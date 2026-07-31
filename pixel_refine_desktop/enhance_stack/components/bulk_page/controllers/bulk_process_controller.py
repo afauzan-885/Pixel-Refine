@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -10,7 +11,6 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
-    QProgressBar,
     QFileDialog,
     QCheckBox,
     QWidget,
@@ -27,6 +27,7 @@ from resources.styles.stylesheet import (
     stylesheet_global_page,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+
 
 def load_json_state(path, default=None):
     if default is None:
@@ -52,7 +53,8 @@ class MassAlgorithmEditDialog(QDialog):
         super().__init__(parent)
         self.panels = panels
         self.seq_to_batch_id = {
-            p.sequential_batch_number: p.batch_id for p in self.panels
+            getattr(p, "sequential_batch_number", i + 1): getattr(p, "batch_id", getattr(p, "id", i + 1))
+            for i, p in enumerate(self.panels)
         }
         self.algorithms = {
             "alignment": [
@@ -101,6 +103,7 @@ class MassAlgorithmEditDialog(QDialog):
         layout = QVBoxLayout(self)
         grid_layout = QGridLayout()
         grid_layout.setSpacing(15)
+
         range_layout = QHBoxLayout()
         from_label = QLabel("From:")
         self.from_spinbox = QSpinBox()
@@ -113,6 +116,7 @@ class MassAlgorithmEditDialog(QDialog):
         range_layout.addWidget(self.to_spinbox)
         range_layout.addStretch()
         grid_layout.addLayout(range_layout, 1, 0, 1, 2)
+
         if self.seq_to_batch_id:
             min_seq, max_seq = min(self.seq_to_batch_id.keys()), max(
                 self.seq_to_batch_id.keys()
@@ -121,7 +125,7 @@ class MassAlgorithmEditDialog(QDialog):
             self.to_spinbox.setRange(min_seq, max_seq)
             self.from_spinbox.setValue(min_seq)
             self.to_spinbox.setValue(max_seq)
-        
+
         self.align_checkbox = QCheckBox("Alignment:")
         self.align_checkbox.setStyleSheet(CHECKBOX_SWITCH_STYLE)
         self.align_combo = QComboBox()
@@ -200,155 +204,279 @@ class MassAlgorithmEditDialog(QDialog):
         self.accept()
 
 
-class ProcessingThread(QThread):
-    progress_update = Signal(int, str, str, int, int, int)
-    batch_finished = Signal(int, bool, str)
-    processing_complete = Signal(list)
-
-    def __init__(self, panels_to_process, batch_page_layout, target_folder):
-        super().__init__()
-        self.panels_to_process = panels_to_process
-        self.batch_page_layout = batch_page_layout
-        self.target_folder = target_folder
-        self._is_running = True
-
-    def run(self):
-        failed_batches_summary = []
-        total_batches_to_process = len(self.panels_to_process)
-
-        for i, (panel, row) in enumerate(self.panels_to_process):
-            if not self._is_running:
-                break
-
-            seq_num = getattr(panel, "sequential_batch_number", "?")
-            batch_id = getattr(panel, "batch_id", "UNKNOWN")
-
-            try:
-                def sub_process_progress_callback(*args):
-                    if not self._is_running:
-                        return
-                    percent = 0
-                    message = ""
-                    current_num_for_ui = i + 1
-
-                    if len(args) == 3:
-                        current, total, message = args
-                        percent = int((current / total) * 100) if total > 0 else 0
-                    elif len(args) == 2:
-                        percent, message = args
-                    else:
-                        return
-
-                    self.progress_update.emit(
-                        row,
-                        "Processing",
-                        message,
-                        percent,
-                        current_num_for_ui,
-                        total_batches_to_process,
-                    )
-
-                files_before = set(self.batch_page_layout.get_files_in_stack_folder())
-                panel.process_all_batch(progress_callback=sub_process_progress_callback)
-                files_after = set(self.batch_page_layout.get_files_in_stack_folder())
-                new_files = list(files_after - files_before)
-
-                if new_files:
-                    output_file = new_files[0]
-                    move_success = self.batch_page_layout._move_single_batch_result(
-                        output_file, self.target_folder
-                    )
-                    if move_success:
-                        self.batch_finished.emit(row, True, "Success: Saved")
-                    else:
-                        self.batch_finished.emit(
-                            row, False, "Error: Failed to move result."
-                        )
-                else:
-                    self.batch_finished.emit(
-                        row, False, "Error: No output file generated."
-                    )
-
-            except Exception as e:
-                error_detail = str(e)
-                failed_summary = {"seq": seq_num, "id": batch_id, "error": error_detail}
-                failed_batches_summary.append(failed_summary)
-                self.batch_finished.emit(row, False, f"Failed: {error_detail[:100]}...")
-
-        self.processing_complete.emit(failed_batches_summary)
-
-    def stop(self):
-        self._is_running = False
+from resources.GenericUILibrary import (
+    ModalDialog,
+    ProgressBar,
+    Button,
+)
 
 
-class BatchProcessDialog(QDialog):
+class BatchProcessDialog(ModalDialog):
     def __init__(self, panels_to_process, batch_page_layout, parent=None):
-        super().__init__(parent)
+        super().__init__(
+            message="",
+            parent=parent,
+            title=getattr(language_config, "UI_BATCH_HEADER", "Batch Processing Manager"),
+            close_on_click_outside=False,
+            width=780,
+            height=560,
+        )
         self.panels = panels_to_process
         self.batch_page_layout = batch_page_layout
         self.database_manager = self.batch_page_layout.database_manager
 
-        self.COLOR_SUCCESS = QColor("#D4EDDA")
-        self.COLOR_FAILED = QColor("#F8D7DA")
-        self.COLOR_CANCELLED = QColor("#D9E44C")
+        self.COLOR_SUCCESS = QColor("#D1FAE5")
+        self.COLOR_FAILED = QColor("#FEE2E2")
+        self.COLOR_CANCELLED = QColor("#FEF3C7")
 
         self._was_cancelled = False
-        self.setWindowTitle(language_config.UI_BATCH_HEADER)
-        self.setMinimumSize(650, 450)
+        self._is_processing = False
+        self._start_time = None
+
         self.initUI()
         self.populate_table()
-        self.setStyleSheet(stylesheet_global_page())
 
     def initUI(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
+        container_layout = self.container.layout()
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(10)
 
+        # 1. Folder Output Selection Row
         folder_layout = QHBoxLayout()
         folder_label = QLabel(language_config.ACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER)
+        folder_label.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 12px; color: #334155; font-weight: 600;")
+
         self.folder_path_edit = QLineEdit()
         self.folder_path_edit.setReadOnly(True)
-        self.browse_button = QPushButton(
-            language_config.SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER
+        self.folder_path_edit.setStyleSheet("""
+            QLineEdit {
+                background-color: #F1F5F9;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-family: 'Segoe UI', Arial;
+                font-size: 12px;
+                color: #1E293B;
+            }
+        """)
+
+        self.browse_button = Button(
+            language_config.SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER, variant="secondary"
         )
+        self.browse_button.setFixedHeight(30)
+        self.browse_button.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 4px 12px;
+                border: 1px solid #CBD5E1;
+                background-color: #F8FAFC;
+                color: #334155;
+            }
+            QPushButton:hover {
+                background-color: #E2E8F0;
+            }
+        """)
+
         folder_layout.addWidget(folder_label)
-        folder_layout.addWidget(self.folder_path_edit)
+        folder_layout.addWidget(self.folder_path_edit, 1)
         folder_layout.addWidget(self.browse_button)
         layout.addLayout(folder_layout)
 
+        # 2. Table Widget
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(4)
         self.table_widget.setHorizontalHeaderLabels(
             ["", "Project Name", "Status", "Details"]
         )
         self.table_widget.verticalHeader().setVisible(True)
-        layout.addWidget(self.table_widget)
+        self.table_widget.setStyleSheet("""
+            QTableWidget {
+                background-color: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 6px;
+                gridline-color: #F1F5F9;
+                font-family: 'Segoe UI', Arial;
+                font-size: 12px;
+            }
+            QHeaderView::section {
+                background-color: #F8FAFC;
+                color: #475569;
+                font-weight: 600;
+                font-size: 12px;
+                border: none;
+                border-bottom: 1px solid #CBD5E1;
+                padding: 6px;
+            }
+            QTableWidget::item {
+                padding: 4px;
+            }
+            QTableWidget::item:selected {
+                background-color: #E0F2FE;
+                color: #0369A1;
+            }
+        """)
+        layout.addWidget(self.table_widget, 1)
 
-        progress_layout = QHBoxLayout()
-        progress_label = QLabel(language_config.OVERALL_PROGRESS)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setStyleSheet(PROGRESS_BAR)
-        progress_layout.addWidget(progress_label)
-        progress_layout.addWidget(self.progress_bar)
-        layout.addLayout(progress_layout)
+        # 3. Translucent Gray Card Container for Progress Bar & Real-time ETA
+        self.progress_container = QWidget()
+        self.progress_container.setObjectName("ProgressCardContainer")
+        self.progress_container.setStyleSheet("""
+            QWidget#ProgressCardContainer {
+                background-color: rgba(241, 245, 249, 0.85);
+                border: 1px solid #CBD5E1;
+                border-radius: 8px;
+            }
+        """)
+        prog_card_layout = QVBoxLayout(self.progress_container)
+        prog_card_layout.setContentsMargins(12, 10, 12, 10)
+        prog_card_layout.setSpacing(6)
 
+        # Top row: Percentage (Top Left) & ETA (Top Right)
+        prog_top_layout = QHBoxLayout()
+        self.progress_percent_label = QLabel("Overall Progress: 0%")
+        self.progress_percent_label.setStyleSheet(
+            "font-family: 'Segoe UI', Arial; font-size: 12px; font-weight: 700; color: #1E293B;"
+        )
+        self.eta_label = QLabel("ETA: --:--")
+        self.eta_label.setStyleSheet(
+            "font-family: 'Segoe UI', Arial; font-size: 11.5px; font-weight: 600; color: #64748B;"
+        )
+
+        prog_top_layout.addWidget(self.progress_percent_label)
+        prog_top_layout.addStretch()
+        prog_top_layout.addWidget(self.eta_label)
+        prog_card_layout.addLayout(prog_top_layout)
+
+        # Middle row: Animated Progress Bar
+        self.progress_bar = ProgressBar(style="animated", variant="primary", show_label=False)
+        prog_card_layout.addWidget(self.progress_bar)
+
+        # Bottom row: Detail status text (e.g. 2/9 batches processed...)
+        self.progress_detail_label = QLabel("Ready to process")
+        self.progress_detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress_detail_label.setStyleSheet(
+            "font-family: 'Segoe UI', Arial; font-size: 11px; color: #475569; font-weight: 500;"
+        )
+        prog_card_layout.addWidget(self.progress_detail_label)
+
+        layout.addWidget(self.progress_container)
+
+        # 4. Action Buttons Row (Single Switch Action Button: Start <-> Cancel)
         button_layout = QHBoxLayout()
-        self.edit_algo_button = QPushButton(language_config.UI_ALGORIHM_EDIT)
+        self.edit_algo_button = Button(language_config.UI_ALGORIHM_EDIT, variant="secondary")
+        self.edit_algo_button.setStyleSheet("""
+            QPushButton {
+                font-size: 11.5px;
+                padding: 5px 14px;
+                border: 1px solid #CBD5E1;
+                background-color: #F1F5F9;
+                color: #334155;
+            }
+            QPushButton:hover {
+                background-color: #E2E8F0;
+            }
+        """)
         button_layout.addWidget(self.edit_algo_button)
         button_layout.addStretch()
-        self.start_button = QPushButton(
-            language_config.PROGRESS_SECTION_PROCESS_BUTTON_TEXT
+
+        # Single Switch Action Button (Start Process <-> Cancel Process)
+        self.action_button = Button(
+            language_config.PROGRESS_SECTION_PROCESS_BUTTON_TEXT, variant="primary"
         )
-        self.close_button = QPushButton(language_config.CLOSE_BUTTON)
-        button_layout.addWidget(self.start_button)
+        self.action_button.setObjectName("actionButton")
+        self._apply_start_button_style()
+
+        self.close_button = Button(language_config.CLOSE_BUTTON, variant="secondary")
+        self.close_button.setStyleSheet("""
+            QPushButton {
+                font-size: 11.5px;
+                padding: 6px 16px;
+                border: 1px solid #CBD5E1;
+                background-color: #FFFFFF;
+                color: #475569;
+                border-radius: 6px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #F1F5F9;
+                color: #0F172A;
+            }
+        """)
+
+        button_layout.addWidget(self.action_button)
         button_layout.addWidget(self.close_button)
-        self.start_button.setObjectName("startButton")
         layout.addLayout(button_layout)
 
+        container_layout.addWidget(content_widget, 1)
+
         self.browse_button.clicked.connect(self.browse_output_folder)
-        self.start_button.clicked.connect(self.start_processing)
+        self.action_button.clicked.connect(self._on_action_button_clicked)
         self.close_button.clicked.connect(self.close)
         self.edit_algo_button.clicked.connect(self.open_mass_edit_dialog)
+
+    def _apply_start_button_style(self):
+        """Applies Emerald Green style to single action button."""
+        self.action_button.setText(language_config.PROGRESS_SECTION_PROCESS_BUTTON_TEXT)
+        self.action_button.setStyleSheet("""
+            QPushButton#actionButton {
+                background-color: #10B981;
+                color: #FFFFFF;
+                font-weight: 700;
+                font-size: 12px;
+                padding: 7px 22px;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton#actionButton:hover {
+                background-color: #059669;
+            }
+            QPushButton#actionButton:pressed {
+                background-color: #047857;
+            }
+        """)
+
+    def _apply_cancel_button_style(self):
+        """Applies Crimson Red style to single action button when running."""
+        self.action_button.setText(language_config.BATCH_CANCELED_PROCESS)
+        self.action_button.setStyleSheet("""
+            QPushButton#actionButton {
+                background-color: #EF4444;
+                color: #FFFFFF;
+                font-weight: 700;
+                font-size: 12px;
+                padding: 7px 22px;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton#actionButton:hover {
+                background-color: #DC2626;
+            }
+            QPushButton#actionButton:pressed {
+                background-color: #B91C1C;
+            }
+        """)
+
+    def _on_action_button_clicked(self):
+        """Toggle behavior for single switch action button."""
+        if not self._is_processing:
+            self.start_processing()
+        else:
+            self.cancel_processing()
+
+    def open_mass_edit_dialog(self):
+        dialog = MassAlgorithmEditDialog(self.panels, self)
+        dialog.algorithms_updated.connect(self.on_algorithms_updated)
+        dialog.exec_()
+
+    def on_algorithms_updated(self):
+        for i, panel in enumerate(self.panels):
+            batch_id = getattr(panel, "batch_id", getattr(panel, "id", ""))
+            algo_summary = self._get_algorithm_summary(batch_id)
+            self._update_details_cell(i, algo_summary)
+        self.table_widget.resizeRowsToContents()
 
     def _set_row_color(self, row, color):
         color_name = color.name() if color != Qt.transparent else "transparent"
@@ -401,9 +529,13 @@ class BatchProcessDialog(QDialog):
             chk_layout.setContentsMargins(0, 0, 0, 0)
             self.table_widget.setCellWidget(i, 0, checkbox_widget)
 
-            project_name_text = (
-                f"Batch {panel.sequential_batch_number} ({str(panel.batch_id)[:8]}...)"
-            )
+            batch_id = getattr(panel, "batch_id", getattr(panel, "id", ""))
+            seq_num = getattr(panel, "sequential_batch_number", getattr(panel, "name", f"Batch {i+1}"))
+            if isinstance(seq_num, str) and seq_num.startswith("Batch "):
+                project_name_text = f"{seq_num} ({str(batch_id)[:8]}...)"
+            else:
+                project_name_text = f"Batch {seq_num} ({str(batch_id)[:8]}...)"
+
             item_name = QTableWidgetItem(project_name_text)
             item_name.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.table_widget.setItem(i, 1, item_name)
@@ -413,7 +545,7 @@ class BatchProcessDialog(QDialog):
             item_status.setTextAlignment(Qt.AlignCenter)
             self.table_widget.setItem(i, 2, item_status)
 
-            algo_summary = self._get_algorithm_summary(panel.batch_id)
+            algo_summary = self._get_algorithm_summary(batch_id)
             details_label = QLabel(algo_summary)
             details_label.setWordWrap(True)
             if algo_summary == language_config.UI_ALGORITHM_NOT_SET:
@@ -454,18 +586,17 @@ class BatchProcessDialog(QDialog):
         overall_percent = (
             int((self.processed_count / num_total) * 100) if num_total > 0 else 0
         )
-        self.progress_bar.setValue(overall_percent)
-        self.progress_bar.setFormat(f"{overall_percent}%")
+        self._update_progress_and_eta(overall_percent, f"{self.processed_count}/{num_total} batches processed...")
 
-        if self.processed_count == num_total and not self._was_cancelled:
-            self.on_processing_complete([])
+    def on_processing_complete(self, failed_batches_summary):
+        self.reset_dialog_state()
+        self._update_progress_and_eta(100, "Batch processing complete!")
+        self.eta_label.setText("ETA: Completed")
 
-    def refresh_details_column(self):
-        for i in range(self.table_widget.rowCount()):
-            panel = self.panels[i]
-            algo_summary = self._get_algorithm_summary(panel.batch_id)
-            self._update_details_cell(i, algo_summary)
-        self.table_widget.resizeRowsToContents()
+        if failed_batches_summary:
+            print(f"Failed batches: {failed_batches_summary}")
+        else:
+            print("Batch processing completed successfully!")
 
     def on_progress_update_from_thread(
         self, row, status, details, percent_in_batch, current_num, total_num
@@ -485,11 +616,29 @@ class BatchProcessDialog(QDialog):
             if num_total_batches > 0
             else 0
         )
-        self.progress_bar.setValue(overall_percent)
-        self.progress_bar.setFormat(
-            language_config.UI_LABEL_BATCH_PROGRESS.format(current_num, total_num)
-        )
+
+        detail_msg = f"{current_num}/{total_num} batches processed... ({details})"
+        self._update_progress_and_eta(overall_percent, detail_msg)
         self.table_widget.resizeRowToContents(row)
+
+    def _update_progress_and_eta(self, percent, detail_msg=""):
+        """Calculates real-time ETA and updates UI progress labels."""
+        self.progress_bar.setValue(percent)
+        self.progress_percent_label.setText(f"Overall Progress: {percent}%")
+        if detail_msg:
+            self.progress_detail_label.setText(detail_msg)
+
+        # Calculate Real-Time ETA
+        if self._start_time and percent > 0 and percent < 100:
+            elapsed = time.time() - self._start_time
+            est_total = (elapsed / percent) * 100
+            remaining = max(0, int(est_total - elapsed))
+            mins, secs = divmod(remaining, 60)
+            self.eta_label.setText(f"ETA: {mins:02d}:{secs:02d}")
+        elif percent >= 100:
+            self.eta_label.setText("ETA: 00:00")
+        else:
+            self.eta_label.setText("ETA: Estimating...")
 
     def _update_details_cell(self, row, text):
         widget = self.table_widget.cellWidget(row, 3)
@@ -497,9 +646,9 @@ class BatchProcessDialog(QDialog):
             label = widget.findChild(QLabel)
             if label:
                 if text == language_config.UI_ALGORITHM_NOT_SET:
-                     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 else:
-                     label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+                    label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
                 label.setText(text)
 
     def start_processing(self):
@@ -523,20 +672,22 @@ class BatchProcessDialog(QDialog):
 
         for panel, row in self.panels_to_process_with_rows:
             self.table_widget.item(row, 2).setText(language_config.BATCH_QUEUE)
-            algo_summary = self._get_algorithm_summary(panel.batch_id)
+            batch_id = getattr(panel, "batch_id", getattr(panel, "id", ""))
+            algo_summary = self._get_algorithm_summary(batch_id)
             self._update_details_cell(row, algo_summary)
             self._set_row_color(row, Qt.transparent)
 
-        self.start_button.setEnabled(False)
+        self._is_processing = True
+        self._start_time = time.time()
+
+        # Switch action button to Crimson Red Cancel Process
+        self._apply_cancel_button_style()
         self.browse_button.setEnabled(False)
         self.edit_algo_button.setEnabled(False)
-        self.close_button.setText(language_config.BATCH_CANCELED_PROCESS)
-        self.close_button.clicked.disconnect()
-        self.close_button.clicked.connect(self.cancel_processing)
 
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("Starting...")
+        self._update_progress_and_eta(0, "Starting batch process...")
         self.processed_count = 0
 
         self.processing_thread = ProcessingThread(
@@ -551,31 +702,25 @@ class BatchProcessDialog(QDialog):
 
     def cancel_processing(self):
         if hasattr(self, "processing_thread") and self.processing_thread.isRunning():
-            reply = QMessageBox.question(
+            from resources.GenericUILibrary import modal_confirm
+            reply = modal_confirm.question(
                 self,
-                language_config.BATCH_CANCELED_PROCESS,
                 language_config.BATCH_CANCELED_CONFIRMATION,
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
             )
-            if reply == QMessageBox.Yes:
+            if reply:
                 self._was_cancelled = True
                 self.processing_thread.stop()
                 self.processing_thread.wait()
                 self.reset_dialog_state()
-                QMessageBox.information(
-                    self,
-                    language_config.BATCH_CANCELED_INFO,
-                    language_config.BATCH_CANCELED_BY_USER,
-                )
 
     def reset_dialog_state(self):
-        self.start_button.setEnabled(True)
+        self._is_processing = False
+        self._start_time = None
+
+        # Switch action button back to Emerald Green Start Process
+        self._apply_start_button_style()
         self.browse_button.setEnabled(True)
         self.edit_algo_button.setEnabled(True)
-        self.close_button.setText("Close")
-        self.close_button.clicked.disconnect()
-        self.close_button.clicked.connect(self.close)
 
         for i in range(self.table_widget.rowCount()):
             status_item = self.table_widget.item(i, 2)
@@ -614,26 +759,84 @@ class BatchProcessDialog(QDialog):
         if folder:
             self.folder_path_edit.setText(folder)
 
-    def open_mass_edit_dialog(self):
-        if not self.panels:
-            QMessageBox.information(
-                self, "Info", language_config.BATCH_CONFIGURATION_INFO
-            )
-            return
 
-        edit_dialog = MassAlgorithmEditDialog(self.panels, self)
-        result = edit_dialog.exec_()
-        if result == QDialog.Accepted:
-            self.refresh_details_column()
+class ProcessingThread(QThread):
+    progress_update = Signal(int, str, str, int, int, int)
+    batch_finished = Signal(int, bool, str)
+    processing_complete = Signal(list)
 
-    def on_processing_complete(self, failed_batches_summary):
-        if not self._was_cancelled:
-            self.progress_bar.setValue(100)
-            self.progress_bar.setFormat(language_config.BATCH_SUCCESS_HEADER)
-            QMessageBox.information(
-                self,
-                language_config.BATCH_SUCCESS_HEADER,
-                language_config.BATCH_SUCCESS,
-            )
-        print("Failed batches:", failed_batches_summary)
-        self.reset_dialog_state()
+    def __init__(self, panels_to_process, batch_page_layout, target_folder):
+        super().__init__()
+        self.panels_to_process = panels_to_process
+        self.batch_page_layout = batch_page_layout
+        self.target_folder = target_folder
+        self._is_running = True
+
+    def run(self):
+        failed_batches_summary = []
+        total_batches_to_process = len(self.panels_to_process)
+
+        for i, (panel, row) in enumerate(self.panels_to_process):
+            if not self._is_running:
+                break
+
+            seq_num = getattr(panel, "sequential_batch_number", getattr(panel, "name", "?"))
+            batch_id = getattr(panel, "batch_id", getattr(panel, "id", "UNKNOWN"))
+
+            try:
+                def sub_process_progress_callback(*args):
+                    if not self._is_running:
+                        return
+                    percent = 0
+                    message = ""
+                    current_num_for_ui = i + 1
+
+                    if len(args) == 3:
+                        current, total, message = args
+                        percent = int((current / total) * 100) if total > 0 else 0
+                    elif len(args) == 2:
+                        percent, message = args
+                    else:
+                        return
+
+                    self.progress_update.emit(
+                        row,
+                        "Processing",
+                        message,
+                        percent,
+                        current_num_for_ui,
+                        total_batches_to_process,
+                    )
+
+                files_before = set(self.batch_page_layout.get_files_in_stack_folder())
+                target_panel = getattr(panel, "original_panel", panel)
+                target_panel.process_all_batch(progress_callback=sub_process_progress_callback)
+                files_after = set(self.batch_page_layout.get_files_in_stack_folder())
+                new_files = list(files_after - files_before)
+
+                if new_files:
+                    output_file = new_files[0]
+                    move_success = self.batch_page_layout._move_single_batch_result(
+                        output_file, self.target_folder
+                    )
+                    if move_success:
+                        self.batch_finished.emit(row, True, "Success: Saved")
+                    else:
+                        self.batch_finished.emit(
+                            row, False, "Error: Failed to move result."
+                        )
+                else:
+                    self.batch_finished.emit(
+                        row, False, "Error: No output file generated."
+                    )
+
+            except Exception as e:
+                error_detail = str(e)
+                failed_summary = {"seq": seq_num, "id": batch_id, "error": error_detail}
+                failed_batches_summary.append(failed_summary)
+                self.batch_finished.emit(row, False, f"Failed: {error_detail[:100]}...")
+
+        self.processing_complete.emit(failed_batches_summary)
+
+    def stop(self):
+        self._is_running = False

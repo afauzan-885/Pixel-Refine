@@ -11,6 +11,11 @@ Usage:
 """
 import os
 os.environ["AOT_MODE"] = "0"
+# The analysis compiler must own Taichi's graphics context.  If the Pixel
+# Refine AOT bridge initializes first, Taichi may fail to create an OpenGL
+# compiler context and silently fall back to CPU while still writing an
+# ``*_opengl.tcm`` filename.  Keep this suite native by default.
+os.environ.setdefault("PIXEL_REFINE_AOT_COMPILE_ONLY", "1")
 
 import taichi as ti
 import sys
@@ -257,14 +262,36 @@ def compile_guided_filter(arch, save_path):
     var_I_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "var_I", ti.f32, ndim=2)
     cov_Ip_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "cov_Ip", ti.f32, ndim=2)
 
+    if arch != ti.vulkan:
+        g = ti.graph.GraphBuilder()
+        g.dispatch(gf_mod._gf_compute_var_cov_kernel, mean_I_2d, mean_p_2d, mean_II_2d, mean_Ip_2d, var_I_2d, cov_Ip_2d, h_arg, w_arg)
+        module.add_graph("gf_var_cov_f32", g.compile())
+
     g = ti.graph.GraphBuilder()
-    g.dispatch(gf_mod._gf_compute_var_cov_kernel, mean_I_2d, mean_p_2d, mean_II_2d, mean_Ip_2d, var_I_2d, cov_Ip_2d, h_arg, w_arg)
-    module.add_graph("gf_var_cov_f32", g.compile())
+    g.dispatch(gf_mod._gf_compute_var_kernel, mean_I_2d, mean_II_2d,
+               var_I_2d, h_arg, w_arg)
+    module.add_graph("gf_var_portable_f32", g.compile())
+
+    g = ti.graph.GraphBuilder()
+    g.dispatch(gf_mod._gf_compute_cov_kernel, mean_I_2d, mean_p_2d,
+               mean_Ip_2d, cov_Ip_2d, h_arg, w_arg)
+    module.add_graph("gf_cov_portable_f32", g.compile())
 
     # Compute a, b coefficients
+    if arch != ti.vulkan:
+        g = ti.graph.GraphBuilder()
+        g.dispatch(gf_mod._gf_compute_ab_kernel, var_I_2d, cov_Ip_2d, mean_I_2d, mean_p_2d, a_2d, b_2d, eps_arg, h_arg, w_arg)
+        module.add_graph("gf_ab_f32", g.compile())
+
     g = ti.graph.GraphBuilder()
-    g.dispatch(gf_mod._gf_compute_ab_kernel, var_I_2d, cov_Ip_2d, mean_I_2d, mean_p_2d, a_2d, b_2d, eps_arg, h_arg, w_arg)
-    module.add_graph("gf_ab_f32", g.compile())
+    g.dispatch(gf_mod._gf_compute_a_kernel, var_I_2d, cov_Ip_2d, a_2d,
+               eps_arg, h_arg, w_arg)
+    module.add_graph("gf_a_portable_f32", g.compile())
+
+    g = ti.graph.GraphBuilder()
+    g.dispatch(gf_mod._gf_compute_b_kernel, mean_I_2d, mean_p_2d, a_2d,
+               b_2d, h_arg, w_arg)
+    module.add_graph("gf_b_portable_f32", g.compile())
 
     # Final output
     mean_a_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_a", ti.f32, ndim=2)
@@ -275,49 +302,50 @@ def compile_guided_filter(arch, save_path):
     g.dispatch(gf_mod._gf_output_kernel, mean_a_2d, mean_b_2d, I_2d, dst_2d, h_arg, w_arg)
     module.add_graph("gf_output_f32", g.compile())
 
-    # 3-channel kernels
-    src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
-    guide_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "guide", ti.f32, ndim=2)
-    Ip0_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_Ip0", ti.f32, ndim=2)
-    Ip1_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_Ip1", ti.f32, ndim=2)
-    Ip2_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_Ip2", ti.f32, ndim=2)
+    # The public AOT guided-filter API is one-channel. Legacy RGB graphs are
+    # retained for CPU/OpenGL archives, but excluded from Vulkan because their
+    # 16-SSBO signature needlessly rejects older Intel descriptor limits.
+    if arch != ti.vulkan:
+        src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
+        guide_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "guide", ti.f32, ndim=2)
+        Ip0_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_Ip0", ti.f32, ndim=2)
+        Ip1_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_Ip1", ti.f32, ndim=2)
+        Ip2_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_Ip2", ti.f32, ndim=2)
 
-    g = ti.graph.GraphBuilder()
-    g.dispatch(gf_mod._gf_mul_3ch_kernel, src_3d, guide_2d, Ip0_2d, Ip1_2d, Ip2_2d, h_arg, w_arg)
-    module.add_graph("gf_mul_3ch_f32", g.compile())
+        g = ti.graph.GraphBuilder()
+        g.dispatch(gf_mod._gf_mul_3ch_kernel, src_3d, guide_2d, Ip0_2d, Ip1_2d, Ip2_2d, h_arg, w_arg)
+        module.add_graph("gf_mul_3ch_f32", g.compile())
 
-    # 3ch ab computation
-    mp0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_p0", ti.f32, ndim=2)
-    mp1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_p1", ti.f32, ndim=2)
-    mp2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_p2", ti.f32, ndim=2)
-    mIp0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_Ip0", ti.f32, ndim=2)
-    mIp1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_Ip1", ti.f32, ndim=2)
-    mIp2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_Ip2", ti.f32, ndim=2)
-    a0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a0", ti.f32, ndim=2)
-    a1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a1", ti.f32, ndim=2)
-    a2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a2", ti.f32, ndim=2)
-    b0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b0", ti.f32, ndim=2)
-    b1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b1", ti.f32, ndim=2)
-    b2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b2", ti.f32, ndim=2)
+        mp0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_p0", ti.f32, ndim=2)
+        mp1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_p1", ti.f32, ndim=2)
+        mp2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_p2", ti.f32, ndim=2)
+        mIp0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_Ip0", ti.f32, ndim=2)
+        mIp1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_Ip1", ti.f32, ndim=2)
+        mIp2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_Ip2", ti.f32, ndim=2)
+        a0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a0", ti.f32, ndim=2)
+        a1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a1", ti.f32, ndim=2)
+        a2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a2", ti.f32, ndim=2)
+        b0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b0", ti.f32, ndim=2)
+        b1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b1", ti.f32, ndim=2)
+        b2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b2", ti.f32, ndim=2)
 
-    g = ti.graph.GraphBuilder()
-    g.dispatch(gf_mod._gf_compute_ab_3ch_kernel, var_I_2d, mean_I_2d,
-               mp0, mp1, mp2, mIp0, mIp1, mIp2,
-               a0, a1, a2, b0, b1, b2, eps_arg, h_arg, w_arg)
-    module.add_graph("gf_ab_3ch_f32", g.compile())
+        g = ti.graph.GraphBuilder()
+        g.dispatch(gf_mod._gf_compute_ab_3ch_kernel, var_I_2d, mean_I_2d,
+                   mp0, mp1, mp2, mIp0, mIp1, mIp2,
+                   a0, a1, a2, b0, b1, b2, eps_arg, h_arg, w_arg)
+        module.add_graph("gf_ab_3ch_f32", g.compile())
 
-    # 3ch output
-    ma0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_a0", ti.f32, ndim=2)
-    ma1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_a1", ti.f32, ndim=2)
-    ma2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_a2", ti.f32, ndim=2)
-    mb0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_b0", ti.f32, ndim=2)
-    mb1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_b1", ti.f32, ndim=2)
-    mb2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_b2", ti.f32, ndim=2)
-    dst_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
+        ma0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_a0", ti.f32, ndim=2)
+        ma1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_a1", ti.f32, ndim=2)
+        ma2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_a2", ti.f32, ndim=2)
+        mb0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_b0", ti.f32, ndim=2)
+        mb1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_b1", ti.f32, ndim=2)
+        mb2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mean_b2", ti.f32, ndim=2)
+        dst_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
 
-    g = ti.graph.GraphBuilder()
-    g.dispatch(gf_mod._gf_output_3ch_kernel, ma0, ma1, ma2, mb0, mb1, mb2, I_2d, dst_3d, h_arg, w_arg)
-    module.add_graph("gf_output_3ch_f32", g.compile())
+        g = ti.graph.GraphBuilder()
+        g.dispatch(gf_mod._gf_output_3ch_kernel, ma0, ma1, ma2, mb0, mb1, mb2, I_2d, dst_3d, h_arg, w_arg)
+        module.add_graph("gf_output_3ch_f32", g.compile())
 
     module.archive(save_path)
     print(f"  Saved: {save_path}")

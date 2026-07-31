@@ -94,6 +94,10 @@ from .modals import (
     Toast,
     LoadingSpinner,
     modal_confirm,
+    ModalDialog,
+    ModalConfirm,
+    AlertModal,
+    ProgressModal,
 )
 from .overlays import OverlayContainer, OverlayPosition
 

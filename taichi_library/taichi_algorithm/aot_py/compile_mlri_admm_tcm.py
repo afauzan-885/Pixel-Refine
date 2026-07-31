@@ -355,6 +355,46 @@ def _admm_step1_kernel(
         temp_b[r, c] = green[r, c] + (sum_diff_B / count)
 
 @ti.kernel
+def _admm_step1_red_kernel(
+    green: ti.types.ndarray(),
+    red: ti.types.ndarray(),
+    temp_r: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+):
+    """Portable red-gradient ADMM pass."""
+    for r, c in ti.ndrange(h, w):
+        sum_diff = 0.0
+        count = 0.0
+        for dr, dc in ti.static(ti.ndrange((-1, 2), (-1, 2))):
+            nr = r + dr
+            nc = c + dc
+            if 0 <= nr < h and 0 <= nc < w:
+                sum_diff += red[nr, nc] - green[nr, nc]
+                count += 1.0
+        temp_r[r, c] = green[r, c] + sum_diff / count
+
+@ti.kernel
+def _admm_step1_blue_kernel(
+    green: ti.types.ndarray(),
+    blue: ti.types.ndarray(),
+    temp_b: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+):
+    """Portable blue-gradient ADMM pass."""
+    for r, c in ti.ndrange(h, w):
+        sum_diff = 0.0
+        count = 0.0
+        for dr, dc in ti.static(ti.ndrange((-1, 2), (-1, 2))):
+            nr = r + dr
+            nc = c + dc
+            if 0 <= nr < h and 0 <= nc < w:
+                sum_diff += blue[nr, nc] - green[nr, nc]
+                count += 1.0
+        temp_b[r, c] = green[r, c] + sum_diff / count
+
+@ti.kernel
 def _admm_step2_kernel(
     wb_bayer: ti.types.ndarray(),
     green: ti.types.ndarray(),
@@ -392,6 +432,75 @@ def _admm_step2_kernel(
             green[r, c] = wb_bayer[r, c]
             red[r, c] = R_new
             blue[r, c] = B_new
+
+@ti.kernel
+def _admm_step2_red_kernel(
+    wb_bayer: ti.types.ndarray(),
+    red: ti.types.ndarray(),
+    temp_r: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+    c00: ti.i32,
+    c01: ti.i32,
+    c10: ti.i32,
+    c11: ti.i32,
+):
+    """Portable ADMM red pass with fewer simultaneous storage buffers."""
+    for r, c in ti.ndrange(h, w):
+        color_idx = 1
+        if r % 2 == 0:
+            color_idx = c00 if c % 2 == 0 else c01
+        else:
+            color_idx = c10 if c % 2 == 0 else c11
+        if color_idx == 0:
+            red[r, c] = wb_bayer[r, c]
+        else:
+            red[r, c] = temp_r[r, c] * 0.5 + red[r, c] * 0.5
+
+@ti.kernel
+def _admm_step2_blue_kernel(
+    wb_bayer: ti.types.ndarray(),
+    blue: ti.types.ndarray(),
+    temp_b: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+    c00: ti.i32,
+    c01: ti.i32,
+    c10: ti.i32,
+    c11: ti.i32,
+):
+    """Portable ADMM blue pass with fewer simultaneous storage buffers."""
+    for r, c in ti.ndrange(h, w):
+        color_idx = 1
+        if r % 2 == 0:
+            color_idx = c00 if c % 2 == 0 else c01
+        else:
+            color_idx = c10 if c % 2 == 0 else c11
+        if color_idx == 2:
+            blue[r, c] = wb_bayer[r, c]
+        else:
+            blue[r, c] = temp_b[r, c] * 0.5 + blue[r, c] * 0.5
+
+@ti.kernel
+def _admm_step2_green_kernel(
+    wb_bayer: ti.types.ndarray(),
+    green: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+    c00: ti.i32,
+    c01: ti.i32,
+    c10: ti.i32,
+    c11: ti.i32,
+):
+    """Portable sensor-fidelity pass for green CFA samples."""
+    for r, c in ti.ndrange(h, w):
+        color_idx = 1
+        if r % 2 == 0:
+            color_idx = c00 if c % 2 == 0 else c01
+        else:
+            color_idx = c10 if c % 2 == 0 else c11
+        if color_idx == 1:
+            green[r, c] = wb_bayer[r, c]
 
 @ti.kernel
 def _mlri_admm_reconstruct_and_postprocess_kernel(
@@ -448,6 +557,51 @@ def _mlri_admm_reconstruct_and_postprocess_kernel(
         sG = sG / ti.math.sqrt(1.0 + sG * sG)
         sB = sB / ti.math.sqrt(1.0 + sB * sB)
 
+        dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
+        dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
+        dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+
+@ti.kernel
+def _mlri_admm_reconstruct_portable_kernel(
+    green: ti.types.ndarray(),
+    red: ti.types.ndarray(),
+    blue: ti.types.ndarray(),
+    dst: ti.types.ndarray(),
+    m00: ti.f32, m01: ti.f32, m02: ti.f32,
+    m10: ti.f32, m11: ti.f32, m12: ti.f32,
+    m20: ti.f32, m21: ti.f32, m22: ti.f32,
+    wb_r: ti.f32, wb_g1: ti.f32, wb_b: ti.f32, wb_g2: ti.f32,
+    h: ti.i32, w: ti.i32,
+):
+    """Full RGB reconstruction with the 3x3 matrix passed as scalars."""
+    inv_wb_r = 1.0 / ti.max(0.1, wb_r)
+    inv_wb_g = 1.0 / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
+    inv_wb_b = 1.0 / ti.max(0.1, wb_b)
+    for r, c in ti.ndrange(h, w):
+        R = red[r, c]
+        G = green[r, c]
+        B = blue[r, c]
+        R_raw = R * inv_wb_r
+        G_raw = G * inv_wb_g
+        B_raw = B * inv_wb_b
+        max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
+        min_raw = ti.min(R_raw, ti.min(G_raw, B_raw))
+        factor = ti.math.clamp((max_raw - 0.55) / 0.43, 0.0, 1.0)
+        factor = factor * factor * (3.0 - 2.0 * factor)
+        ratio = min_raw / ti.max(1e-5, max_raw)
+        neutrality = ti.math.clamp((ratio - 0.40) / 0.45, 0.0, 1.0)
+        neutrality = neutrality * neutrality * (3.0 - 2.0 * neutrality)
+        final_factor = factor * neutrality
+        L = ti.max(R, ti.max(G, B))
+        R = R * (1.0 - final_factor) + L * final_factor
+        G = G * (1.0 - final_factor) + L * final_factor
+        B = B * (1.0 - final_factor) + L * final_factor
+        sR = m00 * R + m01 * G + m02 * B
+        sG = m10 * R + m11 * G + m12 * B
+        sB = m20 * R + m21 * G + m22 * B
+        sR = sR / ti.math.sqrt(1.0 + sR * sR)
+        sG = sG / ti.math.sqrt(1.0 + sG * sG)
+        sB = sB / ti.math.sqrt(1.0 + sB * sB)
         dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
         dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
         dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
@@ -701,6 +855,45 @@ def _mlri_admm_to_grayscale_3channel_kernel(
         )
         dst[r, c] = luma
 
+@ti.kernel
+def _mlri_admm_to_grayscale_portable_kernel(
+    green: ti.types.ndarray(),
+    red: ti.types.ndarray(),
+    blue: ti.types.ndarray(),
+    dst: ti.types.ndarray(),
+    m00: ti.f32, m01: ti.f32, m02: ti.f32,
+    m10: ti.f32, m11: ti.f32, m12: ti.f32,
+    m20: ti.f32, m21: ti.f32, m22: ti.f32,
+    wb_r: ti.f32, wb_g1: ti.f32, wb_b: ti.f32, wb_g2: ti.f32,
+    h: ti.i32, w: ti.i32,
+):
+    """Full luminance reconstruction with scalar color matrix."""
+    for r, c in ti.ndrange(h, w):
+        R = red[r, c]
+        G = green[r, c]
+        B = blue[r, c]
+        R_raw = R / ti.max(0.1, wb_r)
+        G_raw = G / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
+        B_raw = B / ti.max(0.1, wb_b)
+        max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
+        factor = ti.math.clamp((max_raw - 0.75) / 0.23, 0.0, 1.0)
+        factor = factor * factor * (3.0 - 2.0 * factor)
+        L = ti.max(R, ti.max(G, B))
+        R = R * (1.0 - factor) + L * factor
+        G = G * (1.0 - factor) + L * factor
+        B = B * (1.0 - factor) + L * factor
+        sR = m00 * R + m01 * G + m02 * B
+        sG = m10 * R + m11 * G + m12 * B
+        sB = m20 * R + m21 * G + m22 * B
+        sR = sR / ti.math.sqrt(1.0 + sR * sR)
+        sG = sG / ti.math.sqrt(1.0 + sG * sG)
+        sB = sB / ti.math.sqrt(1.0 + sB * sB)
+        dst[r, c] = (
+            0.299 * _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
+            + 0.587 * _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
+            + 0.114 * _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+        )
+
 def compile_mlri_admm_tcm(arch, save_path):
     """Build and save the MLRI-ADMM AOT module."""
     ti.init(arch=arch)
@@ -719,6 +912,11 @@ def compile_mlri_admm_tcm(arch, save_path):
     
     cmatrix_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "cmatrix", ti.f32, ndim=2)
     dst_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
+    matrix_args = [
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, f"m{row}{col}", ti.f32)
+        for row in range(3)
+        for col in range(3)
+    ]
 
     wb_r_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_r", ti.f32)
     wb_g1_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_g1", ti.f32)
@@ -735,6 +933,48 @@ def compile_mlri_admm_tcm(arch, save_path):
     c11_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c11", ti.i32)
     
     denoise_strength_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "denoise_strength", ti.f32)
+
+    def dispatch_admm_step1(graph):
+        if arch == ti.vulkan:
+            graph.dispatch(
+                _admm_step1_red_kernel,
+                green_arg, r_diff_arg, temp_a_arg, h_arg, w_arg,
+            )
+            graph.dispatch(
+                _admm_step1_blue_kernel,
+                green_arg, b_diff_arg, temp_b_arg, h_arg, w_arg,
+            )
+        else:
+            graph.dispatch(
+                _admm_step1_kernel,
+                green_arg, r_diff_arg, b_diff_arg,
+                temp_a_arg, temp_b_arg, h_arg, w_arg,
+            )
+
+    def dispatch_admm_step2(graph):
+        if arch == ti.vulkan:
+            graph.dispatch(
+                _admm_step2_red_kernel,
+                wb_bayer_arg, r_diff_arg, temp_a_arg, h_arg, w_arg,
+                c00_arg, c01_arg, c10_arg, c11_arg,
+            )
+            graph.dispatch(
+                _admm_step2_blue_kernel,
+                wb_bayer_arg, b_diff_arg, temp_b_arg, h_arg, w_arg,
+                c00_arg, c01_arg, c10_arg, c11_arg,
+            )
+            graph.dispatch(
+                _admm_step2_green_kernel,
+                wb_bayer_arg, green_arg, h_arg, w_arg,
+                c00_arg, c01_arg, c10_arg, c11_arg,
+            )
+        else:
+            graph.dispatch(
+                _admm_step2_kernel,
+                wb_bayer_arg, green_arg, r_diff_arg, b_diff_arg,
+                temp_a_arg, temp_b_arg, h_arg, w_arg,
+                c00_arg, c01_arg, c10_arg, c11_arg,
+            )
 
     # 1. Full RGB demosaic
     g_mlri_admm = ti.graph.GraphBuilder()
@@ -836,46 +1076,31 @@ def compile_mlri_admm_tcm(arch, save_path):
     # Run 3 ADMM iterations (Double-Buffered)
     for _ in range(3):
         # Step 1: Reads r_diff, b_diff -> writes updates to temp_a, temp_b
-        g_mlri_admm.dispatch(
-            _admm_step1_kernel,
-            green_arg,
-            r_diff_arg,
-            b_diff_arg,
-            temp_a_arg,
-            temp_b_arg,
-            h_arg,
-            w_arg,
-        )
+        dispatch_admm_step1(g_mlri_admm)
         # Step 2: Reads temp_a, temp_b -> writes stabilized & fidelity-enforced output back to r_diff, b_diff
+        dispatch_admm_step2(g_mlri_admm)
+    if arch == ti.vulkan:
         g_mlri_admm.dispatch(
-            _admm_step2_kernel,
-            wb_bayer_arg,
+            _mlri_admm_reconstruct_portable_kernel,
+            green_arg, r_diff_arg, b_diff_arg, dst_arg,
+            *matrix_args,
+            wb_r_arg, wb_g1_arg, wb_b_arg, wb_g2_arg, h_arg, w_arg,
+        )
+    else:
+        g_mlri_admm.dispatch(
+            _mlri_admm_reconstruct_and_postprocess_kernel,
             green_arg,
             r_diff_arg,
             b_diff_arg,
-            temp_a_arg,
-            temp_b_arg,
+            cmatrix_arg,
+            dst_arg,
+            wb_r_arg,
+            wb_g1_arg,
+            wb_b_arg,
+            wb_g2_arg,
             h_arg,
             w_arg,
-            c00_arg,
-            c01_arg,
-            c10_arg,
-            c11_arg,
         )
-    g_mlri_admm.dispatch(
-        _mlri_admm_reconstruct_and_postprocess_kernel,
-        green_arg,
-        r_diff_arg,
-        b_diff_arg,
-        cmatrix_arg,
-        dst_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        h_arg,
-        w_arg,
-    )
     module.add_graph("mlri_admm_demosaic", g_mlri_admm.compile())
 
     # 2. Fast 1-channel grayscale
@@ -1036,45 +1261,30 @@ def compile_mlri_admm_tcm(arch, save_path):
         w_arg,
     )
     for _ in range(3):
+        dispatch_admm_step1(g_gray_3ch)
+        dispatch_admm_step2(g_gray_3ch)
+    if arch == ti.vulkan:
         g_gray_3ch.dispatch(
-            _admm_step1_kernel,
+            _mlri_admm_to_grayscale_portable_kernel,
+            green_arg, r_diff_arg, b_diff_arg, dst_gray_3ch_arg,
+            *matrix_args,
+            wb_r_arg, wb_g1_arg, wb_b_arg, wb_g2_arg, h_arg, w_arg,
+        )
+    else:
+        g_gray_3ch.dispatch(
+            _mlri_admm_to_grayscale_3channel_kernel,
             green_arg,
             r_diff_arg,
             b_diff_arg,
-            temp_a_arg,
-            temp_b_arg,
+            cmatrix_arg,
+            dst_gray_3ch_arg,
+            wb_r_arg,
+            wb_g1_arg,
+            wb_b_arg,
+            wb_g2_arg,
             h_arg,
             w_arg,
         )
-        g_gray_3ch.dispatch(
-            _admm_step2_kernel,
-            wb_bayer_arg,
-            green_arg,
-            r_diff_arg,
-            b_diff_arg,
-            temp_a_arg,
-            temp_b_arg,
-            h_arg,
-            w_arg,
-            c00_arg,
-            c01_arg,
-            c10_arg,
-            c11_arg,
-        )
-    g_gray_3ch.dispatch(
-        _mlri_admm_to_grayscale_3channel_kernel,
-        green_arg,
-        r_diff_arg,
-        b_diff_arg,
-        cmatrix_arg,
-        dst_gray_3ch_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        h_arg,
-        w_arg,
-    )
     module.add_graph("mlri_admm_demosaic_3channel", g_gray_3ch.compile())
 
     module.archive(save_path)
@@ -1086,7 +1296,17 @@ if __name__ == "__main__":
     assets_dir = os.path.abspath(os.path.join(script_dir, "../aot_tcm"))
     os.makedirs(assets_dir, exist_ok=True)
 
-    archs = [(ti.vulkan, "vulkan"), (ti.cuda, "cuda"), (ti.cpu, "cpu")]
+    requested_arch = os.environ.get("PIXEL_REFINE_AOT_ARCH", "all").lower()
+    available_arches = {
+        "vulkan": (ti.vulkan, "vulkan"),
+        "cuda": (ti.cuda, "cuda"),
+        "cpu": (ti.cpu, "cpu"),
+    }
+    archs = (
+        [available_arches[requested_arch]]
+        if requested_arch in available_arches
+        else list(available_arches.values())
+    )
 
     for arch, suffix in archs:
         save_path = os.path.abspath(os.path.join(assets_dir, f"mlri_admm_{suffix}.tcm"))

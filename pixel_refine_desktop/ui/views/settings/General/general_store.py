@@ -9,8 +9,11 @@ DEFAULTS = {
     "multi_core_cpu": True,
     "create_thumbnail": False,
     "device_backend": "CPU (Universal)",
+    "device_backend_key": "cpu",
     "device_backend_arch": "cpu",
     "device_backend_id": -1,
+    "device_selector": {"vendor": "cpu", "name": "cpu universal"},
+    "backend_test_results": {},
     "allowed_backend_ids": [],
 }
 

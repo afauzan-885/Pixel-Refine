@@ -58,7 +58,10 @@ if TAICHI_AVAILABLE:
         for y, x in ti.ndrange(h, w):
             dx = gx[y, x]
             dy = gy[y, x]
-            mag[y, x] = ti.sqrt(dx * dx + dy * dy)
+            # OpenCV's default Canny mode uses the L1 gradient norm
+            # (L2gradient=False). Keep this explicit so all backends share
+            # the same threshold domain and edge topology.
+            mag[y, x] = ti.abs(dx) + ti.abs(dy)
 
     @ti.kernel
     def _canny_nms_kernel(gx: ti.types.ndarray(), gy: ti.types.ndarray(),
@@ -72,40 +75,40 @@ if TAICHI_AVAILABLE:
         for y, x in ti.ndrange(h, w):
             dx = gx[y, x]
             dy = gy[y, x]
-            m = ti.sqrt(dx * dx + dy * dy)
+            m = ti.abs(dx) + ti.abs(dy)
             if m < 1e-6:
                 nms[y, x] = 0.0
                 continue
 
-            # Quantize direction to 4 orientations
-            angle = ti.atan2(dy, dx)  # [-pi, pi]
-            if angle < 0.0:
-                angle += 3.14159265  # Map to [0, pi]
-
-            # Get neighbors along gradient direction
+            # Quantize direction to the same four sectors used by OpenCV.
+            # Avoid atan2 here: besides being cheaper on OpenGL, the signed
+            # diagonal test below keeps the gradient direction consistent.
+            ax = ti.abs(dx)
+            ay = ti.abs(dy)
             n1 = 0.0
             n2 = 0.0
+            tg22 = 0.41421356237
 
-            if angle < 0.3927 or angle >= 2.7489:  # ~0° or ~180°
-                # Horizontal edge -> compare left/right
+            if ax > ay * (1.0 / tg22):
+                # Gradient near 0 degrees: compare left/right.
                 lx = tm.clamp(x - 1, 0, w - 1)
                 rx = tm.clamp(x + 1, 0, w - 1)
                 n1 = mag[y, lx]
                 n2 = mag[y, rx]
-            elif angle < 1.1781:  # ~45°
-                # Diagonal (top-right to bottom-left)
-                n1 = mag[tm.clamp(y - 1, 0, h - 1), tm.clamp(x + 1, 0, w - 1)]
-                n2 = mag[tm.clamp(y + 1, 0, h - 1), tm.clamp(x - 1, 0, w - 1)]
-            elif angle < 1.9635:  # ~90°
-                # Vertical edge -> compare top/bottom
+            elif ay > ax * (1.0 / tg22):
+                # Gradient near 90 degrees: compare up/down.
                 ty2 = tm.clamp(y - 1, 0, h - 1)
                 by = tm.clamp(y + 1, 0, h - 1)
                 n1 = mag[ty2, x]
                 n2 = mag[by, x]
-            else:  # ~135°
-                # Diagonal (top-left to bottom-right)
+            elif dx * dy >= 0.0:
+                # Gradient near +45 degrees: top-left/bottom-right.
                 n1 = mag[tm.clamp(y - 1, 0, h - 1), tm.clamp(x - 1, 0, w - 1)]
                 n2 = mag[tm.clamp(y + 1, 0, h - 1), tm.clamp(x + 1, 0, w - 1)]
+            else:
+                # Gradient near -45 degrees: top-right/bottom-left.
+                n1 = mag[tm.clamp(y - 1, 0, h - 1), tm.clamp(x + 1, 0, w - 1)]
+                n2 = mag[tm.clamp(y + 1, 0, h - 1), tm.clamp(x - 1, 0, w - 1)]
 
             # Suppress if not local maximum
             if m >= n1 and m >= n2:

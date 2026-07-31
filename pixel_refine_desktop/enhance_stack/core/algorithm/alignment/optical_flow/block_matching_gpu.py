@@ -59,9 +59,36 @@ BLOCK_MATCHING_GPU_PRESETS = {
 class BlockMatchingGPU(LucasKanadeGPU):
     NAME = "Block Matching GPU Optical Flow"
     KIND = "alignment"
-    DESCRIPTION = "Tile-based GPU AOT Block Matching + Parabolic Fit optical flow alignment."
+    DESCRIPTION = "Native AOT Block Matching optical flow for CPU, Vulkan, and OpenGL."
     GPU_MODULES = ("common", "block_matching", "pyramid", "remap")
     DEVICE_RESERVATION = "block_matching_frame"
+
+    def _calculate_flow_host_native(self, reference_gray, target_gray, config):
+        from taichi_library.taichi_algorithm import calcOpticalFlowBlockMatching
+        flow = calcOpticalFlowBlockMatching(
+            np.ascontiguousarray(reference_gray, dtype=np.float32),
+            np.ascontiguousarray(target_gray, dtype=np.float32),
+            **self._build_opengl_safe_params(reference_gray, config), return_gpu=False,
+        )
+        if isinstance(flow, tuple):
+            flow = flow[0]
+        return np.ascontiguousarray(flow, dtype=np.float32)
+
+    def _build_opengl_safe_params(self, reference_gray, config):
+        params = self._build_lk_params(config)
+        from taichi_library import taichi_aot
+        if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
+            # Keep Block Matching at level-zero on Intel OpenGL. Its graph
+            # shares SSBO bindings with the Lucas pyramid and some drivers
+            # reject the combined binding set when algorithms are switched
+            # in the same process.
+            params["maxLevel"] = 0
+            if max(reference_gray.shape[:2]) > 768:
+                params["grid_step"] = max(64, int(params["grid_step"]))
+        return params
+
+    def align_frame(self, *args, **kwargs):
+        return super().align_frame(*args, **kwargs)
 
     @staticmethod
     def load_config(batch_id=None, config_filename=None):

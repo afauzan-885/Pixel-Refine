@@ -400,19 +400,19 @@ def calcOpticalFlowFarneback(
     """OpenCV-style dense Farneback optical flow backed by taichi_aot."""
     from taichi_library import taichi_aot
 
-    return taichi_aot.calcOpticalFlowFarneback(
+    if preset != "opencv" or return_diagnostics:
+        raise ValueError("Taichi AOT Farneback supports the OpenCV preset without diagnostics")
+    return taichi_aot.farneback_flow(
         prev,
         next,
-        flow,
-        pyr_scale,
-        levels,
-        winsize,
-        iterations,
-        poly_n,
-        poly_sigma,
-        flags,
-        preset=preset,
-        return_diagnostics=return_diagnostics,
+        pyr_scale=pyr_scale,
+        num_levels=levels,
+        win_size=winsize,
+        num_iters=iterations,
+        poly_n=poly_n,
+        poly_sigma=poly_sigma,
+        flags=flags,
+        flow_init=flow,
     )
 
 

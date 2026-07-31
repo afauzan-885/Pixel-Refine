@@ -1,5 +1,6 @@
 import os
 os.environ["AOT_MODE"] = "0"
+os.environ.setdefault("PIXEL_REFINE_AOT_COMPILE_ONLY", "1")
 
 import taichi as ti
 import os
@@ -21,10 +22,10 @@ common_mod = importlib.reload(common_mod)
 def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
     print(f"\n>>> Compiling COMMON UTILS AOT for: {arch}")
     ti.init(arch=arch, offline_cache=False)
-    # Advertise Float64 only for the precision-sensitive common kernels. The
-    # target Vulkan device must expose shaderFloat64 at runtime.
-    module_caps = ["spirv_has_float64"] if arch in (ti.vulkan, ti.opengl) else []
-    module = ti.aot.Module(arch, caps=module_caps)
+    # Every public graph is f32/i32. Advertising Float64 unconditionally makes
+    # otherwise portable SPIR-V fail device creation on Intel GPUs without
+    # shaderFloat64 even though no graph consumes f64 data.
+    module = ti.aot.Module(arch)
 
     # 1. Copy Kernels
     def add_copy(name, dtype, is_vec=False):
@@ -261,8 +262,9 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
         builder.dispatch(kernel, tile, tile_weight, hanning, accum, weight_accum, y0, x0, h, w)
         module.add_graph(name, builder.compile())
 
-    add_stitch("stitch_tile_f32")
-    add_stitch("stitch_tile_vec3", is_vec=True)
+    if arch != ti.vulkan:
+        add_stitch("stitch_tile_f32")
+        add_stitch("stitch_tile_vec3", is_vec=True)
 
     def add_stitch_normalized(name, is_vec=False):
         builder = ti.graph.GraphBuilder()
@@ -284,8 +286,9 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
         builder.dispatch(kernel, tile, tile_weight, hanning, accum, weight_accum, y0, x0, h, w)
         module.add_graph(name, builder.compile())
 
-    add_stitch_normalized("stitch_tile_normalized_f32")
-    add_stitch_normalized("stitch_tile_normalized_vec3", is_vec=True)
+    if arch != ti.vulkan:
+        add_stitch_normalized("stitch_tile_normalized_f32")
+        add_stitch_normalized("stitch_tile_normalized_vec3", is_vec=True)
 
     def add_stitch_batch(name, is_vec=False):
         builder = ti.graph.GraphBuilder()
@@ -320,8 +323,13 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
         )
         module.add_graph(name, builder.compile())
 
-    add_stitch_batch("stitch_tile_batch_f32")
-    add_stitch_batch("stitch_tile_batch_vec3", is_vec=True)
+    # Batch stitching belongs to the experimental block runtime and is not
+    # called by the full-frame public API. Its seven ndarray arguments produce
+    # eight SSBO bindings on Vulkan, so keep it in CPU/CUDA/OpenGL artifacts
+    # until a packed-coordinate Vulkan variant is parity-qualified.
+    if arch != ti.vulkan:
+        add_stitch_batch("stitch_tile_batch_f32")
+        add_stitch_batch("stitch_tile_batch_vec3", is_vec=True)
 
     # 9. copyMakeBorder Kernels (Fusing copy_make_border into common.tcm)
     border_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.copy_make_border")
@@ -395,7 +403,22 @@ if __name__ == "__main__":
     assets_dir = os.path.join(script_dir, "../aot_tcm")
     os.makedirs(assets_dir, exist_ok=True)
     
-    archs = [(ti.vulkan, "vulkan"), (ti.cuda, "cuda"), (ti.cpu, "cpu")]
+    requested_arch = os.environ.get("PIXEL_REFINE_AOT_ARCH", "all").lower()
+    available_arches = {
+        "vulkan": (ti.vulkan, "vulkan"),
+        "opengl": (ti.opengl, "opengl"),
+        "cuda": (ti.cuda, "cuda"),
+        "cpu": (ti.cpu, "cpu"),
+    }
+    archs = (
+        [available_arches[requested_arch]]
+        if requested_arch in available_arches
+        else [
+            available_arches["vulkan"],
+            available_arches["cuda"],
+            available_arches["cpu"],
+        ]
+    )
     for arch, suffix in archs:
         save_path = os.path.abspath(os.path.join(assets_dir, f"common_{suffix}.tcm"))
         try:

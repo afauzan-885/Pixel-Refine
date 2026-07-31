@@ -38,6 +38,16 @@ class MemorySnapshot:
 class MemoryDecision:
     pressure: MemoryPressure
     host_cache_budget: int
+    shared_device_budget: int
+    device_pool_budget: int
+    pipeline_resident_limit: int
+    target_chunk_bytes: int
+    recommended_block_size: int
+    system_reserve_bytes: int
+    device_heap_budget: int
+    device_heap_usage: int
+    device_heap_available: int
+    device_budget_source: str
     allow_cache: bool
     allow_pinned_spill: bool
     allow_prefetch: bool
@@ -111,10 +121,16 @@ class MemoryGovernor:
         provider: Callable[[], MemorySnapshot] = system_memory_snapshot,
         configured_max_bytes: Optional[int] = None,
         sample_interval=0.5,
+        device_provider: Optional[Callable[[], dict]] = None,
+        device_sample_interval=2.0,
     ):
         self.provider = provider
         self.configured_max_bytes = configured_max_bytes
         self.sample_interval = max(0.05, float(sample_interval))
+        self.device_provider = device_provider
+        self.device_sample_interval = max(0.25, float(device_sample_interval))
+        self._device_sample = None
+        self._device_sample_time = 0.0
         self._lock = threading.Lock()
         self._decision = None
         self._pressure = MemoryPressure.HEALTHY
@@ -123,6 +139,24 @@ class MemoryGovernor:
         with self._lock:
             self.configured_max_bytes = configured_max_bytes
             self._decision = None
+
+    def _read_device_budget(self, now):
+        if self.device_provider is None:
+            return None
+        if (
+            self._device_sample is not None
+            and now - self._device_sample_time < self.device_sample_interval
+        ):
+            return self._device_sample
+        try:
+            sample = self.device_provider()
+            if not isinstance(sample, dict):
+                sample = None
+        except Exception:
+            sample = None
+        self._device_sample = sample
+        self._device_sample_time = now
+        return sample
 
     def _classify(self, snapshot):
         ratio = snapshot.available_ratio
@@ -155,21 +189,120 @@ class MemoryGovernor:
                 return self._decision
             snapshot = self.provider()
             pressure = self._classify(snapshot)
+            device = self._read_device_budget(now)
+            device_heap_budget = int(
+                (device or {}).get("device_local_budget", 0) or 0
+            )
+            device_heap_usage = int(
+                (device or {}).get("device_local_usage", 0) or 0
+            )
+            device_heap_available = int(
+                (device or {}).get("device_local_available", 0) or 0
+            )
+            device_budget_source = (
+                "vk_ext_memory_budget"
+                if (device or {}).get("supported")
+                else ("vulkan_heap_size" if device else "system_memory")
+            )
+            if device:
+                ratio = device_heap_available / max(1, device_heap_budget)
+                if device_heap_available < 512 * 1024 ** 2 or ratio < 0.08:
+                    pressure = max(pressure, MemoryPressure.LOW)
+                elif device_heap_available < GIB or ratio < 0.15:
+                    pressure = max(pressure, MemoryPressure.CAUTIOUS)
             self._pressure = pressure
-            reserve = max(int(snapshot.total_bytes * 0.10), int(1.5 * GIB))
+            # Shared-memory GPUs compete with the OS and applications for the
+            # same physical RAM. Reserve enough headroom for Windows, the
+            # display compositor, and driver-private allocations.
+            reserve = max(int(snapshot.total_bytes * 0.20), 4 * GIB)
             safe_available = max(0, snapshot.available_bytes - reserve)
             configured = self.configured_max_bytes
             if configured is None:
                 configured = int(snapshot.total_bytes * 0.15)
             budget = min(int(configured), int(snapshot.total_bytes * 0.15), int(safe_available * 0.35))
+
+            configured_shared = os.environ.get("PIXEL_REFINE_AOT_SHARED_MEMORY_MAX")
+            try:
+                configured_shared = (
+                    int(configured_shared) if configured_shared is not None else 6 * GIB
+                )
+            except ValueError:
+                configured_shared = 6 * GIB
+            shared_budget = min(
+                configured_shared,
+                int(snapshot.total_bytes * 0.35),
+                int(safe_available * 0.45),
+            )
+            if device_heap_available:
+                # Keep 30% of the driver-reported available heap for display,
+                # command buffers, pipeline internals, and other applications.
+                shared_budget = min(
+                    shared_budget, int(device_heap_available * 0.70)
+                )
             if pressure == MemoryPressure.CAUTIOUS:
                 budget //= 2
+                shared_budget //= 2
             elif pressure >= MemoryPressure.LOW:
                 budget = 0
+                shared_budget = min(shared_budget, 512 * 1024 ** 2)
+
+            if pressure >= MemoryPressure.CRITICAL:
+                shared_budget = 0
+
+            # Keep a large reserve for the driver/display while allowing one
+            # 24 MP full-frame graph to use more than the old fixed 25% share.
+            # The shared budget above is already limited by available RAM,
+            # current pressure, and (when exposed) the physical-device heap.
+            if shared_budget:
+                pipeline_fraction = (
+                    0.40
+                    if pressure == MemoryPressure.HEALTHY
+                    else 0.30
+                )
+                pipeline_limit = min(
+                    1024 * 1024 ** 2,
+                    max(
+                        256 * 1024 ** 2,
+                        int(shared_budget * pipeline_fraction),
+                    ),
+                )
+                pool_budget = min(512 * 1024 ** 2, int(shared_budget * 0.15))
+                target_chunk = min(
+                    int(pipeline_limit * 0.70),
+                    int(shared_budget * 0.35),
+                )
+            else:
+                pipeline_limit = 256 * 1024 ** 2
+                pool_budget = 0
+                target_chunk = 64 * 1024 ** 2
+
+            # Estimate four simultaneously-live RGB f32 buffers and choose a
+            # practical square block. Algorithms can still apply their halo.
+            live_bytes_per_pixel = 4 * 3 * 4
+            max_side = int((target_chunk / max(1, live_bytes_per_pixel)) ** 0.5)
+            recommended = 256
+            for candidate in (2048, 1536, 1024, 768, 512, 256):
+                if candidate <= max_side:
+                    recommended = candidate
+                    break
+            if shared_budget == 0:
+                recommended = (
+                    256 if pressure >= MemoryPressure.CRITICAL else 512
+                )
             allow_cache = budget > 0 and pressure < MemoryPressure.LOW
             self._decision = MemoryDecision(
                 pressure=pressure,
                 host_cache_budget=max(0, budget),
+                shared_device_budget=max(0, shared_budget),
+                device_pool_budget=max(0, pool_budget),
+                pipeline_resident_limit=max(0, pipeline_limit),
+                target_chunk_bytes=max(0, target_chunk),
+                recommended_block_size=recommended,
+                system_reserve_bytes=reserve,
+                device_heap_budget=max(0, device_heap_budget),
+                device_heap_usage=max(0, device_heap_usage),
+                device_heap_available=max(0, device_heap_available),
+                device_budget_source=device_budget_source,
                 allow_cache=allow_cache,
                 allow_pinned_spill=pressure <= MemoryPressure.CAUTIOUS,
                 allow_prefetch=pressure == MemoryPressure.HEALTHY,

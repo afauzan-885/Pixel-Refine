@@ -37,7 +37,7 @@ cl.exe /nologo /LD /O2 /EHsc /std:c++20 /arch:AVX2 ^
   "%SCRIPT_DIR%\taichi_aot_engine.cpp" ^
   /link /OUT:"%OUTPUT%" /LIBPATH:"%TAICHI_LIB%" ^
   /IMPLIB:"%OUTPUT_DIR%\taichi_aot_engine.lib" ^
-  taichi_c_api.lib windowscodecs.lib ole32.lib uuid.lib
+  taichi_c_api.lib windowscodecs.lib opengl32.lib ole32.lib uuid.lib
 if errorlevel 1 exit /b %errorlevel%
 copy /y "%TAICHI_ROOT%\build\taichi_c_api.dll" "%OUTPUT_DIR%\taichi_c_api.dll" >nul
 exit /b %errorlevel%

@@ -20,6 +20,7 @@ Usage:
 """
 import os
 os.environ["AOT_MODE"] = "0"
+os.environ.setdefault("PIXEL_REFINE_AOT_COMPILE_ONLY", "1")
 
 import taichi as ti
 import sys
@@ -77,32 +78,63 @@ def compile_bm3d_aot(arch, save_path):
 
     # ---- Graph 1: Block Matching ----
     g = ti.graph.GraphBuilder()
-    g.dispatch(
-        bm3d_mod._block_match_and_extract_kernel,
-        src_2d, groups_4d, match_y_2d, match_x_2d, valid_2d, refs_2d,
-        num_refs_arg, K_arg, N_arg, search_r_arg, H_arg, W_arg
-    )
+    if arch == ti.vulkan:
+        g.dispatch(
+            bm3d_mod._block_match_and_extract_portable_kernel,
+            src_2d, groups_4d, match_y_2d, match_x_2d, refs_2d,
+            num_refs_arg, K_arg, N_arg, search_r_arg, H_arg, W_arg
+        )
+    else:
+        g.dispatch(
+            bm3d_mod._block_match_and_extract_kernel,
+            src_2d, groups_4d, match_y_2d, match_x_2d, valid_2d, refs_2d,
+            num_refs_arg, K_arg, N_arg, search_r_arg, H_arg, W_arg
+        )
     module.add_graph("bm3d_block_match_f32", g.compile())
     print("  Compiled: bm3d_block_match_f32")
 
     # ---- Graph 2: DCT Hard Thresholding ----
     g = ti.graph.GraphBuilder()
-    g.dispatch(
-        bm3d_mod._collaborative_dct_filter_kernel,
-        groups_4d, filtered_4d, group_weights_1d, T_dct_2d, temp_4d,
-        num_refs_arg, K_arg, N_arg, sigma_arg, lambda_arg
-    )
+    if arch == ti.vulkan:
+        g.dispatch(
+            bm3d_mod._dct_forward_threshold_portable_kernel,
+            groups_4d, group_weights_1d, T_dct_2d, temp_4d,
+            num_refs_arg, K_arg, N_arg, sigma_arg, lambda_arg
+        )
+        g.dispatch(
+            bm3d_mod._dct_inverse_portable_kernel,
+            groups_4d, filtered_4d, T_dct_2d, temp_4d,
+            num_refs_arg, K_arg, N_arg
+        )
+    else:
+        g.dispatch(
+            bm3d_mod._collaborative_dct_filter_kernel,
+            groups_4d, filtered_4d, group_weights_1d, T_dct_2d, temp_4d,
+            num_refs_arg, K_arg, N_arg, sigma_arg, lambda_arg
+        )
     module.add_graph("bm3d_dct_filter_f32", g.compile())
     print("  Compiled: bm3d_dct_filter_f32")
 
     # ---- Graph 3: Aggregation ----
     g = ti.graph.GraphBuilder()
-    g.dispatch(
-        bm3d_mod._aggregate_kernel,
-        filtered_4d, group_weights_1d, match_y_2d, match_x_2d, valid_2d,
-        output_2d, weight_sum_2d,
-        num_refs_arg, K_arg, N_arg, H_arg, W_arg
-    )
+    if arch == ti.vulkan:
+        g.dispatch(
+            bm3d_mod._aggregate_values_portable_kernel,
+            filtered_4d, group_weights_1d, match_y_2d, match_x_2d,
+            output_2d, num_refs_arg, K_arg, N_arg, H_arg, W_arg
+        )
+        g.dispatch(
+            bm3d_mod._aggregate_weights_portable_kernel,
+            group_weights_1d, match_y_2d, match_x_2d, weight_sum_2d,
+            num_refs_arg, K_arg, N_arg, H_arg, W_arg
+        )
+    else:
+        g.dispatch(
+            bm3d_mod._aggregate_kernel,
+            filtered_4d, group_weights_1d, match_y_2d, match_x_2d, valid_2d,
+            output_2d, weight_sum_2d,
+            num_refs_arg, K_arg, N_arg, H_arg, W_arg
+        )
     module.add_graph("bm3d_aggregate_f32", g.compile())
     print("  Compiled: bm3d_aggregate_f32")
 

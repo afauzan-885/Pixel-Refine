@@ -82,10 +82,52 @@ def _allocate_float_buffer_like(taichi_aot, image, host_accessible=False):
 class LucasKanadeGPU(LucasKanadeCPU):
     NAME = "Lucas Kanade GPU Optical Flow"
     KIND = "alignment"
-    DESCRIPTION = "Tile-based GPU AOT Lucas-Kanade optical flow alignment."
+    DESCRIPTION = "Native AOT Lucas-Kanade optical flow for CPU, Vulkan, and OpenGL."
     GPU_MODULES = ("common", "lucas_kanade", "pyramid", "remap")
     DEVICE_RESERVATION = "lucas_kanade_frame"
     _gpu_remap_disabled = False
+
+    def _calculate_flow_host_native(self, reference_gray, target_gray, config):
+        from taichi_library.taichi_algorithm import calcOpticalFlowPyrLK
+        # Intel OpenGL drivers reject the large SSBO binding set used by the
+        # high-iteration/auto diagnostic path. Keep the native graph, but use
+        # the validated bounded configuration so the call is deterministic.
+        params = self._build_lk_params(config)
+        params["criteria"] = (
+            3,
+            min(2, int(params["criteria"][1])),
+            float(params["criteria"][2]),
+        )
+        params["maxLevel"] = min(1, int(params["maxLevel"]))
+        params["motion_mode"] = "fast"
+        if max(reference_gray.shape[:2]) > 768:
+            # Intel OpenGL limits the combined pyramid SSBO footprint at
+            # larger frames. Level-zero remains fully native and avoids the
+            # driver binding failure without switching to another backend.
+            params["maxLevel"] = 0
+            params["grid_step"] = max(64, int(params["grid_step"]))
+        flow = calcOpticalFlowPyrLK(
+            np.ascontiguousarray(reference_gray, dtype=np.float32),
+            np.ascontiguousarray(target_gray, dtype=np.float32),
+            **params, return_gpu=False,
+        )
+        if isinstance(flow, tuple):
+            flow = flow[0]
+        return np.ascontiguousarray(flow, dtype=np.float32)
+
+    def _align_frame_opengl_native(self, reference, target, config):
+        from taichi_library import taichi_aot
+        reference_gray = to_flow_gray_u8(reference).astype(np.float32, copy=False)
+        target_gray = to_flow_gray_u8(target).astype(np.float32, copy=False)
+        flow = self._calculate_flow_host_native(reference_gray, target_gray, config)
+        expected = (*reference.shape[:2], 2)
+        if flow.shape != expected or not np.isfinite(flow).all():
+            raise RuntimeError(f"OpenGL native flow returned {flow.shape}, expected {expected}")
+        return taichi_aot.remap_with_flow(
+            np.ascontiguousarray(target), flow,
+            int(reference.shape[0]), int(reference.shape[1]), return_gpu=False,
+        )
+
     _reported_gpu_remap_disabled = False
 
     def __init__(self):
@@ -336,6 +378,16 @@ class LucasKanadeGPU(LucasKanadeCPU):
         if reference is None or target is None:
             return None
 
+        # OpenGL uses the host-output native graph path.  The regular GPU
+        # buffer/remap pipeline relies on Vulkan-style storage bindings and
+        # triggers GL_INVALID_OPERATION on Intel drivers.
+        try:
+            from taichi_library import taichi_aot
+            if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
+                return self._align_frame_opengl_native(reference, target, config)
+        except Exception:
+            raise
+
         if LucasKanadeGPU._gpu_remap_disabled:
             if not LucasKanadeGPU._reported_gpu_remap_disabled:
                 print(
@@ -471,7 +523,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
             f"mode={config.get('mode')} grid_step={config.get('grid_step')} "
             f"max_level={config.get('max_level')} iterations={config.get('iterations')} "
             f"win_size={config.get('win_size')} motion_mode={config.get('motion_mode')} "
-            f"block_runtime=native"
+            f"block_runtime={'native' if taichi_aot.get_block_config().enabled else 'full_frame'}"
         )
 
         height, width = reference.shape[:2]
@@ -621,7 +673,15 @@ class LucasKanadeGPU(LucasKanadeCPU):
         from taichi_library import taichi_aot
         from taichi_library.taichi_aot.block import BlockGrid
 
-        block_size = taichi_aot.get_block_config().normalized_size()
+        runtime_config = taichi_aot.get_block_config()
+        if not runtime_config.enabled:
+            return [{
+                "roi": (0, 0, width, height),
+                "valid": (0, 0, width, height),
+                "block_index": 0,
+            }]
+
+        block_size = runtime_config.normalized_size()
         win_radius = max(2, int(config.get("win_size", 15)) // 2)
         motion_halo = int(np.ceil(float(config.get("max_flow_px", 64.0))))
         overlap_halo = int(max(block_size) * float(config.get("tile_overlap", 0.20)))

@@ -102,8 +102,10 @@ class SwitchableParameterPanel(QWidget):
         if key is None or key in ("device_backend_arch", "device_backend_id"):
             self._filter_alignment_for_backend()
 
-    # Items to exclude from alignment combo in CPU mode
-    _CPU_HIDDEN_ALIGNMENT = {"Block Matching GPU", "RAFT"}
+    # RAFT still requires its external model/runtime. Lucas-Kanade, Block
+    # Matching, and Farneback use the validated native AOT paths on OpenGL.
+    _VULKAN_ONLY_ALIGNMENT = {"RAFT"}
+    _CPU_HIDDEN_ALIGNMENT = {"RAFT"}
 
     def _repopulate_alignment_combo(self):
         """Rebuild the alignment combo items based on current backend arch.
@@ -112,11 +114,11 @@ class SwitchableParameterPanel(QWidget):
         so they never appear in the dropdown. The page stack is untouched so
         we can re-add items if the user switches to GPU mode later.
         """
-        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import is_cpu_backend
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import get_backend_arch
         if not hasattr(self, "align_dropdown"):
             return
 
-        cpu_mode = is_cpu_backend()
+        backend_arch = get_backend_arch()
         combo = self.align_dropdown
 
         # Remember current selection
@@ -126,8 +128,10 @@ class SwitchableParameterPanel(QWidget):
         combo.blockSignals(True)
         combo.clear()
         for name in self.alignment_algorithm_names:
-            if cpu_mode and name in self._CPU_HIDDEN_ALIGNMENT:
-                continue  # Completely hide on CPU mode
+            if backend_arch == "opengl" and name in self._VULKAN_ONLY_ALIGNMENT:
+                continue
+            if backend_arch == "cpu" and name in self._CPU_HIDDEN_ALIGNMENT:
+                continue
             combo.addItem(name)
 
         # Restore selection if still available, else fall back to No Alignment

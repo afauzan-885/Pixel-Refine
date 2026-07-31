@@ -224,7 +224,7 @@ def process_and_start_batch_import(batch_page_layout, image_paths: list):
         return
 
     db_manager = batch_page_layout.database_manager
-    CHUNK_SIZE = 2
+    CHUNK_SIZE = max(10, len(image_paths) // 4)
     try:
         existing_batch_names = db_manager.get_all_batch_names()
         prefix = "batch"

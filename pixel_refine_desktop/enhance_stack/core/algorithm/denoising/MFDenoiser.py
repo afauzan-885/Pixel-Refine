@@ -438,8 +438,13 @@ class MFDenoiserAlgorithm:
     @staticmethod
     def _configure_compute_runtime(ctx):
         """Connect this pipeline to the shared adaptive block/VRAM runtime."""
-        mode = str(ctx.params.get("processing_mode", "auto") or "auto").strip().lower()
-        block_enabled = mode not in {"full", "full_frame", "full-frame", "legacy"}
+        # Block processing stays in the codebase as an experimental path, but
+        # production image algorithms currently use the validated full-frame
+        # route.  Do not let a saved legacy value such as ``auto`` re-enable it.
+        mode = "full_frame"
+        block_enabled = False
+        ctx.params["processing_mode"] = mode
+        print("[MFDenoiser][Compute] Full-frame mode enforced; block runtime is experimental.")
         requested_size = int(ctx.params.get("tile_size", 256) or 256)
         block_size = max(64, min(1024, requested_size))
         block_size = max(64, (block_size // 16) * 16)
@@ -1431,20 +1436,19 @@ def running_mf_denoiser(
             clear_raw=clear_raw,
         )
 
-    dialog = QDialog(parent)
-    dialog.setWindowTitle("MFDenoiser")
-    dialog.setWindowModality(Qt.WindowModal)
-    layout = QVBoxLayout(dialog)
-    label = QLabel("Processing MFDenoiser...")
-    progress = QProgressBar()
-    progress.setRange(0, 100)
-    progress.setStyleSheet(PROGRESS_BAR)
-    layout.addWidget(label)
-    layout.addWidget(progress)
+    from resources.GenericUILibrary import ProgressModal
+
+    dialog = ProgressModal(
+        title="MFDenoiser Processing",
+        message="Initializing MFDenoiser pipeline...",
+        parent=parent,
+        on_cancel_callback=stop_callback,
+    )
 
     def update_progress(percent, message=""):
-        progress.setValue(int(percent))
-        label.setText(str(message))
+        dialog.set_progress(percent, message)
+        if message:
+            dialog.append_log(message)
 
     worker = BaseAlgorithmWorker(
         _run_pipeline_entry,
@@ -1464,11 +1468,9 @@ def running_mf_denoiser(
 
     def on_finished():
         dialog.accept()
-        QMessageBox.information(parent, "MFDenoiser", "Processing finished.")
 
     def on_error(error):
         dialog.reject()
-        QMessageBox.critical(parent, "MFDenoiser Error", str(error))
 
     worker.finished.connect(on_finished)
     worker.error_occurred.connect(on_error)

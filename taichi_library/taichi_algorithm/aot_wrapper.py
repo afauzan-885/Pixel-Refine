@@ -36,6 +36,40 @@ from taichi_library.config import AOT_MODE
 
 # ── Lazy module loading ────────────────────────────────────────────────
 _modules = {}
+_OPENGL_FLOW_FAMILY = None
+_OPENGL_FLOW_GPU_OUTPUTS = []
+
+
+def _register_opengl_flow_output(buffer):
+    if buffer is not None:
+        _OPENGL_FLOW_GPU_OUTPUTS.append(buffer)
+    return buffer
+
+
+def _prepare_opengl_flow_family(family):
+    """Reset the OpenGL AOT context when switching dense-flow graph families.
+
+    Intel OpenGL drivers can retain SSBO binding state across the Lucas,
+    Block-Matching, and Farneback modules. Reinitializing the native context
+    at a family boundary prevents an algorithm-order-dependent assertion while
+    keeping every computation on the OpenGL backend.
+    """
+    global _OPENGL_FLOW_FAMILY
+    engine = _get_engine()
+    if str(getattr(engine, "arch", "")).lower() != "opengl":
+        return
+    if _OPENGL_FLOW_FAMILY == family:
+        return
+    if _OPENGL_FLOW_FAMILY is not None:
+        for buffer in list(_OPENGL_FLOW_GPU_OUTPUTS):
+            try:
+                buffer.destroy()
+            except Exception:
+                pass
+        _OPENGL_FLOW_GPU_OUTPUTS.clear()
+        _modules.clear()
+        engine.reinit()
+    _OPENGL_FLOW_FAMILY = family
 _engine = None
 
 # ── Persistent Buffer Cache ────────────────────────────────────────────
@@ -196,7 +230,6 @@ def _InputArray(data, is_vector=False, force_vector=None):
 def _OutputArray(shape, dtype=np.float32):
     """Create output buffer for AOT kernel."""
     from taichi_library.taichi_aot.engine import OutputArray
-
     return OutputArray(shape, dtype)
 
 
@@ -1338,6 +1371,37 @@ def calcOpticalFlowPyrLK(
     The Pixel Refine variant intentionally hides point setup: grid points,
     overlap, and Hanning-style splatting are handled internally.
     """
+    _prepare_opengl_flow_family("lucas_kanade")
+    # Intel OpenGL cannot safely expose the transient SSBO produced by the
+    # dense graph. Compute natively using the validated host-output path,
+    # then upload the completed result as a stable public GPU buffer.
+    if return_gpu:
+        try:
+            if str(getattr(_get_engine(), "arch", "")).lower() == "opengl":
+                host_result = calcOpticalFlowPyrLK(
+                    prev, next, prevPts=prevPts, nextPts=nextPts,
+                    winSize=winSize, maxLevel=maxLevel, criteria=criteria,
+                    flags=flags, minEigThreshold=minEigThreshold,
+                    grid_step=grid_step, border_margin=border_margin,
+                    overlap=overlap, adaptive=adaptive,
+                    adaptive_threshold=adaptive_threshold,
+                    motion_mode=motion_mode, dense_mode=dense_mode,
+                    max_flow_px=max_flow_px, return_gpu=False,
+                    return_diagnostics=return_diagnostics,
+                )
+                if return_diagnostics:
+                    host_result, diagnostics = host_result
+                else:
+                    diagnostics = None
+                from taichi_library import taichi_aot
+                gpu_result = taichi_aot.engine.upload(
+                    np.ascontiguousarray(host_result, dtype=np.float32),
+                    is_vector=True, vector_dim=2,
+                )
+                _register_opengl_flow_output(gpu_result)
+                return (gpu_result, diagnostics) if return_diagnostics else gpu_result
+        except Exception:
+            raise
     h, w = prev.shape[:2]
     is_prev_gpu = hasattr(prev, "handle")
     is_next_gpu = hasattr(next, "handle")
@@ -1564,6 +1628,11 @@ def calcOpticalFlowPyrLK(
             return result, diagnostics
         return result
     except Exception:
+        # OpenGL dense-flow must never silently switch to the OpenCV helper:
+        # that would make a successful call appear native while executing on
+        # the CPU. Surface the driver/graph error instead.
+        if str(getattr(_get_engine(), "arch", "")).lower() == "opengl":
+            raise
         if is_prev_gpu or is_next_gpu:
             raise
         from taichi_library.taichi_algorithm.optical_flow.lucas_kanade import (
@@ -1767,6 +1836,34 @@ def calcOpticalFlowBlockMatching(
     return_diagnostics=False,
 ):
     """Dense block matching with parabolic fit sub-pixel estimation."""
+    _prepare_opengl_flow_family("block_matching")
+    if return_gpu:
+        try:
+            if str(getattr(_get_engine(), "arch", "")).lower() == "opengl":
+                host_result = calcOpticalFlowBlockMatching(
+                    prev, next, prevPts=prevPts, nextPts=nextPts,
+                    winSize=winSize, maxLevel=maxLevel, criteria=criteria,
+                    flags=flags, minEigThreshold=minEigThreshold,
+                    grid_step=grid_step, border_margin=border_margin,
+                    overlap=overlap, adaptive=adaptive,
+                    adaptive_threshold=adaptive_threshold,
+                    motion_mode=motion_mode, dense_mode=dense_mode,
+                    max_flow_px=max_flow_px, return_gpu=False,
+                    return_diagnostics=return_diagnostics,
+                )
+                if return_diagnostics:
+                    host_result, diagnostics = host_result
+                else:
+                    diagnostics = None
+                from taichi_library import taichi_aot
+                gpu_result = taichi_aot.engine.upload(
+                    np.ascontiguousarray(host_result, dtype=np.float32),
+                    is_vector=True, vector_dim=2,
+                )
+                _register_opengl_flow_output(gpu_result)
+                return (gpu_result, diagnostics) if return_diagnostics else gpu_result
+        except Exception:
+            raise
     h, w = prev.shape[:2]
     is_prev_gpu = hasattr(prev, "handle")
     is_next_gpu = hasattr(next, "handle")
@@ -1933,6 +2030,8 @@ def calcOpticalFlowBlockMatching(
             return result, diagnostics
         return result
     except Exception:
+        if str(getattr(_get_engine(), "arch", "")).lower() == "opengl":
+            raise
         if is_prev_gpu or is_next_gpu:
             raise
         return np.zeros((h, w, 2), dtype=np.float32)

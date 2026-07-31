@@ -64,7 +64,11 @@ def iter_runtime_flow_blocks(width, height, halo=0):
     from taichi_library import taichi_aot
     from taichi_library.taichi_aot.block import BlockGrid
 
-    size = taichi_aot.get_block_config().normalized_size()
+    runtime_config = taichi_aot.get_block_config()
+    if not runtime_config.enabled:
+        yield {"valid": (0, 0, width, height), "roi": (0, 0, width, height)}
+        return
+    size = runtime_config.normalized_size()
     for block in BlockGrid((height, width), size=size, halo=max(0, int(halo))):
         yield {
             "valid": (block.x0, block.y0, block.x1, block.y1),

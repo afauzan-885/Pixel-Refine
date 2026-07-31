@@ -173,6 +173,71 @@ if TAICHI_AVAILABLE:
                         for j in range(N):
                             groups[g, k, i, j] = 0.0
 
+    @ti.kernel
+    def _block_match_and_extract_portable_kernel(
+        src: ti.types.ndarray(),
+        groups: ti.types.ndarray(),
+        match_y: ti.types.ndarray(),
+        match_x: ti.types.ndarray(),
+        ref_positions: ti.types.ndarray(),
+        num_refs: int, K: int, N: int,
+        search_r: int, H: int, W: int,
+    ):
+        """Vulkan variant using negative coordinates as the validity flag."""
+        for g in range(num_refs):
+            ry = ref_positions[g, 0]
+            rx = ref_positions[g, 1]
+            top_k_dist = ti.Vector([1e30] * 32)
+            top_k_cy = ti.Vector([0] * 32, dt=ti.i32)
+            top_k_cx = ti.Vector([0] * 32, dt=ti.i32)
+            n_found = 0
+
+            for dy in range(-search_r, search_r + 1):
+                cy = ry + dy
+                if cy < 0 or cy >= H - N + 1:
+                    continue
+                for dx in range(-search_r, search_r + 1):
+                    cx = rx + dx
+                    if cx < 0 or cx >= W - N + 1:
+                        continue
+                    dist = 0.0
+                    for i in range(N):
+                        for j in range(N):
+                            diff = src[ry + i, rx + j] - src[cy + i, cx + j]
+                            dist += diff * diff
+                    if n_found < K:
+                        top_k_dist[n_found] = dist
+                        top_k_cy[n_found] = cy
+                        top_k_cx[n_found] = cx
+                        n_found += 1
+                    else:
+                        worst_idx = 0
+                        worst_d = top_k_dist[0]
+                        for ki in range(1, K):
+                            if top_k_dist[ki] > worst_d:
+                                worst_d = top_k_dist[ki]
+                                worst_idx = ki
+                        if dist < worst_d:
+                            top_k_dist[worst_idx] = dist
+                            top_k_cy[worst_idx] = cy
+                            top_k_cx[worst_idx] = cx
+
+            for k in range(K):
+                if k < n_found:
+                    cy = top_k_cy[k]
+                    cx = top_k_cx[k]
+                    match_y[g, k] = cy
+                    match_x[g, k] = cx
+                    for i in range(N):
+                        for j in range(N):
+                            groups[g, k, i, j] = src[cy + i, cx + j]
+                else:
+                    match_y[g, k] = -1
+                    match_x[g, k] = -1
+                    for i in range(N):
+                        for j in range(N):
+                            groups[g, k, i, j] = 0.0
+
     # ---- Collaborative DCT Hard Thresholding ----
 
     @ti.kernel
@@ -237,6 +302,64 @@ if TAICHI_AVAILABLE:
             # Weight = 1 / (sigma^2 * max(n_har, 1))
             group_weights[g] = 1.0 / (sigma * sigma * ti.max(n_har, 1))
 
+    @ti.kernel
+    def _dct_forward_threshold_portable_kernel(
+        groups: ti.types.ndarray(),
+        group_weights: ti.types.ndarray(),
+        T_dct: ti.types.ndarray(),
+        temp_buf: ti.types.ndarray(),
+        num_refs: int, K: int, N: int,
+        sigma: float, lambda_3d: float,
+    ):
+        """Forward DCT and threshold pass with reduced descriptor pressure."""
+        thr = lambda_3d * sigma
+        for g in range(num_refs):
+            n_har = 0
+            for k in range(K):
+                for i in range(N):
+                    for j in range(N):
+                        s = 0.0
+                        for m in range(N):
+                            s += T_dct[i, m] * groups[g, k, m, j]
+                        temp_buf[g, k, i, j] = s
+                for i in range(N):
+                    for j in range(N):
+                        s = 0.0
+                        for m in range(N):
+                            s += temp_buf[g, k, i, m] * T_dct[j, m]
+                        if ti.abs(s) > thr:
+                            groups[g, k, i, j] = s
+                            n_har += 1
+                        else:
+                            groups[g, k, i, j] = 0.0
+            group_weights[g] = 1.0 / (
+                sigma * sigma * ti.max(n_har, 1)
+            )
+
+    @ti.kernel
+    def _dct_inverse_portable_kernel(
+        groups: ti.types.ndarray(),
+        filtered: ti.types.ndarray(),
+        T_dct: ti.types.ndarray(),
+        temp_buf: ti.types.ndarray(),
+        num_refs: int, K: int, N: int,
+    ):
+        """Inverse DCT pass with reduced descriptor pressure."""
+        for g in range(num_refs):
+            for k in range(K):
+                for i in range(N):
+                    for j in range(N):
+                        s = 0.0
+                        for m in range(N):
+                            s += T_dct[m, i] * groups[g, k, m, j]
+                        temp_buf[g, k, i, j] = s
+                for i in range(N):
+                    for j in range(N):
+                        s = 0.0
+                        for m in range(N):
+                            s += temp_buf[g, k, i, m] * T_dct[m, j]
+                        filtered[g, k, i, j] = s
+
     # ---- Overlap-Add Aggregation ----
 
     @ti.kernel
@@ -267,6 +390,58 @@ if TAICHI_AVAILABLE:
                             ti.atomic_add(output[py, px],
                                           w * filtered[g, k, dy, dx])
                             ti.atomic_add(weight_sum[py, px], w)
+
+    @ti.kernel
+    def _aggregate_values_portable_kernel(
+        filtered: ti.types.ndarray(),
+        group_weights: ti.types.ndarray(),
+        match_y: ti.types.ndarray(),
+        match_x: ti.types.ndarray(),
+        output: ti.types.ndarray(),
+        num_refs: int, K: int, N: int,
+        H: int, W: int,
+    ):
+        """Accumulate filtered values; negative coordinates are invalid."""
+        for g in range(num_refs):
+            weight = group_weights[g]
+            for k in range(K):
+                by = match_y[g, k]
+                bx = match_x[g, k]
+                if by < 0 or bx < 0:
+                    continue
+                for dy in range(N):
+                    for dx in range(N):
+                        py = by + dy
+                        px = bx + dx
+                        if 0 <= py < H and 0 <= px < W:
+                            ti.atomic_add(
+                                output[py, px],
+                                weight * filtered[g, k, dy, dx],
+                            )
+
+    @ti.kernel
+    def _aggregate_weights_portable_kernel(
+        group_weights: ti.types.ndarray(),
+        match_y: ti.types.ndarray(),
+        match_x: ti.types.ndarray(),
+        weight_sum: ti.types.ndarray(),
+        num_refs: int, K: int, N: int,
+        H: int, W: int,
+    ):
+        """Accumulate overlap weights in a separate low-descriptor pass."""
+        for g in range(num_refs):
+            weight = group_weights[g]
+            for k in range(K):
+                by = match_y[g, k]
+                bx = match_x[g, k]
+                if by < 0 or bx < 0:
+                    continue
+                for dy in range(N):
+                    for dx in range(N):
+                        py = by + dy
+                        px = bx + dx
+                        if 0 <= py < H and 0 <= px < W:
+                            ti.atomic_add(weight_sum[py, px], weight)
 
     @ti.kernel
     def _normalize_kernel(output: ti.types.ndarray(),

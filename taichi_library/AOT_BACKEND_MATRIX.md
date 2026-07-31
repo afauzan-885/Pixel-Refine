@@ -10,10 +10,30 @@ $env:PYTHONPATH = (Resolve-Path .).Path
 ```
 
 The loader selects `taichi_algorithm/aot_py/aot_dll/cpu`, `vulkan`, or `opengl`
-automatically. Device names are probed at runtime; on the current machine
-device `0` is Intel UHD 620 and device `1` is the Microsoft Direct3D12 Intel
-adapter, so neither is treated as a safe native Vulkan AOT device. A discrete
-NVIDIA adapter is selected only when its actual vendor name is reported.
+automatically. Device selection is keyed by vendor/device UUID and native
+driver identity rather than a volatile Vulkan ordinal. Microsoft
+Direct3D12/Dozen adapters are always excluded. Native Intel Vulkan is enabled
+only when the exact GPU, driver, bridge, runtime sources, test harness, and
+Vulkan artifact inventory have a passing validation manifest; changing any of
+them automatically returns Intel to the validated OpenGL path.
+
+The General Settings selector is explicit rather than automatic: every native
+GPU is listed once for Vulkan and once for OpenGL. Selecting Intel Vulkan never
+rewrites the saved choice to OpenGL, and selecting either OpenGL entry verifies
+that the runtime `GL_RENDERER` belongs to the selected vendor. A mismatch is an
+error, not a silent device substitution. “Test Hardware Backend” runs the
+complete API and 24.1 MP suite in an isolated process for every pair; Intel
+Vulkan additionally runs and persists the lifecycle/artifact qualification
+gate.
+
+An unseen native Intel fingerprint is now self-qualifying. The first launch
+remains on OpenGL and schedules a detached validator. The validator waits for
+Pixel Refine to exit, then checks every native Intel ICD sequentially using
+the lifecycle, complete artifact inventory, 28-API parity, and 24.1 MP gates.
+Only a complete pass changes the next launch to Vulkan. A crash, timeout,
+driver failure, or incomplete result remains quarantined with a 24-hour retry
+cooldown. Dozen devices are never scheduled. State and logs are written under
+`%LOCALAPPDATA%\PixelRefine\intel_vulkan_qualification`.
 
 ## Build
 
@@ -43,11 +63,49 @@ For CPU/Vulkan parity (including exact integer cases and one-ULP float checks):
   --compare --compare-backend vulkan --device 1
 ```
 
-The verified result is 24/24 algorithms on CPU and OpenGL (with the documented
-OpenGL host fallbacks). Deterministic cases are bit-identical; floating-point
-cases are bounded to the suite tolerances. Vulkan artifact/parity validation is
-available, but runtime validation remains quarantined on the current Intel
-driver because the graphics process terminates during dispatch.
+The Intel UHD 620 native Vulkan gate is:
+
+```powershell
+python taichi_library/vulkan_probe.py --comprehensive --all-intel --persist --repeat 5 --timeout 1200
+```
+
+On driver `101.2115`, the gate passed 42/42 Vulkan artifact loads, 28/28
+algorithm/pipeline tests, a real 8122x2966 (24.1 MP) pipeline, and five
+pre-validation lifecycle probes. A separate bicubic lifecycle stress run
+passed 20/20 process-isolated iterations. Bicubic parity against OpenCV measured
+MAE `3.75e-7` and maximum error `1.85e-6`. CPU, Intel OpenGL, and NVIDIA MX150
+Vulkan smoke regressions remain green.
+
+The validation manifest now also contains a static portability audit of every
+embedded shader. The current 42 archives contain 594 SPIR-V 1.3 shaders; all
+validate for Vulkan 1.1 and require only the base `Shader` capability. Maximum
+compute local size is 128 invocations and maximum descriptor pressure is 6
+storage buffers plus one uniform buffer per shader. Guided Filter's public
+Vulkan path was split into portable passes, reducing its peak from 16 to 6
+storage buffers; MLRI-ADMM step 2 was split by color, reducing its peak from 8
+to 6 together with split gradient passes and scalar color-matrix dispatch.
+BM3D was split into portable block-match, DCT, and overlap-add passes,
+reducing its peak from 8 to 6. Farneback's three polynomial-weight tables are
+packed into one Vulkan buffer, reducing its peak from 7 to 6 without changing
+the public API or its CPU/OpenGL graph ABI. A driver/artifact pair is rejected
+before dispatch when its declared
+features cannot satisfy the audit.
+Removing accidental `Float64` use from `common` and `gaussian` widened the
+profile without changing their tested CPU/Vulkan/OpenGL output accuracy.
+On multi-Intel systems each native adapter is qualified independently and
+receives its own fingerprint/driver/artifact manifest entry.
+Manifest schema 4 records the relative path and SHA-256 of every one of the
+62 bridge, runtime, harness, qualification, and Vulkan artifact components, so an invalidated
+qualification identifies the changed component instead of exposing only an
+aggregate digest.
+
+The comprehensive gate now invokes BM3D through its public API and all five
+MLRI-ADMM APIs. Their deterministic CPU signatures are checked on every
+backend; Intel UHD 620 parity measured below `3e-8` mean absolute error.
+
+Vulkan memory policy reads `VK_EXT_memory_budget` directly. Intel shared heaps
+are jointly clamped by the driver budget and available Windows RAM; discrete
+NVIDIA heaps are clamped by their dedicated VRAM budget.
 
 OpenGL now has a native standalone Windows context: the C API creates a hidden
 GLFW OpenGL 3.3 context when no application context was imported, then activates

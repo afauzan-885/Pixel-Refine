@@ -26,7 +26,8 @@ class PipelineStage:
 
 
 def run_block_pipeline(source, stages: Iterable[PipelineStage], *,
-                       block_size: int = 256, threshold_bytes: int = 1):
+                       block_size: int | None = None,
+                       threshold_bytes: int | None = None):
     """Run a dependency-ordered pipeline through safe block-capable APIs.
 
     The scheduler is deliberately host-array based: this avoids mixing native
@@ -34,9 +35,14 @@ def run_block_pipeline(source, stages: Iterable[PipelineStage], *,
     their own halo and full-frame policy, while this function controls memory
     pressure and stage ordering.
     """
+    import taichi_library.taichi_aot as aot
+    memory = aot.get_memory_status()
+    if block_size is None:
+        block_size = int(memory["recommended_block_size"])
+    if threshold_bytes is None:
+        threshold_bytes = max(1, int(memory["target_chunk_bytes"]))
     if block_size <= 0 or threshold_bytes < 0:
         raise ValueError("block_size must be positive and threshold_bytes non-negative")
-    import taichi_library.taichi_aot as aot
     previous = aot.engine.get_block_config()
     aot.set_block_mode(True, size=int(block_size),
                        threshold_bytes=int(threshold_bytes))

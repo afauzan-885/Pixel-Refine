@@ -26,7 +26,7 @@ DEFAULT_FARNEBACK_CONFIG = {
 class FarnebackFlowCPU:
     NAME = "Farneback Optical Flow"
     KIND = "alignment"
-    DESCRIPTION = "Tile-based CPU Farneback optical flow alignment."
+    DESCRIPTION = "Native AOT Farneback optical flow for CPU, Vulkan, and OpenGL."
 
     @staticmethod
     def load_config(batch_id=None, config_filename=None):
@@ -51,9 +51,11 @@ class FarnebackFlowCPU:
         return FarnebackFlowCPU.load_config(config_filename=config_filename)
 
     def calculate_flow(self, reference_gray, target_gray, config):
-        return cv2.calcOpticalFlowFarneback(
-            reference_gray,
-            target_gray,
+        """Run the full-frame Taichi AOT Farneback implementation."""
+        from taichi_library.taichi_algorithm import calcOpticalFlowFarneback
+        flow = calcOpticalFlowFarneback(
+            np.ascontiguousarray(reference_gray, dtype=np.float32),
+            np.ascontiguousarray(target_gray, dtype=np.float32),
             None,
             pyr_scale=float(config.get("pyr_scale", 0.5)),
             levels=int(config.get("levels", 3)),
@@ -63,9 +65,33 @@ class FarnebackFlowCPU:
             poly_sigma=float(config.get("poly_sigma", 1.2)),
             flags=int(config.get("flags", 0)),
         )
+        if isinstance(flow, tuple):
+            flow = flow[0]
+        flow = np.asarray(flow, dtype=np.float32)
+        expected = (*reference_gray.shape[:2], 2)
+        if flow.shape != expected or not np.isfinite(flow).all():
+            raise RuntimeError(f"Taichi Farneback returned invalid flow: {flow.shape}, expected {expected}")
+        return np.ascontiguousarray(flow)
 
     def align_frame(self, reference, target, config=None, stop_requested=None, target_for_warping=None):
         config = config or self.load_config()
+
+        # OpenGL keeps both the dense-flow solve and the final warp in the
+        # native AOT path.  This avoids cv2 remap (and its backend-dependent
+        # interpolation/rounding) while retaining the same public API.
+        try:
+            from taichi_library import taichi_aot
+            if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
+                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.optical_flow_utils.flow_blocking import to_flow_gray_u8
+                ref_gray = to_flow_gray_u8(reference).astype(np.float32, copy=False)
+                tgt = target if target_for_warping is None else target_for_warping
+                flow = self.calculate_flow(ref_gray, to_flow_gray_u8(target).astype(np.float32, copy=False), config)
+                return taichi_aot.remap_with_flow(
+                    np.ascontiguousarray(tgt), flow,
+                    int(reference.shape[0]), int(reference.shape[1]), return_gpu=False,
+                )
+        except Exception:
+            raise
 
         def flow_func(reference_gray, target_gray):
             return self.calculate_flow(reference_gray, target_gray, config)

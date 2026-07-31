@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import zipfile
 
 
@@ -58,7 +59,23 @@ def normalize_tcm(path):
                 entry.compress_type = zipfile.ZIP_DEFLATED
                 entry.external_attr = 0o100644 << 16
                 target.writestr(entry, contents[name])
-        os.replace(staging, artifact)
+        last_error = None
+        for attempt in range(12):
+            try:
+                os.replace(staging, artifact)
+                last_error = None
+                break
+            except PermissionError as error:
+                # Windows antivirus/indexer and the compiler child can hold a
+                # freshly-written archive for a short interval. Retrying the
+                # atomic promotion keeps normalization deterministic without
+                # weakening the artifact validation contract.
+                last_error = error
+                if attempt == 11:
+                    raise
+                time.sleep(0.25 * (attempt + 1))
+        if last_error is not None:
+            raise last_error
     finally:
         if staging.exists():
             staging.unlink()

@@ -34,17 +34,61 @@ def _bootstrap_aot_backend_from_settings():
 
     arch = str(settings.get("device_backend_arch") or "").strip().lower()
     device_id = settings.get("device_backend_id", None)
-    if arch:
-        os.environ.setdefault("PIXEL_REFINE_AOT_ARCH", arch)
     if device_id is None:
         return
+
+    # Resolve the persisted GPU fingerprint against the *current* Vulkan
+    # enumeration.  A device ordinal is intentionally only a cache: drivers
+    # may reorder adapters after an update or a display configuration change.
+    selector = settings.get("device_selector")
+    if arch in ("vulkan", "opengl") and not isinstance(selector, dict):
+        # One-time migration from settings written before stable selectors.
+        from taichi_library.device_selection import make_device_selector
+        legacy_name = str(settings.get("device_backend") or "")
+        if legacy_name and "cpu" not in legacy_name.lower():
+            selector = make_device_selector(legacy_name)
+            settings["device_selector"] = selector
+    if arch in ("vulkan", "opengl") and isinstance(selector, dict):
+        try:
+            from taichi_library.device_selection import (
+                resolve_device_selector,
+                scan_vulkan_device_records,
+            )
+
+            devices = scan_vulkan_device_records()
+            resolved_id = resolve_device_selector(selector, devices, device_id)
+            if resolved_id is None:
+                print("[PixelRefine Backend] Saved GPU is unavailable; selecting CPU safely.")
+                arch, device_id = "cpu", -1
+            else:
+                device_id = resolved_id
+                settings["device_backend_id"] = resolved_id
+                with open(settings_path, "w", encoding="utf-8") as fh:
+                    json.dump(settings, fh, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            # A failed scan must never reinterpret a stale ordinal as another
+            # GPU. Keep startup available using CPU until a later rescan.
+            print(f"[PixelRefine Backend] GPU fingerprint scan failed; selecting CPU: {exc}")
+            arch, device_id = "cpu", -1
 
     try:
         device_id_int = int(device_id)
     except (TypeError, ValueError):
         return
 
+    os.environ["PIXEL_REFINE_AOT_ARCH"] = arch or "cpu"
     os.environ["PIXEL_REFINE_AOT_DEVICE"] = str(device_id_int)
+    os.environ["PIXEL_REFINE_AOT_STRICT_BACKEND"] = "1"
+    if arch == "opengl" and isinstance(selector, dict):
+        os.environ["PIXEL_REFINE_OPENGL_EXPECTED_VENDOR"] = str(
+            selector.get("vendor", "")
+        ).lower()
+        os.environ["PIXEL_REFINE_OPENGL_EXPECTED_NAME"] = str(
+            selector.get("name", "")
+        )
+    else:
+        os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", None)
+        os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_NAME", None)
     if arch == "vulkan" and device_id_int >= 0:
         try:
             cache_dir = os.path.join(os.environ.get("LOCALAPPDATA", ""), "PixelRefine")
@@ -55,7 +99,15 @@ def _bootstrap_aot_backend_from_settings():
                     "w",
                     encoding="utf-8",
                 ) as fh:
-                    fh.write(str(device_id_int))
+                    json.dump(
+                        {
+                            "selector": selector,
+                            "cached_ordinal": device_id_int,
+                        },
+                        fh,
+                        indent=2,
+                        ensure_ascii=False,
+                    )
         except Exception:
             pass
 

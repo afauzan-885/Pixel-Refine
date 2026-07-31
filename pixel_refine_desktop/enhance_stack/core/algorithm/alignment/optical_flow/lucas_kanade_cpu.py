@@ -112,48 +112,28 @@ class LucasKanadeCPU:
         return LucasKanadeCPU.load_config(config_filename=config_filename)
 
     def calculate_flow(self, reference_gray, target_gray, config, point_executor=None):
-        height, width = reference_gray.shape[:2]
-        points = self._make_grid_points(width, height, config)
-        if points is None or len(points) < 4:
-            return np.zeros((height, width, 2), dtype=np.float32)
-
+        """Run the full-frame Taichi AOT Lucas-Kanade implementation."""
+        from taichi_library.taichi_algorithm import calcOpticalFlowPyrLK
         win_size = max(5, int(config.get("win_size", 17)))
         if win_size % 2 == 0:
             win_size += 1
-
-        next_points, status = self._track_grid_points(
-            reference_gray,
-            target_gray,
-            points,
-            config,
-            win_size,
-            point_executor=point_executor,
+        flow = calcOpticalFlowPyrLK(
+            np.ascontiguousarray(reference_gray),
+            np.ascontiguousarray(target_gray),
+            winSize=(win_size, win_size),
+            maxLevel=max(0, int(config.get("max_level", 2))),
+            grid_step=max(4, int(config.get("grid_step", 16))),
+            border_margin=max(0, int(config.get("border_margin", 8))),
+            motion_mode=str(config.get("motion_mode", "fast")),
+            max_flow_px=float(config.get("max_flow_px", 0.0)),
         )
-        if next_points is None or status is None:
-            return np.zeros((height, width, 2), dtype=np.float32)
-
-        valid = status.reshape(-1).astype(bool)
-        source = points.reshape(-1, 2)[valid]
-        target = next_points.reshape(-1, 2)[valid]
-        if len(source) < 4:
-            return np.zeros((height, width, 2), dtype=np.float32)
-
-        sparse_flow = np.zeros((height, width, 2), dtype=np.float32)
-        weight = np.zeros((height, width), dtype=np.float32)
-        displacement = target - source
-        coords = np.rint(source).astype(np.int32)
-        coords[:, 0] = np.clip(coords[:, 0], 0, width - 1)
-        coords[:, 1] = np.clip(coords[:, 1], 0, height - 1)
-
-        for (x, y), (dx, dy) in zip(coords, displacement):
-            sparse_flow[y, x, 0] += dx
-            sparse_flow[y, x, 1] += dy
-            weight[y, x] += 1.0
-
-        known = weight > 0
-        sparse_flow[known, 0] /= weight[known]
-        sparse_flow[known, 1] /= weight[known]
-        return self._densify_sparse_flow(sparse_flow, known)
+        if isinstance(flow, tuple):
+            flow = flow[0]
+        flow = np.asarray(flow, dtype=np.float32)
+        expected = (*reference_gray.shape[:2], 2)
+        if flow.shape != expected or not np.isfinite(flow).all():
+            raise RuntimeError(f"Taichi Lucas-Kanade returned invalid flow: {flow.shape}, expected {expected}")
+        return np.ascontiguousarray(flow)
 
     def _make_grid_points(self, width, height, config):
         step = max(4, int(config.get("grid_step", 16)))

@@ -4,6 +4,7 @@ Handles background execution of image processing algorithms with progress tracki
 """
 
 from PySide6.QtCore import QThread, Signal
+import config
 
 # Import algorithm functions
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
@@ -92,11 +93,19 @@ class AlgorithmProcessorThread(QThread):
             def get_stop_cb():
                 return self._is_cancelled
 
-            alignment_choice = self.settings.get("alignment", "No Alignment")
-            super_resolution_choice = self.settings.get(
-                "super_resolution", "No Super Resolution"
-            )
-            denoising_choice = self.settings.get("denoising", "No Denoising")
+            is_align_checked = self.settings.get(config.KEY_CHECKBOX_ALIGN, True)
+            is_sr_checked = self.settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
+            is_denoise_checked = self.settings.get(config.KEY_CHECKBOX_DENOISING, False)
+
+            raw_align = self.settings.get(config.KEY_ALIGNMENT) or self.settings.get(config.KEY_ALIGNMENT_ALGO, "No Alignment")
+            alignment_choice = raw_align if (is_align_checked and raw_align not in ("", "None")) else "No Alignment"
+
+            raw_sr = self.settings.get(config.KEY_SUPER_RESOLUTION) or self.settings.get(config.KEY_SUPER_RESOLUTION_ALGO, "No Super Resolution")
+            super_resolution_choice = raw_sr if (is_sr_checked and raw_sr not in ("", "None")) else "No Super Resolution"
+
+            raw_denoise = self.settings.get(config.KEY_DENOISING) or self.settings.get(config.KEY_DENOISING_ALGO, "No Denoising")
+            denoising_choice = raw_denoise if (is_denoise_checked and raw_denoise not in ("", "None")) else "No Denoising"
+
             denoising_active = denoising_choice not in (
                 "",
                 "None",
@@ -150,6 +159,33 @@ class AlgorithmProcessorThread(QThread):
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
+                    ),
+                    "Lucas Kanade": lambda: running_mf_denoiser(
+                        self.parent_panel,
+                        single_process=self.single_process,
+                        batch_id=self.batch_id,
+                        progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
+                        alignment_backend="Lucas Kanade",
+                        merging_mode="none",
+                    ),
+                    "Block Matching GPU": lambda: running_mf_denoiser(
+                        self.parent_panel,
+                        single_process=self.single_process,
+                        batch_id=self.batch_id,
+                        progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
+                        alignment_backend="Block Matching GPU",
+                        merging_mode="none",
+                    ),
+                    "RAFT": lambda: running_mf_denoiser(
+                        self.parent_panel,
+                        single_process=self.single_process,
+                        batch_id=self.batch_id,
+                        progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
+                        alignment_backend="RAFT",
+                        merging_mode="none",
                     ),
                     "No Alignment": lambda: None,
                     "None": lambda: None,

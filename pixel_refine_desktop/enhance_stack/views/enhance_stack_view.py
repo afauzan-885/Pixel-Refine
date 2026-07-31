@@ -140,9 +140,21 @@ class EnhanceStackView(WorkspaceView):
         # )
         # self.top_bar.batch_page_delete_button.clicked.connect(
         #     self.batch_page_view.handle_delete_all_batches
+
+        # Single page buttons
+        # self.top_bar.single_page_import_button.clicked.connect(
+        #     self.single_page_view.handle_import_button
         # )
-        # self.top_bar.start_process_batch.clicked.connect(
-        #     self.batch_page_view.process_all_batches
+        # self.top_bar.single_page_delete_button.clicked.connect(
+        #     self.single_page_view.handle_delete_button
+        # )
+
+        # Batch page buttons
+        # self.top_bar.batch_page_import_button.clicked.connect(
+        #     self.batch_page_view.handle_batch_import_button
+        # )
+        # self.top_bar.batch_page_delete_button.clicked.connect(
+        #     self.batch_page_view.handle_delete_all_batches
         # )
 
     def _handle_legacy_toast(self, message, duration_or_category, is_progress):
@@ -152,32 +164,8 @@ class EnhanceStackView(WorkspaceView):
             self.toast_manager.show_progress(message, category=category)
         else:
             duration = duration_or_category if isinstance(duration_or_category, int) else 3000
+            try:
+                self.toast_manager.hide_progress()
+            except Exception:
+                pass
             self.toast_manager.show_message(message, duration=duration)
-
-    def _handle_switch_request(self):
-        """Handle switch between single and batch pages."""
-        # if self.top_bar.single_button.isChecked():
-        #     target_widget = self.single_page_view
-        #     target_index = 0
-        #     slide_direction = SlideDirection.RIGHT
-        # elif self.top_bar.batch_button.isChecked():
-        #     target_widget = self.batch_page_view
-        #     target_index = 1
-        #     slide_direction = SlideDirection.LEFT
-        # else:
-        #     return
-        return  # Disable switching via TopBar for now
-
-        # Animate transition
-        # slide(
-        #     self.animator,
-        #     self.stacked_widget,
-        #     target_widget,
-        #     slide_direction,
-        #     duration=400,
-        # )
-
-        # Switch top bar stacks
-        # Switch top bar stacks
-        # self.top_bar.left_stack.setCurrentIndex(target_index)
-        # self.top_bar.right_stack.setCurrentIndex(target_index)

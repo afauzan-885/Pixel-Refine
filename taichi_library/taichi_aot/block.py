@@ -414,6 +414,11 @@ OPERATION_PATHS = {
     "arm_demosaic": BlockPath.BLOCK_BORDER,
     "hamilton_demosaic_1channel": BlockPath.BLOCK_BORDER,
     "hamilton_demosaic_half_res": BlockPath.BLOCK,
+    "dcb_demosaic": BlockPath.BLOCK,
+    "dcb_demosaic_1channel": BlockPath.BLOCK,
+    "dcb_demosaic_half_res": BlockPath.BLOCK,
+    "dcb_demosaic_rgb_half_res": BlockPath.BLOCK,
+    "dcb_demosaic_3channel": BlockPath.BLOCK,
     "hamilton_demosaic_rgb_half_res": BlockPath.BLOCK,
     "hamilton_demosaic_3channel": BlockPath.BLOCK_BORDER,
     "arm_demosaic_1channel": BlockPath.BLOCK_BORDER,
@@ -432,6 +437,26 @@ OPERATION_PATHS = {
     "histogram": BlockPath.GLOBAL,
 }
 
+# Conservative automatic set. These operations have local dependency radii
+# and existing halo-aware executors. Global reductions, remap, demosaic, and
+# optical flow remain full-frame unless explicitly enabled and parity-tested.
+AUTO_BLOCK_SAFE = frozenset({
+    "copy",
+    "copy_field",
+    "absdiff",
+    "rgb2gray",
+    "split_3ch",
+    "merge_3ch",
+    "extract_channel",
+    "insert_channel",
+    "enhance_grayscale",
+    "gaussian_blur",
+    "box_filter",
+    "median_filter",
+    "sobel",
+    "laplacian",
+})
+
 
 def normalize_block_size(size: BlockSize) -> Tuple[int, int]:
     if isinstance(size, int):
@@ -449,6 +474,11 @@ def normalize_block_size(size: BlockSize) -> Tuple[int, int]:
 def operation_path(name: str) -> BlockPath:
     """Return the conservative path classification for an operation."""
     return OPERATION_PATHS.get(name, BlockPath.DIRECT)
+
+
+def is_auto_block_safe(name: str) -> bool:
+    """Whether adaptive memory pressure may enable blocking implicitly."""
+    return str(name) in AUTO_BLOCK_SAFE
 
 
 def should_use_blocks(name: str, nbytes: int, config: BlockConfig) -> bool:

@@ -15,8 +15,10 @@
 #define EXPORT __declspec(dllexport)
 #include <wincodec.h>
 #include <windows.h>
+#include <GL/gl.h>
 
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "opengl32.lib")
 #else
 #define EXPORT
 #endif
@@ -104,6 +106,16 @@ struct EngineContext {
   std::string last_error;
   bool destroying;
   uint64_t session_id;
+  std::string device_name;
+#ifdef _WIN32
+  // Taichi 1.7.4 creates a WGL context for its OpenGL runtime. WGL contexts
+  // are thread-affine, while Pixel Refine initializes the runtime on the UI
+  // thread and launches graphs from worker threads. Keep the native handles
+  // so each exported operation can temporarily make the context current.
+  HGLRC gl_context = nullptr;
+  HDC gl_dc = nullptr;
+  std::recursive_mutex gl_context_mutex;
+#endif
 };
 
 static std::unordered_set<EngineContext *> engine_contexts;
@@ -148,6 +160,78 @@ static std::string consume_ti_last_error() {
   }
   return last_error;
 }
+
+static std::string current_opengl_renderer() {
+#ifdef _WIN32
+  // Taichi owns the context. Query only after Runtime construction, on the
+  // same thread, so this reports the physical renderer selected by Windows.
+  const GLubyte *renderer = glGetString(GL_RENDERER);
+  const GLubyte *vendor = glGetString(GL_VENDOR);
+  if (!renderer)
+    return "";
+  std::string name(reinterpret_cast<const char *>(renderer));
+  if (vendor && name.find(reinterpret_cast<const char *>(vendor)) == std::string::npos)
+    name = std::string(reinterpret_cast<const char *>(vendor)) + " - " + name;
+  return name;
+#else
+  return "";
+#endif
+}
+
+// Serializes an OpenGL runtime and migrates its WGL context to the calling
+// thread for the duration of one bridge operation. The context is detached
+// afterwards so the next UI/worker thread can acquire it. Vulkan and CPU are
+// intentionally no-ops.
+class ScopedOpenGLContext {
+ public:
+  explicit ScopedOpenGLContext(EngineContext *ctx) : ctx_(ctx) {
+#ifdef _WIN32
+    if (!ctx_ || ctx_->arch != TI_ARCH_OPENGL)
+      return;
+    lock_ = std::unique_lock<std::recursive_mutex>(ctx_->gl_context_mutex);
+    if (!ctx_->gl_context || !ctx_->gl_dc) {
+      ready_ = false;
+      set_engine_error(ctx_, "OpenGL runtime has no capturable WGL context");
+      return;
+    }
+    previous_context_ = wglGetCurrentContext();
+    previous_dc_ = wglGetCurrentDC();
+    if (previous_context_ == ctx_->gl_context) {
+      ready_ = true;
+      return;
+    }
+    ready_ = wglMakeCurrent(ctx_->gl_dc, ctx_->gl_context) == TRUE;
+    if (!ready_)
+      set_engine_error(ctx_, "wglMakeCurrent failed while binding the OpenGL runtime to the worker thread");
+#endif
+  }
+
+  ~ScopedOpenGLContext() {
+#ifdef _WIN32
+    if (!ctx_ || ctx_->arch != TI_ARCH_OPENGL || !ready_)
+      return;
+    if (previous_context_ != ctx_->gl_context)
+      wglMakeCurrent(previous_dc_, previous_context_);
+#endif
+  }
+
+  bool ready() const {
+#ifdef _WIN32
+    return !ctx_ || ctx_->arch != TI_ARCH_OPENGL || ready_;
+#else
+    return true;
+#endif
+  }
+
+ private:
+  EngineContext *ctx_ = nullptr;
+#ifdef _WIN32
+  std::unique_lock<std::recursive_mutex> lock_;
+  HGLRC previous_context_ = nullptr;
+  HDC previous_dc_ = nullptr;
+  bool ready_ = true;
+#endif
+};
 
 // -----------------------------------------------------------------------
 // Runtime & Module Management
@@ -201,6 +285,17 @@ EXPORT void *init_aot_engine(int arch_id, int device_id) {
     auto ctx = std::make_unique<EngineContext>();
     ctx->arch = arch;
     ctx->runtime = new ti::Runtime(arch, (uint32_t)device_id);
+    if (arch == TI_ARCH_OPENGL) {
+      ctx->device_name = current_opengl_renderer();
+#ifdef _WIN32
+      ctx->gl_context = wglGetCurrentContext();
+      ctx->gl_dc = wglGetCurrentDC();
+      // Do not leave the context owned by the initialization/UI thread.
+      // ScopedOpenGLContext will bind it around every native operation.
+      if (ctx->gl_context && ctx->gl_dc)
+        wglMakeCurrent(nullptr, nullptr);
+#endif
+    }
     ctx->destroying = false;
     ctx->session_id = next_session_id++;
     {
@@ -234,6 +329,14 @@ EXPORT void *init_aot_engine(int arch_id, int device_id) {
   }
 }
 
+EXPORT const char *get_runtime_device_name(void *runtime) {
+  EngineContext *ctx = as_engine(runtime);
+  if (!ctx)
+    return "";
+  std::lock_guard<std::mutex> lock(ctx->mutex);
+  return ctx->device_name.c_str();
+}
+
 EXPORT const char *get_last_engine_error(void *runtime) {
   EngineContext *ctx = as_engine(runtime);
   if (!ctx)
@@ -249,6 +352,9 @@ EXPORT void clear_last_engine_error(void *runtime) {
 
 EXPORT void *load_aot_module(void *runtime, const char *tcm_path) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return nullptr;
   ti::Runtime *rt = engine_runtime(engine);
   if (is_debug_logging_enabled()) {
     FILE *log = fopen("engine_debug.log", "a");
@@ -342,6 +448,9 @@ EXPORT void destroy_aot_module(void *module_ctx) {
   ModuleContext *ctx = (ModuleContext *)module_ctx;
   if (ctx) {
     EngineContext *owner = ctx->owner;
+    ScopedOpenGLContext gl_scope(owner);
+    if (!gl_scope.ready())
+      return;
     if (owner) {
       std::lock_guard<std::mutex> lock(owner->mutex);
       owner->modules.erase(ctx);
@@ -355,6 +464,9 @@ EXPORT void destroy_aot_module(void *module_ctx) {
 EXPORT void destroy_aot_engine(void *runtime) {
   EngineContext *ctx = as_engine(runtime);
   if (!ctx)
+    return;
+  ScopedOpenGLContext gl_scope(ctx);
+  if (!gl_scope.ready())
     return;
 
   {
@@ -421,6 +533,9 @@ EXPORT void destroy_aot_engine(void *runtime) {
 EXPORT void *allocate_gpu_buffer(void *runtime, uint64_t size,
                                  int host_accessible) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return nullptr;
   ti::Runtime *rt = engine_runtime(engine);
   if (!rt)
     return nullptr;
@@ -444,6 +559,9 @@ EXPORT void *allocate_gpu_buffer(void *runtime, uint64_t size,
 
 EXPORT void free_gpu_buffer(void *runtime, void *memory) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return;
   ti::Runtime *rt = engine_runtime(engine);
   if (rt && memory) {
     {
@@ -458,6 +576,9 @@ EXPORT void free_gpu_buffer(void *runtime, void *memory) {
 EXPORT void write_to_gpu_buffer(void *runtime, void *memory, void *data,
                                 uint64_t size) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return;
   ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !memory || !data)
     return;
@@ -471,6 +592,9 @@ EXPORT void write_to_gpu_buffer(void *runtime, void *memory, void *data,
 EXPORT void read_from_gpu_buffer(void *runtime, void *memory, void *data,
                                  uint64_t size) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return;
   ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !memory || !data)
     return;
@@ -484,6 +608,9 @@ EXPORT void read_from_gpu_buffer(void *runtime, void *memory, void *data,
 
 EXPORT void *map_gpu_buffer(void *runtime, void *memory) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return nullptr;
   ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !memory)
     return nullptr;
@@ -497,6 +624,9 @@ EXPORT void *map_gpu_buffer(void *runtime, void *memory) {
 
 EXPORT void unmap_gpu_buffer(void *runtime, void *memory) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return;
   ti::Runtime *rt = engine_runtime(engine);
   if (rt && memory) {
     ti_unmap_memory(rt->runtime(), (TiMemory)memory);
@@ -508,6 +638,9 @@ EXPORT void unmap_gpu_buffer(void *runtime, void *memory) {
 EXPORT void copy_gpu_buffer(void *runtime, void *src, void *dst,
                             uint64_t size) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return;
   ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !src || !dst)
     return;
@@ -528,6 +661,9 @@ EXPORT void copy_gpu_buffer(void *runtime, void *src, void *dst,
 
 EXPORT void sync_runtime(void *runtime) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return;
   ti::Runtime *rt = engine_runtime(engine);
   if (rt)
     rt->wait();
@@ -540,6 +676,9 @@ EXPORT void *ti_imread_to_gpu(void *runtime, const char *path, int *out_width,
                               int *out_height, int *out_channels,
                               int *out_bit_depth) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return nullptr;
   ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !path)
     return nullptr;
@@ -655,6 +794,9 @@ EXPORT bool ti_imwrite_from_gpu(void *runtime, const char *path, void *gpu_mem,
                                 int width, int height, int channels,
                                 int bit_depth) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return false;
   ti::Runtime *rt = engine_runtime(engine);
   if (!rt || !path || !gpu_mem)
     return false;
@@ -891,6 +1033,9 @@ EXPORT void run_aot_graph(void *runtime, void *module_ctx,
                           const char *graph_name, DynamicArg *args_array,
                           int num_args) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return;
   ti::Runtime *rt = engine_runtime(engine);
   ModuleContext *ctx = (ModuleContext *)module_ctx;
   if (!rt || !ctx || !ctx->module || !args_array)
@@ -1033,6 +1178,9 @@ EXPORT void run_pipeline(void *runtime, const char *pipeline_name,
                          uint64_t *old_handles, DynamicArg *new_args,
                          int num_overrides) {
   EngineContext *engine = as_engine(runtime);
+  ScopedOpenGLContext gl_scope(engine);
+  if (!gl_scope.ready())
+    return;
   ti::Runtime *rt = engine_runtime(engine);
   if (!rt)
     return;

@@ -16,7 +16,8 @@ Usage:
 
 import os
 
-os.environ["AOT_MODE"] = "0"
+os.environ.setdefault("AOT_MODE", "0")
+os.environ.setdefault("PIXEL_REFINE_AOT_COMPILE_ONLY", "1")
 
 import taichi as ti
 import numpy as np
@@ -69,9 +70,9 @@ def compile_farneback_flow(arch=ti.vulkan, out_dir=None):
     sym_M = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "M", dtype=ti.f32, ndim=3)
     sym_M_smooth = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "M_smooth", dtype=ti.f32, ndim=3)
 
-    sym_g = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "g", dtype=ti.f32, ndim=1)
-    sym_xg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "xg", dtype=ti.f32, ndim=1)
-    sym_xxg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "xxg", dtype=ti.f32, ndim=1)
+    sym_poly_weights = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "poly_weights", dtype=ti.f32, ndim=2
+    )
     sym_smooth_weights = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "smooth_weights", dtype=ti.f32, ndim=1)
 
     sym_h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", dtype=ti.i32)
@@ -91,10 +92,10 @@ def compile_farneback_flow(arch=ti.vulkan, out_dir=None):
     g_poly = ti.graph.GraphBuilder()
     g_poly.dispatch(fb._poly_exp_vertical_kernel,
                     sym_src_2d, sym_vert_3d, sym_h, sym_w,
-                    sym_g, sym_xg, sym_xxg, sym_poly_radius)
+                    sym_poly_weights, sym_poly_radius)
     g_poly.dispatch(fb._poly_exp_horizontal_kernel,
                     sym_vert_3d, sym_poly_5ch, sym_h, sym_w,
-                    sym_g, sym_xg, sym_xxg,
+                    sym_poly_weights,
                     sym_ig11, sym_ig03, sym_ig33, sym_ig55, sym_poly_radius)
     module.add_graph("poly_expansion_f32", g_poly.compile())
     print("  [OK] poly_expansion_f32")
@@ -166,11 +167,26 @@ def compile_farneback_flow(arch=ti.vulkan, out_dir=None):
 
 
 if __name__ == "__main__":
-    archs = [
-        (ti.vulkan, "vulkan"),
-        (ti.cuda, "cuda"),
-        (ti.cpu, "cpu"),
-    ]
+    requested_arch = os.environ.get("PIXEL_REFINE_AOT_ARCH", "").strip().lower()
+    supported_archs = {
+        "vulkan": ti.vulkan,
+        "cuda": ti.cuda,
+        "cpu": ti.cpu,
+        "opengl": ti.opengl,
+    }
+    if requested_arch:
+        if requested_arch not in supported_archs:
+            raise ValueError(
+                "PIXEL_REFINE_AOT_ARCH must be one of: "
+                + ", ".join(sorted(supported_archs))
+            )
+        archs = [(supported_archs[requested_arch], requested_arch)]
+    else:
+        archs = [
+            (ti.vulkan, "vulkan"),
+            (ti.cuda, "cuda"),
+            (ti.cpu, "cpu"),
+        ]
     for arch, suffix in archs:
         try:
             compile_farneback_flow(arch=arch)

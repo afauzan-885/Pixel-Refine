@@ -36,8 +36,9 @@ def compile_gaussian_tcm():
     elif arch == ti.opengl: suffix = "opengl"
     save_path = os.path.join(save_dir, f"gaussian_{suffix}.tcm")
 
-    module_caps = ["spirv_has_float64"] if arch in (ti.vulkan, ti.opengl) else []
-    module = ti.aot.Module(arch, caps=module_caps)
+    # Gaussian kernels and weights are f32/i32. Do not advertise Float64:
+    # doing so needlessly excludes Vulkan devices lacking shaderFloat64.
+    module = ti.aot.Module(arch)
 
     h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
     w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)

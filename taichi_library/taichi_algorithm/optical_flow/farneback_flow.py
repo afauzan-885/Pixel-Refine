@@ -171,9 +171,7 @@ if TAICHI_AVAILABLE:
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: ti.i32,
         w: ti.i32,
-        g: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        xg: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        xxg: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        poly_weights: ti.types.ndarray(dtype=ti.f32, ndim=2),
         radius: ti.i32,
     ):
         """Vertical separable pass.
@@ -183,18 +181,18 @@ if TAICHI_AVAILABLE:
         Uses CLAMP boundary (matching OpenCV optflowgf.cpp lines 151-152).
         """
         for y, x in ti.ndrange(h, w):
-            s0 = src[y, x] * g[0]   # sum
+            s0 = src[y, x] * poly_weights[0, 0]   # sum
             s1 = 0.0                 # odd (y-deriv)
-            s2 = src[y, x] * xxg[0]  # even (y²)
+            s2 = src[y, x] * poly_weights[0, 2]  # even (y²)
             for k in ti.static(range(1, 12)):
                 if k <= radius:
                     ty = ti.max(0, ti.min(y - k, h - 1))
                     by = ti.max(0, ti.min(y + k, h - 1))
                     top = src[ty, x]
                     bot = src[by, x]
-                    s0 += g[k] * (top + bot)
-                    s1 += xg[k] * (bot - top)
-                    s2 += xxg[k] * (top + bot)
+                    s0 += poly_weights[k, 0] * (top + bot)
+                    s1 += poly_weights[k, 1] * (bot - top)
+                    s2 += poly_weights[k, 2] * (top + bot)
             dst[y, x, 0] = s0
             dst[y, x, 1] = s1
             dst[y, x, 2] = s2
@@ -205,9 +203,7 @@ if TAICHI_AVAILABLE:
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: ti.i32,
         w: ti.i32,
-        g: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        xg: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        xxg: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        poly_weights: ti.types.ndarray(dtype=ti.f32, ndim=2),
         ig11: ti.f32,
         ig03: ti.f32,
         ig33: ti.f32,
@@ -220,11 +216,11 @@ if TAICHI_AVAILABLE:
         Uses CLAMP boundary.
         """
         for y, x in ti.ndrange(h, w):
-            b1 = src[y, x, 0] * g[0]
+            b1 = src[y, x, 0] * poly_weights[0, 0]
             b2 = 0.0
-            b3 = src[y, x, 1] * g[0]
+            b3 = src[y, x, 1] * poly_weights[0, 0]
             b4 = 0.0
-            b5 = src[y, x, 2] * g[0]
+            b5 = src[y, x, 2] * poly_weights[0, 0]
             b6 = 0.0
             for k in ti.static(range(1, 12)):
                 if k <= radius:
@@ -237,12 +233,12 @@ if TAICHI_AVAILABLE:
                     l2 = src[y, lx, 2]
                     r2 = src[y, rx, 2]
                     tg = r0 + l0
-                    b1 += tg * g[k]
-                    b4 += tg * xxg[k]
-                    b2 += (r0 - l0) * xg[k]
-                    b3 += (r1 + l1) * g[k]
-                    b6 += (r1 - l1) * xg[k]
-                    b5 += (r2 + l2) * g[k]
+                    b1 += tg * poly_weights[k, 0]
+                    b4 += tg * poly_weights[k, 2]
+                    b2 += (r0 - l0) * poly_weights[k, 1]
+                    b3 += (r1 + l1) * poly_weights[k, 0]
+                    b6 += (r1 - l1) * poly_weights[k, 1]
+                    b5 += (r2 + l2) * poly_weights[k, 0]
 
             # Apply inverse Gram matrix constants
             dst[y, x, 0] = b3 * ig11          # b_y
@@ -558,12 +554,10 @@ def farneback_flow(
     poly_radius = poly_n // 2
 
     # Upload constants
-    g_gpu = ti.ndarray(dtype=ti.f32, shape=(poly_radius + 1,))
-    g_gpu.from_numpy(g_w)
-    xg_gpu = ti.ndarray(dtype=ti.f32, shape=(poly_radius + 1,))
-    xg_gpu.from_numpy(xg_w)
-    xxg_gpu = ti.ndarray(dtype=ti.f32, shape=(poly_radius + 1,))
-    xxg_gpu.from_numpy(xxg_w)
+    poly_weights_gpu = ti.ndarray(dtype=ti.f32, shape=(poly_radius + 1, 3))
+    poly_weights_gpu.from_numpy(
+        np.ascontiguousarray(np.stack((g_w, xg_w, xxg_w), axis=1), dtype=np.float32)
+    )
     smooth_gpu = ti.ndarray(dtype=ti.f32, shape=(smooth_radius + 1,))
     smooth_gpu.from_numpy(smooth_w[: smooth_radius + 1])
 
@@ -596,11 +590,11 @@ def farneback_flow(
         R0 = common.get_temp_buffer((hl, wl, 5), ti.f32, buffer_provider)
         R1 = common.get_temp_buffer((hl, wl, 5), ti.f32, buffer_provider)
 
-        _poly_exp_vertical_kernel(ref_lvl, vert_buf, hl, wl, g_gpu, xg_gpu, xxg_gpu, poly_radius)
-        _poly_exp_horizontal_kernel(vert_buf, R0, hl, wl, g_gpu, xg_gpu, xxg_gpu,
+        _poly_exp_vertical_kernel(ref_lvl, vert_buf, hl, wl, poly_weights_gpu, poly_radius)
+        _poly_exp_horizontal_kernel(vert_buf, R0, hl, wl, poly_weights_gpu,
                                      ig11, ig03, ig33, ig55, poly_radius)
-        _poly_exp_vertical_kernel(comp_lvl, vert_buf, hl, wl, g_gpu, xg_gpu, xxg_gpu, poly_radius)
-        _poly_exp_horizontal_kernel(vert_buf, R1, hl, wl, g_gpu, xg_gpu, xxg_gpu,
+        _poly_exp_vertical_kernel(comp_lvl, vert_buf, hl, wl, poly_weights_gpu, poly_radius)
+        _poly_exp_horizontal_kernel(vert_buf, R1, hl, wl, poly_weights_gpu,
                                      ig11, ig03, ig33, ig55, poly_radius)
         common.release_temp_buffer(vert_buf)
 

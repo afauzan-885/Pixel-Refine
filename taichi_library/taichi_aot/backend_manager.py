@@ -44,7 +44,19 @@ class BackendManager:
         for backend in candidates:
             status = self.validated.get(backend, "unknown")
             caps = classify_device(self.device, backend)
-            if status in ("quarantined", "unsupported") or not caps.safe:
+            exact_intel_manifest = (
+                backend == "vulkan"
+                and caps.vendor == "intel"
+                and caps.safe
+                and "manifest validated" in caps.reason.lower()
+            )
+            # The legacy runtime cache is not keyed by device fingerprint,
+            # driver, or artifact digest. An exact current Intel manifest is
+            # stronger evidence and must supersede a stale generic quarantine.
+            if (
+                status in ("quarantined", "unsupported")
+                and not exact_intel_manifest
+            ) or not caps.safe:
                 rejected.append(f"{backend}: {caps.reason or status}")
                 continue
             return BackendDecision(backend, candidates, self.device,
@@ -59,8 +71,13 @@ class BackendManager:
         this prevents accidental reuse of native buffers across contexts.
         Returns ``(result, backend, errors)``.
         """
+        requested = (requested or "auto").lower()
         decision = self.decide(requested)
         errors = {}
+        # Explicit backend selection is a strict contract.  Do not silently
+        # switch an explicitly requested OpenGL/Vulkan/CPU operation to CPU;
+        # callers that want recovery can compose that policy externally.
+        strict = requested != "auto"
         for backend in decision.candidates:
             if self.validated.get(backend) in ("quarantined", "unsupported"):
                 continue
@@ -68,12 +85,13 @@ class BackendManager:
                 return operation(backend), backend, errors
             except Exception as exc:
                 errors[backend] = f"{type(exc).__name__}: {exc}"
-        if "cpu" not in errors and decision.selected != "cpu":
+        if not strict and "cpu" not in errors and decision.selected != "cpu":
             try:
                 return operation("cpu"), "cpu", errors
             except Exception as exc:
                 errors["cpu"] = f"{type(exc).__name__}: {exc}"
-        raise RuntimeError(f"All backend candidates failed: {errors}")
+        mode = "explicit backend" if strict else "automatic backend candidates"
+        raise RuntimeError(f"{mode} failed without implicit fallback: {errors}")
 
 
 def preflight_backend(device="unknown", requested="auto", validated=None):

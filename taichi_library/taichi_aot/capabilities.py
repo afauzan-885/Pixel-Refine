@@ -35,6 +35,23 @@ def classify_device(device: str, backend: str, driver: str = "unknown"):
     vendor = "intel" if "intel" in name else "nvidia" if ("nvidia" in name or "geforce" in name) else "unknown"
     backend = backend.lower()
     if backend == "vulkan" and vendor == "intel":
+        try:
+            from taichi_library.vulkan_probe import intel_vulkan_is_validated
+
+            validated = intel_vulkan_is_validated(
+                int(os.environ.get("PIXEL_REFINE_AOT_DEVICE", 0))
+            )
+        except Exception:
+            validated = False
+        if validated:
+            return BackendCapabilities(
+                backend,
+                vendor,
+                device,
+                driver,
+                safe=True,
+                reason="Intel Vulkan lifecycle, parity, and pipeline manifest validated",
+            )
         return BackendCapabilities(backend, vendor, device, driver, safe=False,
                                    reason="Intel Vulkan AOT is quarantined after ABI/pipeline failures")
     if backend == "opengl":
@@ -52,6 +69,15 @@ def backend_candidates(device: str = "unknown"):
     """Return deterministic preference order for automatic dispatch."""
     name = (device or "").lower()
     if "intel" in name:
+        try:
+            from taichi_library.vulkan_probe import intel_vulkan_is_validated
+
+            if intel_vulkan_is_validated(
+                int(os.environ.get("PIXEL_REFINE_AOT_DEVICE", 0))
+            ):
+                return ["vulkan", "opengl", "cpu"]
+        except Exception:
+            pass
         return ["opengl", "cpu"]
     if "nvidia" in name or "geforce" in name:
         return ["vulkan", "opengl", "cpu"]

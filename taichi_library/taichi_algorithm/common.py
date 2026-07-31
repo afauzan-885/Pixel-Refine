@@ -272,11 +272,15 @@ if TAICHI_AVAILABLE:
     @ti.kernel
     def _cvt_color_rgb_to_gray_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
         for i, j in dst:
-            r = ti.cast(src[i, j][0], ti.f64)
-            g = ti.cast(src[i, j][1], ti.f64)
-            b = ti.cast(src[i, j][2], ti.f64)
+            r = ti.cast(src[i, j][0], ti.f32)
+            g = ti.cast(src[i, j][1], ti.f32)
+            b = ti.cast(src[i, j][2], ti.f32)
             # OpenCV formula: Y = 0.299*R + 0.587*G + 0.114*B
-            dst[i, j] = ti.cast(0.299 * r + 0.587 * g + 0.114 * b, ti.f32)
+            dst[i, j] = (
+                ti.cast(0.299, ti.f32) * r
+                + ti.cast(0.587, ti.f32) * g
+                + ti.cast(0.114, ti.f32) * b
+            )
 
     @ti.kernel
     def _cvt_color_rgb_to_gray_i32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):

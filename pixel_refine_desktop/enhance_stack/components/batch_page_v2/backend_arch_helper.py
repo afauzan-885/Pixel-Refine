@@ -28,15 +28,15 @@ def _get_app_setting_path() -> str:
     return ""
 
 
-def is_cpu_backend() -> bool:
-    """Return True when device_backend_arch is 'cpu'."""
+def get_backend_arch() -> str:
+    """Return the persisted AOT architecture without creating a runtime."""
     path = _get_app_setting_path()
     if path and os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             arch = str(data.get("device_backend_arch", "vulkan")).lower()
-            return arch == "cpu"
+            return arch
         except Exception:
             pass
 
@@ -49,8 +49,13 @@ def is_cpu_backend() -> bool:
 
         store = get_general_store()
         arch = store.get("device_backend_arch") or "vulkan"
-        return str(arch).lower() == "cpu"
+        return str(arch).lower()
     except Exception:
         pass
 
-    return False
+    return "cpu"
+
+
+def is_cpu_backend() -> bool:
+    """Return True when device_backend_arch is 'cpu'."""
+    return get_backend_arch() == "cpu"

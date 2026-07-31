@@ -1,5 +1,6 @@
 import ctypes
 import hashlib
+import json
 import os
 import sys
 import atexit
@@ -18,13 +19,19 @@ from concurrent.futures import ThreadPoolExecutor, Future
 
 from .block import (
     BlockCache, BlockConfig, BlockGrid, BlockRecord, BlockState, checksum,
-    should_use_blocks,
+    is_auto_block_safe, should_use_blocks,
 )
 from .memory import CacheTelemetry, MemoryGovernor
 from .residency import DeviceResidencyCache
 from .capabilities import classify_device
 from .artifact_cache import artifact_key, get_status, set_status
 from .backend_manager import BackendManager
+from taichi_library.device_selection import (
+    make_device_selector,
+    query_vulkan_memory_budget,
+    resolve_device_selector,
+    scan_vulkan_device_records,
+)
 
 _UNSET = object()
 _CPU_AOT_EXTRACTION_LOCK = threading.RLock()
@@ -82,6 +89,23 @@ def _materialize_cpu_aot_directory(artifact_path):
                 shutil.rmtree(staging, ignore_errors=True)
 
 def get_vulkan_device_name(device_id):
+    # The AOT bridge and the runtime must use the same enumeration source.
+    # Otherwise a UI ordinal can refer to NVIDIA in one list and Intel in a
+    # separate Vulkan-loader list after a driver update.
+    try:
+        index = int(device_id)
+        record = next(
+            (
+                item
+                for item in scan_vulkan_device_records()
+                if int(item.get("ordinal", -1)) == index
+            ),
+            None,
+        )
+        if record and record.get("name"):
+            return str(record["name"])
+    except Exception:
+        pass
     try:
         import ctypes
         vk = ctypes.CDLL("vulkan-1.dll")
@@ -209,22 +233,130 @@ _DEVICE_CACHE_PATH = os.path.join(
 _STDERR_REDIRECT_LOCK = threading.Lock()
 _PROCESS_JOB_HANDLE = None
 _PROCESS_JOB_ACTIVE = False
+_QUALIFICATION_NOTICES = set()
+
+
+def _intel_vulkan_probe_override():
+    """Permit Intel Vulkan only inside an explicitly isolated probe process."""
+    return (
+        os.environ.get("PIXEL_REFINE_AOT_INTEL_PROBE") == "1"
+        and os.environ.get("PIXEL_REFINE_AOT_ALLOW_UNSAFE_INTEL") == "1"
+    )
+
+
+def _intel_vulkan_allowed(device_id):
+    """Return true only for an isolated probe or exact validated build."""
+    if _intel_vulkan_probe_override():
+        return True
+    try:
+        from taichi_library.vulkan_probe import intel_vulkan_is_validated
+
+        return intel_vulkan_is_validated(device_id=int(device_id))
+    except Exception:
+        return False
+
+
+def _schedule_intel_vulkan_qualification(device_id):
+    """Queue full qualification after shutdown without delaying startup."""
+    if _intel_vulkan_probe_override():
+        return None
+    try:
+        from taichi_library.intel_vulkan_qualification import (
+            schedule_intel_vulkan_qualification,
+        )
+
+        report = schedule_intel_vulkan_qualification(
+            int(device_id), parent_pid=os.getpid()
+        )
+        notice_key = (
+            int(device_id),
+            str(report.get("key", "")),
+            str(report.get("status", "")),
+        )
+        if notice_key not in _QUALIFICATION_NOTICES:
+            _QUALIFICATION_NOTICES.add(notice_key)
+            if report.get("scheduled"):
+                print(
+                    "[AOTEngine] Intel Vulkan qualification scheduled after "
+                    "application shutdown; OpenGL remains active for this run."
+                )
+            elif report.get("status") == "cooldown":
+                print(
+                    "[AOTEngine] Intel Vulkan qualification is in retry "
+                    f"cooldown: {report.get('reason', 'previous gate failed')}"
+                )
+        return report
+    except Exception as exc:
+        print(
+            "[AOTEngine] Intel Vulkan auto-qualification could not be "
+            f"scheduled: {type(exc).__name__}: {exc}"
+        )
+        return None
+
+
+def _opengl_renderer_matches_vendor(renderer, expected_vendor):
+    renderer = str(renderer or "").lower()
+    vendor = str(expected_vendor or "").strip().lower()
+    if not vendor or vendor == "unknown":
+        return True
+    aliases = {
+        "intel": ("intel",),
+        "nvidia": ("nvidia", "geforce", "quadro"),
+        "amd": ("amd", "radeon", "ati"),
+    }
+    return any(token in renderer for token in aliases.get(vendor, (vendor,)))
 
 
 def _read_cached_device_id():
     try:
         with open(_DEVICE_CACHE_PATH, "r", encoding="utf-8") as fh:
-            value = fh.read().strip()
-        return int(value) if value else None
+            raw = fh.read().strip()
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            # A legacy ordinal cannot be trusted after a driver update.
+            return None
+        selector = payload.get("selector") if isinstance(payload, dict) else None
+        if not isinstance(selector, dict):
+            return None
+        devices = scan_vulkan_device_records()
+        return resolve_device_selector(
+            selector,
+            devices,
+            cached_id=payload.get("cached_ordinal"),
+        )
     except Exception:
         return None
 
 
 def _write_cached_device_id(device_id):
     try:
+        ordinal = int(device_id)
+        devices = scan_vulkan_device_records()
+        record = next(
+            (
+                item
+                for item in devices
+                if int(item.get("ordinal", -1)) == ordinal
+            ),
+            None,
+        )
+        if record is None:
+            return
+        payload = {
+            "schema": 2,
+            "cached_ordinal": ordinal,
+            "selector": make_device_selector(record),
+            "driver_version": record.get("driver_version", "unknown"),
+            "driver_uuid": record.get("driver_uuid", ""),
+        }
         os.makedirs(os.path.dirname(_DEVICE_CACHE_PATH), exist_ok=True)
-        with open(_DEVICE_CACHE_PATH, "w", encoding="utf-8") as fh:
-            fh.write(str(int(device_id)))
+        staging = _DEVICE_CACHE_PATH + ".tmp"
+        with open(staging, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+        os.replace(staging, _DEVICE_CACHE_PATH)
     except Exception:
         pass
 
@@ -819,10 +951,16 @@ def _init_aot_bridge(backend=None):
     )
     backend = (backend or os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan")).lower()
     backend_dir = os.path.join(aot_dll_dir, backend)
+    renderer_bridge = os.path.join(backend_dir, "taichi_aot_engine_renderer.dll")
+    default_bridge = (
+        renderer_bridge
+        if backend == "opengl" and os.path.exists(renderer_bridge)
+        else os.path.join(backend_dir, "taichi_aot_engine.dll")
+    )
     engine_dll_path = os.environ.get(
         "PIXEL_REFINE_AOT_ENGINE_DLL",
-        os.path.join(backend_dir, "taichi_aot_engine.dll")
-        if os.path.exists(os.path.join(backend_dir, "taichi_aot_engine.dll"))
+        default_bridge
+        if os.path.exists(default_bridge)
         else os.path.join(aot_dll_dir, "taichi_aot_engine.dll"),
     )
     engine_dll_path = os.path.abspath(engine_dll_path)
@@ -878,6 +1016,12 @@ def _init_aot_bridge(backend=None):
         _LIB.get_last_engine_error.restype = ctypes.c_char_p
         _LIB.clear_last_engine_error.argtypes = [ctypes.c_void_p]
         _LIB.clear_last_engine_error.restype = None
+    except AttributeError:
+        pass
+
+    try:
+        _LIB.get_runtime_device_name.argtypes = [ctypes.c_void_p]
+        _LIB.get_runtime_device_name.restype = ctypes.c_char_p
     except AttributeError:
         pass
 
@@ -1000,7 +1144,14 @@ def select_backend(prefer=None, device_id=None):
         return requested
     probe_id = int(device_id if device_id is not None else os.environ.get("PIXEL_REFINE_AOT_DEFAULT_DEVICE", 0))
     name = get_vulkan_device_name(probe_id) or "unknown"
-    return BackendManager(name).decide("auto").selected
+    selected = BackendManager(name).decide("auto").selected
+    if (
+        "intel" in name.lower()
+        and selected != "vulkan"
+        and not _intel_vulkan_allowed(probe_id)
+    ):
+        _schedule_intel_vulkan_qualification(probe_id)
+    return selected
 
 
 def configure_taichi_backend(prefer: str = None, device_memory_GB: float = None):
@@ -1019,6 +1170,15 @@ def configure_taichi_backend(prefer: str = None, device_memory_GB: float = None)
         raise RuntimeError("Taichi is not installed or cannot be imported.")
 
     env_pref = os.environ.get("PIXEL_REFINE_TAICHI_ARCH")
+    explicit_backend = bool(
+        prefer
+        or (env_pref and str(env_pref).strip().lower() not in ("", "auto"))
+        or (
+            os.environ.get("PIXEL_REFINE_AOT_ARCH")
+            and os.environ.get("PIXEL_REFINE_AOT_ARCH", "").strip().lower()
+            not in ("", "auto")
+        )
+    )
     arch_choice = prefer or env_pref or select_backend()
     arch_choice = arch_choice.lower()
     # Keep direct Taichi initialization consistent with AOTEngine: explicit
@@ -1028,7 +1188,16 @@ def configure_taichi_backend(prefer: str = None, device_memory_GB: float = None)
         _device_name = get_vulkan_device_name(
             int(os.environ.get("PIXEL_REFINE_AOT_DEVICE", 0))
         ) or ""
-        if "intel" in _device_name.lower():
+        if (
+            "intel" in _device_name.lower()
+            and not _intel_vulkan_allowed(
+                int(os.environ.get("PIXEL_REFINE_AOT_DEVICE", 0))
+            )
+            and not explicit_backend
+        ):
+            _schedule_intel_vulkan_qualification(
+                int(os.environ.get("PIXEL_REFINE_AOT_DEVICE", 0))
+            )
             print("[engine.configure_taichi_backend] Intel Vulkan quarantined; using opengl")
             arch_choice = "opengl"
 
@@ -1071,6 +1240,19 @@ def _get_native_engine_error(runtime):
             return raw.decode("utf-8", errors="replace")
         return str(raw)
     except Exception:
+        return ""
+
+
+def _get_runtime_device_name(runtime):
+    if not _LIB or not runtime:
+        return ""
+    try:
+        getter = _LIB.get_runtime_device_name
+        raw = getter(runtime)
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="replace").strip()
+        return str(raw or "").strip()
+    except (AttributeError, OSError, TypeError):
         return ""
 
 
@@ -1117,6 +1299,8 @@ class BufferPool:
     def __init__(self, engine=None):
         self.engine = engine
         self.free_buffers = {}  # size -> list of handles
+        self.max_bytes = 0
+        self.pooled_bytes = 0
         import threading
 
         self._lock = threading.Lock()
@@ -1124,15 +1308,41 @@ class BufferPool:
     def acquire(self, size):
         with self._lock:
             if size in self.free_buffers and self.free_buffers[size]:
-                return self.free_buffers[size].pop()
+                handle = self.free_buffers[size].pop()
+                self.pooled_bytes = max(0, self.pooled_bytes - int(size))
+                if not self.free_buffers[size]:
+                    self.free_buffers.pop(size, None)
+                return handle
             return None
 
     def store(self, size, handle):
         """Store a handle for reuse (caller decides if reuse or free)."""
         with self._lock:
+            size = int(size)
+            if self.max_bytes <= 0 or self.pooled_bytes + size > self.max_bytes:
+                runtime = self.engine.runtime if self.engine else _RUNTIME
+                if _LIB and runtime:
+                    _LIB.free_gpu_buffer(runtime, handle)
+                return
             if size not in self.free_buffers:
                 self.free_buffers[size] = []
             self.free_buffers[size].append(handle)
+            self.pooled_bytes += size
+
+    def set_budget(self, max_bytes):
+        """Apply an adaptive cap and evict largest idle buffers first."""
+        with self._lock:
+            self.max_bytes = max(0, int(max_bytes))
+            runtime = self.engine.runtime if self.engine else _RUNTIME
+            for size in sorted(tuple(self.free_buffers), reverse=True):
+                handles = self.free_buffers.get(size, [])
+                while handles and self.pooled_bytes > self.max_bytes:
+                    handle = handles.pop()
+                    if _LIB and runtime:
+                        _LIB.free_gpu_buffer(runtime, handle)
+                    self.pooled_bytes = max(0, self.pooled_bytes - int(size))
+                if not handles:
+                    self.free_buffers.pop(size, None)
 
     def clear(self):
         """Force-free all pooled handles from VRAM."""
@@ -1144,6 +1354,7 @@ class BufferPool:
                     for h in handles:
                         _LIB.free_gpu_buffer(runtime, h)
             self.free_buffers = {}
+            self.pooled_bytes = 0
 
 
 class TaichiGPUBuffer:
@@ -1441,17 +1652,21 @@ class AOTModuleWrapper:
                 # Intel OpenGL drivers can report GL_INVALID_OPERATION (or
                 # terminate the process) when a very large mixed pipeline is
                 # replayed after intermediate buffers have been recycled.
-                # Keep the opt-in native pipeline deterministic by rejecting
-                # oversized recordings before they reach the driver.  Small
-                # native pipelines remain fully supported; applications that
-                # have validated a larger GPU may raise the limit explicitly.
+                # Derive the resident limit from current shared-memory
+                # availability. An explicit environment value remains a
+                # diagnostic override, not a requirement for normal use.
                 if engine.arch.lower() == "opengl":
+                    decision = engine._refresh_memory_policy()
+                    adaptive_limit = (
+                        decision.pipeline_resident_limit
+                        if decision is not None else 512 * 1024 * 1024
+                    )
                     try:
                         limit = int(os.environ.get(
                             "PIXEL_REFINE_AOT_MAX_PIPELINE_BYTES",
-                            str(256 * 1024 * 1024)))
+                            str(adaptive_limit)))
                     except ValueError:
-                        limit = 256 * 1024 * 1024
+                        limit = adaptive_limit
                     resident = sum(
                         getattr(buf, "nbytes", 0)
                         for buf in engine._pipeline_intermediates.get(
@@ -1459,10 +1674,10 @@ class AOTModuleWrapper:
                     if resident > limit and os.environ.get(
                             "PIXEL_REFINE_AOT_ALLOW_LARGE_PIPELINE") != "1":
                         raise RuntimeError(
-                            "OpenGL native pipeline exceeds the validated "
+                            "OpenGL native pipeline exceeds the adaptive "
                             f"resident-memory limit ({resident} > {limit} bytes); "
-                            "use smaller blocks or explicitly set "
-                            "PIXEL_REFINE_AOT_ALLOW_LARGE_PIPELINE=1 after validation.")
+                            f"recommended block size is "
+                            f"{getattr(decision, 'recommended_block_size', 512)}.")
 
                 _op_begin(f"add_to_pipeline:{graph_name}")
                 try:
@@ -1485,8 +1700,10 @@ class AOTModuleWrapper:
                     _lock_wait_end()
                     if (
                         engine.arch.lower() == "vulkan"
+                        and "intel" in getattr(engine, "gpu_name", "").lower()
+                        and "microsoft" not in getattr(engine, "gpu_name", "").lower()
                         and os.environ.get("PIXEL_REFINE_AOT_INTEL_UNSAFE") == "1"
-                        and os.environ.get("PIXEL_REFINE_AOT_ALLOW_UNSAFE_INTEL") != "1"
+                        and not _intel_vulkan_allowed(engine.device_id)
                     ):
                         msg = (
                             f"Intel native Vulkan AOT graph '{graph_name}' quarantined: "
@@ -1551,9 +1768,16 @@ class AOTEngine:
     _placeholder_id_counter = 0xFFFFFF00
 
     def __new__(cls, arch=None, device_id=None):
+        explicit_env = os.environ.get("PIXEL_REFINE_AOT_ARCH", "")
+        explicit_backend = bool(
+            arch is not None
+            or (
+                explicit_env
+                and explicit_env.strip().lower() not in ("", "auto")
+            )
+        )
         if arch is None:
             arch = select_backend(device_id=device_id)
-        _init_aot_bridge(arch)
 
         # If device_id is not specified, auto-detect
         if device_id is None:
@@ -1577,14 +1801,16 @@ class AOTEngine:
                     autoscan = os.environ.get("PIXEL_REFINE_AOT_AUTOSCAN", "1") == "1"
                     if autoscan:
                         try:
-                            with _suppress_native_stderr():
-                                devices_str = _LIB.scan_vulkan_devices().decode("utf-8")
-                            device_list = [
-                                d.strip().lower() for d in devices_str.split(";")
-                            ]
-                            for idx, dev_name in enumerate(device_list):
+                            device_list = scan_vulkan_device_records()
+                            for record in device_list:
+                                idx = int(record.get("ordinal", -1))
+                                dev_name = str(record.get("name", "")).lower()
                                 if os.environ.get("PIXEL_REFINE_AOT_SKIP_DOZEN", "0") == "1":
-                                    if "dozen" in dev_name or "direct3d12" in dev_name:
+                                    if (
+                                        record.get("translation")
+                                        or "dozen" in dev_name
+                                        or "direct3d12" in dev_name
+                                    ):
                                         continue
                                 if "nvidia" in dev_name or "geforce" in dev_name:
                                     device_id = idx
@@ -1606,7 +1832,12 @@ class AOTEngine:
         # it to the validated OpenGL path before creating native resources.
         if arch.lower() == "vulkan":
             _intel_name = get_vulkan_device_name(int(device_id)) or ""
-            if "intel" in _intel_name.lower():
+            if (
+                "intel" in _intel_name.lower()
+                and not _intel_vulkan_allowed(device_id)
+                and not explicit_backend
+            ):
+                _schedule_intel_vulkan_qualification(device_id)
                 print("[AOTEngine] Intel Vulkan quarantined; selecting OPENGL")
                 arch = "opengl"
                 device_id = 0
@@ -1617,6 +1848,11 @@ class AOTEngine:
         if arch.lower() in ("cpu", "opengl"):
             device_id = 0
             os.environ["PIXEL_REFINE_AOT_DEVICE"] = "0"
+
+        # Load exactly one backend bridge only after the final backend and
+        # device policy has been resolved. Loading Vulkan before an Intel
+        # quarantine decision would permanently contaminate an OpenGL process.
+        _init_aot_bridge(arch)
 
         key = (arch.lower(), device_id)
         existing = cls._instances.get(key)
@@ -1662,10 +1898,10 @@ class AOTEngine:
 
             _init_thread = None
             if arch.lower() == "opengl":
-                # An OpenGL context is current only on the thread that created
-                # it. All subsequent AOT load/launch calls happen on this
-                # caller thread, so initializing through the Vulkan watchdog
-                # thread makes even the first GL buffer operation invalid.
+                # Initialize on the caller/UI thread so the bridge can capture
+                # Taichi's native WGL handles. The bridge then detaches and
+                # safely rebinds that context around each serialized operation,
+                # including calls made later by Qt worker threads.
                 _do_init()
             else:
                 _init_thread = threading.Thread(target=_do_init, daemon=True)
@@ -1695,7 +1931,33 @@ class AOTEngine:
                     f"Failed to initialize {arch.upper()} AOT Runtime on device {device_id}."
                 )
 
-            gpu_name = get_vulkan_device_name(device_id) if arch.lower() == "vulkan" else None
+            gpu_name = (
+                get_vulkan_device_name(device_id)
+                if arch.lower() == "vulkan"
+                else _get_runtime_device_name(instance.runtime)
+            )
+            if arch.lower() == "opengl":
+                expected_vendor = os.environ.get(
+                    "PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", ""
+                )
+                expected_name = os.environ.get(
+                    "PIXEL_REFINE_OPENGL_EXPECTED_NAME", ""
+                )
+                if not _opengl_renderer_matches_vendor(
+                    gpu_name, expected_vendor
+                ):
+                    try:
+                        _LIB.destroy_aot_engine(instance.runtime)
+                    finally:
+                        instance.runtime = None
+                    raise RuntimeError(
+                        "OpenGL renderer mismatch: selected "
+                        f"{expected_name or expected_vendor!r}, but Windows "
+                        f"created the context on {gpu_name or 'an unknown renderer'!r}. "
+                        "Set this Python/application executable to the requested "
+                        "GPU in Windows Settings > System > Display > Graphics, "
+                        "then restart and test again."
+                    )
             if gpu_name:
                 print(
                     f"[AOTEngine] Runtime initialized on '{arch.upper()}' ({gpu_name})"
@@ -1706,7 +1968,8 @@ class AOTEngine:
                 # the OS reclaim the context instead of calling the faulty
                 # destructor; this is scoped to Intel and never affects NVIDIA.
                 if arch.lower() == "vulkan" and "intel" in gpu_name.lower() and "microsoft" not in gpu_name.lower():
-                    os.environ.setdefault("PIXEL_REFINE_AOT_SAFE_TEARDOWN", "1")
+                    if not _intel_vulkan_allowed(device_id):
+                        os.environ.setdefault("PIXEL_REFINE_AOT_SAFE_TEARDOWN", "1")
                     os.environ.setdefault("PIXEL_REFINE_AOT_INTEL_UNSAFE", "1")
                     os.environ.setdefault("PIXEL_REFINE_VULKAN_SERIALIZE_SUBMIT", "1")
             else:
@@ -1714,6 +1977,7 @@ class AOTEngine:
                     f"[AOTEngine] Runtime initialized on '{arch.upper()}' (Device {device_id})"
                 )
 
+            instance.gpu_name = gpu_name or ""
             instance.modules = {}
             instance.buffer_pool = BufferPool(instance)
             instance._local = threading.local()
@@ -1726,10 +1990,26 @@ class AOTEngine:
             instance._generation = 0
             instance._block_config = BlockConfig()
             instance._cache_telemetry = CacheTelemetry()
+            instance._device_memory_provider = (
+                (lambda selected_id=int(device_id): query_vulkan_memory_budget(selected_id))
+                if arch.lower() == "vulkan"
+                else None
+            )
             instance._memory_governor = MemoryGovernor(
-                configured_max_bytes=instance._block_config.cache_bytes
+                configured_max_bytes=instance._block_config.cache_bytes,
+                device_provider=instance._device_memory_provider,
             )
             initial_memory = instance._memory_governor.refresh(force=True)
+            instance.buffer_pool.set_budget(initial_memory.device_pool_budget)
+            print(
+                "[AOTEngine Memory] "
+                f"pressure={initial_memory.pressure.name.lower()} "
+                f"shared_budget={initial_memory.shared_device_budget // (1024 ** 2)}MB "
+                f"device_available={initial_memory.device_heap_available // (1024 ** 2)}MB "
+                f"source={initial_memory.device_budget_source} "
+                f"pipeline_limit={initial_memory.pipeline_resident_limit // (1024 ** 2)}MB "
+                f"block={initial_memory.recommended_block_size}"
+            )
             instance._block_cache = BlockCache(
                 instance._block_config.cache_entries,
                 max_bytes=initial_memory.host_cache_budget,
@@ -1833,6 +2113,8 @@ class AOTEngine:
         host_accessible=False,
         vector_dim=None,
     ):
+        if not host_accessible and hasattr(self, "_memory_governor"):
+            self._refresh_memory_policy()
         _lock_wait_begin("allocate")
         with self._lock:
             _lock_wait_end()
@@ -1956,7 +2238,8 @@ class AOTEngine:
             self._cache_telemetry = CacheTelemetry()
         if not hasattr(self, "_memory_governor"):
             self._memory_governor = MemoryGovernor(
-                configured_max_bytes=self._block_config.cache_bytes
+                configured_max_bytes=self._block_config.cache_bytes,
+                device_provider=getattr(self, "_device_memory_provider", None),
             )
         if not hasattr(self, "_block_cache"):
             self._block_cache = BlockCache(
@@ -1988,15 +2271,24 @@ class AOTEngine:
                 self._block_config.device_cache_bytes
                 if self._block_config.device_cache_enabled else 0
             )
+            self.buffer_pool.set_budget(device_budget)
             self._device_block_cache.set_budget(device_budget)
             return None
         decision = self._memory_governor.refresh(force=force)
+        if decision.device_pool_budget < self.buffer_pool.pooled_bytes:
+            # Idle handles may still be referenced by queued OpenGL commands.
+            # Synchronize before adaptive eviction to avoid SSBO use-after-free.
+            self.sync()
+        self.buffer_pool.set_budget(decision.device_pool_budget)
         self._block_cache.set_limits(
             self._block_config.cache_entries,
             decision.host_cache_budget,
         )
         device_budget = (
-            self._block_config.device_cache_bytes
+            min(
+                self._block_config.device_cache_bytes,
+                decision.device_pool_budget,
+            )
             if self._block_config.device_cache_enabled and decision.allow_cache else 0
         )
         self._device_block_cache.set_budget(device_budget)
@@ -2110,6 +2402,11 @@ class AOTEngine:
             "owner_bytes": self._block_cache.owner_bytes,
             "owner_targets": self._block_cache.owner_targets(),
             "device": self._device_block_cache.stats(),
+            "buffer_pool": {
+                "pooled_bytes": self.buffer_pool.pooled_bytes,
+                "max_bytes": self.buffer_pool.max_bytes,
+                "size_classes": len(self.buffer_pool.free_buffers),
+            },
         })
         return stats
 
@@ -2129,10 +2426,33 @@ class AOTEngine:
             self._device_block_cache.clear()
 
     def plan_blocks(self, operation, shape, nbytes, halo=0):
-        """Return a block grid only when the operation is safe and opted in."""
-        if not should_use_blocks(operation, nbytes, self._block_config):
+        """Plan explicit or pressure-triggered blocks for parity-safe operations."""
+        decision = (
+            self._refresh_memory_policy()
+            if self._block_config.adaptive_memory else None
+        )
+        explicit = should_use_blocks(operation, nbytes, self._block_config)
+        automatic = bool(
+            decision is not None
+            and is_auto_block_safe(operation)
+            and int(nbytes) >= max(
+                1,
+                min(
+                    int(self._block_config.threshold_bytes),
+                    int(decision.target_chunk_bytes),
+                ),
+            )
+        )
+        if not explicit and not automatic:
             return None
-        return BlockGrid(shape, size=self._block_config.normalized_size(), halo=halo)
+        size = self._block_config.normalized_size()
+        if decision is not None:
+            recommended = int(decision.recommended_block_size)
+            if automatic and not self._block_config.enabled:
+                size = (recommended, recommended)
+            else:
+                size = (min(size[0], recommended), min(size[1], recommended))
+        return BlockGrid(shape, size=size, halo=halo)
 
     def get_staging_buffer(self, shape, dtype):
         """Deprecated: use acquire_staging_buffer instead for thread safety."""
@@ -2300,7 +2620,18 @@ class AOTEngine:
                 )
             if p in self.modules:
                 return self.modules[p]
-            device_name = get_vulkan_device_name(self.device_id) if self.arch.lower() == "vulkan" else "logical-device"
+            if self.arch.lower() == "vulkan":
+                device_name = get_vulkan_device_name(self.device_id)
+            elif self.arch.lower() == "opengl":
+                # Hybrid systems can run this same logical OpenGL backend on
+                # physically different renderers. Keep artifact quarantine and
+                # validation records isolated per actual adapter.
+                device_name = (
+                    _get_runtime_device_name(self.runtime)
+                    or "opengl-unknown-renderer"
+                )
+            else:
+                device_name = "logical-device"
             cache_key = artifact_key(p, self.arch, self.device_id, device_name)
             cached = get_status(cache_key)
             if cached and cached.get("status") == "quarantined":
@@ -2464,6 +2795,21 @@ class AOTEngine:
                     f"Failed to reinitialize Taichi AOT runtime for {active_arch}"
                 )
             self.device_id = requested_device
+            self._device_memory_provider = (
+                (
+                    lambda selected_id=requested_device: query_vulkan_memory_budget(
+                        selected_id
+                    )
+                )
+                if active_arch == "vulkan"
+                else None
+            )
+            if hasattr(self, "_memory_governor"):
+                self._memory_governor.device_provider = (
+                    self._device_memory_provider
+                )
+                self._memory_governor._device_sample = None
+                self._memory_governor._decision = None
             self._destroyed = False
             self._generation = getattr(self, "_generation", 0) + 1
 
@@ -2838,12 +3184,14 @@ def InputArray(data, is_vector=False, vector_dim=None) -> TaichiGPUBuffer:
 
 
 def OutputArray(
-    shape, dtype=np.float32, is_vector=False, vector_dim=None
+    shape, dtype=np.float32, is_vector=False, vector_dim=None,
+    host_accessible=False,
 ) -> TaichiGPUBuffer:
     """
     OpenCV-style Data Output Allocation.
     Creates an empty GPU VRAM buffer ready for writing.
     """
     return engine.allocate(
-        shape, dtype=dtype, is_vector=is_vector, vector_dim=vector_dim
+        shape, dtype=dtype, is_vector=is_vector,
+        vector_dim=vector_dim, host_accessible=host_accessible,
     )

@@ -58,7 +58,6 @@ from resources.animations.animation_manager import (
     SlideDirection,
     StackedWidgetAnimator,
 )
-from resources.GenericUILibrary.forms import FormGroup
 from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 
 # Logic
@@ -99,14 +98,10 @@ from PySide6.QtWidgets import QGraphicsScene
 # Animations
 from resources.animations.animation_manager import (
     StackedWidgetAnimator,
-    SlideDirection,
 )
-from resources.animations.slide import slide
-from resources.animations.fade import fade_out, fade_in
 from resources.animations.toast.toast_manager import (
     ToastManager,
     ToastPosition,
-    ToastAnimation,
 )
 
 # Config untuk supported image formats
@@ -574,8 +569,8 @@ class DisplayPanel(QWidget):
         from PySide6.QtWidgets import QPushButton
 
         self.is_bulk_mode = False
-
-        self.bulk_mode_btn = QPushButton(language_config.LBL_BATCH_MODE, self)
+        batch_label = getattr(language_config, "LBL_BATCH_MODE", "Batch Mode")
+        self.bulk_mode_btn = QPushButton(batch_label, self)
         self.bulk_mode_btn.setObjectName("BulkModeBtn")
 
         # Initial Slate/Gray style (Batch mode)
