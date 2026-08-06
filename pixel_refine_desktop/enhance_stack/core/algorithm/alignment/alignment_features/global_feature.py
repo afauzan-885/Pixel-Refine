@@ -647,9 +647,33 @@ def save_image(image, output_path, reference_image_path=None):
     Menyalin metadata orientasi dari gambar referensi menggunakan exiftool.
     """
     try:
-        image_to_save = image
+        image_to_save = image.copy() if hasattr(image, "copy") else image
         ext = os.path.splitext(output_path)[1].lower()
         success = False
+
+        # Apply end-to-end Natural Tone Mapping if the output array is linear float32/uint16
+        try:
+            from taichi_library import taichi_aot
+            from config import DEFAULT_TONE_MAPPING_PARAMS
+
+            if image_to_save.dtype in (np.float32, np.float64):
+                img_f32 = image_to_save.astype(np.float32, copy=False)
+                max_v = float(np.max(img_f32))
+                if max_v > 1.0:
+                    img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
+                img_tm = taichi_aot.naturalTonemapping(img_f32, **DEFAULT_TONE_MAPPING_PARAMS)
+                if max_v > 255.0:
+                    image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+                elif max_v > 1.0:
+                    image_to_save = np.clip(img_tm * 255.0, 0, 255).astype(np.uint8)
+                else:
+                    image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+            elif image_to_save.dtype == np.uint16:
+                img_f32 = image_to_save.astype(np.float32) / 65535.0
+                img_tm = taichi_aot.naturalTonemapping(img_f32, **DEFAULT_TONE_MAPPING_PARAMS)
+                image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+        except Exception as e_tm:
+            print(f"[save_image] Tone mapping warning: {e_tm}")
 
         if ext in [".tif", ".tiff"]:
             try:
@@ -1803,7 +1827,7 @@ def generate_balanced_batches(total_images, max_batch_size=10):
         current_index = end_index
 
 
-def setup_balanced_batching(total_images, language_config, max_batch_size=8):
+def setup_balanced_batching(images_or_total, language_config, max_batch_size=8):
     """
     Menyiapkan seluruh logika batching, termasuk mencetak info ke konsol.
 
@@ -1811,7 +1835,9 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=8):
     yang siap digunakan oleh perulangan di fungsi `main`.
 
     Args:
-        total_images (int): Jumlah total gambar.
+        images_or_total (int | sequence): Jumlah total gambar atau daftar
+            gambar yang akan dibagi ke dalam batch. Jika sequence diberikan,
+            hanya panjangnya yang dipakai untuk membangun rencana indeks.
         language_config: Objek konfigurasi bahasa untuk pesan.
         max_batch_size (int): Ukuran maksimum per batch.
 
@@ -1820,6 +1846,13 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=8):
               yang merupakan rencana eksekusi batch. Mengembalikan list kosong jika
               tidak ada gambar.
     """
+    total_images = (
+        len(images_or_total)
+        if not isinstance(images_or_total, (int, np.integer))
+        else int(images_or_total)
+    )
+    max_batch_size = max(1, int(max_batch_size))
+
     if total_images <= 0:
         return []  # Kembalikan list kosong jika tidak ada gambar
 

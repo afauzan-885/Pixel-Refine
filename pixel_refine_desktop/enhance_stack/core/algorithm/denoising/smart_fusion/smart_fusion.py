@@ -9,6 +9,7 @@ import h5py
 import numpy as np
 import onnxruntime as ort
 from pathlib import Path
+from taichi_library.backend_config import normalize_backend
 
 
 _SESSION_CACHE = {}
@@ -49,6 +50,66 @@ def get_tile_window(h, w, overlap):
     return np.expand_dims(win, axis=-1)
 
 
+def resolve_smart_fusion_backend():
+    """Resolves execution providers and target hardware mode (cpu or gpu) directly from app_setting.json."""
+    arch = "cpu"
+    try:
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import get_backend_arch
+        arch = str(get_backend_arch()).lower()
+    except Exception:
+        arch = normalize_backend(
+            os.environ.get("PIXEL_REFINE_AOT_ARCH", "cpu"),
+            allow_auto=True,
+        )
+        if arch == "auto":
+            arch = "cpu"
+
+    setting_path = ""
+    try:
+        from config import GENERAL_SETTINGS_FILE
+        setting_path = GENERAL_SETTINGS_FILE
+    except ImportError:
+        pass
+
+    if not setting_path or not os.path.exists(setting_path):
+        root = os.path.dirname(os.path.abspath(__file__))
+        for _ in range(8):
+            candidate = os.path.join(root, "database", "setting", "app_setting.json")
+            if os.path.exists(candidate):
+                setting_path = candidate
+                break
+            root = os.path.dirname(root)
+
+    backend_key = arch
+    vendor = ""
+    if setting_path and os.path.exists(setting_path):
+        try:
+            with open(setting_path, "r", encoding="utf-8") as fh:
+                import json
+                data = json.load(fh)
+            backend_key = str(data.get("device_backend_key", arch)).lower()
+            backend_arch = str(data.get("device_backend_arch", arch)).lower()
+            if backend_arch:
+                arch = backend_arch
+            selector = data.get("device_selector", {})
+            if isinstance(selector, dict):
+                vendor = str(selector.get("vendor", "")).lower()
+        except Exception:
+            pass
+
+    available = ort.get_available_providers()
+
+    if arch == "cpu" or backend_key == "cpu" or vendor == "cpu":
+        return ["CPUExecutionProvider"], "cpu"
+
+    if "nvidia" in backend_key or "nvidia" in vendor or "cuda" in arch:
+        providers = [p for p in ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"] if p in available]
+        return (providers, "gpu") if len(providers) > 1 or providers[0] != "CPUExecutionProvider" else (providers, "cpu")
+
+    providers = [p for p in ["DmlExecutionProvider", "CPUExecutionProvider"] if p in available]
+    return (providers, "gpu") if len(providers) > 1 or providers[0] != "CPUExecutionProvider" else (providers, "cpu")
+
+
 class SmartFusionDenoisingAlgorithm:
     NAME = "Smart Fusion"
     KIND = "denoising"
@@ -56,12 +117,19 @@ class SmartFusionDenoisingAlgorithm:
 
     @staticmethod
     def load_config():
-        # Fallback to similarity config UI parameters
-        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
-            load_similarity_config,
-        )
-
-        return load_similarity_config()
+        try:
+            from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
+                load_similarity_config,
+            )
+            return load_similarity_config()
+        except (ImportError, Exception):
+            return {
+                "work_resolution_scale": 1.0,
+                "ai_tile_size": 1024,
+                "ai_overlap_percent": 0.10,
+                "ai_batch_size": 4,
+                "ai_model_type": "nano fusion v1",
+            }
 
     def _resolve_config(self, ctx):
         config = self.load_config()
@@ -81,8 +149,8 @@ class SmartFusionDenoisingAlgorithm:
         overlap = max(0, min(overlap, tile_size // 2 - 1))
         batch_size = int(config.get("ai_batch_size", 4))
 
-        # Determine execution provider based on environment architecture
-        active_arch = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan").lower()
+        # Resolve execution providers and hardware target from app_setting.json
+        providers, target_device = resolve_smart_fusion_backend()
 
         model_type = str(config.get("ai_model_type", "nano fusion v1")).strip().lower()
         if model_type in ("fusion v1", "smart fusion"):
@@ -94,12 +162,8 @@ class SmartFusionDenoisingAlgorithm:
 
         model_dir = Path("database") / "Learning_Model" / "smart_fusion" / model_subfolder
 
-        if active_arch == "cpu":
-            model_name = f"{file_prefix}_{tile_size}x{tile_size}_fp32_ort_cpu.onnx"
-            providers = ["CPUExecutionProvider"]
-        else:
-            model_name = f"{file_prefix}_{tile_size}x{tile_size}_fp32_ort_gpu.onnx"
-            providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
+        model_suffix = "cpu" if target_device == "cpu" else "gpu"
+        model_name = f"{file_prefix}_{tile_size}x{tile_size}_fp32_ort_{model_suffix}.onnx"
 
         onnx_path = model_dir / model_name
         if not onnx_path.exists():
@@ -170,6 +234,27 @@ class SmartFusionDenoisingAlgorithm:
 
         reference_full = reference_normalized
 
+        # Tone mapping is used only as a visibility/preprocessing transform for
+        # the AI weight-map model. The original normalized frame remains the
+        # only source used by the final fusion accumulator below.
+        try:
+            from taichi_library.taichi_aot import naturalTonemapping
+            from config import CALCULATION_TONE_MAPPING_PARAMS
+
+            reference_weight_source = naturalTonemapping(
+                reference_full, return_gpu=False, **CALCULATION_TONE_MAPPING_PARAMS
+            )
+            print(
+                "[SmartFusion] naturalTonemapping enabled for weight-map inference; "
+                "original pixels retained for fusion"
+            )
+        except Exception as exc:
+            print(
+                f"[SmartFusion] Tone mapping unavailable for weight maps, "
+                f"using original frames: {exc}"
+            )
+            reference_weight_source = reference_full
+
         # Prepare work scale only for luma/weight-map inference. Pixel fusion stays
         # in original resolution to preserve aligned RAW detail.
         if abs(scale - 1.0) > 1e-3:
@@ -181,27 +266,44 @@ class SmartFusionDenoisingAlgorithm:
                 f"[SmartFusion] Weight-map work scale: {orig_w}x{orig_h} -> {target_w}x{target_h} (scale={scale})"
             )
             reference_work = cv2.resize(
-                reference_full,
+                reference_weight_source,
                 (target_w, target_h),
                 interpolation=cv2.INTER_LINEAR,
             )
             ref_h, ref_w = target_h, target_w
         else:
-            reference_work = reference_full
+            reference_work = reference_weight_source
             ref_h, ref_w = orig_h, orig_w
 
-        # Compute luma map for the reference frame
-        ref_luma_full = (
-            0.299 * reference_work[:, :, 0]
-            + 0.587 * reference_work[:, :, 1]
-            + 0.114 * reference_work[:, :, 2]
-        )
+        # Dynamically detect ONNX model input node names and expected channel count
+        inputs_meta = session.get_inputs()
+        ref_input_name = inputs_meta[0].name if len(inputs_meta) > 0 else "reference_luma"
+        curr_input_name = inputs_meta[1].name if len(inputs_meta) > 1 else "current_luma"
+
+        first_shape = inputs_meta[0].shape if len(inputs_meta) > 0 else []
+        is_rgb_model = False
+        if len(first_shape) == 4:
+            if first_shape[1] == 3 or first_shape[-1] == 3 or "rgb" in ref_input_name.lower():
+                is_rgb_model = True
+        elif "rgb" in ref_input_name.lower():
+            is_rgb_model = True
+
+        if is_rgb_model:
+            ref_feat_full = reference_work  # RGB (H, W, 3)
+        else:
+            # Compute luma map for 1-channel model
+            ref_feat_full = (
+                0.299 * reference_work[:, :, 0]
+                + 0.587 * reference_work[:, :, 1]
+                + 0.114 * reference_work[:, :, 2]
+            )
 
         # Tiling parameters
         step = tile_size - overlap
 
         print(
-            f"[SmartFusion] Weight maps: {ref_w}x{ref_h} in {tile_size}x{tile_size} tiles, overlap={overlap}px, batch_size={batch_size}"
+            f"[SmartFusion] Weight maps: {ref_w}x{ref_h} in {tile_size}x{tile_size} tiles, "
+            f"overlap={overlap}px, batch_size={batch_size}, format={'RGB (3-ch)' if is_rgb_model else 'Luma (1-ch)'}"
         )
 
         # 1. Collect all tile coordinates to process
@@ -249,23 +351,37 @@ class SmartFusionDenoisingAlgorithm:
             # Normalize
             frame_normalized = normalize_image(frame_raw, ref_dtype)
 
-            # Resize only for luma/weight-map inference. Keep frame_normalized
+            # Resize only for weight-map inference. Keep frame_normalized
             # untouched for the final original-resolution fusion.
+            try:
+                from config import CALCULATION_TONE_MAPPING_PARAMS
+                frame_weight_source = naturalTonemapping(
+                    frame_normalized, return_gpu=False, **CALCULATION_TONE_MAPPING_PARAMS
+                )
+            except Exception as exc:
+                print(
+                    f"[SmartFusion] Tone mapping failed for frame {frame_idx}; "
+                    f"using original frame for weight map: {exc}"
+                )
+                frame_weight_source = frame_normalized
             if abs(scale - 1.0) > 1e-3:
                 frame_work = cv2.resize(
-                    frame_normalized,
+                    frame_weight_source,
                     (target_w, target_h),
                     interpolation=cv2.INTER_LINEAR,
                 )
             else:
-                frame_work = frame_normalized
+                frame_work = frame_weight_source
 
-            # Compute luma for the current frame
-            curr_luma_full = (
-                0.299 * frame_work[:, :, 0]
-                + 0.587 * frame_work[:, :, 1]
-                + 0.114 * frame_work[:, :, 2]
-            )
+            if is_rgb_model:
+                curr_feat_full = frame_work  # RGB (H, W, 3)
+            else:
+                # Compute luma for current frame
+                curr_feat_full = (
+                    0.299 * frame_work[:, :, 0]
+                    + 0.587 * frame_work[:, :, 1]
+                    + 0.114 * frame_work[:, :, 2]
+                )
 
             weight_work_sum = np.zeros((ref_h, ref_w), dtype=np.float32)
             weight_work_norm = np.zeros((ref_h, ref_w), dtype=np.float32)
@@ -277,47 +393,73 @@ class SmartFusionDenoisingAlgorithm:
                 curr_batch = []
 
                 for y, x, h_tile, w_tile in chunk:
-                    ref_tile = ref_luma_full[y : y + h_tile, x : x + w_tile]
-                    curr_tile = curr_luma_full[y : y + h_tile, x : x + w_tile]
-
-                    # Pad to exact tile_size for the static-shape model inputs
-                    pad_h = tile_size - h_tile
-                    pad_w = tile_size - w_tile
-                    if pad_h > 0 or pad_w > 0:
-                        ref_tile_pad = np.pad(
-                            ref_tile, ((0, pad_h), (0, pad_w)), mode="edge"
-                        )
-                        curr_tile_pad = np.pad(
-                            curr_tile, ((0, pad_h), (0, pad_w)), mode="edge"
-                        )
+                    if is_rgb_model:
+                        ref_tile = ref_feat_full[y : y + h_tile, x : x + w_tile, :]
+                        curr_tile = curr_feat_full[y : y + h_tile, x : x + w_tile, :]
+                        pad_h = tile_size - h_tile
+                        pad_w = tile_size - w_tile
+                        if pad_h > 0 or pad_w > 0:
+                            ref_tile_pad = np.pad(
+                                ref_tile, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge"
+                            )
+                            curr_tile_pad = np.pad(
+                                curr_tile, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge"
+                            )
+                        else:
+                            ref_tile_pad = ref_tile
+                            curr_tile_pad = curr_tile
+                        # Transpose to NCHW [3, H, W] if needed
+                        if len(first_shape) == 4 and first_shape[1] == 3:
+                            ref_tile_in = np.transpose(ref_tile_pad, (2, 0, 1))
+                            curr_tile_in = np.transpose(curr_tile_pad, (2, 0, 1))
+                        else:
+                            ref_tile_in = ref_tile_pad
+                            curr_tile_in = curr_tile_pad
                     else:
-                        ref_tile_pad = ref_tile
-                        curr_tile_pad = curr_tile
+                        ref_tile = ref_feat_full[y : y + h_tile, x : x + w_tile]
+                        curr_tile = curr_feat_full[y : y + h_tile, x : x + w_tile]
+                        pad_h = tile_size - h_tile
+                        pad_w = tile_size - w_tile
+                        if pad_h > 0 or pad_w > 0:
+                            ref_tile_pad = np.pad(
+                                ref_tile, ((0, pad_h), (0, pad_w)), mode="edge"
+                            )
+                            curr_tile_pad = np.pad(
+                                curr_tile, ((0, pad_h), (0, pad_w)), mode="edge"
+                            )
+                        else:
+                            ref_tile_pad = ref_tile
+                            curr_tile_pad = curr_tile
+                        ref_tile_in = np.expand_dims(ref_tile_pad, axis=0)  # [1, H, W]
+                        curr_tile_in = np.expand_dims(curr_tile_pad, axis=0)  # [1, H, W]
 
-                    ref_batch.append(ref_tile_pad)
-                    curr_batch.append(curr_tile_pad)
+                    ref_batch.append(ref_tile_in)
+                    curr_batch.append(curr_tile_in)
 
-                # Stack along batch axis and add channel dimension -> [B, 1, H, W]
-                ref_tensor = np.expand_dims(
-                    np.array(ref_batch, dtype=np.float32), axis=1
-                )
-                curr_tensor = np.expand_dims(
-                    np.array(curr_batch, dtype=np.float32), axis=1
-                )
+                # Stack along batch axis -> [B, C, H, W] or [B, H, W, C]
+                ref_tensor = np.array(ref_batch, dtype=np.float32)
+                curr_tensor = np.array(curr_batch, dtype=np.float32)
+                if not is_rgb_model and ref_tensor.ndim == 3:
+                    ref_tensor = np.expand_dims(ref_tensor, axis=1)
+                    curr_tensor = np.expand_dims(curr_tensor, axis=1)
 
-                # Execute ONNX session run
+                # Execute ONNX session run with dynamic node names
+                output_names = [o.name for o in session.get_outputs()]
                 outputs = session.run(
-                    ["weight_map"],
+                    output_names,
                     {
-                        "reference_luma": ref_tensor,
-                        "current_luma": curr_tensor,
+                        ref_input_name: ref_tensor,
+                        curr_input_name: curr_tensor,
                     },
                 )
                 out_weights = outputs[0]
 
                 # De-batch, crop padded outputs, and accumulate directly
                 for j, (y, x, h_tile, w_tile) in enumerate(chunk):
-                    weight_map_pad = out_weights[j, 0, :, :]
+                    if out_weights.ndim == 4:
+                        weight_map_pad = out_weights[j, 0, :, :]
+                    else:
+                        weight_map_pad = out_weights[j, :, :]
                     pad_h = tile_size - h_tile
                     pad_w = tile_size - w_tile
                     if pad_h > 0 or pad_w > 0:
@@ -349,10 +491,11 @@ class SmartFusionDenoisingAlgorithm:
             accum_final_img += weight_full * frame_normalized
             accum_final_weight += weight_full
 
-            # Cleanup this frame's work pixels and luma to reclaim memory immediately
+            # Cleanup this frame's work pixels and feature to reclaim memory immediately
             del frame_work
+            del frame_weight_source
             del frame_normalized
-            del curr_luma_full
+            del curr_feat_full
             del weight_work_sum
             del weight_work_norm
             del weight_work
@@ -363,7 +506,8 @@ class SmartFusionDenoisingAlgorithm:
 
         # Cleanup reference work image
         del reference_work
-        del ref_luma_full
+        del reference_weight_source
+        del ref_feat_full
         import gc
 
         gc.collect()

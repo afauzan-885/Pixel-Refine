@@ -141,8 +141,12 @@ class HardwareBackendTestWorker(QObject):
         for index, option in enumerate(self.options, start=1):
             text = option.get("text", "")
             result_key = option.get("key", text)
-            backend = option.get("backend", "cpu")
-            device_id = option.get("device_id", -1)
+            from taichi_library.backend_config import normalize_backend, parse_device_id
+
+            backend = normalize_backend(option.get("backend", "cpu"), allow_auto=False)
+            device_id = parse_device_id(option.get("device_id"), 0) or 0
+            if backend in ("cpu", "opengl"):
+                device_id = 0
             vendor = str(option.get("vendor", "")).lower()
             success = False
             output = ""
@@ -176,9 +180,17 @@ class HardwareBackendTestWorker(QObject):
                 environment["PIXEL_REFINE_OPENGL_EXPECTED_NAME"] = str(
                     option.get("raw_name", "")
                 )
+                # Qualification must exercise the vendor ICD directly.  This
+                # avoids WGL's adapter selection and also works on older
+                # Windows drivers that ship no EGL provider.
+                environment["PIXEL_REFINE_OPENGL_CONTEXT"] = "icd"
+                environment["PIXEL_REFINE_OPENGL_ICD_ONLY"] = "1"
+                environment.pop("PIXEL_REFINE_OPENGL_EGL_ONLY", None)
             else:
                 environment.pop("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", None)
                 environment.pop("PIXEL_REFINE_OPENGL_EXPECTED_NAME", None)
+                environment.pop("PIXEL_REFINE_OPENGL_CONTEXT", None)
+                environment.pop("PIXEL_REFINE_OPENGL_EGL_ONLY", None)
 
             test_path = os.path.abspath(
                 os.path.join(
@@ -335,7 +347,7 @@ class HardwareBackendTestWorker(QObject):
                         renderer = renderer_match.group(1).strip()
                     else:
                         mismatch = re.search(
-                            r"Windows created the context on '([^']+)'",
+                            r"(?:Windows created the context on|context provider selected) '([^']+)'",
                             output,
                         )
                         if mismatch:
@@ -706,10 +718,14 @@ class GeneralSettingsPage(Container, SyncMixin):
                         ("vulkan", "Vulkan"),
                         ("opengl", "OpenGL"),
                     ):
-                        if backend == "vulkan" and vendor == "intel":
-                            continue
-                        if backend == "opengl" and vendor == "nvidia":
-                            continue
+                        # TEMPORARY real-device validation policy (2026-07):
+                        # expose every native GPU/backend pair in General Settings.
+                        # Keep the former conservative filters here, commented, so
+                        # they can be restored once the validation matrix is complete.
+                        # if backend == "vulkan" and vendor == "intel":
+                        #     continue
+                        # if backend == "opengl" and vendor == "nvidia":
+                        #     continue
                         options.append(
                             {
                                 "key": f"{fingerprint}|{backend}",
@@ -806,7 +822,9 @@ class GeneralSettingsPage(Container, SyncMixin):
 
         import os
 
-        backend = option.get("backend", "cpu")
+        from taichi_library.backend_config import normalize_backend
+
+        backend = normalize_backend(option.get("backend", "cpu"), allow_auto=False)
         device_id = int(option.get("device_id", -1))
         self.store.set("device_backend", option.get("text", "CPU (Universal)"))
         self.store.set("device_backend_key", option.get("key", "cpu"))
@@ -824,8 +842,18 @@ class GeneralSettingsPage(Container, SyncMixin):
                 )
             self.store.set("device_selector", selector)
 
-        os.environ["PIXEL_REFINE_AOT_ARCH"] = backend
-        os.environ["PIXEL_REFINE_AOT_DEVICE"] = str(device_id)
+        from taichi_library.backend_config import BackendConfig, backend_env
+
+        canonical_config = BackendConfig(
+            backend=backend,
+            device_id=device_id,
+            vendor=option.get("vendor", ""),
+            device_name=option.get("raw_name", "") or option.get("text", ""),
+            explicit=True,
+            source="general_settings",
+            strict=True,
+        )
+        os.environ.update(backend_env(canonical_config))
         os.environ["PIXEL_REFINE_AOT_STRICT_BACKEND"] = "1"
         if backend == "opengl":
             os.environ["PIXEL_REFINE_OPENGL_EXPECTED_VENDOR"] = str(
@@ -834,6 +862,12 @@ class GeneralSettingsPage(Container, SyncMixin):
             os.environ["PIXEL_REFINE_OPENGL_EXPECTED_NAME"] = str(
                 option.get("raw_name", "")
             )
+            # The bridge prefers native ICD automatically.  Clear stale test
+            # overrides so production selection cannot accidentally force a
+            # WGL/EGL compatibility path from a previous hardware probe.
+            os.environ.pop("PIXEL_REFINE_OPENGL_CONTEXT", None)
+            os.environ.pop("PIXEL_REFINE_OPENGL_ICD_ONLY", None)
+            os.environ.pop("PIXEL_REFINE_OPENGL_EGL_ONLY", None)
         else:
             os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", None)
             os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_NAME", None)

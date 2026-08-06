@@ -82,10 +82,11 @@ def _get_fixed_pool():
     global _fixed_pool
     if _fixed_pool is None:
         try:
-            from taichi_library.taichi_aot.engine import FixedBufferPool, AOTEngine
+            from taichi_library.taichi_aot.engine import FixedBufferPool
+            from taichi_library.taichi_aot import get_engine
         except ImportError:
             return None
-        _fixed_pool = FixedBufferPool(AOTEngine())
+        _fixed_pool = FixedBufferPool(get_engine())
         # Pre-allocate common 512x512 buffers
         _fixed_pool.preallocate(
             [
@@ -138,18 +139,13 @@ def _get_gaussian_weights(ks, sigma):
 def _get_engine():
     global _engine
     if _engine is None:
-        # Select the backend before importing taichi_aot's singleton engine.
-        # Importing the package constructs its native context immediately;
-        # doing the preflight first keeps all buffers/graphs in one context
-        # and prevents an unsafe mid-graph backend switch.
-        if os.environ.get("PIXEL_REFINE_AOT_ARCH", "").lower() in ("", "auto"):
-            from taichi_library.taichi_aot.engine import select_backend
+        # The package facade owns backend/device resolution.  Do not perform a
+        # second env-based preflight here: that used to let this wrapper pick
+        # a different adapter from the singleton engine during hybrid-GPU
+        # startup.
+        from taichi_library.taichi_aot import get_engine
 
-            chosen = select_backend()
-            os.environ["PIXEL_REFINE_AOT_ARCH"] = chosen
-        from taichi_library.taichi_aot import engine
-
-        _engine = engine
+        _engine = get_engine()
     return _engine
 
 
@@ -177,13 +173,39 @@ def _get_module(name):
     cache_key = (engine.arch.lower(), getattr(engine, "_generation", 0), name)
     if cache_key not in _modules:
         file_dir = os.path.dirname(os.path.abspath(__file__))
-        # AOTEngine.load() resolves ``name_<active-backend>.tcm`` first and
-        # only falls back to the unsuffixed artifact for legacy deployments.
-        # Passing an unsuffixed basename is essential for CPU AOT: passing a
-        # Vulkan-suffixed path would otherwise make it try
-        # ``name_vulkan_cpu.tcm`` before loading a Vulkan artifact on CPU.
-        tcm_path = os.path.join(file_dir, "aot_tcm", f"{name}.tcm")
-        _modules[cache_key] = engine.load(tcm_path)
+        # Resolve the exact architecture/API/vendor artifact before calling
+        # the native loader.  The previous unsuffixed path depended on the
+        # legacy ``name_<backend>.tcm`` files and could silently load an
+        # artifact compiled for a different adapter.
+        from taichi_library.taichi_aot.artifact_targets import (
+            detect_target,
+            resolve_artifact,
+        )
+
+        target = detect_target(
+            backend=getattr(engine, "arch", "cpu"),
+            device=getattr(engine, "gpu_name", ""),
+        )
+        tcm_root = os.path.join(file_dir, "aot_tcm")
+        allow_legacy = (
+            # Legacy root artifacts are migration-only and disabled by
+            # default now that the target-qualified tree is complete.
+            os.environ.get("PIXEL_REFINE_AOT_ALLOW_LEGACY_ARTIFACTS", "0") == "1"
+            and not target.is_arm
+            and not target.is_mobile
+        )
+        resolved = resolve_artifact(
+            tcm_root,
+            name,
+            target,
+            allow_legacy=allow_legacy,
+        )
+        if resolved is None:
+            raise FileNotFoundError(
+                f"No target-qualified AOT artifact for {name!r} "
+                f"({target.target_id}) under {tcm_root!r}"
+            )
+        _modules[cache_key] = engine.load(str(resolved))
     return _modules[cache_key]
 
 

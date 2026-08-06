@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import time
 import concurrent
+import threading
 import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Signal
@@ -9,6 +10,8 @@ from PySide6.QtGui import QPixmap, QImage
 import rawpy
 
 from config import SUPPORTED_FORMATS
+
+taichi_lock = threading.Lock()
 
 
 class BaseMultiThreading(QThread):
@@ -91,18 +94,11 @@ def _process_image_part(img_part_data):
             or processed_part.dtype != np.uint8
         ):
             pass
-            # raise RuntimeError(f"Pemrosesan kuadran gagal menghasilkan RGB uint8: shape={processed_part.shape}, dtype={processed_part.dtype}")
 
         return processed_part
 
     except Exception as e:
-        pass
         raise RuntimeError(f"Failed to process quadrant: {e}")
-
-
-import threading
-
-taichi_lock = threading.Lock()
 
 
 def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
@@ -114,6 +110,7 @@ def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
         with taichi_lock:
             rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton")
         if rgb_f32 is not None:
+            rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
             return np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
         else:
             raise RuntimeError("Hamilton demosaic returned None")
@@ -139,7 +136,7 @@ def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
         except rawpy.LibRawError as e:
             raise RuntimeError(f"Rawpy Error for {filename}: {e}")  # type: ignore
     except Exception as e:
-            raise RuntimeError(f"Unexpected DNG error for {filename}: {e}")
+        raise RuntimeError(f"Unexpected DNG error for {filename}: {e}")
 
 
 def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
@@ -151,6 +148,7 @@ def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
         with taichi_lock:
             rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton-rgb-half-res")
         if rgb_f32 is not None:
+            rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
             return np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
         else:
             raise RuntimeError("Hamilton demosaic half res returned None")
@@ -163,7 +161,6 @@ def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
 
             taichi_aot.engine.buffer_pool.clear()
         except Exception:
-            # Best-effort cleanup only; fallback should still proceed if cleanup fails.
             pass
         try:
             with rawpy.imread(image_path) as raw:
@@ -186,36 +183,14 @@ def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
             raise RuntimeError(f"Unexpected DNG error for {filename}: {e}")
 
 
-
 class RawImageProcessingThread(BaseMultiThreading):
     """
     Thread untuk memproses gambar dari path file menjadi QPixmap atau QImage.
-
-    Mendukung dua mode operasi:
-    1.  Resolusi Penuh (default):
-        Memuat gambar dengan kualitas penuh, menerapkan pemrosesan paralel
-        untuk format tertentu, dan menghasilkan QPixmap.
-
-    2.  Resolusi Rendah (diaktifkan dengan `low_res_target_size`):
-        Mengambil jalur cepat untuk memuat, mengubah ukuran gambar ke target
-        yang ditentukan, dan menghasilkan tuple (path, QImage). Mode ini
-        dirancang untuk pra-pemuatan (pre-caching) yang cepat.
     """
 
     def __init__(
         self, image_paths, batch_size=1, delay_ms=100, low_res_target_size=None
     ):
-        """
-        Inisialisasi thread pemrosesan.
-
-        Args:
-            image_paths (list): Daftar path gambar yang akan diproses.
-            batch_size (int): Ukuran batch untuk pemrosesan.
-            delay_ms (int): Jeda antar batch.
-            low_res_target_size (int, optional): Jika diisi, mengaktifkan mode resolusi
-                                                 rendah. Nilai ini adalah ukuran (dalam piksel)
-                                                 untuk sisi terpanjang gambar thumbnail.
-        """
         self.low_res_mode = low_res_target_size is not None
         self.target_size = low_res_target_size
 
@@ -227,9 +202,6 @@ class RawImageProcessingThread(BaseMultiThreading):
 
         def process_image(image_path):
             try:
-                # =======================================================
-                # TAHAP 1: PEMBACAAN FILE DAN KONVERSI AWAL KE NP.ARRAY
-                # =======================================================
                 filename = os.path.basename(image_path)
                 extension = os.path.splitext(image_path)[1].lower()
                 img_array = None
@@ -241,13 +213,11 @@ class RawImageProcessingThread(BaseMultiThreading):
                 )
                 if is_raw:
                     img_array = load_raw_as_8bit_rgb(image_path)
-
                 else:  # Untuk format non-RAW (JPG, PNG, TIFF, dll.)
                     img_cv = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
                     if img_cv is None:
                         raise RuntimeError(f"OpenCV failed to read image: {filename}")
 
-                    # Normalisasi tipe data ke uint8
                     if img_cv.dtype == np.uint16:
                         img_array = (img_cv / 256).astype(np.uint8)
                     elif img_cv.dtype == np.uint8:
@@ -255,7 +225,6 @@ class RawImageProcessingThread(BaseMultiThreading):
                     else:
                         img_array = img_cv.astype(np.uint8)
 
-                    # Konversi warna awal jika gambar berwarna (3 channel)
                     if len(img_array.shape) == 3 and img_array.shape[2] == 3:
                         img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
 
@@ -264,22 +233,15 @@ class RawImageProcessingThread(BaseMultiThreading):
                         f"Image array could not be created for {filename}"
                     )
 
-                # =================================================================
-                # TAHAP 2: JALUR CEPAT UNTUK MODE RESOLUSI RENDAH (PRE-LOADING)
-                # =================================================================
                 if self.low_res_mode:
-                    # Pastikan format warna konsisten (RGB) sebelum resize
-                    if len(img_array.shape) == 2:  # Grayscale
+                    if len(img_array.shape) == 2:
                         img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
-                    elif (
-                        len(img_array.shape) == 3 and img_array.shape[2] == 4
-                    ):  # BGRA/RGBA
+                    elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
                         img_array = cv2.cvtColor(img_array, cv2.COLOR_BGRA2RGB)
 
-                    # Hitung dimensi baru dengan menjaga aspek rasio
                     h, w = img_array.shape[:2]
                     if self.target_size is not None and max(h, w) <= self.target_size:
-                        resized_img = img_array  # Tidak perlu resize jika sudah kecil
+                        resized_img = img_array
                     elif self.target_size is not None:
                         scale = self.target_size / max(h, w)
                         new_w, new_h = int(w * scale), int(h * scale)
@@ -289,7 +251,6 @@ class RawImageProcessingThread(BaseMultiThreading):
                     else:
                         resized_img = img_array
 
-                    # Konversi array numpy hasil resize ke QImage
                     height, width, channel = resized_img.shape
                     bytes_per_line = channel * width
                     qimg_low = QImage(
@@ -300,15 +261,9 @@ class RawImageProcessingThread(BaseMultiThreading):
                         QImage.Format.Format_RGB888,
                     ).copy()
 
-                    # Kembalikan TUPLE untuk menandakan hasil pra-pemuatan
                     return (image_path, qimg_low)
 
-                # =================================================================
-                # TAHAP 3: PEMROSESAN RESOLUSI PENUH (PERILAKU ASLI)
-                # =================================================================
-
                 final_img = None
-                # Tentukan apakah perlu pemrosesan paralel (untuk gambar Grayscale atau Alpha)
                 processed_via_parts = (
                     len(img_array.shape) == 2 or img_array.shape[2] == 4
                 )
@@ -333,17 +288,12 @@ class RawImageProcessingThread(BaseMultiThreading):
                             future.result() for future in as_completed(futures)
                         ]
 
-                    # Gabungkan kembali bagian-bagian yang telah diproses
                     top_row = np.hstack((processed_parts[0], processed_parts[1]))
                     bottom_row = np.hstack((processed_parts[2], processed_parts[3]))
                     final_img = np.vstack((top_row, bottom_row))
                 else:
-                    # Jika gambar sudah RGB, tidak perlu pemrosesan paralel
                     final_img = img_array
 
-                # =================================================================
-                # TAHAP 4: KONVERSI FINAL KE QPIXMAP (UNTUK RESOLUSI PENUH)
-                # =================================================================
                 if final_img is not None:
                     if final_img.dtype != np.uint8:
                         final_img = final_img.astype(np.uint8)
@@ -365,7 +315,6 @@ class RawImageProcessingThread(BaseMultiThreading):
                     if pixmap.isNull():
                         raise RuntimeError(f"Failed to create QPixmap for {filename}")
 
-                    # Kembalikan QPixmap untuk menandakan hasil resolusi penuh
                     return pixmap
                 else:
                     raise RuntimeError(
@@ -374,14 +323,12 @@ class RawImageProcessingThread(BaseMultiThreading):
 
             except Exception as e:
                 print(f"ERROR processing {image_path}: {e}")
-                # Melempar kembali error agar dapat ditangkap oleh error_signal dari BaseMultiThreading
                 raise e
 
         super().__init__(process_image, image_paths, batch_size, delay_ms)
 
 
 class ImageImportThreading(BaseMultiThreading):
-    # Tambahkan sinyal baru untuk mengirim data item yang baru saja di-import: (int batch_id, str path)
     image_added_signal = Signal(int, str)
 
     def __init__(self, database_manager, image_paths, batch_size, delay_ms, batch_id=0):
@@ -391,72 +338,55 @@ class ImageImportThreading(BaseMultiThreading):
             database_manager.single_process_save_image_path(image_path)
             self.image_added_signal.emit(
                 self.batch_id, image_path
-            )  # Emit dengan batch_id
+            )
 
         super().__init__(import_task, image_paths, batch_size, delay_ms)
 
 
 class BatchImageImportThreading(BaseMultiThreading):
-    # Tambahkan sinyal baru untuk mengirim data item yang baru saja di-import
-    image_added_signal = Signal(
-        int, str, str
-    )  # Mengirim (batch_id, batch_name, path gambar)
+    # One stable signal contract for all batch import callers.
+    image_added_signal = Signal(int, str)
+    batch_imported_signal = Signal(int, list)
 
     def __init__(
-        self, database_manager, image_paths, batch_id, batch_name, batch_size, delay_ms
+        self,
+        database_manager,
+        image_paths=None,
+        batch_dict=None,
+        batch_id=0,
+        batch_name="",
+        batch_size=5,
+        delay_ms=50,
+        **kwargs,
     ):
+        self.database_manager = database_manager
         self.batch_id = batch_id
         self.batch_name = batch_name
-        self.database_manager = database_manager
 
-        def import_task(image_path):
-            # Simpan satu per satu ke database
-            self.database_manager.batch_process_save_image_path(
-                self.batch_id, [image_path]
-            )
-            # Kirim sinyal ke UI setelah satu gambar masuk DB
-            self.image_added_signal.emit(self.batch_id, self.batch_name, image_path)
+        if batch_dict is not None:
+            items = list(batch_dict.items())
 
-        super().__init__(import_task, image_paths, batch_size, delay_ms)
+            def process_task(item):
+                item_batch_id, paths = item
+                saved_paths = []
+                for path in paths:
+                    saved = self.database_manager.batch_process_save_image_path(
+                        item_batch_id, [path]
+                    )
+                    if saved:
+                        saved_paths.append(path)
+                        self.image_added_signal.emit(item_batch_id, path)
+                self.batch_imported_signal.emit(item_batch_id, saved_paths)
+                return (item_batch_id, saved_paths)
+        else:
+            items = image_paths if image_paths is not None else []
 
+            def process_task(image_path):
+                saved = self.database_manager.batch_process_save_image_path(
+                    self.batch_id, [image_path]
+                )
+                if saved:
+                    self.image_added_signal.emit(self.batch_id, image_path)
+                return (self.batch_id, image_path, bool(saved))
 
-class ImageProcessingMultiThreading(QThread):
-    progress_updated = Signal(int, str)
-    finished = Signal()
-    error_occurred = Signal(str)
-
-    def __init__(
-        self, worker_function, db_path, single_process=True, batch_id=None, parent=None
-    ):
-        super().__init__(parent)
-        self.worker_function = worker_function
-        self.db_path = db_path
-        self.single_process = single_process
-        self.batch_id = batch_id
-        self.stop_requested = False
-
-    def run(self):
-        try:
-
-            def update_progress(current, total, message):
-                progress = int((current / total) * 100)
-                self.progress_updated.emit(progress, message)
-
-            def is_stop_requested():
-                return self.stop_requested
-
-            # Jalankan fungsi pekerja yang diberikan
-            self.worker_function(
-                self.db_path,
-                update_progress=update_progress,
-                stop_requested=is_stop_requested,
-                single_process=self.single_process,
-                batch_id=self.batch_id,
-            )
-            self.finished.emit()
-        except Exception as e:
-            print(f"Error terjadi: {str(e)}")
-            self.error_occurred.emit(str(e))
-
-    def stop(self):
-        self.stop_requested = True
+        super().__init__(process_task, items, batch_size, delay_ms)

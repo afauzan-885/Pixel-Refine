@@ -6,6 +6,7 @@ Handles loading and saving batch algorithm parameters from JSON.
 import json
 import os
 from typing import Dict, Any, Optional
+import config
 
 
 # Centralized JSON path for batch parameters
@@ -93,14 +94,14 @@ def update_batch_settings(store: Any, batch_id: int, settings: Dict[str, Any]) -
 
     # Map high-level settings to store keys
     bulk_data = {
-        f"{str_id}.alignment_algo": settings.get("alignment_algo"),
-        f"{str_id}.super_resolution_algo": settings.get("super_resolution_algo"),
-        f"{str_id}.denoising_algo": settings.get("denoising_algo"),
-        f"{str_id}.checkbox_align_images": settings.get("checkbox_align_images"),
-        f"{str_id}.checkbox_super_resolution": settings.get(
-            "checkbox_super_resolution"
+        f"{str_id}.{config.KEY_ALIGNMENT_ALGO}": settings.get(config.KEY_ALIGNMENT_ALGO),
+        f"{str_id}.{config.KEY_SUPER_RESOLUTION_ALGO}": settings.get(config.KEY_SUPER_RESOLUTION_ALGO),
+        f"{str_id}.{config.KEY_DENOISING_ALGO}": settings.get(config.KEY_DENOISING_ALGO),
+        f"{str_id}.{config.KEY_CHECKBOX_ALIGN}": settings.get(config.KEY_CHECKBOX_ALIGN),
+        f"{str_id}.{config.KEY_CHECKBOX_SUPER_RES}": settings.get(
+            config.KEY_CHECKBOX_SUPER_RES
         ),
-        f"{str_id}.checkbox_denoising": settings.get("checkbox_denoising"),
+        f"{str_id}.{config.KEY_CHECKBOX_DENOISING}": settings.get(config.KEY_CHECKBOX_DENOISING),
     }
 
     # Filter out None values to avoid overwriting with nulls if some keys are missing
@@ -128,20 +129,20 @@ def get_batch_algorithm_summary(batch_id: int) -> str:
     active_algos = []
 
     # Check alignment
-    if batch_params.get("checkbox_align_images", False):
-        algo = batch_params.get("alignment_algo", "None")
+    if batch_params.get(config.KEY_CHECKBOX_ALIGN, False):
+        algo = batch_params.get(config.KEY_ALIGNMENT_ALGO, "None")
         if algo not in ["None", "No Alignment"]:
             active_algos.append(_normalize_alignment_name(algo))
 
     # Check super resolution
-    if batch_params.get("checkbox_super_resolution", False):
-        algo = batch_params.get("super_resolution_algo", "None")
+    if batch_params.get(config.KEY_CHECKBOX_SUPER_RES, False):
+        algo = batch_params.get(config.KEY_SUPER_RESOLUTION_ALGO, "None")
         if algo not in ["None", "No Super Resolution"]:
             active_algos.append(algo)
 
     # Check denoising
-    if batch_params.get("checkbox_denoising", False):
-        algo = batch_params.get("denoising_algo", "None")
+    if batch_params.get(config.KEY_CHECKBOX_DENOISING, False):
+        algo = batch_params.get(config.KEY_DENOISING_ALGO, "None")
         if algo not in ["None", "No Denoising"]:
             active_algos.append(algo)
 
@@ -166,28 +167,28 @@ def get_batch_algorithm_settings(batch_id: int) -> Dict[str, str]:
     batch_params = all_params.get(str(batch_id), {})
 
     settings = {
-        "alignment": "No Alignment",
-        "super_resolution": "No Super Resolution",
-        "denoising": "No Denoising",
+        config.KEY_ALIGNMENT: "No Alignment",
+        config.KEY_SUPER_RESOLUTION: "No Super Resolution",
+        config.KEY_DENOISING: "No Denoising",
     }
 
     # Check alignment
-    if batch_params.get("checkbox_align_images", False):
-        algo = batch_params.get("alignment_algo", "No Alignment")
+    if batch_params.get(config.KEY_CHECKBOX_ALIGN, False):
+        algo = batch_params.get(config.KEY_ALIGNMENT_ALGO, "No Alignment")
         if algo and algo not in ["None"]:
-            settings["alignment"] = _normalize_alignment_name(algo)
+            settings[config.KEY_ALIGNMENT] = _normalize_alignment_name(algo)
 
     # Check super resolution
-    if batch_params.get("checkbox_super_resolution", False):
-        algo = batch_params.get("super_resolution_algo", "No Super Resolution")
+    if batch_params.get(config.KEY_CHECKBOX_SUPER_RES, False):
+        algo = batch_params.get(config.KEY_SUPER_RESOLUTION_ALGO, "No Super Resolution")
         if algo and algo not in ["None"]:
-            settings["super_resolution"] = algo
+            settings[config.KEY_SUPER_RESOLUTION] = algo
 
     # Check denoising
-    if batch_params.get("checkbox_denoising", False):
-        algo = batch_params.get("denoising_algo", "No Denoising")
+    if batch_params.get(config.KEY_CHECKBOX_DENOISING, False):
+        algo = batch_params.get(config.KEY_DENOISING_ALGO, "No Denoising")
         if algo and algo not in ["None"]:
-            settings["denoising"] = algo
+            settings[config.KEY_DENOISING] = algo
 
     return settings
 
@@ -203,7 +204,7 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
     if batch_id is None:
         return {
             "batch_id": None,
-            "alignment_algo": "No Alignment",
+            config.KEY_ALIGNMENT_ALGO: "No Alignment",
             "alignment_active": False,
             "reference_path": "",
             "params_key": "",
@@ -214,9 +215,9 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
     all_params = load_json_state()
     batch_entry = dict(all_params.get(str(batch_id), {}) or {})
     alignment_algo = _normalize_alignment_name(
-        batch_entry.get("alignment_algo", "No Alignment")
+        batch_entry.get(config.KEY_ALIGNMENT_ALGO, "No Alignment")
     )
-    alignment_active = bool(batch_entry.get("checkbox_align_images", False))
+    alignment_active = bool(batch_entry.get(config.KEY_CHECKBOX_ALIGN, False))
     if not alignment_active:
         alignment_algo = "No Alignment"
 
@@ -245,7 +246,7 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
     reference_path = str(batch_entry.get("reference_image_path", "") or "")
     return {
         "batch_id": batch_id,
-        "alignment_algo": alignment_algo,
+        config.KEY_ALIGNMENT_ALGO: alignment_algo,
         "alignment_active": alignment_active,
         "reference_path": reference_path,
         "params_key": params_key,

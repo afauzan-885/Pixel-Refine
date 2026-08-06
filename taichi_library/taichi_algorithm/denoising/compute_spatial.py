@@ -117,7 +117,9 @@ if TAICHI_AVAILABLE:
                 min_mag_sq = ti.min(mag1_sq, mag2_sq)
 
                 tolerance_scale = ti.max(1.0, ti.min(3.0, 3.0 - 2.0 * p2_val))
-                local_adaptive_diff_threshold = adaptive_diff_threshold * tolerance_scale
+                local_adaptive_diff_threshold = (
+                    adaptive_diff_threshold * tolerance_scale
+                )
 
                 noise_weight = 1.0
                 if noise_level > stab_epsilon:
@@ -132,7 +134,9 @@ if TAICHI_AVAILABLE:
                             noise_weight = 1.0 - 0.2 * ratio
                     else:
                         if pixel_diff < local_adaptive_diff_threshold:
-                            noise_weight = 1.15 + 0.15 * (1.0 - pixel_diff / local_adaptive_diff_threshold)
+                            noise_weight = 1.15 + 0.15 * (
+                                1.0 - pixel_diff / local_adaptive_diff_threshold
+                            )
                         else:
                             ratio = pixel_diff / (local_adaptive_diff_threshold * 4.0)
                             if ratio > 1.0:
@@ -140,7 +144,11 @@ if TAICHI_AVAILABLE:
                             noise_weight = 0.3 + 0.4 * (1.0 - ratio)
 
                 structure_weight = 1.0
-                if min_mag_sq > stab_epsilon and mag1_sq > stab_epsilon and mag2_sq > stab_epsilon:
+                if (
+                    min_mag_sq > stab_epsilon
+                    and mag1_sq > stab_epsilon
+                    and mag2_sq > stab_epsilon
+                ):
                     dot = gx1 * gx2 + gy1 * gy2
                     cos_sim = dot / ti.sqrt(mag1_sq * mag2_sq)
 
@@ -161,7 +169,9 @@ if TAICHI_AVAILABLE:
             l1_sum = 0.0
             for y in range(curr_h):
                 for x in range(curr_w):
-                    l1_sum += ti.abs(current_img[r + y, c + x] - reference_img[r + y, c + x])
+                    l1_sum += ti.abs(
+                        current_img[r + y, c + x] - reference_img[r + y, c + x]
+                    )
             res_val = l1_sum / float(curr_h * curr_w)
         else:
             res_val = weighted_sum / total_weight
@@ -241,12 +251,22 @@ if TAICHI_AVAILABLE:
             curr_w = ti.min(coarse_tile_w, w_coarse - tile_x)
             if curr_h > 0 and curr_w > 0:
                 mad_score = _calculate_hybrid_gradient(
-                    current_coarse, reference_coarse,
-                    coarse_grad_x, coarse_grad_y,
-                    ref_coarse_grad_x, ref_coarse_grad_y,
-                    tile_y, tile_x,
-                    curr_h, curr_w, h_coarse, w_coarse,
-                    noise_sigma, 1.0, 1e-6, 0.0,
+                    current_coarse,
+                    reference_coarse,
+                    coarse_grad_x,
+                    coarse_grad_y,
+                    ref_coarse_grad_x,
+                    ref_coarse_grad_y,
+                    tile_y,
+                    tile_x,
+                    curr_h,
+                    curr_w,
+                    h_coarse,
+                    w_coarse,
+                    noise_sigma,
+                    1.0,
+                    1e-6,
+                    0.0,
                 )
                 diff_ratio = mad_score / ti.max(1e-6, noise_sigma)
                 adjusted = ti.max(0.0, diff_ratio - noise_offset_factor)
@@ -309,7 +329,10 @@ if TAICHI_AVAILABLE:
                 if use_stability == 1:
                     stab_val = stability_map[center_y, center_x]
 
-                if guidance_val >= early_exit_threshold and stab_val >= early_exit_threshold:
+                if (
+                    guidance_val >= early_exit_threshold
+                    and stab_val >= early_exit_threshold
+                ):
                     # Local contrast estimation (5-point)
                     c_y = curr_h // 2
                     c_x = curr_w // 2
@@ -326,26 +349,68 @@ if TAICHI_AVAILABLE:
                     mean_luma = (v0 + v1 + v2 + v3 + v4) * 0.2
                     contrast_limit = 0.12 * ti.max(0.05, mean_luma)
                     contrast_range = 0.08 * ti.max(0.05, mean_luma)
-                    flat_weight = ti.max(0.0, ti.min(1.0, (contrast_limit - contrast) / contrast_range))
+                    flat_weight = ti.max(
+                        0.0, ti.min(1.0, (contrast_limit - contrast) / contrast_range)
+                    )
 
                     mad_score = _calculate_hybrid_gradient(
-                        current, reference,
-                        curr_grad_x, curr_grad_y,
-                        ref_grad_x, ref_grad_y,
-                        r, c, curr_h, curr_w, h, w,
-                        noise_sigma, 1.0, 1e-6, flat_weight,
+                        current,
+                        reference,
+                        curr_grad_x,
+                        curr_grad_y,
+                        ref_grad_x,
+                        ref_grad_y,
+                        r,
+                        c,
+                        curr_h,
+                        curr_w,
+                        h,
+                        w,
+                        noise_sigma,
+                        1.0,
+                        1e-6,
+                        flat_weight,
                     )
 
                     confidence_fine = _calculate_match_confidence(
-                        mad_score, noise_sigma, motion_sensitivity, noise_offset_factor,
+                        mad_score,
+                        noise_sigma,
+                        motion_sensitivity,
+                        noise_offset_factor,
                     )
 
                     final_conf = confidence_fine * guidance_val * stab_val
 
                     if final_conf >= 1e-6:
                         for y, x in ti.ndrange(curr_h, curr_w):
-                            wy = 0.5 * (1.0 - ti.cos(2.0 * 3.1415926535 * float(y) / float(tile_h - 1))) if tile_h > 1 else 1.0
-                            wx = 0.5 * (1.0 - ti.cos(2.0 * 3.1415926535 * float(x) / float(tile_w - 1))) if tile_w > 1 else 1.0
+                            wy = (
+                                0.5
+                                * (
+                                    1.0
+                                    - ti.cos(
+                                        2.0
+                                        * 3.1415926535
+                                        * float(y)
+                                        / float(tile_h - 1)
+                                    )
+                                )
+                                if tile_h > 1
+                                else 1.0
+                            )
+                            wx = (
+                                0.5
+                                * (
+                                    1.0
+                                    - ti.cos(
+                                        2.0
+                                        * 3.1415926535
+                                        * float(x)
+                                        / float(tile_w - 1)
+                                    )
+                                )
+                                if tile_w > 1
+                                else 1.0
+                            )
                             weight_map_sum[r + y, c + x] += wy * wx * final_conf
 
     @ti.kernel
@@ -354,8 +419,10 @@ if TAICHI_AVAILABLE:
         weight_map_work: ti.types.ndarray(dtype=ti.f32, ndim=2),
         final_image_sum: ti.types.ndarray(dtype=ti.f32, ndim=3),
         weight_map_sum_full: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        h_full: ti.i32, w_full: ti.i32,
-        h_work: ti.i32, w_work: ti.i32,
+        h_full: ti.i32,
+        w_full: ti.i32,
+        h_work: ti.i32,
+        w_work: ti.i32,
         num_channels: ti.i32,
     ):
         """Bilinear upsample work-res weights → full-res and accumulate."""
@@ -369,10 +436,10 @@ if TAICHI_AVAILABLE:
             wy = y_work_f - float(y0)
             wx = x_work_f - float(x0)
             w_val = (
-                (1.0 - wy) * (1.0 - wx) * weight_map_work[y0, x0] +
-                (1.0 - wy) * wx * weight_map_work[y0, x1] +
-                wy * (1.0 - wx) * weight_map_work[y1, x0] +
-                wy * wx * weight_map_work[y1, x1]
+                (1.0 - wy) * (1.0 - wx) * weight_map_work[y0, x0]
+                + (1.0 - wy) * wx * weight_map_work[y0, x1]
+                + wy * (1.0 - wx) * weight_map_work[y1, x0]
+                + wy * wx * weight_map_work[y1, x1]
             )
             weight_map_sum_full[i, j] += w_val
             for c in range(num_channels):
@@ -382,6 +449,7 @@ if TAICHI_AVAILABLE:
 # =============================================================================
 # Utility: Compute tile starts (CPU)
 # =============================================================================
+
 
 def _compute_tile_starts(full_size, tile_size, overlap=0.3):
     """Compute tile start positions for a dimension."""
@@ -410,6 +478,7 @@ def _estimate_noise_sigma(gray_np):
         return 0.015
     lap_kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float32)
     from . import filter2d
+
     lap = filter2d(gray_np, lap_kernel)
     if lap is None:
         return 0.015
@@ -518,6 +587,7 @@ class NoiseEstimator:
 # Public API (JIT)
 # =============================================================================
 
+
 @ti_thread
 def compute_spatial_weight(
     ref_gray,
@@ -526,7 +596,7 @@ def compute_spatial_weight(
     noise_estimator=None,
     noise_threshold=None,
     motion_threshold=None,
-    mode='auto',
+    mode="auto",
     motion_sensitivity=150.0,
     noise_offset_factor=0.15,
     tile_h=16,
@@ -568,14 +638,22 @@ def compute_spatial_weight(
         raise ImportError("Taichi not available")
 
     # Ensure float32 numpy
-    ref_np = ref_gray.astype(np.float32) if isinstance(ref_gray, np.ndarray) else ref_gray.to_numpy().astype(np.float32)
-    comp_np = comp_gray.astype(np.float32) if isinstance(comp_gray, np.ndarray) else comp_gray.to_numpy().astype(np.float32)
+    ref_np = (
+        ref_gray.astype(np.float32)
+        if isinstance(ref_gray, np.ndarray)
+        else ref_gray.to_numpy().astype(np.float32)
+    )
+    comp_np = (
+        comp_gray.astype(np.float32)
+        if isinstance(comp_gray, np.ndarray)
+        else comp_gray.to_numpy().astype(np.float32)
+    )
 
     h, w = ref_np.shape[:2]
 
     # --- Resolusi noise_sigma ---
     if noise_estimator is not None:
-        if isinstance(noise_sigma, str) and noise_sigma == 'force':
+        if isinstance(noise_sigma, str) and noise_sigma == "force":
             actual_sigma = noise_estimator.estimate(ref_np, force=True)
         elif noise_sigma is not None:
             noise_estimator.set_external(float(noise_sigma))
@@ -585,21 +663,33 @@ def compute_spatial_weight(
     else:
         if noise_sigma is None:
             actual_sigma = _estimate_noise_sigma(ref_np)
-        elif isinstance(noise_sigma, str) and noise_sigma == 'force':
+        elif isinstance(noise_sigma, str) and noise_sigma == "force":
             actual_sigma = _estimate_noise_sigma(ref_np)
         else:
             actual_sigma = float(noise_sigma)
 
     # --- Resolusi noise_threshold dan motion_sensitivity ---
-    if mode == 'auto':
+    if mode == "auto":
         # Auto mode: noise_threshold = noise_sigma * offset_factor
         # motion_threshold digunakan sebagai base, adaptif per tile via SSIM
-        actual_noise_offset = noise_threshold / actual_sigma if noise_threshold is not None and actual_sigma > 1e-8 else noise_offset_factor
-        actual_motion_sens = motion_threshold if motion_threshold is not None else motion_sensitivity
+        actual_noise_offset = (
+            noise_threshold / actual_sigma
+            if noise_threshold is not None and actual_sigma > 1e-8
+            else noise_offset_factor
+        )
+        actual_motion_sens = (
+            motion_threshold if motion_threshold is not None else motion_sensitivity
+        )
     else:
         # Manual mode: gunakan parameter langsung
-        actual_noise_offset = noise_threshold / actual_sigma if noise_threshold is not None and actual_sigma > 1e-8 else noise_offset_factor
-        actual_motion_sens = motion_threshold if motion_threshold is not None else motion_sensitivity
+        actual_noise_offset = (
+            noise_threshold / actual_sigma
+            if noise_threshold is not None and actual_sigma > 1e-8
+            else noise_offset_factor
+        )
+        actual_motion_sens = (
+            motion_threshold if motion_threshold is not None else motion_sensitivity
+        )
 
     # Upload to GPU
     ref_gpu, ref_temp = common.ensure_taichi_field(ref_np, dtype=ti.f32)
@@ -628,8 +718,12 @@ def compute_spatial_weight(
     # Downscale pyramids matching C++ AOT exactly to avoid aliasing: L0 -> L1 -> L2
     ref_l1_np = bilinear_resize(ref_np, h // 2, w // 2)
     ref_l2_np = bilinear_resize(ref_l1_np, h // 4, w // 4)
-    
-    comp_l1_np = bilinear_resize(analysis_input.to_numpy() if hasattr(analysis_input, "to_numpy") else comp_np, h // 2, w // 2)
+
+    comp_l1_np = bilinear_resize(
+        analysis_input.to_numpy() if hasattr(analysis_input, "to_numpy") else comp_np,
+        h // 2,
+        w // 2,
+    )
     comp_l2_np = bilinear_resize(comp_l1_np, h // 4, w // 4)
 
     ref_l2_gpu, _ = common.ensure_taichi_field(ref_l2_np, dtype=ti.f32)
@@ -655,12 +749,20 @@ def compute_spatial_weight(
     coarse_conf.from_numpy(np.zeros((num_tiles_h, num_tiles_w), dtype=np.float32))
 
     _phase1_coarse_kernel(
-        comp_l2_gpu, ref_l2_gpu,
-        comp_cgx, comp_cgy, ref_cgx, ref_cgy,
+        comp_l2_gpu,
+        ref_l2_gpu,
+        comp_cgx,
+        comp_cgy,
+        ref_cgx,
+        ref_cgy,
         coarse_conf,
-        level_tile_h, level_tile_w,
-        h_l2, w_l2,
-        float(actual_sigma), float(actual_motion_sens), float(actual_noise_offset),
+        level_tile_h,
+        level_tile_w,
+        h_l2,
+        w_l2,
+        float(actual_sigma),
+        float(actual_motion_sens),
+        float(actual_noise_offset),
     )
 
     # Upsample coarse confidence to full resolution using bicubic resize matching C++ AOT
@@ -692,13 +794,29 @@ def compute_spatial_weight(
     # Run 4 passes
     for pass_idx in range(4):
         _phase2_fine_kernel(
-            analysis_input, ref_gpu,
-            comp_grad_x, comp_grad_y, ref_grad_x, ref_grad_y,
-            guidance_gpu, dummy_stab, weight_map,
-            0, rows_gpu, cols_gpu, pass_idx,
-            tile_h, tile_w, h, w,
-            float(actual_sigma), float(actual_motion_sens), float(actual_noise_offset),
-            0, 1, float(early_exit_threshold),
+            analysis_input,
+            ref_gpu,
+            comp_grad_x,
+            comp_grad_y,
+            ref_grad_x,
+            ref_grad_y,
+            guidance_gpu,
+            dummy_stab,
+            weight_map,
+            0,
+            rows_gpu,
+            cols_gpu,
+            pass_idx,
+            tile_h,
+            tile_w,
+            h,
+            w,
+            float(actual_sigma),
+            float(actual_motion_sens),
+            float(actual_noise_offset),
+            0,
+            1,
+            float(early_exit_threshold),
         )
 
     # Cleanup
@@ -722,8 +840,10 @@ def accumulate_spatial_merging(
     weight_map_work,
     final_image_sum,
     weight_map_sum_full,
-    h_full, w_full,
-    h_work, w_work,
+    h_full,
+    w_full,
+    h_work,
+    w_work,
     num_channels,
 ):
     """
@@ -739,8 +859,17 @@ def accumulate_spatial_merging(
     wsum_gpu, _ = common.ensure_taichi_field(weight_map_sum_full, dtype=ti.f32)
 
     _accumulate_merging_kernel(
-        curr_gpu, weight_gpu, sum_gpu, wsum_gpu,
-        h_full, w_full, h_work, w_work, num_channels,
+        curr_gpu,
+        weight_gpu,
+        sum_gpu,
+        wsum_gpu,
+        h_full,
+        w_full,
+        h_work,
+        w_work,
+        num_channels,
     )
+
+    return sum_gpu.to_numpy(), wsum_gpu.to_numpy()
 
     return sum_gpu.to_numpy(), wsum_gpu.to_numpy()

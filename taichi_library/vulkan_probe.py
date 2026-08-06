@@ -105,8 +105,17 @@ def _default_module(root: Path) -> Path:
         / "taichi_library"
         / "taichi_algorithm"
         / "aot_tcm"
-        / "common_vulkan.tcm"
+        / "vulkan_x86_64_windows"
+        / "common_vulkan_x86_64_windows.tcm"
     )
+
+
+def _vulkan_artifacts(root: Path):
+    """Return target-qualified Vulkan artifacts, excluding legacy root files."""
+
+    artifact_root = root / "taichi_library" / "taichi_algorithm" / "aot_tcm"
+    target_root = artifact_root / "vulkan_x86_64_windows"
+    return sorted(target_root.glob("*_vulkan_x86_64_windows.tcm"), key=lambda p: p.name)
 
 
 def _sha256_file(path: Path) -> str:
@@ -123,7 +132,7 @@ def vulkan_inventory_digest(project_root=None):
     artifact_root = (
         root / "taichi_library" / "taichi_algorithm" / "aot_tcm"
     )
-    paths = sorted(artifact_root.glob("*_vulkan.tcm"), key=lambda p: p.name)
+    paths = _vulkan_artifacts(root)
     artifact_count = len(paths)
     bridge = _bridge_path(root)
     if bridge.is_file():
@@ -562,7 +571,7 @@ def _child_probe(args) -> int:
                     / "taichi_library"
                     / "taichi_algorithm"
                     / "aot_tcm"
-                ).glob("*_vulkan.tcm"),
+                ).glob("vulkan_x86_64_windows/*_vulkan_x86_64_windows.tcm"),
                 key=lambda path: path.name,
             )
             state["artifact_total"] = len(artifacts)

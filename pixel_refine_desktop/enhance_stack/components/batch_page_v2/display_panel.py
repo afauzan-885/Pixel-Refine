@@ -298,6 +298,7 @@ class BurstCacheWorker(QThread):
                         )
 
                     if rgb_f32 is not None:
+                        rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
                         arr = np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
                         q_img = self._arr_to_qimage(arr)
                         self.image_cached.emit(path, q_img)
@@ -1498,10 +1499,12 @@ class DisplayPanel(QWidget):
         """Delegate to ImportManager."""
         self.import_manager.on_batch_import_finished(batch_id)
 
-    @Slot(int, str, str)
-    def add_single_image_to_grid(self, batch_id, batch_name, image_path):
+    @Slot(int, str)
+    def add_single_image_to_grid(self, batch_id, image_path=None, legacy_image_path=None):
         """Delegate to ImportManager."""
-        self.import_manager.add_single_image_to_grid(batch_id, batch_name, image_path)
+        self.import_manager.add_single_image_to_grid(
+            batch_id, image_path, legacy_image_path
+        )
 
     def _on_deletion_finished(self, count):
         """Handle completion of image deletion."""

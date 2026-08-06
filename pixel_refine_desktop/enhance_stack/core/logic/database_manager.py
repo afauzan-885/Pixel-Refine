@@ -247,40 +247,6 @@ class DatabaseManager:
             print(f"Database error while creating new panorama project: {e}")
             return None
 
-    def get_images_for_project(self, project_id):
-        """
-        Mengambil semua path gambar yang terkait dengan project_id tertentu,
-        diurutkan berdasarkan image_order.
-
-        Args:
-            project_id (int): ID dari proyek panorama.
-
-        Returns:
-            list: Sebuah daftar (list) dari string path gambar.
-        """
-        if project_id is None:
-            return []
-
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT i.path
-                    FROM panorama_project_images AS ppi
-                    JOIN images AS i ON ppi.image_id = i.id
-                    WHERE ppi.project_id = ?
-                    ORDER BY ppi.image_order ASC; 
-                """,
-                    (project_id,),
-                )
-                # Menggunakan list comprehension untuk mendapatkan hasil yang bersih
-                paths = [row[0] for row in cursor.fetchall()]
-                return paths
-        except sqlite3.Error as e:
-            print(f"Error fetching images for project {project_id}: {e}")
-            return []
-
     def get_all_panorama_projects(self):
         """
         Mengambil semua proyek panorama dari database, diurutkan berdasarkan nama.

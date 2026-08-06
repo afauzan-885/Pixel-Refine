@@ -32,7 +32,12 @@ def _bootstrap_aot_backend_from_settings():
     except Exception:
         return
 
-    arch = str(settings.get("device_backend_arch") or "").strip().lower()
+    from taichi_library.backend_config import normalize_backend
+
+    arch = normalize_backend(
+        settings.get("device_backend_arch") or "cpu",
+        allow_auto=False,
+    )
     device_id = settings.get("device_backend_id", None)
     if device_id is None:
         return
@@ -76,8 +81,18 @@ def _bootstrap_aot_backend_from_settings():
     except (TypeError, ValueError):
         return
 
-    os.environ["PIXEL_REFINE_AOT_ARCH"] = arch or "cpu"
-    os.environ["PIXEL_REFINE_AOT_DEVICE"] = str(device_id_int)
+    from taichi_library.backend_config import BackendConfig, backend_env
+
+    canonical_config = BackendConfig(
+        backend=arch or "cpu",
+        device_id=device_id_int,
+        vendor=(selector or {}).get("vendor", "") if isinstance(selector, dict) else "",
+        device_name=(selector or {}).get("name", "") if isinstance(selector, dict) else "",
+        explicit=True,
+        source="app_setting.json",
+        strict=True,
+    )
+    os.environ.update(backend_env(canonical_config))
     os.environ["PIXEL_REFINE_AOT_STRICT_BACKEND"] = "1"
     if arch == "opengl" and isinstance(selector, dict):
         os.environ["PIXEL_REFINE_OPENGL_EXPECTED_VENDOR"] = str(

@@ -87,10 +87,10 @@ class TileBasedSpatialFusionProcessor(TileProcessor):
 
     def setup(self, ctx, shared_data: dict) -> None:
         """Initialize GPU engine and validate availability."""
-        from taichi_library.taichi_aot.engine import AOTEngine
-        
+        from taichi_library.taichi_aot import get_engine
+
         try:
-            self._engine = AOTEngine()
+            self._engine = get_engine()
         except Exception as e:
             raise RuntimeError(
                 f"[TileBasedSpatialFusion] GPU AOT engine not available: {e}. "

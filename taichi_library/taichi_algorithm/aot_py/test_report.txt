@@ -1,5 +1,8 @@
-[AOTEngine] Successfully loaded backend bridge: E:\APP Developer\Pixel Refine\taichi_library\taichi_algorithm\aot_py\aot_dll\opengl\taichi_aot_engine.dll
-[AOTEngine] Runtime initialized on 'OPENGL' (Device 0)
+[AOTEngine] Successfully loaded backend bridge: e:\APP Developer\Pixel Refine\taichi_library\taichi_algorithm\aot_py\aot_dll\opengl\taichi_aot_engine_renderer.dll
+[AOTEngine ICD] Native OpenGL ICD context initialized from C:\WINDOWS\system32\DriverStore\FileRepository\nvaci.inf_amd64_24127cdb83a324ea\nvoglv64.dll (NVIDIA Corporation - NVIDIA GeForce MX150/PCIe/SSE2)
+[AOTEngine] Runtime initialized on 'OPENGL' (NVIDIA Corporation - NVIDIA GeForce MX150/PCIe/SSE2)
+[AOTEngine] OpenGL context provider: ICD
+[AOTEngine Memory] pressure=healthy shared_budget=2378MB device_available=0MB source=system_memory pipeline_limit=1024MB block=2048
 
 ======================================================================
  TAICHI AOT MASTER COMPREHENSIVE TEST
@@ -26,6 +29,7 @@ Using 512x512 resized version for accuracy tests.
 [PASS] Joint Bilateral Filter              | MAE:   0.000000 | Limit: 0.1
 [PASS] Joint Bilateral Upsample            | MAE:   0.000000 | Limit: 0.5
 [PASS] Phase Correlation (Shift 5, -3)     | MAE:   0.001895 | Limit: 0.1
+[AOTEngine] Loaded TCM module: ransac_opengl.tcm
 [PASS] RANSAC Flow Cleanup                 | MAE:   0.000000 | Limit: 1.0
 [AOTEngine] Loaded TCM module: gradients_opengl.tcm
 [PASS] Sobel DX (Gray)                     | MAE:   0.000000 | Limit: 0.5
@@ -46,7 +50,8 @@ Using 512x512 resized version for accuracy tests.
 [PASS] AOT Otsu Threshold                  | MAE:   1.000000 | Limit: 5.0
 [AOTEngine] Loaded TCM module: clahe_opengl.tcm
 [PASS] AOT CLAHE (clip=2.0, 4x4)           | MAE:   0.160461 | Limit: 30.0
-[PASS] AOT Canny Edge Detector (IoU=1.000, ratio=1.000) | MAE:   0.000000 | Limit: 0.7
+[AOTEngine] Loaded TCM module: canny_opengl.tcm
+[PASS] AOT Canny Edge Detector (IoU=0.957, ratio=0.969) | MAE:   0.043424 | Limit: 0.1
 [AOTEngine] Loaded TCM module: box_filter_opengl.tcm
 [AOTEngine] Loaded TCM module: guided_filter_opengl.tcm
 [PASS] AOT Guided Filter (smoothing)       | MAE:   0.000000 | Limit: 0.5
@@ -54,8 +59,24 @@ Using 512x512 resized version for accuracy tests.
 [PASS] AOT Hough Lines (synthetic)         | MAE:   0.000000 | Limit: 0.5
 [AOTEngine] Loaded TCM module: nlm_opengl.tcm
 [PASS] AOT Non-Local Means (64x64)         | MAE:   0.000000 | Limit: 0.5
+[AOTEngine] Loaded TCM module: bm3d_opengl.tcm
+[PASS] AOT BM3D Public API/CPU Parity      | MAE:   0.000000 | Limit: 0.0005
+[AOTEngine] Loaded TCM module: mlri_admm_opengl.tcm
+[PASS] AOT MLRI-ADMM 5-API CPU Parity      | MAE:   0.000000 | Limit: 0.0005
+[AOTEngine] Loaded TCM module: block_matching_opengl.tcm
+[AOTEngine ICD] Native OpenGL ICD context initialized from C:\WINDOWS\system32\DriverStore\FileRepository\nvaci.inf_amd64_24127cdb83a324ea\nvoglv64.dll (NVIDIA Corporation - NVIDIA GeForce MX150/PCIe/SSE2)
+[AOTEngine] Loaded TCM module: lucas_kanade_opengl.tcm
+[AOTEngine] Loaded TCM module: pyramid_opengl.tcm
+[AOTEngine ICD] Native OpenGL ICD context initialized from C:\WINDOWS\system32\DriverStore\FileRepository\nvaci.inf_amd64_24127cdb83a324ea\nvoglv64.dll (NVIDIA Corporation - NVIDIA GeForce MX150/PCIe/SSE2)
+[AOTEngine] Loaded TCM module: farneback_flow_opengl.tcm
+[PASS] AOT Native Dense Flow (CPU/Vulkan/OpenGL) | MAE:   0.000000 | Limit: 0.5
+[AOTEngine ICD] Native OpenGL ICD context initialized from C:\WINDOWS\system32\DriverStore\FileRepository\nvaci.inf_amd64_24127cdb83a324ea\nvoglv64.dll (NVIDIA Corporation - NVIDIA GeForce MX150/PCIe/SSE2)
+[AOTEngine] Loaded TCM module: lucas_kanade_opengl.tcm
+[AOTEngine] Loaded TCM module: pyramid_opengl.tcm
+[PASS] OpenGL Dense Flow GPU Buffer Lifecycle | MAE:   0.000000 | Limit: 0.5
 [PASS] AOT Inpainting (128x128)            | MAE:   0.000000 | Limit: 0.5
 [AOTEngine] Loaded TCM module: seamless_clone_opengl.tcm
+[AOTEngine] Loaded TCM module: common_opengl.tcm
 [PASS] AOT Seamless Clone (128x128)        | MAE:   0.000000 | Limit: 0.5
 
 --- End of AOT Algorithm Tests ---
@@ -67,22 +88,43 @@ Using 512x512 resized version for accuracy tests.
 Resolution: 8122x2966 (24.1 MP)
 
 [Stage 1] Recording RGB Master Pipeline...
+[AOTEngine] Loaded TCM module: bicubic_opengl.tcm
+[AOTEngine] Loaded TCM module: gaussian_opengl.tcm
+[AOTEngine] Loaded TCM module: bilateral_grid_opengl.tcm
+[AOTEngine] Loaded TCM module: gradients_opengl.tcm
+[Success] Pipeline Recorded successfully.
 
-[CRITICAL ERROR] Pipeline Test Failed: OpenGL native pipeline exceeds the validated resident-memory limit (348367544 > 268435456 bytes); use smaller blocks or explicitly set PIXEL_REFINE_AOT_ALLOW_LARGE_PIPELINE=1 after validation.
-Traceback (most recent call last):
-  File "E:\APP Developer\Pixel Refine\taichi_library\taichi_algorithm\aot_py\test_comprehensif.py", line 659, in run_pipeline_stress_test
-    res_up = taichi_aot.resize(
-             ^^^^^^^^^^^^^^^^^^
-  File "E:\APP Developer\Pixel Refine\taichi_library\taichi_aot\__init__.py", line 1103, in resize
-    _mod("bicubic").run(
-  File "E:\APP Developer\Pixel Refine\taichi_library\taichi_aot\engine.py", line 1451, in run
-    raise RuntimeError(
-RuntimeError: OpenGL native pipeline exceeds the validated resident-memory limit (348367544 > 268435456 bytes); use smaller blocks or explicitly set PIXEL_REFINE_AOT_ALLOW_LARGE_PIPELINE=1 after validation.
+[Stage 2] Running 10 iterations of Master Pipeline (One Big Graph)...
+[AOTEngine ICD] Native OpenGL ICD context initialized from C:\WINDOWS\system32\DriverStore\FileRepository\nvaci.inf_amd64_24127cdb83a324ea\nvoglv64.dll (NVIDIA Corporation - NVIDIA GeForce MX150/PCIe/SSE2)
+
+[Stage 3] Running 10 iterations of Standard Dispatch (Kernel-by-Kernel)...
+[AOTEngine] Loaded TCM module: bicubic_opengl.tcm
+[AOTEngine] Loaded TCM module: gaussian_opengl.tcm
+[AOTEngine] Loaded TCM module: common_opengl.tcm
+[AOTEngine] Loaded TCM module: bilateral_grid_opengl.tcm
+[AOTEngine] Loaded TCM module: gradients_opengl.tcm
+
+[Stage 4] Verifying OBG Accuracy vs. Standard Dispatch...
+>>> OBG Accuracy MAE (vs Standard): 0.083341
+
+======================================================================
+ PERFORMANCE COMPARISON
+======================================================================
+Method                    | Latency (ms)    | FPS       
+-------------------------------------------------------
+Master Pipeline (OBG)     | 887.09          | 1.13      
+Standard Dispatch         | 1934.03         | 0.52      
+-------------------------------------------------------
+
+>>> Speedup using Master Pipeline: 54.13% faster
+>>> Overhead Reduced: 1046.94 ms per frame
 
 ======================================================================
  FINAL VERDICT
 ======================================================================
 >>> ALL TESTS PASSED! AOT System is Healthy and Accurate.
->>> Results: 24/24 tests passed.
+>>> Results: 29/29 tests passed.
 ======================================================================
 [AOTEngine] GPU cleanup triggered (reason=atexit)
+[AOTEngine Watchdog] Main thread is dead. Triggering VRAM destruction.
+[AOTEngine] GPU cleanup triggered (reason=watchdog-main-thread-dead)

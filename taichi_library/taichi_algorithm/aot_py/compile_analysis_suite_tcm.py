@@ -6,8 +6,13 @@ Algorithms with ti.template() (NLM) or dynamic kernel defs (Inpaint, Seamless Cl
 are JIT-only and tested via subprocess with AOT_MODE=0.
 
 Usage:
-  python compile_analysis_suite_tcm.py           # Compile all 3 backends
+  python compile_analysis_suite_tcm.py           # Compile target-qualified desktop defaults
   set PIXEL_REFINE_AOT_ARCH=vulkan && python ... # Compile vulkan only
+
+The output is always placed below ``aot_tcm/<target-id>/``.  Set
+``PIXEL_REFINE_TARGET_VARIANT`` when producing a vendor/ABI-specific profile
+(for example ``opengl_x86_64_windows_intel``); this prevents the old
+``<name>_<backend>.tcm`` files from being recreated.
 """
 import os
 os.environ["AOT_MODE"] = "0"
@@ -35,6 +40,24 @@ hough_mod = importlib.import_module("taichi_library.taichi_algorithm.image_proce
 gf_mod = importlib.import_module("taichi_library.taichi_algorithm.smoothing.guided_filter")
 
 ASSETS_DIR = os.path.join(file_dir, "../aot_tcm")
+
+
+def _target_id_for_suffix(suffix):
+    """Return the canonical artifact directory for one compiler backend."""
+
+    override = os.environ.get("PIXEL_REFINE_TARGET_VARIANT", "").strip()
+    if override:
+        return override
+    defaults = {
+        "cpu": "cpu_x86_64_windows" if os.name == "nt" else "cpu_x86_64_linux",
+        "cuda": "cuda_x86_64_windows_nvidia" if os.name == "nt" else "cuda_arm64_linux_nvidia",
+        "vulkan": "vulkan_x86_64_windows" if os.name == "nt" else "vulkan_x86_64_linux",
+        "opengl": "opengl_x86_64_windows" if os.name == "nt" else "opengl_x86_64_linux",
+    }
+    try:
+        return defaults[suffix]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported analysis compiler backend: {suffix!r}") from exc
 
 
 def compile_color_convert(arch, save_path):
@@ -380,13 +403,16 @@ if __name__ == "__main__":
     results = []
     for name, func in compilers:
         for arch, suffix in archs:
-            save_path = os.path.join(ASSETS_DIR, f"{name}_{suffix}.tcm")
+            target_id = _target_id_for_suffix(suffix)
+            target_dir = os.path.join(ASSETS_DIR, target_id)
+            os.makedirs(target_dir, exist_ok=True)
+            save_path = os.path.join(target_dir, f"{name}_{target_id}.tcm")
             try:
                 func(arch, save_path)
-                results.append(f"[PASS] {name}_{suffix}")
+                results.append(f"[PASS] {name}_{target_id}")
             except Exception as e:
-                print(f"[FAIL] {name}_{suffix}: {e}")
-                results.append(f"[FAIL] {name}_{suffix}: {e}")
+                print(f"[FAIL] {name}_{target_id}: {e}")
+                results.append(f"[FAIL] {name}_{target_id}: {e}")
 
     print("\n" + "=" * 60)
     print(" COMPILATION SUMMARY")

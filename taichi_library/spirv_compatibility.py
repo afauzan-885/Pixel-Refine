@@ -257,10 +257,12 @@ def audit_vulkan_inventory(project_root=None, target_env="vulkan1.1"):
     artifact_root = (
         root / "taichi_library" / "taichi_algorithm" / "aot_tcm"
     )
+    target_root = artifact_root / "vulkan_x86_64_windows"
     reports = [
         audit_tcm(path, target_env=target_env)
         for path in sorted(
-            artifact_root.glob("*_vulkan.tcm"), key=lambda item: item.name
+            target_root.glob("*_vulkan_x86_64_windows.tcm"),
+            key=lambda item: item.name,
         )
     ]
     capability_counts = Counter(

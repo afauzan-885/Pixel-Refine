@@ -2,12 +2,10 @@ import json
 import os
 import time
 from PySide6.QtWidgets import (
-    QDialog,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -18,15 +16,21 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QSpinBox,
     QComboBox,
+    QMenu,
 )
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtCore import Qt, QThread, Signal, QPoint, QEvent
+from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QShortcut
 from resources.styles.stylesheet import (
     CHECKBOX_SWITCH_STYLE,
     PROGRESS_BAR,
     stylesheet_global_page,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+from resources.GenericUILibrary import (
+    ModalDialog,
+    ProgressBar,
+    Button,
+)
 
 
 def load_json_state(path, default=None):
@@ -46,14 +50,25 @@ def save_json_state(path, data):
         json.dump(data, f, indent=4)
 
 
-class MassAlgorithmEditDialog(QDialog):
+class MassAlgorithmEditDialog(ModalDialog):
     algorithms_updated = Signal()
 
     def __init__(self, panels, parent=None):
-        super().__init__(parent)
+        super().__init__(
+            message="",
+            parent=parent,
+            title=getattr(
+                language_config, "UI_ALGORITHM_EDIT_HEADER", "Bulk Edit Algorithm"
+            ),
+            close_on_click_outside=False,
+            width=440,
+            height=300,
+        )
         self.panels = panels
         self.seq_to_batch_id = {
-            getattr(p, "sequential_batch_number", i + 1): getattr(p, "batch_id", getattr(p, "id", i + 1))
+            getattr(p, "sequential_batch_number", i + 1): getattr(
+                p, "batch_id", getattr(p, "id", i + 1)
+            )
             for i, p in enumerate(self.panels)
         }
         self.algorithms = {
@@ -79,39 +94,41 @@ class MassAlgorithmEditDialog(QDialog):
             ],
         }
         self.json_path = os.path.join("database", "align", "batch_parameter.json")
-        self.setWindowTitle(language_config.UI_ALGORITHM_EDIT_HEADER)
-
-        screen = QGuiApplication.primaryScreen()
-        if screen:
-            available_rect = screen.availableGeometry()
-            screen_width = available_rect.width()
-            screen_height = available_rect.height()
-
-            dialog_width = int(screen_width * 0.15)
-            dialog_height = int(screen_height * 0.25)
-
-            dialog_width = max(dialog_width, 150)
-            dialog_height = max(dialog_height, 250)
-            self.resize(dialog_width, dialog_height)
-        else:
-            self.setMinimumSize(150, 250)
-
         self.initUI()
         self.setStyleSheet(stylesheet_global_page())
 
     def initUI(self):
-        layout = QVBoxLayout(self)
+        container_layout = self.container.layout()
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(12)
+
         grid_layout = QGridLayout()
-        grid_layout.setSpacing(15)
+        grid_layout.setSpacing(12)
 
         range_layout = QHBoxLayout()
         from_label = QLabel("From:")
+        from_label.setStyleSheet(
+            "font-family: 'Segoe UI', Arial; font-size: 12px; font-weight: 600; color: #334155;"
+        )
         self.from_spinbox = QSpinBox()
+        self.from_spinbox.setStyleSheet(
+            "font-size: 12px; padding: 3px 6px; border: 1px solid #CBD5E1; border-radius: 4px;"
+        )
         to_label = QLabel("To:")
+        to_label.setStyleSheet(
+            "font-family: 'Segoe UI', Arial; font-size: 12px; font-weight: 600; color: #334155;"
+        )
         self.to_spinbox = QSpinBox()
+        self.to_spinbox.setStyleSheet(
+            "font-size: 12px; padding: 3px 6px; border: 1px solid #CBD5E1; border-radius: 4px;"
+        )
+
         range_layout.addWidget(from_label)
         range_layout.addWidget(self.from_spinbox)
-        range_layout.addSpacing(20)
+        range_layout.addSpacing(15)
         range_layout.addWidget(to_label)
         range_layout.addWidget(self.to_spinbox)
         range_layout.addStretch()
@@ -150,12 +167,14 @@ class MassAlgorithmEditDialog(QDialog):
         layout.addLayout(grid_layout)
 
         btn_box = QHBoxLayout()
-        apply_btn = QPushButton("Apply")
-        cancel_btn = QPushButton("Cancel")
+        apply_btn = Button("Apply", variant="primary")
+        cancel_btn = Button("Cancel", variant="secondary")
         btn_box.addStretch()
         btn_box.addWidget(apply_btn)
         btn_box.addWidget(cancel_btn)
         layout.addLayout(btn_box)
+
+        container_layout.addWidget(content_widget, 1)
 
         apply_btn.clicked.connect(self.apply_changes)
         cancel_btn.clicked.connect(self.reject)
@@ -165,7 +184,9 @@ class MassAlgorithmEditDialog(QDialog):
         end_seq = self.to_spinbox.value()
 
         if start_seq > end_seq:
-            QMessageBox.warning(self, "Warning", "Start batch number must be <= end batch number.")
+            QMessageBox.warning(
+                self, "Warning", "Start batch number must be <= end batch number."
+            )
             return
 
         all_params = load_json_state(self.json_path)
@@ -177,19 +198,25 @@ class MassAlgorithmEditDialog(QDialog):
                 if self.align_checkbox.isChecked():
                     align_val = self.align_combo.currentText()
                     if align_val != language_config.UI_NO_CHANGE:
-                        batch_params["checkbox_align_images"] = (align_val != "No Alignment")
+                        batch_params["checkbox_align_images"] = (
+                            align_val != "No Alignment"
+                        )
                         batch_params["alignment_algo"] = align_val
 
                 if self.sr_checkbox.isChecked():
                     sr_val = self.sr_combo.currentText()
                     if sr_val != language_config.UI_NO_CHANGE:
-                        batch_params["checkbox_super_resolution"] = (sr_val != "No Super Resolution")
+                        batch_params["checkbox_super_resolution"] = (
+                            sr_val != "No Super Resolution"
+                        )
                         batch_params["super_resolution_algo"] = sr_val
 
                 if self.denoise_checkbox.isChecked():
                     denoise_val = self.denoise_combo.currentText()
                     if denoise_val != language_config.UI_NO_CHANGE:
-                        batch_params["checkbox_denoising"] = (denoise_val != "No Denoising")
+                        batch_params["checkbox_denoising"] = (
+                            denoise_val != "No Denoising"
+                        )
                         batch_params["denoising_algo"] = denoise_val
 
                 all_params[str(batch_id)] = batch_params
@@ -204,11 +231,55 @@ class MassAlgorithmEditDialog(QDialog):
         self.accept()
 
 
-from resources.GenericUILibrary import (
-    ModalDialog,
-    ProgressBar,
-    Button,
-)
+class MasterHeaderView(QHeaderView):
+    master_checkbox_toggled = Signal()
+    context_menu_requested = Signal(object)
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self.master_checkbox = QCheckBox(self)
+        self.master_checkbox.setStyleSheet(CHECKBOX_SWITCH_STYLE)
+        self.master_checkbox.setToolTip("Check All / Uncheck All")
+        self.master_checkbox.clicked.connect(self._on_master_clicked)
+
+        # Connect custom context menu directly on the master checkbox button
+        self.master_checkbox.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.master_checkbox.customContextMenuRequested.connect(
+            self._on_chk_context_menu
+        )
+
+        self.setSectionsClickable(True)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
+
+    def _on_master_clicked(self):
+        self.master_checkbox_toggled.emit()
+
+    def _on_context_menu(self, pos):
+        global_pos = self.mapToGlobal(pos)
+        self.context_menu_requested.emit(global_pos)
+
+    def _on_chk_context_menu(self, pos):
+        global_pos = self.master_checkbox.mapToGlobal(pos)
+        self.context_menu_requested.emit(global_pos)
+
+    def update_checkbox_geometry(self):
+        sec_size = self.sectionSize(0)
+        chk_size = self.master_checkbox.sizeHint()
+        x = self.sectionPosition(0) + (sec_size - chk_size.width()) // 2
+        y = (self.height() - chk_size.height()) // 2
+        self.master_checkbox.move(max(2, x), max(2, y))
+        self.master_checkbox.show()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_checkbox_geometry()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        self.update_checkbox_geometry()
 
 
 class BatchProcessDialog(ModalDialog):
@@ -216,7 +287,9 @@ class BatchProcessDialog(ModalDialog):
         super().__init__(
             message="",
             parent=parent,
-            title=getattr(language_config, "UI_BATCH_HEADER", "Batch Processing Manager"),
+            title=getattr(
+                language_config, "UI_BATCH_HEADER", "Batch Processing Manager"
+            ),
             close_on_click_outside=False,
             width=780,
             height=560,
@@ -232,6 +305,7 @@ class BatchProcessDialog(ModalDialog):
         self._was_cancelled = False
         self._is_processing = False
         self._start_time = None
+        self._last_toggled_row = None
 
         self.initUI()
         self.populate_table()
@@ -247,11 +321,14 @@ class BatchProcessDialog(ModalDialog):
         # 1. Folder Output Selection Row
         folder_layout = QHBoxLayout()
         folder_label = QLabel(language_config.ACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER)
-        folder_label.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 12px; color: #334155; font-weight: 600;")
+        folder_label.setStyleSheet(
+            "font-family: 'Segoe UI', Arial; font-size: 12px; color: #334155; font-weight: 600;"
+        )
 
         self.folder_path_edit = QLineEdit()
         self.folder_path_edit.setReadOnly(True)
-        self.folder_path_edit.setStyleSheet("""
+        self.folder_path_edit.setStyleSheet(
+            """
             QLineEdit {
                 background-color: #F1F5F9;
                 border: 1px solid #CBD5E1;
@@ -261,13 +338,15 @@ class BatchProcessDialog(ModalDialog):
                 font-size: 12px;
                 color: #1E293B;
             }
-        """)
+        """
+        )
 
         self.browse_button = Button(
             language_config.SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER, variant="secondary"
         )
         self.browse_button.setFixedHeight(30)
-        self.browse_button.setStyleSheet("""
+        self.browse_button.setStyleSheet(
+            """
             QPushButton {
                 font-size: 11px;
                 padding: 4px 12px;
@@ -278,21 +357,38 @@ class BatchProcessDialog(ModalDialog):
             QPushButton:hover {
                 background-color: #E2E8F0;
             }
-        """)
+        """
+        )
 
         folder_layout.addWidget(folder_label)
         folder_layout.addWidget(self.folder_path_edit, 1)
         folder_layout.addWidget(self.browse_button)
         layout.addLayout(folder_layout)
 
-        # 2. Table Widget
+        # 2. Table Widget with Master Header Checkbox
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(4)
+
+        # Set custom header with Master Checkbox
+        self.header_view = MasterHeaderView(
+            Qt.Orientation.Horizontal, self.table_widget
+        )
+        self.table_widget.setHorizontalHeader(self.header_view)
         self.table_widget.setHorizontalHeaderLabels(
             ["", "Project Name", "Status", "Details"]
         )
+        self.header_view.master_checkbox_toggled.connect(
+            self._on_master_checkbox_clicked
+        )
+        self.header_view.context_menu_requested.connect(self._show_table_context_menu)
+
         self.table_widget.verticalHeader().setVisible(True)
-        self.table_widget.setStyleSheet("""
+        self.table_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_widget.customContextMenuRequested.connect(
+            self._show_table_context_menu
+        )
+        self.table_widget.setStyleSheet(
+            """
             QTableWidget {
                 background-color: #FFFFFF;
                 border: 1px solid #E2E8F0;
@@ -317,28 +413,41 @@ class BatchProcessDialog(ModalDialog):
                 background-color: #E0F2FE;
                 color: #0369A1;
             }
-        """)
+        """
+        )
         layout.addWidget(self.table_widget, 1)
+
+        # Shortcut Ctrl+A
+        self.shortcut_select_all = QShortcut(QKeySequence("Ctrl+A"), self.table_widget)
+        self.shortcut_select_all.activated.connect(
+            lambda: self._set_all_checkboxes(True)
+        )
 
         # 3. Translucent Gray Card Container for Progress Bar & Real-time ETA
         self.progress_container = QWidget()
         self.progress_container.setObjectName("ProgressCardContainer")
-        self.progress_container.setStyleSheet("""
+        self.progress_container.setStyleSheet(
+            """
             QWidget#ProgressCardContainer {
                 background-color: rgba(241, 245, 249, 0.85);
                 border: 1px solid #CBD5E1;
                 border-radius: 8px;
             }
-        """)
+        """
+        )
         prog_card_layout = QVBoxLayout(self.progress_container)
-        prog_card_layout.setContentsMargins(12, 10, 12, 10)
-        prog_card_layout.setSpacing(6)
+        prog_card_layout.setContentsMargins(12, 8, 12, 8)
+        prog_card_layout.setSpacing(4)
 
-        # Top row: Percentage (Top Left) & ETA (Top Right)
+        # Top row: Percentage & Status Tag (Left) + ETA (Right)
         prog_top_layout = QHBoxLayout()
         self.progress_percent_label = QLabel("Overall Progress: 0%")
         self.progress_percent_label.setStyleSheet(
             "font-family: 'Segoe UI', Arial; font-size: 12px; font-weight: 700; color: #1E293B;"
+        )
+        self.progress_status_tag = QLabel("Ready to process")
+        self.progress_status_tag.setStyleSheet(
+            "font-family: 'Segoe UI', Arial; font-size: 11.5px; font-weight: 600; color: #10B981; margin-left: 8px;"
         )
         self.eta_label = QLabel("ETA: --:--")
         self.eta_label.setStyleSheet(
@@ -346,28 +455,34 @@ class BatchProcessDialog(ModalDialog):
         )
 
         prog_top_layout.addWidget(self.progress_percent_label)
+        prog_top_layout.addWidget(self.progress_status_tag)
         prog_top_layout.addStretch()
         prog_top_layout.addWidget(self.eta_label)
         prog_card_layout.addLayout(prog_top_layout)
 
         # Middle row: Animated Progress Bar
-        self.progress_bar = ProgressBar(style="animated", variant="primary", show_label=False)
+        self.progress_bar = ProgressBar(
+            style="animated", variant="primary", show_label=False
+        )
         prog_card_layout.addWidget(self.progress_bar)
 
-        # Bottom row: Detail status text (e.g. 2/9 batches processed...)
-        self.progress_detail_label = QLabel("Ready to process")
-        self.progress_detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Bottom row: Detail status text (Tight spacing right below progress bar, like a note info label)
+        self.progress_detail_label = QLabel("")
         self.progress_detail_label.setStyleSheet(
-            "font-family: 'Segoe UI', Arial; font-size: 11px; color: #475569; font-weight: 500;"
+            "font-family: 'Segoe UI', Arial; font-size: 11px; color: #475569; font-weight: 500; margin-top: 1px;"
         )
+        self.progress_detail_label.hide()
         prog_card_layout.addWidget(self.progress_detail_label)
 
         layout.addWidget(self.progress_container)
 
-        # 4. Action Buttons Row (Single Switch Action Button: Start <-> Cancel)
+        # 4. Action Buttons Row
         button_layout = QHBoxLayout()
-        self.edit_algo_button = Button(language_config.UI_ALGORIHM_EDIT, variant="secondary")
-        self.edit_algo_button.setStyleSheet("""
+        self.edit_algo_button = Button(
+            language_config.UI_ALGORIHM_EDIT, variant="secondary"
+        )
+        self.edit_algo_button.setStyleSheet(
+            """
             QPushButton {
                 font-size: 11.5px;
                 padding: 5px 14px;
@@ -378,11 +493,11 @@ class BatchProcessDialog(ModalDialog):
             QPushButton:hover {
                 background-color: #E2E8F0;
             }
-        """)
+        """
+        )
         button_layout.addWidget(self.edit_algo_button)
         button_layout.addStretch()
 
-        # Single Switch Action Button (Start Process <-> Cancel Process)
         self.action_button = Button(
             language_config.PROGRESS_SECTION_PROCESS_BUTTON_TEXT, variant="primary"
         )
@@ -390,7 +505,8 @@ class BatchProcessDialog(ModalDialog):
         self._apply_start_button_style()
 
         self.close_button = Button(language_config.CLOSE_BUTTON, variant="secondary")
-        self.close_button.setStyleSheet("""
+        self.close_button.setStyleSheet(
+            """
             QPushButton {
                 font-size: 11.5px;
                 padding: 6px 16px;
@@ -404,7 +520,8 @@ class BatchProcessDialog(ModalDialog):
                 background-color: #F1F5F9;
                 color: #0F172A;
             }
-        """)
+        """
+        )
 
         button_layout.addWidget(self.action_button)
         button_layout.addWidget(self.close_button)
@@ -417,10 +534,157 @@ class BatchProcessDialog(ModalDialog):
         self.close_button.clicked.connect(self.close)
         self.edit_algo_button.clicked.connect(self.open_mass_edit_dialog)
 
+    def _on_master_checkbox_clicked(self):
+        checked_count = self._get_checked_checkbox_count()
+        # Rule:
+        # If checked_count <= 1: Check ALL
+        # If checked_count >= 2: Uncheck ALL
+        target_state = checked_count <= 1
+        self._set_all_checkboxes(target_state)
+
+    def _get_checked_checkbox_count(self):
+        count = 0
+        for i in range(self.table_widget.rowCount()):
+            chk = self._get_row_checkbox(i)
+            if chk and chk.isChecked():
+                count += 1
+        return count
+
+    def _get_row_checkbox(self, row):
+        widget = self.table_widget.cellWidget(row, 0)
+        if widget:
+            return widget.findChild(QCheckBox)
+        return None
+
+    def _set_all_checkboxes(self, is_checked):
+        for i in range(self.table_widget.rowCount()):
+            chk = self._get_row_checkbox(i)
+            if chk:
+                chk.blockSignals(True)
+                chk.setChecked(is_checked)
+                chk.blockSignals(False)
+        self._update_master_checkbox_visual()
+
+    def _set_selected_checkboxes(self, row_indices, is_checked):
+        for r in row_indices:
+            chk = self._get_row_checkbox(r)
+            if chk:
+                chk.blockSignals(True)
+                chk.setChecked(is_checked)
+                chk.blockSignals(False)
+        self._update_master_checkbox_visual()
+
+    def _update_master_checkbox_visual(self):
+        total = self.table_widget.rowCount()
+        count = self._get_checked_checkbox_count()
+        if hasattr(self, "header_view") and self.header_view:
+            chk = self.header_view.master_checkbox
+            chk.blockSignals(True)
+            if count == total and total > 0:
+                chk.setChecked(True)
+            elif count == 0:
+                chk.setChecked(False)
+            else:
+                chk.setChecked(True)
+            chk.blockSignals(False)
+
+    def _handle_checkbox_click(self, row, event=None):
+        modifiers = QGuiApplication.keyboardModifiers()
+        is_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
+        current_chk = self._get_row_checkbox(row)
+        if not current_chk:
+            return
+
+        target_state = current_chk.isChecked()
+
+        if is_shift and self._last_toggled_row is not None:
+            start_r = min(self._last_toggled_row, row)
+            end_r = max(self._last_toggled_row, row)
+            for r in range(start_r, end_r + 1):
+                chk = self._get_row_checkbox(r)
+                if chk:
+                    chk.blockSignals(True)
+                    chk.setChecked(target_state)
+                    chk.blockSignals(False)
+
+        self._last_toggled_row = row
+        self._update_master_checkbox_visual()
+
+    def _show_table_context_menu(self, pos_or_global_pos):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu {
+                background-color: #FFFFFF;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                font-family: 'Segoe UI', Arial;
+                font-size: 12px;
+                color: #1E293B;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #F1F5F9;
+                color: #0284C7;
+            }
+        """
+        )
+
+        selected_rows = sorted(
+            list(set(index.row() for index in self.table_widget.selectedIndexes()))
+        )
+        checked_in_selection = []
+        unchecked_in_selection = []
+        for r in selected_rows:
+            chk = self._get_row_checkbox(r)
+            if chk:
+                if chk.isChecked():
+                    checked_in_selection.append(r)
+                else:
+                    unchecked_in_selection.append(r)
+
+        if selected_rows:
+            if unchecked_in_selection:
+                act_check_sel = menu.addAction(
+                    f"Check Selected ({len(unchecked_in_selection)})"
+                )
+                act_check_sel.triggered.connect(
+                    lambda: self._set_selected_checkboxes(unchecked_in_selection, True)
+                )
+            if checked_in_selection:
+                act_uncheck_sel = menu.addAction(
+                    f"Uncheck Selected ({len(checked_in_selection)})"
+                )
+                act_uncheck_sel.triggered.connect(
+                    lambda: self._set_selected_checkboxes(checked_in_selection, False)
+                )
+            menu.addSeparator()
+
+        action_check_all = menu.addAction("Check All (Ctrl+A)")
+        action_uncheck_all = menu.addAction("Uncheck All")
+
+        action_check_all.triggered.connect(lambda: self._set_all_checkboxes(True))
+        action_uncheck_all.triggered.connect(lambda: self._set_all_checkboxes(False))
+
+        if isinstance(pos_or_global_pos, QPoint):
+            if pos_or_global_pos.y() > self.header_view.height():
+                global_pos = self.table_widget.mapToGlobal(pos_or_global_pos)
+            else:
+                global_pos = self.header_view.mapToGlobal(pos_or_global_pos)
+        else:
+            global_pos = pos_or_global_pos
+
+        menu.exec_(global_pos)
+
     def _apply_start_button_style(self):
-        """Applies Emerald Green style to single action button."""
         self.action_button.setText(language_config.PROGRESS_SECTION_PROCESS_BUTTON_TEXT)
-        self.action_button.setStyleSheet("""
+        self.action_button.setStyleSheet(
+            """
             QPushButton#actionButton {
                 background-color: #10B981;
                 color: #FFFFFF;
@@ -436,12 +700,13 @@ class BatchProcessDialog(ModalDialog):
             QPushButton#actionButton:pressed {
                 background-color: #047857;
             }
-        """)
+        """
+        )
 
     def _apply_cancel_button_style(self):
-        """Applies Crimson Red style to single action button when running."""
         self.action_button.setText(language_config.BATCH_CANCELED_PROCESS)
-        self.action_button.setStyleSheet("""
+        self.action_button.setStyleSheet(
+            """
             QPushButton#actionButton {
                 background-color: #EF4444;
                 color: #FFFFFF;
@@ -457,10 +722,10 @@ class BatchProcessDialog(ModalDialog):
             QPushButton#actionButton:pressed {
                 background-color: #B91C1C;
             }
-        """)
+        """
+        )
 
     def _on_action_button_clicked(self):
-        """Toggle behavior for single switch action button."""
         if not self._is_processing:
             self.start_processing()
         else:
@@ -524,13 +789,25 @@ class BatchProcessDialog(ModalDialog):
             chk_box = QCheckBox()
             chk_box.setStyleSheet(CHECKBOX_SWITCH_STYLE)
             chk_box.setChecked(True)
+            chk_box.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            chk_box.customContextMenuRequested.connect(
+                lambda pos, chk=chk_box: self.table_widget.customContextMenuRequested.emit(
+                    chk.mapToGlobal(pos)
+                )
+            )
             chk_layout.addWidget(chk_box)
             chk_layout.setAlignment(Qt.AlignCenter)
             chk_layout.setContentsMargins(0, 0, 0, 0)
             self.table_widget.setCellWidget(i, 0, checkbox_widget)
 
+            chk_box.clicked.connect(
+                lambda checked=False, r=i: self._handle_checkbox_click(r)
+            )
+
             batch_id = getattr(panel, "batch_id", getattr(panel, "id", ""))
-            seq_num = getattr(panel, "sequential_batch_number", getattr(panel, "name", f"Batch {i+1}"))
+            seq_num = getattr(
+                panel, "sequential_batch_number", getattr(panel, "name", f"Batch {i+1}")
+            )
             if isinstance(seq_num, str) and seq_num.startswith("Batch "):
                 project_name_text = f"{seq_num} ({str(batch_id)[:8]}...)"
             else:
@@ -566,6 +843,7 @@ class BatchProcessDialog(ModalDialog):
         )
         self.adjust_column_widths()
         self.table_widget.resizeRowsToContents()
+        self._update_master_checkbox_visual()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -586,7 +864,9 @@ class BatchProcessDialog(ModalDialog):
         overall_percent = (
             int((self.processed_count / num_total) * 100) if num_total > 0 else 0
         )
-        self._update_progress_and_eta(overall_percent, f"{self.processed_count}/{num_total} batches processed...")
+        self._update_progress_and_eta(
+            overall_percent, f"{self.processed_count}/{num_total} batches processed..."
+        )
 
     def on_processing_complete(self, failed_batches_summary):
         self.reset_dialog_state()
@@ -622,13 +902,23 @@ class BatchProcessDialog(ModalDialog):
         self.table_widget.resizeRowToContents(row)
 
     def _update_progress_and_eta(self, percent, detail_msg=""):
-        """Calculates real-time ETA and updates UI progress labels."""
         self.progress_bar.setValue(percent)
         self.progress_percent_label.setText(f"Overall Progress: {percent}%")
-        if detail_msg:
-            self.progress_detail_label.setText(detail_msg)
 
-        # Calculate Real-Time ETA
+        if detail_msg:
+            self.progress_status_tag.setText("Processing...")
+            self.progress_status_tag.setStyleSheet(
+                "font-family: 'Segoe UI', Arial; font-size: 11.5px; font-weight: 600; color: #0284C7; margin-left: 8px;"
+            )
+            self.progress_detail_label.setText(detail_msg)
+            self.progress_detail_label.show()
+        else:
+            self.progress_status_tag.setText("Ready to process")
+            self.progress_status_tag.setStyleSheet(
+                "font-family: 'Segoe UI', Arial; font-size: 11.5px; font-weight: 600; color: #10B981; margin-left: 8px;"
+            )
+            self.progress_detail_label.hide()
+
         if self._start_time and percent > 0 and percent < 100:
             elapsed = time.time() - self._start_time
             est_total = (elapsed / percent) * 100
@@ -648,7 +938,9 @@ class BatchProcessDialog(ModalDialog):
                 if text == language_config.UI_ALGORITHM_NOT_SET:
                     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 else:
-                    label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+                    label.setAlignment(
+                        Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+                    )
                 label.setText(text)
 
     def start_processing(self):
@@ -680,7 +972,6 @@ class BatchProcessDialog(ModalDialog):
         self._is_processing = True
         self._start_time = time.time()
 
-        # Switch action button to Crimson Red Cancel Process
         self._apply_cancel_button_style()
         self.browse_button.setEnabled(False)
         self.edit_algo_button.setEnabled(False)
@@ -703,6 +994,7 @@ class BatchProcessDialog(ModalDialog):
     def cancel_processing(self):
         if hasattr(self, "processing_thread") and self.processing_thread.isRunning():
             from resources.GenericUILibrary import modal_confirm
+
             reply = modal_confirm.question(
                 self,
                 language_config.BATCH_CANCELED_CONFIRMATION,
@@ -717,7 +1009,6 @@ class BatchProcessDialog(ModalDialog):
         self._is_processing = False
         self._start_time = None
 
-        # Switch action button back to Emerald Green Start Process
         self._apply_start_button_style()
         self.browse_button.setEnabled(True)
         self.edit_algo_button.setEnabled(True)
@@ -780,10 +1071,13 @@ class ProcessingThread(QThread):
             if not self._is_running:
                 break
 
-            seq_num = getattr(panel, "sequential_batch_number", getattr(panel, "name", "?"))
+            seq_num = getattr(
+                panel, "sequential_batch_number", getattr(panel, "name", "?")
+            )
             batch_id = getattr(panel, "batch_id", getattr(panel, "id", "UNKNOWN"))
 
             try:
+
                 def sub_process_progress_callback(*args):
                     if not self._is_running:
                         return
@@ -810,7 +1104,22 @@ class ProcessingThread(QThread):
 
                 files_before = set(self.batch_page_layout.get_files_in_stack_folder())
                 target_panel = getattr(panel, "original_panel", panel)
-                target_panel.process_all_batch(progress_callback=sub_process_progress_callback)
+                if hasattr(target_panel, "process_all_batch"):
+                    target_panel.process_all_batch(
+                        progress_callback=sub_process_progress_callback,
+                        stop_callback=lambda: not self._is_running,
+                    )
+                else:
+                    from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_combined_panel import (
+                        CombinedPanel,
+                    )
+
+                    db_mgr = getattr(self.batch_page_layout, "database_manager", None)
+                    temp_panel = CombinedPanel(database_manager=db_mgr, batch_id=batch_id)
+                    temp_panel.process_all_batch(
+                        progress_callback=sub_process_progress_callback,
+                        stop_callback=lambda: not self._is_running,
+                    )
                 files_after = set(self.batch_page_layout.get_files_in_stack_folder())
                 new_files = list(files_after - files_before)
 

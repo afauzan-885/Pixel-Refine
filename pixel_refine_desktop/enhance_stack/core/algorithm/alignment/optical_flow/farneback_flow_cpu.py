@@ -1,5 +1,6 @@
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -120,6 +121,7 @@ class FarnebackFlowCPU:
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
             extract_exif,
             save_to_hdf5,
+            setup_balanced_batching,
             write_alignment_cache_attrs,
         )
 
@@ -135,40 +137,89 @@ class FarnebackFlowCPU:
                 cache_payload=getattr(ctx, "alignment_cache_payload", ""),
             )
 
-            for index, path in enumerate(ctx.image_paths):
-                if ctx.stop_requested and ctx.stop_requested():
-                    break
-                if index == 0:
-                    aligned = np.array(reference, copy=True)
-                else:
-                    frame = orchestrator._load_single_frame(
-                        ctx, path, target_dims=target_dims
-                    )
-                    if frame is None:
-                        continue
-                    aligned = self.align_frame(
-                        reference,
-                        frame,
-                        config=config,
-                        stop_requested=ctx.stop_requested,
-                    )
-                    del frame
-                if aligned is None:
-                    continue
-                save_to_hdf5(h5f, f"image_{index}", aligned, extract_exif(path))
-                h5f.flush()
-                saved_count += 1
-                print(
-                    f"[FarnebackFlowCPU] saved image_{index} shape={aligned.shape} dtype={aligned.dtype}"
-                )
-                del aligned
-                gc.collect()
+            paths = list(ctx.image_paths)
+            from pixel_refine_desktop.ui.views.settings.General.Language import (
+                language_config,
+            )
+            compute_batch_size = max(
+                1, int(getattr(ctx, "params", {}).get("batch_size", 8))
+            )
+            write_batch_size = max(
+                1, int(getattr(ctx, "params", {}).get("h5_write_batch_size", 4))
+            )
+            compute_plan = setup_balanced_batching(
+                paths, language_config, max_batch_size=compute_batch_size
+            )
 
-                if ctx.update_progress:
-                    progress = 25 + int(((index + 1) / max(1, ctx.total_images)) * 65)
-                    ctx.update_progress(
-                        progress, f"Farneback flow {index + 1}/{ctx.total_images}"
+            def write_job(records):
+                for idx, path, img in records:
+                    save_to_hdf5(h5f, f"image_{idx}", img, extract_exif(path))
+                    print(
+                        f"[FarnebackFlowCPU] saved image_{idx} "
+                        f"shape={img.shape} dtype={img.dtype}"
                     )
+                h5f.flush()
+
+            pending_writes = []
+            with ThreadPoolExecutor(max_workers=1) as writer_executor:
+                for compute_start, compute_end in compute_plan:
+                    write_buffer = []
+                    for index in range(compute_start, compute_end):
+                        if ctx.stop_requested and ctx.stop_requested():
+                            break
+                        path = paths[index]
+                        if index == 0:
+                            aligned = np.array(reference, copy=True)
+                        else:
+                            frame = orchestrator._load_single_frame(
+                                ctx, path, target_dims=target_dims
+                            )
+                            if frame is None:
+                                continue
+                            aligned = self.align_frame(
+                                reference,
+                                frame,
+                                config=config,
+                                stop_requested=ctx.stop_requested,
+                            )
+                            del frame
+                        if aligned is None:
+                            continue
+                        write_buffer.append((index, path, aligned))
+                        saved_count += 1
+
+                        if len(write_buffer) >= write_batch_size:
+                            pending_writes.append(
+                                writer_executor.submit(write_job, write_buffer)
+                            )
+                            write_buffer = []
+                            if len(pending_writes) >= 2:
+                                pending_writes.pop(0).result()
+
+                        if ctx.update_progress:
+                            progress = 25 + int(
+                                ((index + 1) / max(1, ctx.total_images)) * 65
+                            )
+                            ctx.update_progress(
+                                progress,
+                                f"Farneback flow {index + 1}/{ctx.total_images}",
+                            )
+
+                    if write_buffer:
+                        pending_writes.append(
+                            writer_executor.submit(write_job, write_buffer)
+                        )
+                        if len(pending_writes) >= 2:
+                            pending_writes.pop(0).result()
+                    gc.collect()
+
+                for write_future in pending_writes:
+                    write_future.result()
+            print(
+                f"[FarnebackFlowCPU] compute_batch_size={compute_batch_size} "
+                f"h5_write_batch_size={write_batch_size} "
+                f"compute_batches={len(compute_plan)}"
+            )
 
         ctx.aligned_frames = []
         ctx.frames = []

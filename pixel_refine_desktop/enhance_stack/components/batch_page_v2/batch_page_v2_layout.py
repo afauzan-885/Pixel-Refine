@@ -4,6 +4,7 @@ import subprocess
 import os
 from PIL import Image, UnidentifiedImageError
 import tifffile
+import config
 
 from PySide6.QtWidgets import (
     QMessageBox,
@@ -367,6 +368,12 @@ class BatchPageV2Layout(QWidget):
                 image_paths=selected_files,
                 batch_size=15,
                 delay_ms=25,
+                # The worker defaults to batch 0 for legacy callers.  Pass
+                # the actual active batch so the display manager does not
+                # classify every imported image as a background import.
+                batch_id=getattr(
+                    self.workspace_panel.display_panel, "current_batch_id", 0
+                ),
             )
 
             # KONEKSI REAL-TIME:
@@ -441,10 +448,10 @@ class BatchPageV2Layout(QWidget):
 
             algo_panel = self.workspace_panel.algorithm_panel
             settings = algo_panel.logic.get_settings()
-            alignment_choice = settings.get("alignment", "No Alignment")
-            denoising_choice = settings.get("denoising", "No Denoising")
+            alignment_choice = settings.get(config.KEY_ALIGNMENT, "No Alignment")
+            denoising_choice = settings.get(config.KEY_DENOISING, "No Denoising")
             super_resolution_choice = settings.get(
-                "super_resolution", "No Super Resolution"
+                config.KEY_SUPER_RESOLUTION, "No Super Resolution"
             )
 
             # Jika tidak ada algoritma yang dipilih

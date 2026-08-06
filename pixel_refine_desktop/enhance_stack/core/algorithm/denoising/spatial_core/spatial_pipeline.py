@@ -501,6 +501,7 @@ def process_in_gpu(
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
         generate_spatial_weights_taichi,
         accumulate_spatial_merging_taichi,
+        SpatialScratchCache,
     )
     from taichi_library.taichi_algorithm.interpolation.bilinear_interpolation import (
         bilinear_resize,
@@ -517,6 +518,10 @@ def process_in_gpu(
     )
     weight_map_sum_full_res = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
     processed_frames_spatial = [0]
+    # Reuse per-frame spatial analysis buffers for the lifetime of this batch.
+    # The loop is sequential and each dispatch completes before the next frame,
+    # so slots are safe to overwrite without changing algorithm ordering.
+    spatial_scratch = SpatialScratchCache()
 
     def _run_gpu_merging_loop():
         engine = taichi_aot.engine
@@ -574,89 +579,90 @@ def process_in_gpu(
                     else:
                         future_chunk = None
 
-                for chunk_i, img_orig in enumerate(chunk_images):
-                    i = start_idx + chunk_i
-                    if stop_requested and stop_requested():
-                        break
+                    for chunk_i, img_orig in enumerate(chunk_images):
+                        i = start_idx + chunk_i
+                        if stop_requested and stop_requested():
+                            break
 
-                    if img_orig is None:
-                        continue
+                        if img_orig is None:
+                            continue
 
-                    # Preprocessing Frame (Unified API - Classic Way)
-                    curr_full_gpu, curr_work_gray_gpu = taichi_bridge.prepare_frame_aot(
-                        img_orig,
-                        ref_dtype,
-                        is_linear_mode,
-                        proxy_scale,
-                        work_res_h,
-                        work_res_w,
-                        ref_image_h,
-                        ref_image_w,
-                    )
-
-                    generate_spatial_weights_taichi(
-                        current_image=curr_work_gray_gpu,
-                        reference_image=ref_work_res_pass2_gpu,
-                        weight_map_sum=_weight_work_gpu,
-                        base_window=_base_window_gpu,
-                        stability_map=None,
-                        row_starts=_rows_gpu,
-                        col_starts=_cols_gpu,
-                        tile_h=tile_h,
-                        tile_w=tile_w,
-                        noise_sigma=ref_noise_sigma,
-                        motion_sensitivity=motion_sensitivity,
-                        noise_offset_factor=noise_offset_factor,
-                        equalize_brightness=False,
-                        buffer_provider="pool",
-                        search_radius=kwargs.get("similarity_search_radius", 3),
-                        early_exit_threshold=kwargs.get("early_exit_threshold", 0.05),
-                    )
-
-                    curr_work_gray_gpu.destroy()
-
-                    accumulate_spatial_merging_taichi(
-                        current_image_full=curr_full_gpu.view_as_vector(False),
-                        weight_map_work=_weight_work_gpu,
-                        final_image_sum=_sum_gpu.view_as_vector(False),
-                        weight_map_sum_full=_weight_sum_full_gpu,
-                        row_starts=_rows_gpu,
-                        col_starts=_cols_gpu,
-                        tile_h=tile_h,
-                        tile_w=tile_w,
-                        h_full=ref_image_h,
-                        w_full=ref_image_w,
-                        h_work=work_res_h,
-                        w_work=work_res_w,
-                    )
-
-                    curr_full_gpu.destroy()
-                    processed_frames_spatial[0] += 1
-
-                    if update_progress:
-                        prog = int(
-                            pass_merge_range[0]
-                            + ((i + 1) / num_images)
-                            * (pass_merge_range[1] - pass_merge_range[0])
+                        # Preprocessing Frame (Unified API - Classic Way)
+                        curr_full_gpu, curr_work_gray_gpu = taichi_bridge.prepare_frame_aot(
+                            img_orig,
+                            ref_dtype,
+                            is_linear_mode,
+                            proxy_scale,
+                            work_res_h,
+                            work_res_w,
+                            ref_image_h,
+                            ref_image_w,
                         )
-                        msg = (
-                            language_config.IMAGE_PROCESS_IN_PROGRESS.format(
-                                images_processed_so_far + i + 1, total_overall_images
+
+                        generate_spatial_weights_taichi(
+                            current_image=curr_work_gray_gpu,
+                            reference_image=ref_work_res_pass2_gpu,
+                            weight_map_sum=_weight_work_gpu,
+                            base_window=_base_window_gpu,
+                            stability_map=None,
+                            row_starts=_rows_gpu,
+                            col_starts=_cols_gpu,
+                            tile_h=tile_h,
+                            tile_w=tile_w,
+                            noise_sigma=ref_noise_sigma,
+                            motion_sensitivity=motion_sensitivity,
+                            noise_offset_factor=noise_offset_factor,
+                            equalize_brightness=False,
+                            buffer_provider="pool",
+                            scratch_cache=spatial_scratch,
+                            search_radius=kwargs.get("similarity_search_radius", 3),
+                            early_exit_threshold=kwargs.get("early_exit_threshold", 0.05),
+                        )
+
+                        curr_work_gray_gpu.destroy()
+
+                        accumulate_spatial_merging_taichi(
+                            current_image_full=curr_full_gpu.view_as_vector(False),
+                            weight_map_work=_weight_work_gpu,
+                            final_image_sum=_sum_gpu.view_as_vector(False),
+                            weight_map_sum_full=_weight_sum_full_gpu,
+                            row_starts=_rows_gpu,
+                            col_starts=_cols_gpu,
+                            tile_h=tile_h,
+                            tile_w=tile_w,
+                            h_full=ref_image_h,
+                            w_full=ref_image_w,
+                            h_work=work_res_h,
+                            w_work=work_res_w,
+                        )
+
+                        curr_full_gpu.destroy()
+                        processed_frames_spatial[0] += 1
+
+                        if update_progress:
+                            prog = int(
+                                pass_merge_range[0]
+                                + ((i + 1) / num_images)
+                                * (pass_merge_range[1] - pass_merge_range[0])
                             )
-                            if use_overall_progress
-                            else f"Spatial Merging: {i+1}/{num_images} (GPU Taichi)"
-                        )
-                        update_progress(prog, msg)
-                    time.sleep(0.01)
+                            msg = (
+                                language_config.IMAGE_PROCESS_IN_PROGRESS.format(
+                                    images_processed_so_far + i + 1, total_overall_images
+                                )
+                                if use_overall_progress
+                                else f"Spatial Merging: {i+1}/{num_images} (GPU Taichi)"
+                            )
+                            update_progress(prog, msg)
+                        time.sleep(0.01)
 
-                # Free chunk RAM instantly
-                del chunk_images
-                if not data_source:
-                    for idx in range(start_idx, end_idx):
-                        images[idx] = None
-                import gc
+                    # Free chunk RAM instantly
+                    del chunk_images
+                    if not data_source:
+                        for idx in range(start_idx, end_idx):
+                            images[idx] = None
+                    import gc
 
-                gc.collect()
+                    gc.collect()
 
             return_raw = kwargs.get("return_raw", False)
             if not return_raw and processed_frames_spatial[0] > 0:
@@ -709,6 +715,7 @@ def process_in_gpu(
             if os.environ.get("PIXEL_REFINE_AOT_CLEAR_AFTER_OP", "0") == "1":
                 taichi_aot.unload_all_modules()
                 engine.buffer_pool.clear()
+            spatial_scratch.clear()
 
     try:
         is_aot = os.environ.get("AOT_MODE", "1") == "1"

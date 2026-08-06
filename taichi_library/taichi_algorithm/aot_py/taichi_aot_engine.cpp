@@ -1,7 +1,11 @@
 #include <cstring>
+#include <cwchar>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <taichi/cpp/taichi.hpp>
 #include <unordered_map>
@@ -16,9 +20,26 @@
 #include <wincodec.h>
 #include <windows.h>
 #include <GL/gl.h>
+#ifndef GLsizeiptr
+typedef ptrdiff_t GLsizeiptr;
+#endif
+#include <glad/egl.h>
+#include <taichi/taichi_opengl.h>
+#include "raw_icd_gl_dispatch.h"
+
+// CUDA-only bridge bundles intentionally do not link Taichi's OpenGL C-API
+// object.  Keep the common bridge source linkable for that profile while
+// returning a deterministic error if a caller tries to select OpenGL on a
+// CUDA-only bundle.  Desktop CPU/Vulkan/OpenGL bridges leave this disabled
+// and resolve the real C-API implementation.
+#if defined(PIXEL_REFINE_AOT_DISABLE_OPENGL_INTEROP)
+extern "C" TiRuntime TI_API_CALL
+ti_import_opengl_runtime(TiOpenglRuntimeInteropInfo *, bool) {
+  return nullptr;
+}
+#endif
 
 #pragma comment(lib, "windowscodecs.lib")
-#pragma comment(lib, "opengl32.lib")
 #else
 #define EXPORT
 #endif
@@ -95,6 +116,8 @@ struct ModuleContext {
   std::mutex cache_mutex;
 };
 
+struct RawIcdContextTag;
+
 struct EngineContext {
   TiArch arch;
   ti::Runtime *runtime;
@@ -108,19 +131,83 @@ struct EngineContext {
   uint64_t session_id;
   std::string device_name;
 #ifdef _WIN32
-  // Taichi 1.7.4 creates a WGL context for its OpenGL runtime. WGL contexts
-  // are thread-affine, while Pixel Refine initializes the runtime on the UI
-  // thread and launches graphs from worker threads. Keep the native handles
-  // so each exported operation can temporarily make the context current.
-  HGLRC gl_context = nullptr;
-  HDC gl_dc = nullptr;
+  // Direct Windows OpenGL ICD mode. This path uses the vendor ICD exports
+  // (DrvCreateContext/DrvSetContext) and never asks the system OpenGL loader
+  // to pick an adapter.
+  bool icd_mode = false;
+  HWND icd_window = nullptr;
+  HDC icd_dc = nullptr;
+  HMODULE icd_module = nullptr;
+  std::string icd_library_path;
+  struct RawIcdContextTag *icd_context = nullptr;
+  BOOL (WINAPI *icdSetPixelFormat)(HDC, int) = nullptr;
+  struct RawIcdContextTag *(WINAPI *icdCreateContext)(HDC) = nullptr;
+  const void *(WINAPI *icdSetContext)(HDC, struct RawIcdContextTag *,
+                                      void (APIENTRY *)(const void *)) = nullptr;
+  BOOL (WINAPI *icdDeleteContext)(struct RawIcdContextTag *) = nullptr;
+  void (WINAPI *icdReleaseContext)(struct RawIcdContextTag *) = nullptr;
+  PROC (WINAPI *icdGetProcAddress)(LPCSTR) = nullptr;
+  const void *icd_table = nullptr;
+  // EGL is the device-selectable, window-system-independent path. It is kept
+  // separate from the direct ICD state so the bridge can make an OpenGL
+  // context current on any worker thread without relying on the desktop
+  // window/display adapter chosen by Windows.
+  bool egl_mode = false;
+  HMODULE egl_module = nullptr;
+  std::string egl_library_path;
+  PFNEGLGETDISPLAYPROC eglGetDisplay = nullptr;
+  PFNEGLGETPROCADDRESSPROC eglGetProcAddress = nullptr;
+  PFNEGLINITIALIZEPROC eglInitialize = nullptr;
+  PFNEGLTERMINATEPROC eglTerminate = nullptr;
+  PFNEGLBINDAPIPROC eglBindAPI = nullptr;
+  PFNEGLCHOOSECONFIGPROC eglChooseConfig = nullptr;
+  PFNEGLCREATEPBUFFERSURFACEPROC eglCreatePbufferSurface = nullptr;
+  PFNEGLDESTROYSURFACEPROC eglDestroySurface = nullptr;
+  PFNEGLCREATECONTEXTPROC eglCreateContext = nullptr;
+  PFNEGLDESTROYCONTEXTPROC eglDestroyContext = nullptr;
+  PFNEGLMAKECURRENTPROC eglMakeCurrent = nullptr;
+  PFNEGLGETCURRENTDISPLAYPROC eglGetCurrentDisplay = nullptr;
+  PFNEGLGETCURRENTSURFACEPROC eglGetCurrentSurface = nullptr;
+  PFNEGLGETCURRENTCONTEXTPROC eglGetCurrentContext = nullptr;
+  PFNEGLGETERRORPROC eglGetError = nullptr;
+  PFNEGLQUERYSTRINGPROC eglQueryString = nullptr;
+  PFNEGLGETPLATFORMDISPLAYPROC eglGetPlatformDisplay = nullptr;
+  PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT = nullptr;
+  PFNEGLQUERYDEVICESEXTPROC eglQueryDevicesEXT = nullptr;
+  PFNEGLQUERYDEVICESTRINGEXTPROC eglQueryDeviceStringEXT = nullptr;
+  EGLDisplay egl_display = EGL_NO_DISPLAY;
+  EGLSurface egl_surface = EGL_NO_SURFACE;
+  EGLContext egl_context = EGL_NO_CONTEXT;
   std::recursive_mutex gl_context_mutex;
 #endif
 };
 
+#ifdef _WIN32
+// The public Windows ICD ABI uses a 336-entry GL 1.1 dispatch table followed
+// by the vendor's modern entry points returned by DrvGetProcAddress.
+struct RawIcdGlcltProcTable {
+  int cEntries;
+  void *dispatch[336];
+};
+static_assert(offsetof(RawIcdGlcltProcTable, dispatch) == sizeof(void *),
+              "Unexpected Windows ICD dispatch table layout");
+struct RawIcdContextTag {};
+using RawIcdSetProcTable = void(APIENTRY *)(const RawIcdGlcltProcTable *);
+static EngineContext *g_raw_icd_context = nullptr;
+
+static void APIENTRY raw_icd_set_proc_table(const RawIcdGlcltProcTable *) {}
+#endif
+
 static std::unordered_set<EngineContext *> engine_contexts;
 static std::mutex engine_contexts_mutex;
 static uint64_t next_session_id = 1;
+static std::mutex init_error_mutex;
+static std::string last_init_error;
+
+static void set_last_init_error(const std::string &message) {
+  std::lock_guard<std::mutex> lock(init_error_mutex);
+  last_init_error = message;
+}
 
 static EngineContext *as_engine(void *runtime) {
   return (EngineContext *)runtime;
@@ -161,27 +248,711 @@ static std::string consume_ti_last_error() {
   return last_error;
 }
 
-static std::string current_opengl_renderer() {
 #ifdef _WIN32
-  // Taichi owns the context. Query only after Runtime construction, on the
-  // same thread, so this reports the physical renderer selected by Windows.
-  const GLubyte *renderer = glGetString(GL_RENDERER);
-  const GLubyte *vendor = glGetString(GL_VENDOR);
-  if (!renderer)
-    return "";
-  std::string name(reinterpret_cast<const char *>(renderer));
-  if (vendor && name.find(reinterpret_cast<const char *>(vendor)) == std::string::npos)
-    name = std::string(reinterpret_cast<const char *>(vendor)) + " - " + name;
-  return name;
+static std::string current_opengl_renderer(EngineContext *ctx);
+
+static std::string lower_ascii(std::string value) {
+  for (char &ch : value)
+    if (ch >= 'A' && ch <= 'Z')
+      ch = static_cast<char>(ch - 'A' + 'a');
+  return value;
+}
+
+static bool text_matches(const std::string &value, const std::string &needle) {
+  return needle.empty() || lower_ascii(value).find(lower_ascii(needle)) !=
+                              std::string::npos;
+}
+
+static const RawIcdGlcltProcTable *raw_icd_table(EngineContext *ctx) {
+  return ctx && ctx->icd_table
+             ? reinterpret_cast<const RawIcdGlcltProcTable *>(ctx->icd_table)
+             : nullptr;
+}
+
+static void *resolve_raw_icd_proc(EngineContext *ctx, const char *name) {
+  if (!ctx || !ctx->icd_mode || !name)
+    return nullptr;
+  if (const auto *table = raw_icd_table(ctx)) {
+    for (std::size_t i = 0; i < kRawIcdGlProcEntryCount; ++i) {
+      if (std::strcmp(table ? kRawIcdGlProcEntries[i].name : "", name) == 0) {
+        const std::size_t index = kRawIcdGlProcEntries[i].index;
+        if (table->cEntries >= 336 && index < 336)
+          return table->dispatch[index];
+      }
+    }
+  }
+  if (ctx->icdGetProcAddress)
+    return reinterpret_cast<void *>(ctx->icdGetProcAddress(name));
+  return nullptr;
+}
+
+static void *APIENTRY raw_icd_get_proc_addr(const char *name) {
+  return resolve_raw_icd_proc(g_raw_icd_context, name);
+}
+
+static void append_registry_icd_candidates(std::vector<std::string> &result) {
+  // Some Windows drivers register an ICD DLL whose filename does not contain
+  // "icd", "ogl", or "opengl". Consult both registry views so those drivers
+  // remain discoverable without relying on opengl32's adapter selection.
+  constexpr const char *kOpenGLDriversKey =
+      "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\OpenGLDrivers";
+  const REGSAM views[] = {KEY_WOW64_64KEY, KEY_WOW64_32KEY};
+  auto append_value = [&](HKEY key, const char *value_name) {
+    DWORD type = 0;
+    DWORD byte_count = 0;
+    if (RegQueryValueExA(key, value_name, nullptr, &type, nullptr,
+                         &byte_count) != ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ) || byte_count == 0 ||
+        byte_count > 32 * 1024)
+      return;
+    std::vector<char> storage(byte_count + 2, '\0');
+    if (RegQueryValueExA(key, value_name, nullptr, &type,
+                         reinterpret_cast<LPBYTE>(storage.data()),
+                         &byte_count) != ERROR_SUCCESS)
+      return;
+    std::string value(storage.data());
+    if (lower_ascii(value).find(".dll") == std::string::npos)
+      return;
+    std::vector<char> expanded(32768, '\0');
+    DWORD expanded_length = ExpandEnvironmentStringsA(
+        value.c_str(), expanded.data(), static_cast<DWORD>(expanded.size()));
+    if (expanded_length > 0 && expanded_length < expanded.size())
+      value.assign(expanded.data(), expanded_length - 1);
+    result.emplace_back(value);
+  };
+  for (REGSAM view : views) {
+    HKEY root = nullptr;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, kOpenGLDriversKey, 0,
+                      KEY_READ | view, &root) != ERROR_SUCCESS)
+      continue;
+    DWORD value_count = 0;
+    DWORD subkey_count = 0;
+    DWORD max_value_name = 0;
+    DWORD max_subkey_name = 0;
+    RegQueryInfoKeyA(root, nullptr, nullptr, nullptr, &subkey_count,
+                     &max_subkey_name, nullptr, &value_count,
+                     &max_value_name, nullptr, nullptr, nullptr);
+    std::vector<char> value_name(max_value_name + 2, '\0');
+    for (DWORD i = 0; i < value_count; ++i) {
+      DWORD name_length = static_cast<DWORD>(value_name.size() - 1);
+      if (RegEnumValueA(root, i, value_name.data(), &name_length, nullptr,
+                        nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
+        value_name[name_length] = '\0';
+        append_value(root, value_name.data());
+      }
+    }
+    std::vector<char> subkey_name(max_subkey_name + 2, '\0');
+    for (DWORD i = 0; i < subkey_count; ++i) {
+      DWORD name_length = static_cast<DWORD>(subkey_name.size() - 1);
+      FILETIME last_write{};
+      if (RegEnumKeyExA(root, i, subkey_name.data(), &name_length, nullptr,
+                        nullptr, nullptr, &last_write) != ERROR_SUCCESS)
+        continue;
+      subkey_name[name_length] = '\0';
+      HKEY child = nullptr;
+      if (RegOpenKeyExA(root, subkey_name.data(), 0, KEY_READ, &child) !=
+          ERROR_SUCCESS)
+        continue;
+      DWORD child_value_count = 0;
+      DWORD child_max_value_name = 0;
+      RegQueryInfoKeyA(child, nullptr, nullptr, nullptr, nullptr, nullptr,
+                       nullptr, &child_value_count, &child_max_value_name,
+                       nullptr, nullptr, nullptr);
+      std::vector<char> child_value_name(child_max_value_name + 2, '\0');
+      for (DWORD j = 0; j < child_value_count; ++j) {
+        DWORD child_name_length =
+            static_cast<DWORD>(child_value_name.size() - 1);
+        if (RegEnumValueA(child, j, child_value_name.data(),
+                          &child_name_length, nullptr, nullptr, nullptr,
+                          nullptr) == ERROR_SUCCESS) {
+          child_value_name[child_name_length] = '\0';
+          append_value(child, child_value_name.data());
+        }
+      }
+      RegCloseKey(child);
+    }
+    RegCloseKey(root);
+  }
+}
+
+static std::vector<std::string> raw_icd_library_candidates() {
+  std::vector<std::string> result;
+  const auto narrow_path = [](const std::wstring &value) {
+    if (value.empty())
+      return std::string();
+    const int length = WideCharToMultiByte(CP_UTF8, 0, value.c_str(),
+                                           static_cast<int>(value.size()),
+                                           nullptr, 0, nullptr, nullptr);
+    std::string output(static_cast<std::size_t>(length), '\0');
+    if (length > 0)
+      WideCharToMultiByte(CP_UTF8, 0, value.c_str(),
+                          static_cast<int>(value.size()), output.data(), length,
+                          nullptr, nullptr);
+    return output;
+  };
+  const char *override_path = std::getenv("PIXEL_REFINE_OPENGL_ICD_LIBRARY");
+  if (override_path && override_path[0] != '\0')
+    result.emplace_back(override_path);
+  const char *override_paths = std::getenv("PIXEL_REFINE_OPENGL_ICD_PATHS");
+  if (override_paths && override_paths[0] != '\0') {
+    std::stringstream list(override_paths);
+    std::string path;
+    while (std::getline(list, path, ';'))
+      if (!path.empty())
+        result.emplace_back(path);
+  }
+  std::vector<std::string> names = {"nvoglv64.dll", "ig11icd64.dll",
+                                   "ig10icd64.dll", "ig9icd64.dll",
+                                   "atio6axx.dll", "atio6axx64.dll"};
+  const char *expected_vendor =
+      std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR");
+  const std::string vendor = lower_ascii(expected_vendor ? expected_vendor : "");
+  if (vendor.find("nvidia") != std::string::npos)
+    names = {"nvoglv64.dll"};
+  else if (vendor.find("intel") != std::string::npos)
+    names = {"ig11icd64.dll", "ig9icd64.dll"};
+  wchar_t system_dir[MAX_PATH] = {};
+  const UINT system_length = GetSystemDirectoryW(system_dir, MAX_PATH);
+  if (system_length > 0 && system_length < MAX_PATH) {
+    for (const auto &name : names) {
+      const std::wstring repository = std::wstring(system_dir, system_length) +
+                                      L"\\DriverStore\\FileRepository\\";
+      const std::wstring pattern = repository + L"*";
+      WIN32_FIND_DATAW data{};
+      HANDLE handle = FindFirstFileW(pattern.c_str(), &data);
+      if (handle != INVALID_HANDLE_VALUE) {
+        do {
+          if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+              std::wcscmp(data.cFileName, L".") != 0 &&
+              std::wcscmp(data.cFileName, L"..") != 0) {
+            const std::wstring path = repository + data.cFileName + L"\\" +
+                                      std::wstring(name.begin(), name.end());
+            if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+              result.emplace_back(narrow_path(path));
+          }
+        } while (FindNextFileW(handle, &data));
+        FindClose(handle);
+      }
+      const std::wstring system_path =
+          std::wstring(system_dir, system_length) + L"\\" +
+          std::wstring(name.begin(), name.end());
+      result.emplace_back(narrow_path(system_path));
+    }
+    // Older Intel packages use ig7/ig8/ig9 names and several third-party
+    // ICDs use a vendor-specific suffix. Enumerate common OpenGL/ICD filename
+    // families as a final vendor-neutral discovery pass. The export checks in
+    // initialize_native_icd() reject ordinary DLLs (including Microsoft's
+    // opengl32.dll) without loading them as a context provider.
+    const std::wstring repository = std::wstring(system_dir, system_length) +
+                                    L"\\DriverStore\\FileRepository\\";
+    WIN32_FIND_DATAW directory_data{};
+    HANDLE directory_handle =
+        FindFirstFileW((repository + L"*").c_str(), &directory_data);
+    if (directory_handle != INVALID_HANDLE_VALUE) {
+      do {
+        if ((directory_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+            std::wcscmp(directory_data.cFileName, L".") == 0 ||
+            std::wcscmp(directory_data.cFileName, L"..") == 0)
+          continue;
+        const std::wstring directory = repository + directory_data.cFileName + L"\\";
+        const std::vector<std::wstring> patterns = {
+            L"*icd*.dll", L"*ogl*.dll", L"*opengl*.dll"};
+        for (const auto &pattern : patterns) {
+          WIN32_FIND_DATAW icd_data{};
+          HANDLE icd_handle =
+              FindFirstFileW((directory + pattern).c_str(), &icd_data);
+          if (icd_handle == INVALID_HANDLE_VALUE)
+            continue;
+          do {
+            if ((icd_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+              const std::wstring path = directory + icd_data.cFileName;
+              result.emplace_back(narrow_path(path));
+            }
+          } while (FindNextFileW(icd_handle, &icd_data));
+          FindClose(icd_handle);
+        }
+      } while (FindNextFileW(directory_handle, &directory_data));
+      FindClose(directory_handle);
+    }
+  }
+  append_registry_icd_candidates(result);
+  return result;
+}
+
+static bool bind_raw_icd_context(EngineContext *ctx) {
+  if (!ctx || !ctx->icd_mode || !ctx->icdSetContext || !ctx->icd_dc ||
+      !ctx->icd_context)
+    return false;
+  auto set_context = reinterpret_cast<const RawIcdGlcltProcTable *(WINAPI *)(
+      HDC, RawIcdContextTag *, RawIcdSetProcTable)>(ctx->icdSetContext);
+  const auto *table = set_context(ctx->icd_dc, ctx->icd_context,
+                                  raw_icd_set_proc_table);
+  if (!table || table->cEntries < 336)
+    return false;
+  ctx->icd_table = table;
+  g_raw_icd_context = ctx;
+  return true;
+}
+
+static void release_native_icd(EngineContext *ctx) {
+  if (!ctx || (!ctx->icd_mode && !ctx->icd_module && !ctx->icd_window))
+    return;
+  if (ctx->icdReleaseContext && ctx->icd_context)
+    ctx->icdReleaseContext(ctx->icd_context);
+  if (ctx->icdDeleteContext && ctx->icd_context)
+    ctx->icdDeleteContext(ctx->icd_context);
+  if (ctx->icd_window && ctx->icd_dc)
+    ReleaseDC(ctx->icd_window, ctx->icd_dc);
+  if (ctx->icd_window)
+    DestroyWindow(ctx->icd_window);
+  if (ctx->icd_module)
+    FreeLibrary(ctx->icd_module);
+  if (g_raw_icd_context == ctx)
+    g_raw_icd_context = nullptr;
+  ctx->icd_mode = false;
+  ctx->icd_window = nullptr;
+  ctx->icd_dc = nullptr;
+  ctx->icd_module = nullptr;
+  ctx->icd_library_path.clear();
+  ctx->icd_context = nullptr;
+  ctx->icd_table = nullptr;
+}
+
+static bool initialize_native_icd(EngineContext *ctx) {
+  if (!ctx)
+    return false;
+  const std::string expected_name =
+      std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_NAME")
+          ? std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_NAME")
+          : "";
+  const std::string expected_vendor =
+      std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR")
+          ? std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR")
+          : "";
+  for (const auto &candidate : raw_icd_library_candidates()) {
+    HMODULE module = LoadLibraryA(candidate.c_str());
+    if (!module)
+      continue;
+    auto set_pixel_format = reinterpret_cast<BOOL(WINAPI *)(HDC, int)>(
+        GetProcAddress(module, "DrvSetPixelFormat"));
+    auto create_context = reinterpret_cast<RawIcdContextTag *(WINAPI *)(HDC)>(
+        GetProcAddress(module, "DrvCreateContext"));
+    auto set_context = reinterpret_cast<const void *(WINAPI *)(
+        HDC, RawIcdContextTag *, void(APIENTRY *)(const void *))>(
+        GetProcAddress(module, "DrvSetContext"));
+    auto delete_context = reinterpret_cast<BOOL(WINAPI *)(RawIcdContextTag *)>(
+        GetProcAddress(module, "DrvDeleteContext"));
+    auto release_context = reinterpret_cast<void(WINAPI *)(RawIcdContextTag *)>(
+        GetProcAddress(module, "DrvReleaseContext"));
+    auto get_proc = reinterpret_cast<PROC(WINAPI *)(LPCSTR)>(
+        GetProcAddress(module, "DrvGetProcAddress"));
+    if (!set_pixel_format || !create_context || !set_context ||
+        !delete_context || !get_proc) {
+      FreeLibrary(module);
+      continue;
+    }
+    HWND window = CreateWindowExA(0, "STATIC", "PixelRefineRawICD", 0, 0, 0,
+                                  1, 1, nullptr, nullptr, GetModuleHandleA(nullptr),
+                                  nullptr);
+    HDC dc = window ? GetDC(window) : nullptr;
+    PIXELFORMATDESCRIPTOR pfd{};
+    pfd.nSize = sizeof(pfd);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+    pfd.cDepthBits = 24;
+    pfd.cStencilBits = 8;
+    pfd.iLayerType = PFD_MAIN_PLANE;
+    const int format = dc ? ChoosePixelFormat(dc, &pfd) : 0;
+    bool ok = dc && format > 0 && SetPixelFormat(dc, format, &pfd) == TRUE &&
+              set_pixel_format(dc, format) == TRUE;
+    RawIcdContextTag *raw_context = ok ? create_context(dc) : nullptr;
+    const auto set_fn = reinterpret_cast<const RawIcdGlcltProcTable *(WINAPI *)(
+        HDC, RawIcdContextTag *, RawIcdSetProcTable)>(set_context);
+    const auto *table = raw_context ? set_fn(dc, raw_context, raw_icd_set_proc_table)
+                                     : nullptr;
+    if (table && table->cEntries >= 336) {
+      ctx->icd_mode = true;
+      ctx->icd_module = module;
+      ctx->icd_library_path = candidate;
+      ctx->icd_window = window;
+      ctx->icd_dc = dc;
+      ctx->icd_context = raw_context;
+      ctx->icdSetPixelFormat = set_pixel_format;
+      ctx->icdCreateContext = create_context;
+      ctx->icdSetContext = set_context;
+      ctx->icdDeleteContext = delete_context;
+      ctx->icdReleaseContext = release_context;
+      ctx->icdGetProcAddress = get_proc;
+      ctx->icd_table = table;
+      g_raw_icd_context = ctx;
+      const std::string renderer = current_opengl_renderer(ctx);
+      const std::string vendor = [&]() {
+        using GetString = const GLubyte *(APIENTRY *)(GLenum);
+        auto fn = reinterpret_cast<GetString>(resolve_raw_icd_proc(ctx, "glGetString"));
+        const GLubyte *value = fn ? fn(GL_VENDOR) : nullptr;
+        return value ? std::string(reinterpret_cast<const char *>(value)) : "";
+      }();
+      if (text_matches(renderer, expected_name) &&
+          text_matches(vendor, expected_vendor)) {
+        std::cout << "[AOTEngine ICD] Native OpenGL ICD context initialized from "
+                  << candidate << " (" << renderer << ")" << std::endl;
+        return true;
+      }
+      release_native_icd(ctx);
+      continue;
+    }
+    if (raw_context)
+      delete_context(raw_context);
+    if (dc && window)
+      ReleaseDC(window, dc);
+    if (window)
+      DestroyWindow(window);
+    FreeLibrary(module);
+  }
+  set_engine_error(ctx, "OpenGL native ICD initialization failed: no matching vendor driver context was created");
+  return false;
+}
+#endif
+
+static std::string current_opengl_renderer(EngineContext *ctx = nullptr) {
+#ifdef _WIN32
+  if (ctx && ctx->icd_mode) {
+    using GetString = const GLubyte *(APIENTRY *)(GLenum);
+    auto fn = reinterpret_cast<GetString>(resolve_raw_icd_proc(ctx, "glGetString"));
+    const GLubyte *renderer = fn ? fn(GL_RENDERER) : nullptr;
+    const GLubyte *vendor = fn ? fn(GL_VENDOR) : nullptr;
+    if (!renderer)
+      return "";
+    std::string name(reinterpret_cast<const char *>(renderer));
+    if (vendor && name.find(reinterpret_cast<const char *>(vendor)) == std::string::npos)
+      name = std::string(reinterpret_cast<const char *>(vendor)) + " - " + name;
+    return name;
+  }
+  if (ctx && ctx->egl_mode && ctx->eglGetProcAddress) {
+    using GetString = const GLubyte *(APIENTRY *)(GLenum);
+    auto get_string = reinterpret_cast<GetString>(ctx->eglGetProcAddress("glGetString"));
+    const GLubyte *renderer = get_string ? get_string(GL_RENDERER) : nullptr;
+    const GLubyte *vendor = get_string ? get_string(GL_VENDOR) : nullptr;
+    if (!renderer)
+      return "";
+    std::string name(reinterpret_cast<const char *>(renderer));
+    if (vendor && name.find(reinterpret_cast<const char *>(vendor)) == std::string::npos)
+      name = std::string(reinterpret_cast<const char *>(vendor)) + " - " + name;
+    return name;
+  }
+  return "";
 #else
   return "";
 #endif
 }
 
-// Serializes an OpenGL runtime and migrates its WGL context to the calling
-// thread for the duration of one bridge operation. The context is detached
-// afterwards so the next UI/worker thread can acquire it. Vulkan and CPU are
-// intentionally no-ops.
+#ifdef _WIN32
+template <typename Proc>
+static Proc load_egl_proc(EngineContext *ctx, const char *name) {
+  if (!ctx || !ctx->egl_module || !name)
+    return nullptr;
+  auto address = GetProcAddress(ctx->egl_module, name);
+  if (!address && ctx->eglGetProcAddress)
+    address = reinterpret_cast<decltype(address)>(
+        ctx->eglGetProcAddress(name));
+  return reinterpret_cast<Proc>(address);
+}
+
+static std::string egl_error_string(EngineContext *ctx,
+                                    const char *operation) {
+  std::ostringstream out;
+  out << operation;
+  if (ctx && ctx->eglGetError) {
+    EGLint error = ctx->eglGetError();
+    out << " (EGL error 0x" << std::hex << error << std::dec << ")";
+  }
+  return out.str();
+}
+
+static void release_native_egl(EngineContext *ctx) {
+  if (!ctx || (!ctx->egl_mode && !ctx->egl_module &&
+               ctx->egl_display == EGL_NO_DISPLAY &&
+               ctx->egl_surface == EGL_NO_SURFACE &&
+               ctx->egl_context == EGL_NO_CONTEXT))
+    return;
+  if (ctx->eglMakeCurrent && ctx->egl_display != EGL_NO_DISPLAY) {
+    ctx->eglMakeCurrent(ctx->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                        EGL_NO_CONTEXT);
+  }
+  if (ctx->eglDestroyContext && ctx->egl_display != EGL_NO_DISPLAY &&
+      ctx->egl_context != EGL_NO_CONTEXT) {
+    ctx->eglDestroyContext(ctx->egl_display, ctx->egl_context);
+  }
+  if (ctx->eglDestroySurface && ctx->egl_display != EGL_NO_DISPLAY &&
+      ctx->egl_surface != EGL_NO_SURFACE) {
+    ctx->eglDestroySurface(ctx->egl_display, ctx->egl_surface);
+  }
+  if (ctx->eglTerminate && ctx->egl_display != EGL_NO_DISPLAY)
+    ctx->eglTerminate(ctx->egl_display);
+  if (ctx->egl_module)
+    FreeLibrary(ctx->egl_module);
+  ctx->egl_module = nullptr;
+  ctx->egl_library_path.clear();
+  ctx->egl_display = EGL_NO_DISPLAY;
+  ctx->egl_surface = EGL_NO_SURFACE;
+  ctx->egl_context = EGL_NO_CONTEXT;
+  ctx->egl_mode = false;
+}
+
+static bool initialize_native_egl(EngineContext *ctx, uint32_t requested_device) {
+  if (!ctx)
+    return false;
+
+  const char *override_path =
+      std::getenv("PIXEL_REFINE_OPENGL_EGL_LIBRARY");
+  std::vector<std::string> library_candidates;
+  if (override_path && override_path[0] != '\0')
+    library_candidates.emplace_back(override_path);
+
+  // Prefer a self-contained provider shipped next to the renderer bridge.
+  // This keeps native EGL selection independent of PATH and of host GUI
+  // libraries.  Companion DLLs are resolved relative to this module by the
+  // Windows loader.
+  HMODULE bridge_module = nullptr;
+  if (GetModuleHandleExA(
+          GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+          reinterpret_cast<LPCSTR>(&initialize_native_egl), &bridge_module)) {
+    char module_path[MAX_PATH] = {};
+    DWORD length = GetModuleFileNameA(bridge_module, module_path,
+                                      static_cast<DWORD>(sizeof(module_path)));
+    if (length > 0 && length < sizeof(module_path)) {
+      std::string directory(module_path, length);
+      const size_t separator = directory.find_last_of("\\/");
+      if (separator != std::string::npos)
+        directory.resize(separator);
+      library_candidates.emplace_back(directory + "\\egl\\libEGL.dll");
+      library_candidates.emplace_back(directory + "\\libEGL.dll");
+    }
+  }
+  library_candidates.emplace_back("libEGL.dll");
+  library_candidates.emplace_back("EGL.dll");
+  for (const auto &candidate : library_candidates) {
+    ctx->egl_module = LoadLibraryA(candidate.c_str());
+    if (ctx->egl_module) {
+      ctx->egl_library_path = candidate;
+      break;
+    }
+  }
+  if (!ctx->egl_module) {
+    set_engine_error(
+        ctx,
+        "OpenGL EGL initialization failed: no vendor libEGL.dll was found; "
+        "native ICD/EGL selection is unavailable");
+    return false;
+  }
+  if (is_debug_logging_enabled())
+    std::cerr << "[AOTEngine EGL] Loaded provider " << ctx->egl_library_path
+              << std::endl;
+
+  ctx->eglGetProcAddress = load_egl_proc<PFNEGLGETPROCADDRESSPROC>(
+      ctx, "eglGetProcAddress");
+  ctx->eglGetError = load_egl_proc<PFNEGLGETERRORPROC>(ctx, "eglGetError");
+  ctx->eglQueryString =
+      load_egl_proc<PFNEGLQUERYSTRINGPROC>(ctx, "eglQueryString");
+  ctx->eglGetDisplay = load_egl_proc<PFNEGLGETDISPLAYPROC>(ctx, "eglGetDisplay");
+  ctx->eglInitialize = load_egl_proc<PFNEGLINITIALIZEPROC>(ctx, "eglInitialize");
+  ctx->eglTerminate = load_egl_proc<PFNEGLTERMINATEPROC>(ctx, "eglTerminate");
+  ctx->eglBindAPI = load_egl_proc<PFNEGLBINDAPIPROC>(ctx, "eglBindAPI");
+  ctx->eglChooseConfig =
+      load_egl_proc<PFNEGLCHOOSECONFIGPROC>(ctx, "eglChooseConfig");
+  ctx->eglCreatePbufferSurface = load_egl_proc<PFNEGLCREATEPBUFFERSURFACEPROC>(
+      ctx, "eglCreatePbufferSurface");
+  ctx->eglDestroySurface =
+      load_egl_proc<PFNEGLDESTROYSURFACEPROC>(ctx, "eglDestroySurface");
+  ctx->eglCreateContext =
+      load_egl_proc<PFNEGLCREATECONTEXTPROC>(ctx, "eglCreateContext");
+  ctx->eglDestroyContext =
+      load_egl_proc<PFNEGLDESTROYCONTEXTPROC>(ctx, "eglDestroyContext");
+  ctx->eglMakeCurrent =
+      load_egl_proc<PFNEGLMAKECURRENTPROC>(ctx, "eglMakeCurrent");
+  ctx->eglGetCurrentDisplay = load_egl_proc<PFNEGLGETCURRENTDISPLAYPROC>(
+      ctx, "eglGetCurrentDisplay");
+  ctx->eglGetCurrentSurface = load_egl_proc<PFNEGLGETCURRENTSURFACEPROC>(
+      ctx, "eglGetCurrentSurface");
+  ctx->eglGetCurrentContext = load_egl_proc<PFNEGLGETCURRENTCONTEXTPROC>(
+      ctx, "eglGetCurrentContext");
+  ctx->eglGetPlatformDisplay =
+      load_egl_proc<PFNEGLGETPLATFORMDISPLAYPROC>(ctx, "eglGetPlatformDisplay");
+  ctx->eglGetPlatformDisplayEXT =
+      load_egl_proc<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+          ctx, "eglGetPlatformDisplayEXT");
+  ctx->eglQueryDevicesEXT =
+      load_egl_proc<PFNEGLQUERYDEVICESEXTPROC>(ctx, "eglQueryDevicesEXT");
+  ctx->eglQueryDeviceStringEXT = load_egl_proc<PFNEGLQUERYDEVICESTRINGEXTPROC>(
+      ctx, "eglQueryDeviceStringEXT");
+
+  if (!ctx->eglGetDisplay || !ctx->eglInitialize || !ctx->eglTerminate ||
+      !ctx->eglBindAPI || !ctx->eglChooseConfig ||
+      !ctx->eglCreatePbufferSurface || !ctx->eglDestroySurface ||
+      !ctx->eglCreateContext || !ctx->eglDestroyContext ||
+      !ctx->eglMakeCurrent) {
+    set_engine_error(ctx, "OpenGL EGL initialization failed: required EGL entry points are missing");
+    release_native_egl(ctx);
+    return false;
+  }
+
+  // ANGLE's libEGL is intentionally not accepted as the native OpenGL
+  // provider.  ANGLE translates OpenGL through D3D/Vulkan and would make the
+  // backend appear device-independent while violating the native-driver
+  // requirement.  It may be enabled explicitly for diagnostics only.
+  if (ctx->eglQueryString) {
+    const char *extensions = ctx->eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+    const char *allow_angle = std::getenv("PIXEL_REFINE_OPENGL_ALLOW_ANGLE");
+    if (extensions && std::strstr(extensions, "EGL_ANGLE") &&
+        (!allow_angle || std::string(allow_angle) != "1")) {
+      set_engine_error(ctx,
+                       "OpenGL EGL provider is ANGLE (translation), not a native vendor EGL implementation");
+      release_native_egl(ctx);
+      return false;
+    }
+  }
+
+  const char *expected_name = std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_NAME");
+  const std::string expected = expected_name ? expected_name : "";
+  EGLDeviceEXT selected_device = nullptr;
+  EGLint device_count = 0;
+  if (ctx->eglQueryDevicesEXT &&
+      (ctx->eglGetPlatformDisplayEXT || ctx->eglGetPlatformDisplay)) {
+    EGLDeviceEXT devices[32] = {};
+    if (ctx->eglQueryDevicesEXT(32, devices, &device_count) == EGL_TRUE &&
+        device_count > 0) {
+      int selected_index = -1;
+      for (EGLint i = 0; i < device_count; ++i) {
+        const char *vendor = ctx->eglQueryDeviceStringEXT
+                                 ? ctx->eglQueryDeviceStringEXT(devices[i], EGL_VENDOR)
+                                 : nullptr;
+        const char *renderer = ctx->eglQueryDeviceStringEXT
+                                   ? ctx->eglQueryDeviceStringEXT(devices[i], EGL_RENDERER_EXT)
+                                   : nullptr;
+        std::string description;
+        if (vendor)
+          description += vendor;
+        if (renderer) {
+          if (!description.empty())
+            description += " - ";
+          description += renderer;
+        }
+        if (is_debug_logging_enabled())
+          std::cerr << "[AOTEngine EGL] device[" << i << "] " << description << std::endl;
+        if (!expected.empty() &&
+            ((vendor && std::string(vendor).find(expected) != std::string::npos) ||
+             (renderer && std::string(renderer).find(expected) != std::string::npos))) {
+          selected_index = i;
+          selected_device = devices[i];
+          break;
+        }
+      }
+      if (!selected_device && expected.empty()) {
+        selected_index = static_cast<int>(requested_device < static_cast<uint32_t>(device_count)
+                                              ? requested_device
+                                              : 0);
+        selected_device = devices[selected_index];
+      }
+      if (!selected_device && !expected.empty()) {
+        set_engine_error(ctx, "OpenGL EGL device enumeration did not expose the requested renderer '" +
+                                  expected + "'");
+        release_native_egl(ctx);
+        return false;
+      }
+      if (selected_device)
+        if (ctx->eglGetPlatformDisplayEXT) {
+          ctx->egl_display = ctx->eglGetPlatformDisplayEXT(
+              EGL_PLATFORM_DEVICE_EXT, selected_device, nullptr);
+        } else {
+          ctx->egl_display = ctx->eglGetPlatformDisplay(
+              EGL_PLATFORM_DEVICE_EXT, selected_device, nullptr);
+        }
+    }
+  }
+  if (ctx->egl_display == EGL_NO_DISPLAY) {
+    if (!expected.empty() && device_count > 0) {
+      set_engine_error(ctx, "OpenGL EGL could not create a display for the requested device '" +
+                                expected + "'");
+      release_native_egl(ctx);
+      return false;
+    }
+    ctx->egl_display = ctx->eglGetDisplay(EGL_DEFAULT_DISPLAY);
+  }
+  if (ctx->egl_display == EGL_NO_DISPLAY) {
+    set_engine_error(ctx, egl_error_string(ctx, "OpenGL EGL eglGetDisplay failed"));
+    release_native_egl(ctx);
+    return false;
+  }
+
+  EGLint major = 0, minor = 0;
+  if (ctx->eglInitialize(ctx->egl_display, &major, &minor) != EGL_TRUE ||
+      ctx->eglBindAPI(EGL_OPENGL_API) != EGL_TRUE) {
+    set_engine_error(ctx, egl_error_string(ctx, "OpenGL EGL display initialization failed"));
+    release_native_egl(ctx);
+    return false;
+  }
+  const EGLint config_attrs[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+                                 EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+                                 EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8,
+                                 EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE};
+  EGLConfig config = nullptr;
+  EGLint config_count = 0;
+  if (ctx->eglChooseConfig(ctx->egl_display, config_attrs, &config, 1,
+                           &config_count) != EGL_TRUE || config_count == 0) {
+    set_engine_error(ctx, egl_error_string(ctx, "OpenGL EGL eglChooseConfig failed"));
+    release_native_egl(ctx);
+    return false;
+  }
+  const EGLint surface_attrs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
+  ctx->egl_surface = ctx->eglCreatePbufferSurface(ctx->egl_display, config,
+                                                   surface_attrs);
+  if (ctx->egl_surface == EGL_NO_SURFACE) {
+    set_engine_error(ctx, egl_error_string(ctx, "OpenGL EGL pbuffer creation failed"));
+    release_native_egl(ctx);
+    return false;
+  }
+  const EGLint context_attrs[] = {EGL_CONTEXT_MAJOR_VERSION_KHR, 4,
+                                  EGL_CONTEXT_MINOR_VERSION_KHR, 3,
+                                  EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR,
+                                  EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR,
+                                  EGL_NONE};
+  ctx->egl_context = ctx->eglCreateContext(ctx->egl_display, config,
+                                            EGL_NO_CONTEXT, context_attrs);
+  if (ctx->egl_context == EGL_NO_CONTEXT) {
+    const EGLint fallback_attrs[] = {EGL_NONE};
+    ctx->egl_context = ctx->eglCreateContext(ctx->egl_display, config,
+                                              EGL_NO_CONTEXT, fallback_attrs);
+  }
+  if (ctx->egl_context == EGL_NO_CONTEXT ||
+      ctx->eglMakeCurrent(ctx->egl_display, ctx->egl_surface, ctx->egl_surface,
+                          ctx->egl_context) != EGL_TRUE) {
+    set_engine_error(ctx, egl_error_string(ctx, "OpenGL EGL context creation/bind failed"));
+    release_native_egl(ctx);
+    return false;
+  }
+  ctx->egl_mode = true;
+  if (!expected.empty()) {
+    const std::string selected_renderer = current_opengl_renderer(ctx);
+    if (selected_renderer.find(expected) == std::string::npos) {
+      set_engine_error(ctx,
+                       "OpenGL EGL selected renderer '" + selected_renderer +
+                           "', not the requested '" + expected + "'");
+      release_native_egl(ctx);
+      return false;
+    }
+  }
+  std::cout << "[AOTEngine EGL] Native EGL context initialized (EGL " << major
+            << "." << minor << ")" << std::endl;
+  return true;
+}
+#endif
+
+// Serializes an OpenGL runtime and migrates its native context to the calling
+// thread for the duration of one bridge operation. Both supported providers
+// (direct ICD and EGL) are window-system independent.
 class ScopedOpenGLContext {
  public:
   explicit ScopedOpenGLContext(EngineContext *ctx) : ctx_(ctx) {
@@ -189,20 +960,41 @@ class ScopedOpenGLContext {
     if (!ctx_ || ctx_->arch != TI_ARCH_OPENGL)
       return;
     lock_ = std::unique_lock<std::recursive_mutex>(ctx_->gl_context_mutex);
-    if (!ctx_->gl_context || !ctx_->gl_dc) {
-      ready_ = false;
-      set_engine_error(ctx_, "OpenGL runtime has no capturable WGL context");
+    if (ctx_->icd_mode) {
+      icd_scope_ = true;
+      ready_ = bind_raw_icd_context(ctx_);
+      if (!ready_)
+        set_engine_error(ctx_, "DrvSetContext failed while binding the native OpenGL ICD to the worker thread");
       return;
     }
-    previous_context_ = wglGetCurrentContext();
-    previous_dc_ = wglGetCurrentDC();
-    if (previous_context_ == ctx_->gl_context) {
-      ready_ = true;
+    if (ctx_->egl_mode) {
+      egl_scope_ = true;
+      if (!ctx_->eglMakeCurrent || !ctx_->eglGetCurrentDisplay ||
+          !ctx_->eglGetCurrentSurface || !ctx_->eglGetCurrentContext ||
+          ctx_->egl_display == EGL_NO_DISPLAY ||
+          ctx_->egl_context == EGL_NO_CONTEXT) {
+        ready_ = false;
+        set_engine_error(ctx_, "OpenGL EGL runtime has no valid native context");
+        return;
+      }
+      previous_egl_display_ = ctx_->eglGetCurrentDisplay();
+      previous_egl_draw_ = ctx_->eglGetCurrentSurface(EGL_DRAW);
+      previous_egl_read_ = ctx_->eglGetCurrentSurface(EGL_READ);
+      previous_egl_context_ = ctx_->eglGetCurrentContext();
+      if (previous_egl_context_ == ctx_->egl_context &&
+          previous_egl_display_ == ctx_->egl_display) {
+        ready_ = true;
+        return;
+      }
+      ready_ = ctx_->eglMakeCurrent(ctx_->egl_display, ctx_->egl_surface,
+                                    ctx_->egl_surface, ctx_->egl_context) == EGL_TRUE;
+      if (!ready_)
+        set_engine_error(ctx_, egl_error_string(ctx_,
+            "eglMakeCurrent failed while binding the OpenGL runtime to the worker thread"));
       return;
     }
-    ready_ = wglMakeCurrent(ctx_->gl_dc, ctx_->gl_context) == TRUE;
-    if (!ready_)
-      set_engine_error(ctx_, "wglMakeCurrent failed while binding the OpenGL runtime to the worker thread");
+    ready_ = false;
+    set_engine_error(ctx_, "OpenGL runtime has no native ICD or EGL context");
 #endif
   }
 
@@ -210,8 +1002,29 @@ class ScopedOpenGLContext {
 #ifdef _WIN32
     if (!ctx_ || ctx_->arch != TI_ARCH_OPENGL || !ready_)
       return;
-    if (previous_context_ != ctx_->gl_context)
-      wglMakeCurrent(previous_dc_, previous_context_);
+    if (egl_scope_) {
+      if (previous_egl_context_ == ctx_->egl_context &&
+          previous_egl_display_ == ctx_->egl_display)
+        return;
+      if (ctx_->eglMakeCurrent) {
+        if (previous_egl_display_ == EGL_NO_DISPLAY ||
+            previous_egl_context_ == EGL_NO_CONTEXT) {
+          ctx_->eglMakeCurrent(EGL_NO_DISPLAY, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                               EGL_NO_CONTEXT);
+        } else {
+          ctx_->eglMakeCurrent(previous_egl_display_, previous_egl_draw_,
+                               previous_egl_read_, previous_egl_context_);
+        }
+      }
+      return;
+    }
+    if (icd_scope_) {
+      // DrvSetContext is re-issued for every worker operation.  Do not call
+      // DrvReleaseContext here: the runtime may issue deferred GL work after
+      // the bridge scope returns, and the context is destroyed only at the
+      // explicit engine teardown boundary.
+      return;
+    }
 #endif
   }
 
@@ -227,8 +1040,12 @@ class ScopedOpenGLContext {
   EngineContext *ctx_ = nullptr;
 #ifdef _WIN32
   std::unique_lock<std::recursive_mutex> lock_;
-  HGLRC previous_context_ = nullptr;
-  HDC previous_dc_ = nullptr;
+  EGLDisplay previous_egl_display_ = EGL_NO_DISPLAY;
+  EGLSurface previous_egl_draw_ = EGL_NO_SURFACE;
+  EGLSurface previous_egl_read_ = EGL_NO_SURFACE;
+  EGLContext previous_egl_context_ = EGL_NO_CONTEXT;
+  bool egl_scope_ = false;
+  bool icd_scope_ = false;
   bool ready_ = true;
 #endif
 };
@@ -237,6 +1054,11 @@ class ScopedOpenGLContext {
 // Runtime & Module Management
 // -----------------------------------------------------------------------
 extern "C" {
+
+EXPORT const char *get_last_init_error() {
+  std::lock_guard<std::mutex> lock(init_error_mutex);
+  return last_init_error.c_str();
+}
 
 EXPORT const char *scan_vulkan_devices() {
   static std::string device_list;
@@ -273,6 +1095,7 @@ EXPORT const char *scan_vulkan_devices() {
 }
 
 EXPORT void *init_aot_engine(int arch_id, int device_id) {
+  set_last_init_error("");
   TiArch arch = TI_ARCH_VULKAN;
   if (arch_id == 1)
     arch = TI_ARCH_CUDA;
@@ -284,17 +1107,93 @@ EXPORT void *init_aot_engine(int arch_id, int device_id) {
     // Use specified device_id
     auto ctx = std::make_unique<EngineContext>();
     ctx->arch = arch;
-    ctx->runtime = new ti::Runtime(arch, (uint32_t)device_id);
     if (arch == TI_ARCH_OPENGL) {
-      ctx->device_name = current_opengl_renderer();
 #ifdef _WIN32
-      ctx->gl_context = wglGetCurrentContext();
-      ctx->gl_dc = wglGetCurrentDC();
-      // Do not leave the context owned by the initialization/UI thread.
-      // ScopedOpenGLContext will bind it around every native operation.
-      if (ctx->gl_context && ctx->gl_dc)
-        wglMakeCurrent(nullptr, nullptr);
+      const char *egl_only = std::getenv("PIXEL_REFINE_OPENGL_EGL_ONLY");
+      const char *context_mode = std::getenv("PIXEL_REFINE_OPENGL_CONTEXT");
+      const char *icd_only = std::getenv("PIXEL_REFINE_OPENGL_ICD_ONLY");
+      const bool strict_icd =
+          (icd_only && std::string(icd_only) == "1") ||
+          (context_mode && std::string(context_mode) == "icd");
+      const bool strict_egl =
+          (egl_only && std::string(egl_only) == "1") ||
+          (context_mode && std::string(context_mode) == "egl");
+      if (context_mode && std::string(context_mode) == "wgl") {
+        set_last_init_error(
+            "OpenGL legacy context mode has been removed; use the native vendor ICD or EGL provider");
+        return nullptr;
+      }
+      if (strict_icd) {
+        if (!initialize_native_icd(ctx.get())) {
+          set_last_init_error(ctx->last_error);
+          return nullptr;
+        }
+      }
+      const bool try_icd_first = !strict_egl && !strict_icd;
+      if (try_icd_first)
+        initialize_native_icd(ctx.get());
+      // Native ICD is preferred on Windows because it selects the vendor
+      // driver directly. EGL remains the second native path for systems that
+      // ship a vendor EGL provider. There is no legacy window-system fallback.
+      if (!strict_icd && !ctx->icd_mode) {
+        if (!initialize_native_egl(ctx.get(), static_cast<uint32_t>(device_id))) {
+          std::cerr << "[AOTEngine EGL] " << ctx->last_error << std::endl;
+          const std::string native_error =
+              "OpenGL native ICD/EGL initialization failed; legacy context providers are not supported. ";
+          set_last_init_error(native_error + ctx->last_error);
+          return nullptr;
+        }
+      }
 #endif
+    }
+    try {
+      // Import the already-current EGL context through Taichi's supported C
+      // interop API.  This is important: merely setting an environment flag
+      // still lets Taichi create a second EGL display/context and can lose the
+      // explicit physical-device selection.  The imported proc-address
+      // callback makes the RHI operate on exactly the context created above.
+#ifdef _WIN32
+      if (arch == TI_ARCH_OPENGL && (ctx->egl_mode || ctx->icd_mode)) {
+        TiOpenglRuntimeInteropInfo interop{};
+        interop.get_proc_addr = ctx->icd_mode
+                                    ? reinterpret_cast<void *>(raw_icd_get_proc_addr)
+                                    : reinterpret_cast<void *>(ctx->eglGetProcAddress);
+        TiRuntime imported = ti_import_opengl_runtime(&interop, false);
+        if (!imported)
+          throw std::runtime_error("ti_import_opengl_runtime returned a null runtime");
+        try {
+          ctx->runtime = new ti::Runtime(arch, imported, true);
+        } catch (...) {
+          ti_destroy_runtime(imported);
+          throw;
+        }
+      } else {
+        ctx->runtime = new ti::Runtime(arch, (uint32_t)device_id);
+      }
+#else
+      ctx->runtime = new ti::Runtime(arch, (uint32_t)device_id);
+#endif
+    } catch (...) {
+#ifdef _WIN32
+      release_native_egl(ctx.get());
+      release_native_icd(ctx.get());
+#endif
+      throw;
+    }
+    if (arch == TI_ARCH_OPENGL) {
+#ifdef _WIN32
+      if (ctx->icd_mode) {
+        ctx->device_name = current_opengl_renderer(ctx.get());
+      } else if (ctx->egl_mode) {
+        ctx->device_name = current_opengl_renderer(ctx.get());
+        // Do not leave the context owned by the initialization/UI thread.
+        // ScopedOpenGLContext will bind it around every native operation.
+        ctx->eglMakeCurrent(EGL_NO_DISPLAY, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                            EGL_NO_CONTEXT);
+#else
+      ctx->device_name = current_opengl_renderer();
+#endif
+    }
     }
     ctx->destroying = false;
     ctx->session_id = next_session_id++;
@@ -335,6 +1234,26 @@ EXPORT const char *get_runtime_device_name(void *runtime) {
     return "";
   std::lock_guard<std::mutex> lock(ctx->mutex);
   return ctx->device_name.c_str();
+}
+
+EXPORT const char *get_runtime_context_backend(void *runtime) {
+  EngineContext *ctx = as_engine(runtime);
+  static thread_local std::string backend;
+  if (!ctx || ctx->arch != TI_ARCH_OPENGL) {
+    backend.clear();
+    return backend.c_str();
+  }
+#ifdef _WIN32
+  // Legacy window-system contexts are intentionally not supported in the
+  // native bridge. Keep the diagnostic value explicit when initialization did
+  // not establish an ICD/EGL provider instead of reporting a backend that is
+  // never actually used.
+  backend = ctx->icd_mode ? "ICD"
+                          : (ctx->egl_mode ? "EGL" : "native-unavailable");
+#else
+  backend = "native";
+#endif
+  return backend.c_str();
 }
 
 EXPORT const char *get_last_engine_error(void *runtime) {
@@ -524,6 +1443,10 @@ EXPORT void destroy_aot_engine(void *runtime) {
   } catch (...) {
   }
   ctx->runtime = nullptr;
+#ifdef _WIN32
+  release_native_egl(ctx);
+  release_native_icd(ctx);
+#endif
   delete ctx;
 }
 

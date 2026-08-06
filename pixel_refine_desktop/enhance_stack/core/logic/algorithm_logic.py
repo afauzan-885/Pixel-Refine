@@ -5,6 +5,7 @@ Separated dari UI untuk better maintainability dan testability.
 """
 
 from typing import Dict, List, Optional
+import config
 
 # Backend logic helper
 from pixel_refine_desktop.enhance_stack.models.algorithm_list import (
@@ -28,9 +29,12 @@ class AlgorithmLogic:
     def __init__(self):
         """Initialize algorithm logic."""
         self.settings: Dict[str, Optional[str]] = {
-            "alignment": None,
-            "super_resolution": None,
-            "denoising": None,
+            config.KEY_ALIGNMENT: None,
+            config.KEY_SUPER_RESOLUTION: None,
+            config.KEY_DENOISING: None,
+            config.KEY_CHECKBOX_ALIGN: False,
+            config.KEY_CHECKBOX_SUPER_RES: False,
+            config.KEY_CHECKBOX_DENOISING: False,
         }
         self.algorithm_names = {
             "alignment": [],
@@ -106,6 +110,13 @@ class AlgorithmLogic:
         try:
             for key, value in settings.items():
                 if key in self.settings:
+                    if key in (
+                        config.KEY_CHECKBOX_ALIGN,
+                        config.KEY_CHECKBOX_SUPER_RES,
+                        config.KEY_CHECKBOX_DENOISING,
+                    ):
+                        self.settings[key] = bool(value)
+                        continue
                     # Robust check: allow None or "None" variants
                     if value is None or str(value).strip().lower() in ["none", ""]:
                         self.settings[key] = None  # Normalize to None

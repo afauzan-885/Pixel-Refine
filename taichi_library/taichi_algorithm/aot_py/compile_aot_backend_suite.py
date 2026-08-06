@@ -55,6 +55,7 @@ JOBS = {
     "bm3d": ("compile_bm3d_tcm", "compile_bm3d_aot", "path", ()),
     "box_filter": ("compile_box_filter_tcm", "compile_box_filter_aot", "path", ()),
     "common": ("compile_common_tcm", "compile_common_aot", "path", ()),
+    "dcb": ("compile_dcb_tcm", "compile_dcb_tcm", "path", ()),
     "farneback_flow": (
         "compile_farneback_tcm",
         "compile_farneback_flow",
@@ -65,6 +66,12 @@ JOBS = {
     "gaussian": ("compile_gaussian_tcm", "compile_gaussian_tcm", "environment", ()),
     "gradients": ("compile_gradients_tcm", "compile_gradients_aot", "path", ()),
     "hamilton": ("compile_hamilton_tcm", "compile_hamilton_tcm", "path", ()),
+    "highlight_recovery": (
+        "compile_highlight_recovery_tcm",
+        "compile_highlight_recovery_tcm",
+        "path",
+        (),
+    ),
     "horn_schunck": (
         "compile_horn_schunck_tcm",
         "compile_horn_schunck_flow",
@@ -99,9 +106,37 @@ JOBS = {
     ),
 }
 
+# A backend is not a complete artifact identity.  These explicit profiles
+# keep CPU bitcode, mobile GLES archives, and vendor-specific desktop archives
+# in separate directories while preserving the historical ``--backend`` CLI.
+TARGET_BACKENDS = {
+    "cpu_x86_64_windows": "cpu",
+    "cpu_x86_64_linux": "cpu",
+    "cpu_arm64_linux": "cpu",
+    "cpu_arm64_android": "cpu",
+    "vulkan_x86_64_windows": "vulkan",
+    "vulkan_x86_64_windows_nvidia": "vulkan",
+    "vulkan_x86_64_windows_intel": "vulkan",
+    "vulkan_arm64_android": "vulkan",
+    "opengl_x86_64_windows": "opengl",
+    "opengl_x86_64_windows_nvidia": "opengl",
+    "opengl_x86_64_windows_intel": "opengl",
+    "opengl_arm64_linux": "opengl",
+    "gles_arm64_android": "opengl",
+    "gles_arm64_linux": "opengl",
+    "cuda_x86_64_windows_nvidia": "cuda",
+    "cuda_arm64_linux_nvidia": "cuda",
+}
+
 
 def _artifact_path(name: str, backend: str) -> Path:
     return ARTIFACT_DIR / f"{name}_{backend}.tcm"
+
+
+def _target_artifact_path(name: str, target_id: str) -> Path:
+    directory = ARTIFACT_DIR / target_id
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{name}_{target_id}.tcm"
 
 
 def _require_backend_artifact(path: Path, backend: str) -> None:
@@ -124,16 +159,16 @@ def _require_backend_artifact(path: Path, backend: str) -> None:
         raise RuntimeError(f"{path.name} is not a {backend} GFX AOT artifact")
 
 
-def _run_worker(backend: str, name: str) -> None:
+def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
     module_name, function_name, convention, aliases = JOBS[name]
     import taichi as ti
 
     # Compile each target with its actual Taichi architecture.  The worker uses
     # the rebuilt wheel, whose GLFW path can create the hidden native context.
-    arch = {"cpu": ti.cpu, "vulkan": ti.vulkan, "opengl": ti.opengl}[backend]
+    arch = {"cpu": ti.cpu, "vulkan": ti.vulkan, "opengl": ti.opengl, "cuda": ti.cuda}[backend]
     module = importlib.import_module(f"{PACKAGE}.{module_name}")
     compiler = getattr(module, function_name)
-    target = _artifact_path(name, backend)
+    target = _target_artifact_path(name, target_id) if target_id else _artifact_path(name, backend)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
     if convention == "path":
@@ -157,33 +192,62 @@ def _run_worker(backend: str, name: str) -> None:
         try:
             compiler(arch=arch, out_dir=str(staging_dir))
             for candidate in (name, *aliases):
-                staged = _artifact_path(candidate, backend)
-                # out_dir compilers write relative to the supplied directory.
-                staged = staging_dir / staged.name
-                if not staged.is_file():
-                    raise RuntimeError(f"compiler did not create staging artifact: {staged.name}")
+                target_path = (
+                    _target_artifact_path(candidate, target_id)
+                    if target_id else _artifact_path(candidate, backend)
+                )
+                # out_dir compilers emit the historical ``*_cuda.tcm`` (or
+                # ``*_vulkan.tcm``) name. Accept that producer name, then
+                # promote it to the target-qualified path. Older code only
+                # looked for the final name inside staging and incorrectly
+                # rejected otherwise valid CUDA flow artifacts.
+                candidates = (
+                    staging_dir / target_path.name,
+                    staging_dir / f"{candidate}_{backend}.tcm",
+                    staging_dir / f"{candidate}.tcm",
+                )
+                staged = next((item for item in candidates if item.is_file()), None)
+                if staged is None:
+                    raise RuntimeError(
+                        "compiler did not create staging artifact: "
+                        + ", ".join(item.name for item in candidates)
+                    )
                 _require_backend_artifact(staged, backend)
                 normalize_tcm(staged)
-                os.replace(staged, _artifact_path(candidate, backend))
+                os.replace(staged, target_path)
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
     elif convention == "environment":
         os.environ["PIXEL_REFINE_AOT_ARCH"] = backend
         compiler()
+        if target_id:
+            # Environment-style producers save beside the suite by design.
+            # Move the validated legacy name into the exact target directory
+            # before the common postcondition check below.
+            legacy = _artifact_path(name, backend)
+            target = _target_artifact_path(name, target_id)
+            if legacy.is_file() and legacy.resolve() != target.resolve():
+                _require_backend_artifact(legacy, backend)
+                normalize_tcm(legacy)
+                os.replace(legacy, target)
     else:  # pragma: no cover - registry invariant
         raise RuntimeError(f"unknown convention {convention!r}")
 
     expected = (name, *aliases)
-    missing = [candidate for candidate in expected if not _artifact_path(candidate, backend).is_file()]
+    missing = [
+        candidate
+        for candidate in expected
+        if not ( _target_artifact_path(candidate, target_id) if target_id else _artifact_path(candidate, backend) ).is_file()
+    ]
     if missing:
         raise RuntimeError(f"compiler did not create: {', '.join(missing)}")
     for candidate in expected:
-        artifact = _artifact_path(candidate, backend)
+        artifact = _target_artifact_path(candidate, target_id) if target_id else _artifact_path(candidate, backend)
         _require_backend_artifact(artifact, backend)
         normalize_tcm(artifact)
 
 
-def _run_subprocess(backend: str, name: str, timeout: float = 900.0) -> tuple[bool, str]:
+def _run_subprocess(backend: str, name: str, target_id: str | None = None, timeout: float = 900.0) -> tuple[bool, str]:
     env = os.environ.copy()
     env.update(
         {
@@ -199,6 +263,13 @@ def _run_subprocess(backend: str, name: str, timeout: float = 900.0) -> tuple[bo
             "PIXEL_REFINE_AOT_COMPILE_ONLY": "1",
         }
     )
+    if target_id:
+        env.update(
+            {
+                "PIXEL_REFINE_TARGET_BACKEND": backend,
+                "PIXEL_REFINE_TARGET_VARIANT": target_id,
+            }
+        )
     existing_pythonpath = env.get("PYTHONPATH", "")
     # Use the interpreter's installed custom wheel.  Prepending the historical
     # build/pr-vk-python tree silently selected an older Taichi binary and made
@@ -208,7 +279,8 @@ def _run_subprocess(backend: str, name: str, timeout: float = 900.0) -> tuple[bo
     )
     try:
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()), "--backend", backend, "--worker", name],
+            [sys.executable, str(Path(__file__).resolve()), "--backend", backend, "--worker", name]
+            + (["--target", target_id] if target_id else []),
             cwd=PROJECT_ROOT,
             text=True,
             capture_output=True,
@@ -224,7 +296,8 @@ def _run_subprocess(backend: str, name: str, timeout: float = 900.0) -> tuple[bo
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", choices=("cpu", "vulkan", "opengl"), required=True)
+    parser.add_argument("--backend", choices=("cpu", "vulkan", "opengl", "cuda"))
+    parser.add_argument("--target", choices=tuple(sorted(TARGET_BACKENDS)), help="exact architecture/OS/vendor artifact profile")
     parser.add_argument("--only", help="comma-separated artifact names")
     parser.add_argument("--force", action="store_true", help="recompile existing artifacts")
     parser.add_argument(
@@ -235,8 +308,23 @@ def main() -> None:
     parser.add_argument("--worker", choices=tuple(sorted(JOBS)), help=argparse.SUPPRESS)
     args = parser.parse_args()
 
+    if args.target:
+        target_backend = TARGET_BACKENDS[args.target]
+        if args.backend and args.backend != target_backend:
+            parser.error(f"target {args.target} requires --backend {target_backend}")
+        args.backend = target_backend
+    if not args.backend:
+        parser.error("--backend or --target is required")
+
+    # CPU/CUDA archives contain host-architecture code.  Never label an x86
+    # compile as ARM merely because a filename was requested.
+    if args.target and args.target.startswith(("cpu_arm64", "cuda_arm64")):
+        host = os.environ.get("PROCESSOR_ARCHITECTURE", "").lower()
+        if host not in {"arm64", "aarch64"} and not os.environ.get("PIXEL_REFINE_ALLOW_CROSS_CPU_AOT"):
+            parser.error("ARM CPU/CUDA AOT requires an ARM64 worker or an explicit cross-compiler profile")
+
     if args.worker:
-        _run_worker(args.backend, args.worker)
+        _run_worker(args.backend, args.worker, args.target)
         return
 
     requested = tuple(args.only.split(",")) if args.only else tuple(sorted(JOBS))
@@ -246,11 +334,11 @@ def main() -> None:
 
     outcomes: list[tuple[str, str]] = []
     for name in requested:
-        artifact = _artifact_path(name, args.backend)
+        artifact = _target_artifact_path(name, args.target) if args.target else _artifact_path(name, args.backend)
         if artifact.is_file() and not args.force:
             outcomes.append((name, "SKIP existing"))
             continue
-        ok, output = _run_subprocess(args.backend, name, timeout=args.timeout)
+        ok, output = _run_subprocess(args.backend, name, args.target, timeout=args.timeout)
         outcomes.append((name, "PASS" if ok else f"FAIL\n{output}"))
 
     for name, outcome in outcomes:

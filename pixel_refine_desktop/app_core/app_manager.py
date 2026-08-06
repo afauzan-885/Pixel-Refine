@@ -70,7 +70,6 @@ class ApplicationManager:
             DatabaseManager instance
         """
         self.database_manager = DatabaseManager(db_path)
-        self.database_manager.create_database()
         return self.database_manager
 
     def setup_animator(self) -> StackedWidgetAnimator:

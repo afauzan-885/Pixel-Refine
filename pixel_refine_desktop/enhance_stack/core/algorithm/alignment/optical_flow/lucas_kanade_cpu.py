@@ -271,26 +271,19 @@ class LucasKanadeCPU:
             1, min(int(config.get("point_workers", 2)), os.cpu_count() or 4)
         )
 
-        def compute_aligned(index, path, tile_executor, point_executor):
+        def compute_aligned(index, path, frame, tile_executor, point_executor):
             if ctx.stop_requested and ctx.stop_requested():
                 return index, path, None
-            if index == 0:
-                return index, path, np.array(reference, copy=True)
-
-            frame = orchestrator._load_single_frame(ctx, path, target_dims=target_dims)
             if frame is None:
                 return index, path, None
-            try:
-                aligned = self.align_frame(
-                    reference,
-                    frame,
-                    config=config,
-                    stop_requested=ctx.stop_requested,
-                    tile_executor=tile_executor,
-                    point_executor=point_executor,
-                )
-            finally:
-                del frame
+            aligned = self.align_frame(
+                reference,
+                frame,
+                config=config,
+                stop_requested=ctx.stop_requested,
+                tile_executor=tile_executor,
+                point_executor=point_executor,
+            )
             return index, path, aligned
 
         saved_count = 0
@@ -306,78 +299,179 @@ class LucasKanadeCPU:
             )
 
             paths = list(ctx.image_paths)
-            with ThreadPoolExecutor(max_workers=1) as frame_executor:
-                with ThreadPoolExecutor(max_workers=1) as writer_executor:
-                    with ThreadPoolExecutor(max_workers=tile_workers) as tile_executor:
-                        with ThreadPoolExecutor(
-                            max_workers=point_workers
-                        ) as point_executor:
+            from pixel_refine_desktop.ui.views.settings.General.Language import (
+                language_config,
+            )
+            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+                setup_balanced_batching,
+            )
+            compute_batch_size = max(
+                1, int(getattr(ctx, "params", {}).get("batch_size", 8))
+            )
+            write_batch_size = max(
+                1, int(getattr(ctx, "params", {}).get("h5_write_batch_size", 4))
+            )
+            # Index 0 is an immutable reference and is persisted once.  Every
+            # compute batch contains only target frames, so batch_size=8 means
+            # eight comparison images are held ready for the GPU pipeline.
+            compute_plan = list(getattr(ctx, "batch_plan", []) or [])
+            if not compute_plan:
+                comparison_plan = setup_balanced_batching(
+                    paths[1:],
+                    language_config,
+                    max_batch_size=compute_batch_size,
+                )
+                compute_plan = [
+                    (start + 1, end + 1) for start, end in comparison_plan
+                ]
 
-                            def write_job(idx, r_path, img):
+            save_to_hdf5(
+                h5f,
+                "image_0",
+                np.array(reference, copy=True),
+                extract_exif(paths[0]),
+            )
+            h5f.flush()
+            saved_count = 1
+            print(
+                "[LucasKanadeCPU] saved persistent reference image_0 "
+                f"shape={reference.shape} dtype={reference.dtype}"
+            )
+
+            def acquire_compute_batch(compute_start, compute_end):
+                """Reuse MFDenoiser's resident RAM batch when it is available."""
+                active_start = getattr(ctx, "alignment_prefetch_start", -1)
+                active_end = getattr(ctx, "alignment_prefetch_end", -1)
+                batch_paths = paths[compute_start:compute_end]
+                if (
+                    active_start == compute_start
+                    and active_end == compute_end
+                    and getattr(ctx, "alignment_prefetch_frames", None)
+                ):
+                    batch_frames = [
+                        ctx.alignment_prefetch_frames.get(path)
+                        for path in batch_paths
+                    ]
+                    ctx.alignment_prefetch_frames.clear()
+                    ctx.alignment_prefetch_start = -1
+                    ctx.alignment_prefetch_end = -1
+                    print(
+                        f"[LucasKanadeCPU][Batch] reused prefetched resident batch "
+                        f"indices={compute_start}:{compute_end} "
+                        f"frames={len(batch_frames)}"
+                    )
+                    return batch_paths, batch_frames
+
+                job = orchestrator._load_alignment_batch(
+                    ctx, (compute_start, compute_end)
+                )
+                return list(job.paths), list(job.frames)
+
+            with ThreadPoolExecutor(max_workers=1) as writer_executor:
+                with ThreadPoolExecutor(max_workers=tile_workers) as tile_executor:
+                    with ThreadPoolExecutor(
+                        max_workers=point_workers
+                    ) as point_executor:
+
+                        def write_job(records):
+                            for idx, r_path, img in records:
                                 save_to_hdf5(
                                     h5f,
                                     f"image_{idx}",
                                     img,
                                     extract_exif(r_path),
                                 )
-                                h5f.flush()
                                 print(
-                                    f"[LucasKanadeCPU] saved image_{idx} shape={img.shape} dtype={img.dtype}"
+                                    f"[LucasKanadeCPU] saved image_{idx} "
+                                    f"shape={img.shape} dtype={img.dtype}"
                                 )
-                                del img
+                            h5f.flush()
 
-                            future = None
-                            for index, path in enumerate(paths):
-                                if future is None:
-                                    future = frame_executor.submit(
-                                        compute_aligned,
-                                        index,
-                                        path,
-                                        tile_executor,
-                                        point_executor,
-                                    )
+                        pending_writes = []
+                        for compute_start, compute_end in compute_plan:
+                            if ctx.stop_requested and ctx.stop_requested():
+                                break
 
-                                result_index, result_path, aligned = future.result()
-                                next_index = index + 1
-                                if next_index < len(paths) and not (
-                                    ctx.stop_requested and ctx.stop_requested()
-                                ):
-                                    future = frame_executor.submit(
-                                        compute_aligned,
-                                        next_index,
-                                        paths[next_index],
-                                        tile_executor,
-                                        point_executor,
-                                    )
-                                else:
-                                    future = None
-
+                            batch_paths, batch_frames = acquire_compute_batch(
+                                compute_start, compute_end
+                            )
+                            print(
+                                f"[LucasKanadeCPU][Batch] compute job "
+                                f"indices={compute_start}:{compute_end} "
+                                f"resident_frames={len(batch_frames)} "
+                                f"write_batch_size={write_batch_size}"
+                            )
+                            write_buffer = []
+                            for offset, (path, frame) in enumerate(
+                                zip(batch_paths, batch_frames)
+                            ):
                                 if ctx.stop_requested and ctx.stop_requested():
                                     break
+                                index = compute_start + offset
+                                result_index, result_path, aligned = compute_aligned(
+                                    index,
+                                    path,
+                                    frame,
+                                    tile_executor,
+                                    point_executor,
+                                )
+                                # The source is no longer needed once remap has
+                                # completed; retain only the aligned result until
+                                # the next HDF5 write batch is dispatched.
+                                batch_frames[offset] = None
+                                del frame
                                 if aligned is None:
                                     continue
 
-                                writer_executor.submit(
-                                    write_job,
-                                    result_index,
-                                    result_path,
-                                    aligned,
+                                write_buffer.append(
+                                    (result_index, result_path, aligned)
                                 )
                                 saved_count += 1
-
-                                if saved_count % 4 == 0:
-                                    gc.collect()
+                                if len(write_buffer) >= write_batch_size:
+                                    pending_writes.append(
+                                        writer_executor.submit(
+                                            write_job, write_buffer
+                                        )
+                                    )
+                                    write_buffer = []
+                                    # One active write plus one queued batch is
+                                    # enough to overlap disk I/O with GPU work
+                                    # without retaining unbounded full-res data.
+                                    if len(pending_writes) >= 2:
+                                        pending_writes.pop(0).result()
 
                                 if ctx.update_progress:
                                     progress = 25 + int(
                                         ((result_index + 1) / max(1, ctx.total_images))
                                         * 65
                                     )
-                                    from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-                                    msg = getattr(language_config, "PROGRESS_ALIGN", "Align: {}/{}").format(
+                                    msg = getattr(
+                                        language_config,
+                                        "PROGRESS_ALIGN",
+                                        "Align: {}/{}",
+                                    ).format(
                                         result_index + 1, ctx.total_images
                                     )
                                     ctx.update_progress(progress, msg)
+
+                            if write_buffer:
+                                pending_writes.append(
+                                    writer_executor.submit(write_job, write_buffer)
+                                )
+                            batch_frames.clear()
+                            batch_paths.clear()
+                            gc.collect()
+
+                            if len(pending_writes) >= 2:
+                                pending_writes.pop(0).result()
+
+                        for write_future in pending_writes:
+                            write_future.result()
+                        print(
+                            f"[LucasKanadeCPU] compute_batch_size={compute_batch_size} "
+                            f"h5_write_batch_size={write_batch_size} "
+                            f"compute_batches={len(compute_plan)}"
+                        )
 
         ctx.aligned_frames = []
         ctx.frames = []

@@ -683,6 +683,43 @@ if __name__ == "__main__":
 # -------------------------------------------------------------------------
 # AOT Runtime Wrappers
 # -------------------------------------------------------------------------
+class SpatialScratchCache:
+    """Reusable per-batch GPU scratch buffers for spatial analysis.
+
+    The spatial algorithm is sequential per frame, so a scratch slot can be
+    safely overwritten after the previous dispatch has completed.  Slots are
+    keyed by purpose and shape; a resolution change transparently replaces
+    only the incompatible slot.
+    """
+
+    def __init__(self):
+        self._slots = {}
+        self.reference_token = None
+
+    def acquire(self, engine, name, shape, dtype=np.float32, **kwargs):
+        shape = tuple(int(v) for v in shape)
+        buf = self._slots.get(name)
+        if buf is not None and tuple(buf.shape) == shape:
+            return buf
+        if buf is not None:
+            try:
+                buf.destroy()
+            except Exception:
+                pass
+        buf = engine.allocate(shape, dtype=dtype, **kwargs)
+        self._slots[name] = buf
+        return buf
+
+    def clear(self):
+        for buf in self._slots.values():
+            try:
+                buf.destroy()
+            except Exception:
+                pass
+        self._slots.clear()
+        self.reference_token = None
+
+
 def generate_spatial_weights_taichi(
     current_image,
     reference_image,
@@ -705,6 +742,16 @@ def generate_spatial_weights_taichi(
     """
     import taichi_library.taichi_aot as taichi_aot
     engine = taichi_aot.engine
+    scratch = kwargs.get("scratch_cache")
+
+    def _alloc(name, shape, dtype=np.float32, **alloc_kwargs):
+        if scratch is not None:
+            return scratch.acquire(engine, name, shape, dtype=dtype, **alloc_kwargs)
+        return engine.allocate(shape, dtype=dtype, **alloc_kwargs)
+
+    def _destroy(buf):
+        if scratch is None and buf is not None:
+            buf.destroy()
 
     # Load Module
     file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -733,13 +780,59 @@ def generate_spatial_weights_taichi(
         t_prev = 0.0
 
     h, w = current_image.shape[0], current_image.shape[1]
+    coarse_texture_boost = float(kwargs.get("coarse_texture_boost", 0.30))
+    coarse_texture_radius = float(kwargs.get("coarse_texture_radius", 10.0))
+    reference_token = (
+        getattr(reference_image, "handle", id(reference_image)),
+        int(h),
+        int(w),
+        round(coarse_texture_boost, 6),
+        round(coarse_texture_radius, 6),
+    )
+    reference_cache_names = ["ref_l1", "ref_l2"]
+    if coarse_texture_boost > 1e-6:
+        reference_cache_names.append("ref_texture_boost")
+    reuse_reference = (
+        scratch is not None
+        and scratch.reference_token == reference_token
+        and all(name in scratch._slots for name in reference_cache_names)
+    )
 
-    # 2. Brightness Equalization (Optional)
-    analysis_input = current_image
+    # 2. Coarse texture boost for analysis only.  This never modifies the
+    # source RGB frame or the output merge; it only improves texture evidence
+    # used by the weight-map kernels.  The invariant reference result is
+    # cached for the complete batch.
+    curr_texture_boost = None
+    if coarse_texture_boost > 1e-6:
+        curr_texture_boost = _alloc("curr_texture_boost", (h, w), dtype=np.float32)
+        taichi_aot.coarse_texture_boost_gpu(
+            current_image,
+            texture_amount=coarse_texture_boost,
+            radius=coarse_texture_radius,
+            dst=curr_texture_boost,
+        )
+
+        if reuse_reference:
+            ref_texture_boost = scratch._slots["ref_texture_boost"]
+        else:
+            ref_texture_boost = _alloc("ref_texture_boost", (h, w), dtype=np.float32)
+            taichi_aot.coarse_texture_boost_gpu(
+                reference_image,
+                texture_amount=coarse_texture_boost,
+                radius=coarse_texture_radius,
+                dst=ref_texture_boost,
+            )
+    else:
+        curr_texture_boost = current_image
+        ref_texture_boost = reference_image
+
+    # 3. Brightness Equalization (Optional)
+    analysis_input = curr_texture_boost
+    analysis_reference = ref_texture_boost
     eq_temp = None
     if equalize_brightness:
-        eq_temp = engine.allocate((h, w), dtype=np.float32)
-        mod.run("equalize_brightness", src=current_image, ref=reference_image, dst=eq_temp, h=int(h), w=int(w))
+        eq_temp = _alloc("equalize", (h, w), dtype=np.float32)
+        mod.run("equalize_brightness", src=analysis_input, ref=analysis_reference, dst=eq_temp, h=int(h), w=int(w))
         analysis_input = eq_temp
 
     if profile_hotspots:
@@ -747,15 +840,23 @@ def generate_spatial_weights_taichi(
         hotspots["2. Brightness Equalization"] = (time.perf_counter() - t_prev) * 1000
         t_prev = time.perf_counter()
 
-    # 3. Phase 1: Coarse Analysis for Guidance Map (Level 2: 1/4 Resolution)
+    # 4. Phase 1: Coarse Analysis for Guidance Map (Level 2: 1/4 Resolution)
     # Downscale in two steps (L0 -> L1 -> L2) to prevent aliasing
     curr_l0 = analysis_input
-    curr_l1 = taichi_aot.resize(curr_l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
-    curr_l2 = taichi_aot.resize(curr_l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+    curr_l1 = taichi_aot.resize(curr_l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True,
+                                 dst=_alloc("curr_l1", (h // 2, w // 2)))
+    curr_l2 = taichi_aot.resize(curr_l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True,
+                                 dst=_alloc("curr_l2", (h // 4, w // 4)))
 
-    ref_l0 = reference_image
-    ref_l1 = taichi_aot.resize(ref_l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
-    ref_l2 = taichi_aot.resize(ref_l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+    if reuse_reference:
+        ref_l1 = scratch._slots["ref_l1"]
+        ref_l2 = scratch._slots["ref_l2"]
+    else:
+        ref_l0 = analysis_reference
+        ref_l1 = taichi_aot.resize(ref_l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True,
+                                   dst=_alloc("ref_l1", (h // 2, w // 2)))
+        ref_l2 = taichi_aot.resize(ref_l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True,
+                                   dst=_alloc("ref_l2", (h // 4, w // 4)))
 
     if profile_hotspots:
         engine.sync()
@@ -777,19 +878,23 @@ def generate_spatial_weights_taichi(
         h_level, w_level = curr_level.shape[0], curr_level.shape[1]
 
         # Allocate coarse gradients
-        curr_coarse_grad_x = engine.allocate((h_level, w_level), dtype=np.float32)
-        curr_coarse_grad_y = engine.allocate((h_level, w_level), dtype=np.float32)
-        ref_coarse_grad_x = engine.allocate((h_level, w_level), dtype=np.float32)
-        ref_coarse_grad_y = engine.allocate((h_level, w_level), dtype=np.float32)
+        curr_coarse_grad_x = _alloc("curr_coarse_grad_x", (h_level, w_level))
+        curr_coarse_grad_y = _alloc("curr_coarse_grad_y", (h_level, w_level))
+        ref_coarse_grad_x = _alloc("ref_coarse_grad_x", (h_level, w_level))
+        ref_coarse_grad_y = _alloc("ref_coarse_grad_y", (h_level, w_level))
 
         # Run precompute_gradients on coarse level
         mod.run("precompute_gradients", img=curr_level, grad_x=curr_coarse_grad_x, grad_y=curr_coarse_grad_y, h=int(h_level), w=int(w_level))
-        mod.run("precompute_gradients", img=ref_level, grad_x=ref_coarse_grad_x, grad_y=ref_coarse_grad_y, h=int(h_level), w=int(w_level))
+        if not reuse_reference:
+            mod.run("precompute_gradients", img=ref_level, grad_x=ref_coarse_grad_x, grad_y=ref_coarse_grad_y, h=int(h_level), w=int(w_level))
 
         if profile_hotspots:
             engine.sync()
             hotspots["3b. Coarse Gradients Precompute"] = (time.perf_counter() - t_prev) * 1000
             t_prev = time.perf_counter()
+
+        if scratch is not None and not reuse_reference:
+            scratch.reference_token = reference_token
 
         scale_factor = h_level / h
         level_tile_h = max(8, int(tile_h * scale_factor))
@@ -798,7 +903,7 @@ def generate_spatial_weights_taichi(
         num_tiles_h = max(1, h_level // level_tile_h)
         num_tiles_w = max(1, w_level // level_tile_w)
 
-        level_conf_gpu = engine.allocate((num_tiles_h, num_tiles_w), dtype=np.float32)
+        level_conf_gpu = _alloc("level_conf", (num_tiles_h, num_tiles_w))
 
         mod.run(
             "phase1_coarse_analysis",
@@ -829,6 +934,7 @@ def generate_spatial_weights_taichi(
             (w_level, h_level),
             interpolation=taichi_aot.INTER_CUBIC,
             return_gpu=True,
+            dst=_alloc("guidance_level", (h_level, w_level)),
         )
 
         # Final upsample from Level 2 resolution to full resolution
@@ -837,8 +943,9 @@ def generate_spatial_weights_taichi(
         ):
             final_guidance = taichi_aot.resize(
                 guidance_gpu, (w, h), interpolation=taichi_aot.INTER_CUBIC, return_gpu=True
+                , dst=_alloc("guidance_full", (h, w))
             )
-            guidance_gpu.destroy()
+            _destroy(guidance_gpu)
             guidance_gpu = final_guidance
 
         if profile_hotspots:
@@ -848,20 +955,20 @@ def generate_spatial_weights_taichi(
 
     finally:
         # Cleanup pyramids and temp buffers
-        curr_l1.destroy()
-        curr_l2.destroy()
-        ref_l1.destroy()
-        ref_l2.destroy()
+        _destroy(curr_l1)
+        _destroy(curr_l2)
+        _destroy(ref_l1)
+        _destroy(ref_l2)
         if curr_coarse_grad_x is not None:
-            curr_coarse_grad_x.destroy()
+            _destroy(curr_coarse_grad_x)
         if curr_coarse_grad_y is not None:
-            curr_coarse_grad_y.destroy()
+            _destroy(curr_coarse_grad_y)
         if ref_coarse_grad_x is not None:
-            ref_coarse_grad_x.destroy()
+            _destroy(ref_coarse_grad_x)
         if ref_coarse_grad_y is not None:
-            ref_coarse_grad_y.destroy()
+            _destroy(ref_coarse_grad_y)
         if level_conf_gpu is not None:
-            level_conf_gpu.destroy()
+            _destroy(level_conf_gpu)
 
         if profile_hotspots:
             engine.sync()
@@ -872,7 +979,7 @@ def generate_spatial_weights_taichi(
     use_stability = 1 if stability_map is not None else 0
     dummy_gpu = None
     if stability_map is None:
-        dummy_gpu = engine.allocate((1, 1), dtype=np.float32)
+        dummy_gpu = _alloc("dummy_stability", (1, 1), dtype=np.float32)
         stability_map = dummy_gpu
 
     curr_grad_x = None
@@ -882,14 +989,15 @@ def generate_spatial_weights_taichi(
 
     try:
         # Allocate fine gradients
-        curr_grad_x = engine.allocate((h, w), dtype=np.float32)
-        curr_grad_y = engine.allocate((h, w), dtype=np.float32)
-        ref_grad_x = engine.allocate((h, w), dtype=np.float32)
-        ref_grad_y = engine.allocate((h, w), dtype=np.float32)
+        curr_grad_x = _alloc("curr_grad_x", (h, w))
+        curr_grad_y = _alloc("curr_grad_y", (h, w))
+        ref_grad_x = _alloc("ref_grad_x", (h, w))
+        ref_grad_y = _alloc("ref_grad_y", (h, w))
 
         # Run precompute_gradients on fine level
         mod.run("precompute_gradients", img=analysis_input, grad_x=curr_grad_x, grad_y=curr_grad_y, h=int(h), w=int(w))
-        mod.run("precompute_gradients", img=reference_image, grad_x=ref_grad_x, grad_y=ref_grad_y, h=int(h), w=int(w))
+        if not reuse_reference:
+            mod.run("precompute_gradients", img=analysis_reference, grad_x=ref_grad_x, grad_y=ref_grad_y, h=int(h), w=int(w))
 
         if profile_hotspots:
             engine.sync()
@@ -902,7 +1010,7 @@ def generate_spatial_weights_taichi(
         mod.run(
             "generate_fine_weights_4passes",
             current=analysis_input,
-            reference=reference_image,
+            reference=analysis_reference,
             curr_grad_x=curr_grad_x,
             curr_grad_y=curr_grad_y,
             ref_grad_x=ref_grad_x,
@@ -935,19 +1043,23 @@ def generate_spatial_weights_taichi(
             t_prev = time.perf_counter()
     finally:
         if curr_grad_x is not None:
-            curr_grad_x.destroy()
+            _destroy(curr_grad_x)
         if curr_grad_y is not None:
-            curr_grad_y.destroy()
+            _destroy(curr_grad_y)
         if ref_grad_x is not None:
-            ref_grad_x.destroy()
+            _destroy(ref_grad_x)
         if ref_grad_y is not None:
-            ref_grad_y.destroy()
+            _destroy(ref_grad_y)
         if dummy_gpu is not None:
-            dummy_gpu.destroy()
+            _destroy(dummy_gpu)
         if guidance_gpu is not None:
-            guidance_gpu.destroy()
+            _destroy(guidance_gpu)
         if eq_temp is not None:
-            eq_temp.destroy()
+            _destroy(eq_temp)
+        if coarse_texture_boost > 1e-6:
+            _destroy(curr_texture_boost)
+            if not reuse_reference:
+                _destroy(ref_texture_boost)
 
         if profile_hotspots:
             engine.sync()

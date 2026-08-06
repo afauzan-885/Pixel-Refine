@@ -1,4 +1,4 @@
-"""Compile pure-Taichi compression preparation graphs to compression_image.tcm."""
+"""Compile pure-Taichi compression preparation graphs to a target artifact."""
 from __future__ import annotations
 
 import os
@@ -35,7 +35,19 @@ from taichi_library.taichi_algorithm.compression.kernels import (
 
 
 def compile_compression(arch=ti.cpu, output: str | None = None) -> str:
-    output_path = Path(output or Path(__file__).parents[1] / "aot_tcm" / "compression_image.tcm")
+    if output is None:
+        target_id = os.environ.get("PIXEL_REFINE_TARGET_VARIANT", "").strip()
+        if not target_id:
+            backend_name = "cpu" if arch == ti.cpu else "vulkan" if arch == ti.vulkan else "opengl" if arch == ti.opengl else "cuda"
+            defaults = {
+                "cpu": "cpu_x86_64_windows" if os.name == "nt" else "cpu_x86_64_linux",
+                "vulkan": "vulkan_x86_64_windows" if os.name == "nt" else "vulkan_x86_64_linux",
+                "opengl": "opengl_x86_64_windows" if os.name == "nt" else "opengl_x86_64_linux",
+                "cuda": "cuda_x86_64_windows_nvidia" if os.name == "nt" else "cuda_arm64_linux_nvidia",
+            }
+            target_id = defaults[backend_name]
+        output = Path(__file__).parents[1] / "aot_tcm" / target_id / f"compression_image_{target_id}.tcm"
+    output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ti.init(arch=arch, offline_cache=False)
     compression_kernels.JPEG_QUALITY_TABLE_FIELD = ti.field(dtype=ti.f32, shape=64)

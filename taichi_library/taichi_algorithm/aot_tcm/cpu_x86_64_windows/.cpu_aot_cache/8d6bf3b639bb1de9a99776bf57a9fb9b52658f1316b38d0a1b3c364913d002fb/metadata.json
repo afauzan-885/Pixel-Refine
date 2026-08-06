@@ -1,0 +1,194 @@
+{
+"cache": {
+  "version": {1, 7, 4},
+  "size": 17834,
+  "fields": {},
+  "kernels": {"_phase_normalize_kernel_c286_0": {
+      "kernel_key": "_phase_normalize_kernel_c286_0",
+      "args": [[[0], {
+            "is_array": true,
+            "is_argpack": false,
+            "total_dim": 3,
+            "format": 0,
+            "dt_": {
+              "ptr_": ptr {
+                "type_kind": 3
+                "content": {
+                  "elements_": [{
+                      "type": ptr {
+                        "type_kind": 3
+                        "content": {
+                          "elements_": [{
+                              "type": ptr {
+                                "type_kind": 0
+                                "content": {
+                                  "type": 5}},
+                              "name": "dim_0",
+                              "offset": 0},{
+                              "type": ptr {
+                                "type_kind": 0
+                                "content": {
+                                  "type": 5}},
+                              "name": "dim_1",
+                              "offset": 0}],
+                          "layout_": "none"}},
+                      "name": "shape",
+                      "offset": 0},{
+                      "type": ptr {
+                        "type_kind": 1
+                        "content": {
+                          "pointee_": ptr {
+                            "type_kind": 0
+                            "content": {
+                              "type": 1}},
+                          "addr_space_": 0,
+                          "is_bit_pointer_": false}},
+                      "name": "data_ptr",
+                      "offset": 0}],
+                  "layout_": "none"}}},
+            "needs_grad": false,
+            "element_shape": [2],
+            "ptype": 1}],[[1], {
+            "is_array": true,
+            "is_argpack": false,
+            "total_dim": 2,
+            "format": 0,
+            "dt_": {
+              "ptr_": ptr {
+                "type_kind": 3
+                "content": {
+                  "elements_": [{
+                      "type": ptr {
+                        "type_kind": 3
+                        "content": {
+                          "elements_": [{
+                              "type": ptr {
+                                "type_kind": 0
+                                "content": {
+                                  "type": 5}},
+                              "name": "dim_0",
+                              "offset": 0},{
+                              "type": ptr {
+                                "type_kind": 0
+                                "content": {
+                                  "type": 5}},
+                              "name": "dim_1",
+                              "offset": 0}],
+                          "layout_": "none"}},
+                      "name": "shape",
+                      "offset": 0},{
+                      "type": ptr {
+                        "type_kind": 1
+                        "content": {
+                          "pointee_": ptr {
+                            "type_kind": 0
+                            "content": {
+                              "type": 1}},
+                          "addr_space_": 0,
+                          "is_bit_pointer_": false}},
+                      "name": "data_ptr",
+                      "offset": 0}],
+                  "layout_": "none"}}},
+            "needs_grad": false,
+            "element_shape": [],
+            "ptype": 1}]],
+      "compiled_data": {
+        "tasks": [{
+            "name": "_phase_normalize_kernel_c286_0_kernel_0_serial",
+            "block_dim": 0,
+            "grid_dim": 0,
+            "dynamic_shared_array_bytes": 0},{
+            "name": "_phase_normalize_kernel_c286_0_kernel_1_range_for",
+            "block_dim": 0,
+            "grid_dim": 0,
+            "dynamic_shared_array_bytes": 0}]},
+      "size": 17834,
+      "created_at": 1786006875,
+      "last_used_at": 1786006875,
+      "rets": [],
+      "ret_type": ptr {
+        "type_kind": 3
+        "content": {
+          "elements_": [],
+          "layout_": "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"}},
+      "ret_size": 0,
+      "args_type": ptr {
+        "type_kind": 3
+        "content": {
+          "elements_": [{
+              "type": ptr {
+                "type_kind": 3
+                "content": {
+                  "elements_": [{
+                      "type": ptr {
+                        "type_kind": 3
+                        "content": {
+                          "elements_": [{
+                              "type": ptr {
+                                "type_kind": 0
+                                "content": {
+                                  "type": 5}},
+                              "name": "dim_0",
+                              "offset": 0},{
+                              "type": ptr {
+                                "type_kind": 0
+                                "content": {
+                                  "type": 5}},
+                              "name": "dim_1",
+                              "offset": 4}],
+                          "layout_": "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"}},
+                      "name": "shape",
+                      "offset": 0},{
+                      "type": ptr {
+                        "type_kind": 1
+                        "content": {
+                          "pointee_": ptr {
+                            "type_kind": 0
+                            "content": {
+                              "type": 1}},
+                          "addr_space_": 0,
+                          "is_bit_pointer_": false}},
+                      "name": "data_ptr",
+                      "offset": 8}],
+                  "layout_": "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"}},
+              "name": "arg_0",
+              "offset": 0},{
+              "type": ptr {
+                "type_kind": 3
+                "content": {
+                  "elements_": [{
+                      "type": ptr {
+                        "type_kind": 3
+                        "content": {
+                          "elements_": [{
+                              "type": ptr {
+                                "type_kind": 0
+                                "content": {
+                                  "type": 5}},
+                              "name": "dim_0",
+                              "offset": 0},{
+                              "type": ptr {
+                                "type_kind": 0
+                                "content": {
+                                  "type": 5}},
+                              "name": "dim_1",
+                              "offset": 4}],
+                          "layout_": "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"}},
+                      "name": "shape",
+                      "offset": 0},{
+                      "type": ptr {
+                        "type_kind": 1
+                        "content": {
+                          "pointee_": ptr {
+                            "type_kind": 0
+                            "content": {
+                              "type": 1}},
+                          "addr_space_": 0,
+                          "is_bit_pointer_": false}},
+                      "name": "data_ptr",
+                      "offset": 8}],
+                  "layout_": "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"}},
+              "name": "arg_1",
+              "offset": 16}],
+          "layout_": "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"}},
+      "args_size": 32}}}}

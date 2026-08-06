@@ -1,0 +1,6 @@
+cgraph:box_filter_fused_3x3_3ch_f32
+cgraph:box_filter_separable_generic_3ch_f32
+cgraph:box_filter_fused_3x3_vec3_f32
+cgraph:box_filter_separable_generic_vec3_f32
+cgraph:box_filter_fused_3x3_1ch_f32
+cgraph:box_filter_separable_generic_1ch_f32

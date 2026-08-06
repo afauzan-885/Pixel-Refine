@@ -1,0 +1,5 @@
+cgraph:canny_magnitude_f32
+cgraph:canny_nms_f32
+cgraph:canny_threshold_f32
+cgraph:canny_hysteresis_f32
+cgraph:canny_finalize_f32

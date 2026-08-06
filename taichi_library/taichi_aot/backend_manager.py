@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 from .capabilities import backend_candidates, classify_device
+from taichi_library.backend_config import normalize_backend
 
 
 @dataclass
@@ -38,7 +39,7 @@ class BackendManager:
         return result
 
     def decide(self, requested="auto"):
-        requested = (requested or "auto").lower()
+        requested = normalize_backend(requested, allow_auto=True)
         candidates = [requested] if requested != "auto" else backend_candidates(self.device)
         rejected = []
         for backend in candidates:
@@ -71,7 +72,7 @@ class BackendManager:
         this prevents accidental reuse of native buffers across contexts.
         Returns ``(result, backend, errors)``.
         """
-        requested = (requested or "auto").lower()
+        requested = normalize_backend(requested, allow_auto=True)
         decision = self.decide(requested)
         errors = {}
         # Explicit backend selection is a strict contract.  Do not silently

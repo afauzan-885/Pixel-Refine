@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "artifact_contract": {
+    "filename": "<algorithm>_<backend>_<arch>[_<os>][_<vendor>][_<variant>].tcm",
+    "legacy_filename": "<algorithm>_<backend>.tcm",
+    "legacy_loading": "temporary-compatibility-only",
+    "architecture_values": ["x86_64", "arm64", "armv7"],
+    "backend_values": ["cpu", "vulkan", "opengl", "gles", "cuda"],
+    "mobile_abi_values": ["arm64-v8a", "armeabi-v7a"],
+    "native_bridge_required": true
+  },
+  "target_matrix": [
+    {"backend": "cpu", "arch": "x86_64", "os": "windows"},
+    {"backend": "cpu", "arch": "x86_64", "os": "linux"},
+    {"backend": "cpu", "arch": "arm64", "os": "linux"},
+    {"backend": "cpu", "arch": "arm64", "os": "android", "abi": "arm64-v8a"},
+    {"backend": "vulkan", "arch": "x86_64", "os": "windows", "vendor": "nvidia"},
+    {"backend": "vulkan", "arch": "x86_64", "os": "windows", "vendor": "intel"},
+    {"backend": "vulkan", "arch": "arm64", "os": "android", "vendor": "unknown", "abi": "arm64-v8a"},
+    {"backend": "opengl", "arch": "x86_64", "os": "windows", "vendor": "unknown"},
+    {"backend": "opengl", "arch": "x86_64", "os": "windows", "vendor": "nvidia"},
+    {"backend": "opengl", "arch": "x86_64", "os": "windows", "vendor": "intel"},
+    {"backend": "opengl", "arch": "arm64", "os": "linux", "vendor": "unknown"},
+    {"backend": "gles", "arch": "arm64", "os": "android", "vendor": "unknown", "abi": "arm64-v8a"},
+    {"backend": "gles", "arch": "arm64", "os": "linux", "vendor": "unknown"},
+    {"backend": "cuda", "arch": "x86_64", "os": "windows", "vendor": "nvidia"},
+    {"backend": "cuda", "arch": "arm64", "os": "linux", "vendor": "nvidia"}
+  ],
+  "compatibility_policy": {
+    "never_mix_architecture": true,
+    "never_mix_mobile_gles_with_desktop_opengl": true,
+    "cuda_requires_nvidia": true,
+    "legacy_artifacts_must_be_quarantined_before_release": true
+  }
+}

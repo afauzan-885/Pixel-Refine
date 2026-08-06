@@ -190,7 +190,6 @@ class BulkPageLayout(QWidget):
 
         self.param_watcher.addPath(self.json_path)
 
-        self.database_manager.create_database()
         self.animator = StackedWidgetAnimator(self)
         self._active_fade_in_animations = {}
         self._running_delete_threads = []

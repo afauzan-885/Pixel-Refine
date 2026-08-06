@@ -298,8 +298,8 @@ def upsample_flow(
 ) -> np.ndarray:
     """CPU interface: Upsample flow using NumPy input/output."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library.taichi_aot.engine import AOTEngine
-        engine = AOTEngine()
+        from taichi_library.taichi_aot import get_engine
+        engine = get_engine()
         src_gpu = engine.upload(flow)
         dst_gpu = engine.allocate((target_h, target_w, 2), dtype=np.float32)
         upsample_flow_gpu(src_gpu, dst_gpu, scale)

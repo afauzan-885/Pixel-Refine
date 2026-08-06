@@ -17,6 +17,29 @@ COMPARISON_CACHE_DIR = "database/cache/comparison"
 CONFIG_DIR = os.path.join("database", "setting")
 
 # ==============================================================================
+# CENTRALIZED NATURAL TONE MAPPING PARAMETERS (SINGLE SOURCE OF TRUTH)
+# ==============================================================================
+DEFAULT_TONE_MAPPING_PARAMS = {
+    "exposure": 1.43,
+    "shoulder": 2.99,
+    "gamma": 1.50,
+    "shadow_offset": 0.01,
+    "saturation": 1.00,
+    "texture_amount": 0.0,
+    "texture_radius": 10,
+}
+
+CALCULATION_TONE_MAPPING_PARAMS = {
+    "exposure": 1.43,
+    "shoulder": 2.99,
+    "gamma": 1.50,
+    "shadow_offset": 0.01,
+    "saturation": 1.00,
+    "texture_amount": 0.42,
+    "texture_radius": 10,
+}
+
+# ==============================================================================
 # BATCH PARAMETER & ALGORITHM KEYS (SINGLE SOURCE OF TRUTH)
 # ==============================================================================
 KEY_ALIGNMENT_ALGO = "alignment_algo"

@@ -594,6 +594,9 @@ def compile_dcb_tcm(arch=ti.vulkan, save_path="dcb_vulkan.tcm"):
 
 
 if __name__ == "__main__":
-    output = os.path.abspath(os.path.join(file_dir, "../aot_tcm/dcb_vulkan.tcm"))
+    target_id = os.environ.get("PIXEL_REFINE_TARGET_VARIANT", "").strip() or "vulkan_x86_64_windows"
+    output = os.path.abspath(
+        os.path.join(file_dir, f"../aot_tcm/{target_id}/dcb_{target_id}.tcm")
+    )
     os.makedirs(os.path.dirname(output), exist_ok=True)
     compile_dcb_tcm(ti.vulkan, output)

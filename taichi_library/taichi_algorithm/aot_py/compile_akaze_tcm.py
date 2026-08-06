@@ -115,15 +115,32 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     assets_dir = os.path.join(script_dir, "../aot_tcm")
     os.makedirs(assets_dir, exist_ok=True)
-    
+
+    # Standalone compilation must publish only target-qualified artifacts.
+    # The historical ``aot_tcm/akaze_<backend>.tcm`` files are ambiguous on
+    # hybrid systems and are intentionally no longer regenerated.  The suite
+    # uses the same target IDs; keeping this script aligned prevents a manual
+    # compile from reintroducing stale legacy artifacts.
+    target_override = os.environ.get("PIXEL_REFINE_TARGET_VARIANT", "").strip()
+    target_ids = {
+        "vulkan": "vulkan_x86_64_windows",
+        "cuda": "cuda_x86_64_windows_nvidia",
+        "cpu": "cpu_x86_64_windows",
+    }
+
     archs = [
         (ti.vulkan, "vulkan"),
         (ti.cuda, "cuda"),
         (ti.cpu, "cpu"),
     ]
-    
+
     for arch, suffix in archs:
-        save_path = os.path.abspath(os.path.join(assets_dir, f"akaze_{suffix}.tcm"))
+        target_id = target_override or target_ids[suffix]
+        target_dir = os.path.join(assets_dir, target_id)
+        os.makedirs(target_dir, exist_ok=True)
+        save_path = os.path.abspath(
+            os.path.join(target_dir, f"akaze_{target_id}.tcm")
+        )
         try:
             compile_akaze_tcm(arch=arch, save_path=save_path)
         except Exception as e:

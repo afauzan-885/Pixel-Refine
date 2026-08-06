@@ -25,7 +25,7 @@ class WSRAOTEngine:
 
     def __init__(self, lr_shape, hr_shape, num_frames, scale=2,
                  alpha=0.7, beta=0.01, btv_window=2):
-        from taichi_library.taichi_aot.engine import AOTEngine
+        from taichi_library.taichi_aot import get_engine
         import ctypes
 
         self.scale = scale
@@ -43,7 +43,7 @@ class WSRAOTEngine:
         )
 
         # Initialize engine and load TCM
-        self._engine = AOTEngine()
+        self._engine = get_engine()
         tcm_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "../../../../../ui/data/aot_assets"

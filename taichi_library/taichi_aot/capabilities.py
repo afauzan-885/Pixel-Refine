@@ -12,6 +12,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from taichi_library.backend_config import requested_backend as _requested_backend
 
 
 @dataclass(frozen=True)
@@ -61,8 +62,7 @@ def classify_device(device: str, backend: str, driver: str = "unknown"):
 
 
 def requested_backend():
-    return (os.environ.get("PIXEL_REFINE_AOT_ARCH") or
-            os.environ.get("PIXEL_REFINE_BACKEND") or "auto").lower()
+    return _requested_backend()[0]
 
 
 def backend_candidates(device: str = "unknown"):
@@ -101,7 +101,7 @@ def opengl_native_probe(operation: str, timeout: float = 8.0) -> bool:
     cache = getattr(opengl_native_probe, "_cache", None)
     if cache is None:
         cache = opengl_native_probe._cache = {}
-    cache_key = (operation, os.environ.get("PIXEL_REFINE_AOT_ARCH", "opengl"),
+    cache_key = (operation, _requested_backend()[0],
                  os.environ.get("PIXEL_REFINE_AOT_DEVICE", "0"))
     if cache_key in cache:
         return cache[cache_key]

@@ -18,6 +18,7 @@ from resources.animations.animation_manager import (
 )
 import json
 import os
+import config
 
 
 # Generic UI Library
@@ -148,13 +149,13 @@ class RightPanel(QWidget, SyncMixin):
             return
 
         settings = {
-            "alignment_algo": self.align_form.get_value(),
-            "super_resolution_algo": self.sr_card.get_value(),
-            "denoising_algo": self.denoise_card.get_value(),
-            "checkbox_align_images": self.align_form.get_value()
+            config.KEY_ALIGNMENT_ALGO: self.align_form.get_value(),
+            config.KEY_SUPER_RESOLUTION_ALGO: self.sr_card.get_value(),
+            config.KEY_DENOISING_ALGO: self.denoise_card.get_value(),
+            config.KEY_CHECKBOX_ALIGN: self.align_form.get_value()
             not in ["None", "No Alignment"],
-            "checkbox_super_resolution": self.sr_card.is_checked,
-            "checkbox_denoising": self.denoise_card.is_checked,
+            config.KEY_CHECKBOX_SUPER_RES: self.sr_card.is_checked,
+            config.KEY_CHECKBOX_DENOISING: self.denoise_card.is_checked,
         }
 
         # Use logic module to update store
@@ -390,9 +391,13 @@ class RightPanel(QWidget, SyncMixin):
         self._update_cards_mutually_exclusive_state()
 
         settings = {
-            "alignment": self.align_form.get_value() or "",
-            "super_resolution": self.sr_card.get_value() or "",
-            "denoising": self.denoise_card.get_value() or "",
+            config.KEY_ALIGNMENT: self.align_form.get_value() or "",
+            config.KEY_SUPER_RESOLUTION: self.sr_card.get_value() or "",
+            config.KEY_DENOISING: self.denoise_card.get_value() or "",
+            config.KEY_CHECKBOX_ALIGN: self.align_form.get_value()
+            not in ("", "None", "No Alignment"),
+            config.KEY_CHECKBOX_SUPER_RES: bool(self.sr_card.is_checked),
+            config.KEY_CHECKBOX_DENOISING: bool(self.denoise_card.is_checked),
         }
 
         if settings == self._last_emitted_settings:

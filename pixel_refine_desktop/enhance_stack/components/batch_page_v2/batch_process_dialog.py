@@ -45,8 +45,6 @@ from pixel_refine_desktop.enhance_stack.core.logic.batch_processor import (
 
 class MassAlgorithmEditDialog(QDialog):
     algorithms_updated = Signal()
-class MassAlgorithmEditDialog(QDialog):
-    algorithms_updated = Signal()
 
     def __init__(self, batches, parent=None):
         super().__init__(parent)

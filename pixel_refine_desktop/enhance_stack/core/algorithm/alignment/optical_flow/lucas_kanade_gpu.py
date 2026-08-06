@@ -115,10 +115,13 @@ class LucasKanadeGPU(LucasKanadeCPU):
             flow = flow[0]
         return np.ascontiguousarray(flow, dtype=np.float32)
 
-    def _align_frame_opengl_native(self, reference, target, config):
+    def _align_frame_opengl_native(self, reference, target, config,
+                                   matching_reference=None, matching_target=None):
         from taichi_library import taichi_aot
-        reference_gray = to_flow_gray_u8(reference).astype(np.float32, copy=False)
-        target_gray = to_flow_gray_u8(target).astype(np.float32, copy=False)
+        matching_reference = reference if matching_reference is None else matching_reference
+        matching_target = target if matching_target is None else matching_target
+        reference_gray = to_flow_gray_u8(matching_reference).astype(np.float32, copy=False)
+        target_gray = to_flow_gray_u8(matching_target).astype(np.float32, copy=False)
         flow = self._calculate_flow_host_native(reference_gray, target_gray, config)
         expected = (*reference.shape[:2], 2)
         if flow.shape != expected or not np.isfinite(flow).all():
@@ -200,9 +203,9 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
     def _init_tile_buffer(self, reference, tile):
         from taichi_library import taichi_aot
-        from taichi_library.taichi_aot.engine import AOTEngine
+        from taichi_library.taichi_aot import get_engine
 
-        engine = AOTEngine()
+        engine = get_engine()
         rx0, ry0, rx1, ry1 = tile["roi"]
         roi_h, roi_w = ry1 - ry0, rx1 - rx0
         ref_roi = reference[ry0:ry1, rx0:rx1]
@@ -373,10 +376,14 @@ class LucasKanadeGPU(LucasKanadeCPU):
         stop_requested=None,
         tile_executor=None,
         point_executor=None,
+        matching_reference=None,
+        matching_target=None,
     ):
         config = config or self.load_config()
         if reference is None or target is None:
             return None
+        matching_reference = reference if matching_reference is None else matching_reference
+        matching_target = target if matching_target is None else matching_target
 
         # OpenGL uses the host-output native graph path.  The regular GPU
         # buffer/remap pipeline relies on Vulkan-style storage bindings and
@@ -384,7 +391,11 @@ class LucasKanadeGPU(LucasKanadeCPU):
         try:
             from taichi_library import taichi_aot
             if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
-                return self._align_frame_opengl_native(reference, target, config)
+                return self._align_frame_opengl_native(
+                    reference, target, config,
+                    matching_reference=matching_reference,
+                    matching_target=matching_target,
+                )
         except Exception:
             raise
 
@@ -418,6 +429,8 @@ class LucasKanadeGPU(LucasKanadeCPU):
                     target,
                     config,
                     stop_requested=stop_requested,
+                    matching_reference=matching_reference,
+                    matching_target=matching_target,
                 )
             if bool(config.get("conservative_vram", True)):
                 self._cleanup_tile_buffers()
@@ -499,6 +512,8 @@ class LucasKanadeGPU(LucasKanadeCPU):
         target,
         config,
         stop_requested=None,
+        matching_reference=None,
+        matching_target=None,
     ):
         from taichi_library import taichi_aot
 
@@ -526,6 +541,8 @@ class LucasKanadeGPU(LucasKanadeCPU):
             f"block_runtime={'native' if taichi_aot.get_block_config().enabled else 'full_frame'}"
         )
 
+        matching_reference = reference if matching_reference is None else matching_reference
+        matching_target = target if matching_target is None else matching_target
         height, width = reference.shape[:2]
         tiles = self._build_tiles(width, height, config)
         single_full_frame_tile = (
@@ -536,18 +553,18 @@ class LucasKanadeGPU(LucasKanadeCPU):
         conservative_vram = bool(config.get("conservative_vram", True))
 
         # Initialize/re-initialize tile buffers once per batch/reference change
-        ref_id = id(reference)
+        ref_id = id(matching_reference)
         if self._tile_buffers is None or self._current_ref_id != ref_id:
             self._cleanup_tile_buffers()
             # Keep only the active tile resident on low-VRAM devices.
             self._tile_buffers = (
                 {} if conservative_vram
-                else self._init_tile_buffers(reference, tiles, config)
+                else self._init_tile_buffers(matching_reference, tiles, config)
             )
             self._current_ref_id = ref_id
 
         t_prepare = time.perf_counter()
-        target_gray_full = to_flow_gray_u8(target).astype(np.float32, copy=False)
+        target_gray_full = to_flow_gray_u8(matching_target).astype(np.float32, copy=False)
         profile["prepare"] += time.perf_counter() - t_prepare
 
         accumulator = weights = None
@@ -579,7 +596,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
                     return None
 
                 if idx not in self._tile_buffers:
-                    self._tile_buffers[idx] = self._init_tile_buffer(reference, tile)
+                    self._tile_buffers[idx] = self._init_tile_buffer(matching_reference, tile)
 
 
                 warped_gpu = self._warp_tile_gpu(

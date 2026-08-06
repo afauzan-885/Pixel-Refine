@@ -1,0 +1,5 @@
+cgraph:downsample_2x_f32
+cgraph:downsample_2x_3ch_f32
+cgraph:downsample_2x_offset_f32
+cgraph:downsample_2x_offset_3ch_f32
+cgraph:upsample_flow_f32

@@ -1,13 +1,11 @@
 import os
 import numpy as np
 from taichi_library import taichi_aot
-from taichi_library.taichi_aot.engine import (
-    AOTEngine,
-)
+from taichi_library.taichi_aot import get_engine
 
 
 def normalize_image_gpu(image_gpu, dtype, out_gpu=None):
-    engine = AOTEngine()
+    engine = get_engine()
     h, w = image_gpu.shape[0], image_gpu.shape[1]
     if out_gpu is None:
         out_gpu = engine.allocate(
@@ -47,7 +45,7 @@ def normalize_image_gpu(image_gpu, dtype, out_gpu=None):
 def to_gamma_proxy_gpu(
     image_gpu, scale=1.0, gamma_pow=2.22, slope=4.5, cutoff=0.018, dst_gpu=None
 ):
-    engine = AOTEngine()
+    engine = get_engine()
     file_dir = os.path.dirname(os.path.abspath(__file__))
     aot_assets_dir = os.path.abspath(
         os.path.join(file_dir, "../../../../../ui/data/aot_assets")
@@ -134,7 +132,7 @@ def prepare_reference_for_alignment(
         # Avoids allocating massive RGB intermediate VRAM buffers!
         ref_gpu = taichi_aot.upload(reference_image_float, force_8bit=False)
         # Get active camera parameters from engine if available
-        engine = AOTEngine()
+        engine = get_engine()
         wb_r = getattr(engine, "active_wb_r", 1.0)
         wb_g1 = getattr(engine, "active_wb_g1", 1.0)
         wb_b = getattr(engine, "active_wb_b", 1.0)
@@ -224,7 +222,7 @@ def prepare_comparison_for_alignment(
         # Avoids allocating massive RGB intermediate VRAM buffers!
         comp_gpu = taichi_aot.upload(comp_image, force_8bit=False)
         # Get active camera parameters from engine if available
-        engine = AOTEngine()
+        engine = get_engine()
         wb_r = getattr(engine, "active_wb_r", 1.0)
         wb_g1 = getattr(engine, "active_wb_g1", 1.0)
         wb_b = getattr(engine, "active_wb_b", 1.0)
@@ -315,50 +313,6 @@ def prepare_reference_aot(
         )
         if ref_gray is not final_res_gray:
             ref_gray.destroy()
-
-    # Estimate noise on CPU/NumPy
-    ref_gray_np = final_res_gray.to_numpy()
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-        estimate_noise_in_python,
-    )
-
-    ref_noise_sigma = estimate_noise_in_python(ref_gray_np)
-
-    return final_res_gray, ref_noise_sigma
-
-
-def prepare_reference_aot(
-    reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w
-):
-    """Prepare reference image on GPU for merging. Returns (ref_work_res_pass2_gpu, ref_noise_sigma)."""
-    ref_gpu = taichi_aot.upload(reference_image_float)
-
-    # FUSED OPTIMIZATION: If linear mode, we apply both scale (1.0) and proxy_scale directly to gamma_proxy
-    # to avoid creating an intermediate normalized image buffer.
-    if is_linear_mode:
-        ref_final = to_gamma_proxy_gpu(ref_gpu, scale=proxy_scale)
-        if ref_gpu is not ref_final:
-            ref_gpu.release()
-    else:
-        # For non-linear, since we bypass gamma_proxy, we just normalize
-        ref_final = normalize_image_gpu(ref_gpu, dtype=np.float32)
-        if ref_gpu is not ref_final:
-            ref_gpu.release()
-
-    ref_gray = taichi_aot.rgb2gray(ref_final)
-    if ref_final is not ref_gray:
-        ref_final.release()
-
-    final_res_gray = ref_gray
-    if ref_gray.shape[:2] != (work_res_h, work_res_w):
-        final_res_gray = taichi_aot.resize(
-            ref_gray,
-            (work_res_w, work_res_h),
-            interpolation=taichi_aot.INTER_LINEAR,
-            return_gpu=True,
-        )
-        if ref_gray is not final_res_gray:
-            ref_gray.release()
 
     # Estimate noise on CPU/NumPy
     ref_gray_np = final_res_gray.to_numpy()

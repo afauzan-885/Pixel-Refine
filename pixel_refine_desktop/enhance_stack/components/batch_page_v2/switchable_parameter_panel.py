@@ -1,4 +1,5 @@
 import os
+import config
 from PySide6.QtWidgets import (
     QApplication,
     QWidget,
@@ -152,7 +153,10 @@ class SwitchableParameterPanel(QWidget):
 
     def _persist_alignment_selection(self):
         selected_text = self.align_dropdown.currentText()
-        right_panel = getattr(self.parent(), "right_panel", None)
+        right_panel = self._resolve_right_panel()
+        active_batch_id = self._resolve_active_batch_id(right_panel)
+        if right_panel is not None and active_batch_id is not None:
+            right_panel.current_batch_id = active_batch_id
         if right_panel and hasattr(right_panel, "align_form"):
             right_panel.align_form.set_value(selected_text)
             if hasattr(right_panel, "_on_settings_changed"):
@@ -176,15 +180,44 @@ class SwitchableParameterPanel(QWidget):
 
         print(
             f"[SwitchableParameterPanel] persisted alignment='{selected_text}' "
-            f"batch_id={getattr(right_panel, 'current_batch_id', None)}"
+            f"batch_id={active_batch_id}"
         )
 
+    def _resolve_right_panel(self):
+        """Find the owning RightPanel through the widget parent chain."""
+        widget = self
+        while widget is not None:
+            candidate = getattr(widget, "right_panel", None)
+            if candidate is not None:
+                return candidate
+            if hasattr(widget, "current_batch_id") and hasattr(
+                widget, "denoise_card"
+            ):
+                return widget
+            widget = widget.parent() if hasattr(widget, "parent") else None
+        return None
+
+    def _resolve_active_batch_id(self, right_panel=None):
+        """Resolve the active batch even when RightPanel has not synced yet."""
+        if right_panel is not None:
+            batch_id = getattr(right_panel, "current_batch_id", None)
+            if batch_id is not None:
+                return batch_id
+        widget = self
+        while widget is not None:
+            batch_id = getattr(widget, "current_batch_id", None)
+            if batch_id is not None:
+                return batch_id
+            widget = widget.parent() if hasattr(widget, "parent") else None
+        return None
+
     def _save_alignment_params_for_active_batch(self, algorithm_name, params_key, params):
-        right_panel = getattr(self.parent(), "right_panel", None)
-        if not right_panel or not getattr(right_panel, "current_batch_id", None):
+        right_panel = self._resolve_right_panel()
+        active_batch_id = self._resolve_active_batch_id(right_panel)
+        if not right_panel or active_batch_id is None:
             return
 
-        batch_id = right_panel.current_batch_id
+        batch_id = active_batch_id
         str_id = str(batch_id)
         denoising_algo = (
             right_panel.denoise_card.get_value()
@@ -197,14 +230,14 @@ class SwitchableParameterPanel(QWidget):
             else "No Super Resolution"
         )
         bulk_data = {
-            f"{str_id}.alignment_algo": algorithm_name,
-            f"{str_id}.super_resolution_algo": super_resolution_algo or "No Super Resolution",
-            f"{str_id}.denoising_algo": denoising_algo or "No Denoising",
-            f"{str_id}.checkbox_align_images": algorithm_name not in ("", "None", "No Alignment"),
-            f"{str_id}.checkbox_super_resolution": bool(getattr(right_panel.sr_card, "is_checked", False))
+            f"{str_id}.{config.KEY_ALIGNMENT_ALGO}": algorithm_name,
+            f"{str_id}.{config.KEY_SUPER_RESOLUTION_ALGO}": super_resolution_algo or "No Super Resolution",
+            f"{str_id}.{config.KEY_DENOISING_ALGO}": denoising_algo or "No Denoising",
+            f"{str_id}.{config.KEY_CHECKBOX_ALIGN}": algorithm_name not in ("", "None", "No Alignment"),
+            f"{str_id}.{config.KEY_CHECKBOX_SUPER_RES}": bool(getattr(right_panel.sr_card, "is_checked", False))
             if hasattr(right_panel, "sr_card")
             else False,
-            f"{str_id}.checkbox_denoising": bool(getattr(right_panel.denoise_card, "is_checked", False))
+                    f"{str_id}.{config.KEY_CHECKBOX_DENOISING}": bool(getattr(right_panel.denoise_card, "is_checked", False))
             if hasattr(right_panel, "denoise_card")
             else denoising_algo not in ("", "None", "No Denoising"),
             f"{str_id}.{params_key}": params,
@@ -221,9 +254,9 @@ class SwitchableParameterPanel(QWidget):
         if hasattr(right_panel, "logic"):
             right_panel.logic.set_settings(
                 {
-                    "alignment": algorithm_name,
-                    "super_resolution": super_resolution_algo,
-                    "denoising": denoising_algo,
+                    config.KEY_ALIGNMENT: algorithm_name,
+                    config.KEY_SUPER_RESOLUTION: super_resolution_algo,
+                    config.KEY_DENOISING: denoising_algo,
                 }
             )
         print(f"[{algorithm_name}Settings] Saved params for batch_id={batch_id}")
@@ -274,138 +307,6 @@ class SwitchableParameterPanel(QWidget):
             if clicked_widget and clicked_widget != self and not self.isAncestorOf(clicked_widget):
                 self.collapse_panel()
         return super().eventFilter(obj, event)
-
-    def _collapsed_height(self):
-        visible_buttons = sum(
-            1
-            for button in (self.btn_align_tab, self.btn_denoise_tab)
-            if button.isVisible()
-        )
-        return max(60, (visible_buttons * 50) + 20)
-
-    def _expanded_size(self):
-        parent = self.get_overlay_container()
-        if parent:
-            parent_widget = parent.parent()
-        else:
-            parent_widget = self.parent()
-
-        available_w = parent_widget.width() if parent_widget else 1200
-        available_h = parent_widget.height() if parent_widget else 800
-
-        width_cap = max(240, available_w - 20)
-        height_cap = max(240, available_h - 70)
-        
-        if self.active_tab == "alignment":
-            preferred_width = max(260 + 58, int(available_w * 0.35))
-            width = max(290, min(750, preferred_width, width_cap))
-        else:
-            preferred_width = max(260 + 58, int(available_w * 0.24))
-            width = max(290, min(520, preferred_width, width_cap))
-
-        # Tinggi maksimal ditambah 30%: dari 0.52 menjadi 0.67 area layar
-        height = max(240, min(562, int(available_h * 0.67), height_cap))
-        return width, height
-
-    def _sync_overlay_geometry(self):
-        overlay = self.get_overlay_container()
-        if overlay:
-            if self.content_wrapper.isVisible():
-                width, height = self._expanded_size()
-                self.setMinimumSize(width, height)
-                self.setMaximumSize(width, height)
-            self.adjustSize()
-            overlay.content_wrapper.adjustSize()
-            overlay.adjustSize()
-            overlay._update_position()
-
-    def _setup_ui(self):
-        # Main layout is horizontal: Content area (left) + Tabs (right)
-        self.main_layout = QHBoxLayout(self)
-        self.main_layout.setContentsMargins(0, 0, 0, 0)
-        self.main_layout.setSpacing(0)
-
-        # Main widget background transparent
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-
-        # 1. Content Wrapper (Left)
-        self.content_wrapper = QWidget()
-        self.content_wrapper.setObjectName("ParamContentWrapper")
-        self.content_layout = QVBoxLayout(self.content_wrapper)
-        self.content_layout.setContentsMargins(14, 14, 14, 14)
-        self.content_layout.setSpacing(8)
-
-        # Content stacked widget
-        self.content_stack = QStackedWidget()
-        
-        # Build pages
-        self._setup_alignment_page()
-        self._setup_denoising_page()
-
-        self.content_layout.addWidget(self.content_stack)
-        self.main_layout.addWidget(self.content_wrapper, 1)
-
-        # 2. Tabs Sidebar (Right)
-        self.tabs_sidebar = QWidget()
-        self.tabs_sidebar.setFixedWidth(50)
-        # Transparent background for the sidebar
-        self.tabs_sidebar.setStyleSheet("background: transparent; border: none;")
-        self.tabs_layout = QVBoxLayout(self.tabs_sidebar)
-        self.tabs_layout.setContentsMargins(0, 10, 0, 10)
-        self.tabs_layout.setSpacing(10)
-        self.tabs_layout.setAlignment(Qt.AlignmentFlag.AlignBottom)
-
-        # Alignment Tab Button (Red)
-        self.btn_align_tab = QPushButton("A")
-        self.btn_align_tab.setToolTip("Alignment Parameters")
-        self.btn_align_tab.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.btn_align_tab.setFixedSize(40, 40)
-        self.btn_align_tab.clicked.connect(lambda: self.set_active_tab("alignment"))
-        self.tabs_layout.addWidget(self.btn_align_tab)
-
-        # Denoising Tab Button (Green)
-        self.btn_denoise_tab = QPushButton("D")
-        self.btn_denoise_tab.setToolTip("Denoising Parameters")
-        self.btn_denoise_tab.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.btn_denoise_tab.setFixedSize(40, 40)
-        self.btn_denoise_tab.clicked.connect(lambda: self.set_active_tab("denoising"))
-        self.tabs_layout.addWidget(self.btn_denoise_tab)
-
-        self.main_layout.addWidget(self.tabs_sidebar)
-
-        # Minimum Panel Size
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.setMinimumSize(50, 100)
-
-    def refresh_responsive_layout(self):
-        if not self.content_wrapper.isVisible():
-            self._sync_overlay_geometry()
-            return
-        self._apply_adaptive_density()
-        if not self._resize_sync_pending:
-            self._resize_sync_pending = True
-            QTimer.singleShot(0, self._flush_resize_sync)
-
-    def _flush_resize_sync(self):
-        self._resize_sync_pending = False
-        self._sync_overlay_geometry()
-
-    def _apply_adaptive_density(self):
-        width = self.width()
-        compact = width < 380
-        margin = 10 if compact else 14
-        spacing = 6 if compact else 8
-        self.content_layout.setContentsMargins(margin, margin, margin, margin)
-        self.content_layout.setSpacing(spacing)
-        self.align_dropdown_label.setFont(
-            QFont("Arial", 9 if compact else 10, QFont.Weight.Bold)
-        )
-        denoise_page = self.denoise_page_container.widget() if isinstance(self.denoise_page_container, QScrollArea) else None
-        if denoise_page and hasattr(denoise_page, "refresh_responsive_layout"):
-            denoise_page.refresh_responsive_layout()
-
-    def _setup_alignment_page(self):
-        self.align_page = QWidget()
 
     def _collapsed_height(self):
         visible_buttons = sum(
@@ -781,15 +682,15 @@ class SwitchableParameterPanel(QWidget):
     def update_settings_state(self, settings):
         """Update active UI state when RightPanel settings change."""
         snapshot = (
-            settings.get("alignment", "No Alignment"),
-            settings.get("denoising", "No Denoising"),
+            settings.get(config.KEY_ALIGNMENT, "No Alignment"),
+            settings.get(config.KEY_DENOISING, "No Denoising"),
         )
         if snapshot == self._last_settings_snapshot:
             return
         self._last_settings_snapshot = snapshot
 
         # 1. Update alignment selection dropdown
-        alignment_algo = self._normalize_alignment_name(settings.get("alignment", "No Alignment"))
+        alignment_algo = self._normalize_alignment_name(settings.get(config.KEY_ALIGNMENT, "No Alignment"))
         idx = self.align_dropdown.findText(alignment_algo)
         if idx >= 0:
             self.align_dropdown.blockSignals(True)
@@ -798,7 +699,7 @@ class SwitchableParameterPanel(QWidget):
             self.align_dropdown.blockSignals(False)
 
         # 2. Handle visibility logic for denoising
-        denoising_algo = settings.get("denoising", "No Denoising")
+        denoising_algo = settings.get(config.KEY_DENOISING, "No Denoising")
         
         # If denoising algo changed, collapse panel and reset active tab
         if denoising_algo != self.current_denoising_algo:

@@ -1022,15 +1022,38 @@ class CombinedPanel(QWidget):
         if keep_edge_cb:
             keep_edge_cb.setEnabled(is_alignment_checked and not is_crop_edge_checked)
 
-    def process_all_batch(self, progress_callback=None):
+    def _normalize_alignment_name(self, name: str) -> str:
+        mapping = {
+            "Farneback Optical Flow": "Farneback",
+            "Lucas Kanade Optical Flow": "Lucas Kanade",
+            "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
+            "Block Matching GPU Optical Flow": "Block Matching GPU",
+            "RAFT Optical Flow": "RAFT",
+        }
+        return mapping.get(str(name or "").strip(), str(name or ""))
+
+    def _normalize_denoising_name(self, name: str) -> str:
+        mapping = {
+            "Average Denoising": "Average",
+            "Median Filter": "Median",
+            "Similarity Denoising": "Similarity",
+            "Similarity Fusion Denoising": "Similarity Fusion",
+        }
+        return mapping.get(str(name or "").strip(), str(name or ""))
+
+    def process_all_batch(self, progress_callback=None, stop_callback=None):
         """
         Jalankan semua algoritma yang dipilih untuk self.batch_id.
-        Fungsi ini sekarang menerima 'progress_callback' untuk melaporkan status
-        sub-proses kembali ke thread pemanggil tanpa membuat UI baru.
+        Fungsi ini sekarang menerima 'progress_callback' dan 'stop_callback' untuk membatalkan
+        proses per-gambar/per-frame secara instan tanpa menunggu 1 batch selesai.
         """
         # --- Langkah 0: Pemeriksaan Awal ---
         if self.batch_id is None:
             print("[ERROR] process_all_batch called with no batch_id.")
+            return
+
+        if stop_callback and stop_callback():
+            print(f"[INFO] Process cancelled before starting batch_id: {self.batch_id}")
             return
 
         # --- Langkah 1: Verifikasi Batch ID terhadap Database Manager & Validasi Keberadaan File ---
@@ -1115,12 +1138,14 @@ class CombinedPanel(QWidget):
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                 ),
                 "Lucas Kanade": lambda: running_mf_denoiser(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                     alignment_backend="Lucas Kanade",
                     merging_mode="none",
                 ),
@@ -1129,6 +1154,7 @@ class CombinedPanel(QWidget):
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                     alignment_backend="Block Matching GPU",
                     merging_mode="none",
                 ),
@@ -1137,6 +1163,7 @@ class CombinedPanel(QWidget):
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                     alignment_backend="RAFT",
                     merging_mode="none",
                 ),
@@ -1145,18 +1172,21 @@ class CombinedPanel(QWidget):
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                 ),
                 "ORB": lambda: running_orb(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                 ),
                 "Light Glue": lambda: running_light_glue(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                 ),
                 "No Alignment": lambda: None,
                 "None": lambda: None,
@@ -1171,6 +1201,7 @@ class CombinedPanel(QWidget):
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                     merging_mode="average",
                     output_suffix="average",
                     alignment_backend=align_algo,
@@ -1180,12 +1211,14 @@ class CombinedPanel(QWidget):
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                 ),
                 "Similarity": lambda: running_mf_similarity(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                     alignment_backend=align_algo,
                 ),
                 "Similarity Fusion": lambda: running_similarity_fusion(
@@ -1193,6 +1226,7 @@ class CombinedPanel(QWidget):
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                     alignment_backend=align_algo,
                 ),
                 "No Denoising": lambda: None,

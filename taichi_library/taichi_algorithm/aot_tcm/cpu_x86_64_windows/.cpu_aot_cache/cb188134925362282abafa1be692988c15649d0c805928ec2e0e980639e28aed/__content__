@@ -1,0 +1,4 @@
+cgraph:inter_area_f32
+cgraph:inter_area_vec3_f32
+cgraph:inter_area_offset_f32
+cgraph:inter_area_offset_vec3_f32

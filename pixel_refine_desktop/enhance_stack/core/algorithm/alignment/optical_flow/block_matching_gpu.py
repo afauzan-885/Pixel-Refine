@@ -88,7 +88,31 @@ class BlockMatchingGPU(LucasKanadeGPU):
         return params
 
     def align_frame(self, *args, **kwargs):
-        return super().align_frame(*args, **kwargs)
+        if len(args) >= 2:
+            reference, target = args[0], args[1]
+            rest = args[2:]
+        else:
+            reference = kwargs.get("reference")
+            target = kwargs.get("target")
+            rest = ()
+        if reference is None or target is None:
+            return super().align_frame(*args, **kwargs)
+        try:
+            from taichi_library.taichi_aot import naturalTonemapping
+            from config import CALCULATION_TONE_MAPPING_PARAMS
+            matching_reference = naturalTonemapping(
+                reference, return_gpu=False, **CALCULATION_TONE_MAPPING_PARAMS
+            )
+            matching_target = naturalTonemapping(
+                target, return_gpu=False, **CALCULATION_TONE_MAPPING_PARAMS
+            )
+            print("[BlockMatchingGPU] naturalTonemapping enabled for flow matching; original frame retained for warping")
+        except Exception as exc:
+            print(f"[BlockMatchingGPU] Tone mapping unavailable, using original frames: {exc}")
+            matching_reference, matching_target = reference, target
+        kwargs["matching_reference"] = matching_reference
+        kwargs["matching_target"] = matching_target
+        return super().align_frame(reference, target, *rest, **kwargs)
 
     @staticmethod
     def load_config(batch_id=None, config_filename=None):

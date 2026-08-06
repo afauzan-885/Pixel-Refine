@@ -255,9 +255,13 @@ class MemoryGovernor:
             # current pressure, and (when exposed) the physical-device heap.
             if shared_budget:
                 pipeline_fraction = (
-                    0.40
+                    # A 24 MP RGB graph observed in production needs about
+                    # 0.92 GiB resident.  Keep the one-gigabyte hard cap,
+                    # but do not reject that graph merely because the
+                    # shared-memory budget is just below 2.3 GiB.
+                    0.55
                     if pressure == MemoryPressure.HEALTHY
-                    else 0.30
+                    else 0.40
                 )
                 pipeline_limit = min(
                     1024 * 1024 ** 2,

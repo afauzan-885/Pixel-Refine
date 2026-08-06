@@ -565,14 +565,12 @@ def perform_alignment_gpu(
     Berkomunikasi langsung dengan compute_flow (AOT) via AOTEngine dengan
     suntikan matriks parameter radius_map dinamis per frame.
     """
-    from taichi_library.taichi_aot.engine import (
-        AOTEngine,
-    )
+    from taichi_library.taichi_aot import get_engine
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
         taichi_bridge,
     )
 
-    engine = AOTEngine()
+    engine = get_engine()
     num_images = len(images)
     if num_images <= 1:
         return True

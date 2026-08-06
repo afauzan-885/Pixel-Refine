@@ -56,12 +56,14 @@ class SpatialFusionDenoisingAlgorithm:
             from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_fusion_cpu import (
                 SpatialFusionCPUDenoisingAlgorithm,
             )
+
             print("[SpatialFusion] similarity_backend=cpu → routing to CPU processor.")
             return SpatialFusionCPUDenoisingAlgorithm().run(ctx, frames, batch_plan)
         elif backend == "ai":
             from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.smart_fusion import (
                 SmartFusionDenoisingAlgorithm,
             )
+
             print("[SpatialFusion] similarity_backend=ai → routing to AI processor.")
             return SmartFusionDenoisingAlgorithm().run(ctx, frames, batch_plan)
 
@@ -106,7 +108,9 @@ class SpatialFusionDenoisingAlgorithm:
                 )
         else:
             if not frames:
-                print("[SpatialFusion] aligned HDF5 and in-memory frames are both unavailable.")
+                print(
+                    "[SpatialFusion] aligned HDF5 and in-memory frames are both unavailable."
+                )
                 return None
             reference = frames[0]
             ref_h, ref_w = reference.shape[:2]

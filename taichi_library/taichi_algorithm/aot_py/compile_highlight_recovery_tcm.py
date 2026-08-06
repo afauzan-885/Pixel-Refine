@@ -139,8 +139,12 @@ def compile_highlight_recovery_tcm(
 
 
 if __name__ == "__main__":
+    target_id = os.environ.get("PIXEL_REFINE_TARGET_VARIANT", "").strip() or "vulkan_x86_64_windows"
     output = os.path.abspath(
-        os.path.join(file_dir, "../aot_tcm/highlight_recovery_vulkan.tcm")
+        os.path.join(
+            file_dir,
+            f"../aot_tcm/{target_id}/highlight_recovery_{target_id}.tcm",
+        )
     )
     os.makedirs(os.path.dirname(output), exist_ok=True)
     compile_highlight_recovery_tcm(ti.vulkan, output)

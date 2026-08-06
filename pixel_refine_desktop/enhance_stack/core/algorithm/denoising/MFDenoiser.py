@@ -147,21 +147,6 @@ class LucasKanadeAliasAlgorithm:
     KIND = "alignment"
     DESCRIPTION = "Lucas Kanade optical flow alignment with switchable CPU/GPU backend."
 
-    def _resolve_delegate(self, batch_id=None):
-        try:
-            config = get_alignment_registry()["Lucas Kanade Optical Flow"].load_config(
-                batch_id=batch_id
-            )
-            backend = str(config.get("backend", "cpu")).strip().lower()
-        except Exception as exc:
-            print(f"[LucasKanadeAlias] Failed to load backend config: {exc}")
-            backend = "cpu"
-
-        registry = get_alignment_registry()
-        if backend == "gpu":
-            return registry["Lucas Kanade GPU Optical Flow"]
-        return registry["Lucas Kanade Optical Flow"]
-
     NAME = "Lucas Kanade"
     KIND = "alignment"
     DESCRIPTION = "Lucas Kanade optical flow alignment with switchable CPU/GPU backend."
@@ -346,6 +331,11 @@ def _build_algorithm_alias_map(registry):
         "orb": "ORB",
         "no alignment": "No Alignment",
         "noalignment": "No Alignment",
+        "none": "No Denoising",
+        "no denoising": "No Denoising",
+        "average": "Average",
+        "similarity": "Similarity",
+        "similarity fusion": "Similarity Fusion",
     }
     for alias, target in explicit_aliases.items():
         if target in registry:
@@ -427,6 +417,39 @@ class PipelineContext:
     alignment_effective_name: str = "No Alignment"
     alignment_runtime_snapshot: dict = field(default_factory=dict)
     compute_runtime: dict = field(default_factory=dict)
+    # Alignment orchestration state.  The reference belongs to the pipeline,
+    # while comparison frames belong to a short-lived AlignmentBatchJob.
+    alignment_reference: Optional[np.ndarray] = None
+    alignment_reference_ready: bool = False
+    alignment_batch_size: int = 0
+    alignment_batches_processed: int = 0
+    alignment_prefetch_active: bool = False
+    alignment_prefetch_start: int = -1
+    alignment_prefetch_end: int = -1
+    alignment_prefetch_frames: dict = field(default_factory=dict)
+
+
+@dataclass
+class AlignmentBatchJob:
+    """A bounded alignment workload owned by :class:`MFDenoiserAlgorithm`.
+
+    Alignment implementations receive this job as data only.  They must not
+    open/close HDF5, load paths, or retain the comparison frames after the job
+    returns.  ``reference`` is deliberately separate and owned by the parent
+    pipeline so it can remain stable across all jobs.
+    """
+
+    start_index: int
+    end_index: int
+    paths: list = field(default_factory=list)
+    frames: list = field(default_factory=list)
+    reference: Optional[np.ndarray] = None
+    target_dims: tuple = (0, 0)
+    config: dict = field(default_factory=dict)
+
+    @property
+    def size(self):
+        return max(0, self.end_index - self.start_index)
 
 
 class MFDenoiserAlgorithm:
@@ -444,7 +467,9 @@ class MFDenoiserAlgorithm:
         mode = "full_frame"
         block_enabled = False
         ctx.params["processing_mode"] = mode
-        print("[MFDenoiser][Compute] Full-frame mode enforced; block runtime is experimental.")
+        print(
+            "[MFDenoiser][Compute] Full-frame mode enforced; block runtime is experimental."
+        )
         requested_size = int(ctx.params.get("tile_size", 256) or 256)
         block_size = max(64, min(1024, requested_size))
         block_size = max(64, (block_size // 16) * 16)
@@ -675,7 +700,15 @@ class MFDenoiserAlgorithm:
             "tile_overlap": float(config.get("tile_based_overlap_percent", 0.20)),
             "alignment_plan": config.get("mfdenoiser_alignment_plan", "No Alignment"),
             "merge_plan": config.get("mfdenoiser_merge_plan", "No Denoising"),
-            "batch_size": int(config.get("mfdenoiser_batch_size", 15)),
+            "batch_size": int(
+                config.get(
+                    "mfdenoiser_batch_size",
+                    config.get("ai_batch_size", 15),
+                )
+            ),
+            "h5_write_batch_size": int(
+                config.get("mfdenoiser_h5_write_batch_size", 4)
+            ),
             "use_alignment_cache": bool(
                 config.get("mfdenoiser_use_alignment_cache", False)
             ),
@@ -764,15 +797,189 @@ class MFDenoiserAlgorithm:
         return ctx
 
     def build_batch_plan(self, ctx):
-        """Create batch ranges. The plan is owned by run_pipeline orchestration."""
-        batch_size = max(1, int(ctx.params.get("batch_size", 8)))
-        ctx.batch_plan = setup_balanced_batching(
-            ctx.total_images,
+        """Create comparison-frame batches; reference frame is kept separate."""
+        batch_size = max(1, int(ctx.params.get("batch_size", 6)))
+        comparison_paths = ctx.image_paths[1:]
+        comparison_plan = setup_balanced_batching(
+            comparison_paths,
             _lang(),
             max_batch_size=batch_size,
         )
+        # The batching helper works on a zero-based comparison list. Convert
+        # its ranges back to the global image-path indices while reserving
+        # index 0 exclusively for the persistent reference frame.
+        ctx.batch_plan = [(start + 1, end + 1) for start, end in comparison_plan]
         print(f"[MFDenoiser][Batch] batch_size={batch_size} plan={ctx.batch_plan}")
         return ctx.batch_plan
+
+    def _prepare_alignment_reference(self, ctx):
+        """Load and normalize the immutable alignment reference once.
+
+        This is intentionally separate from ``_load_single_frame`` so future
+        GPU backends can attach a persistent reference pyramid/buffer here,
+        without making the alignment algorithms aware of pipeline policy.
+        """
+        if ctx.alignment_reference_ready and ctx.alignment_reference is not None:
+            return ctx.alignment_reference
+        if not ctx.image_paths:
+            return None
+
+        reference = self._load_single_frame(ctx, ctx.image_paths[0])
+        if reference is None:
+            return None
+        resize_res = resize_all_with_padding(
+            [reference],
+            method="preserve",
+            stop_requested=ctx.stop_requested,
+            force_even=True,
+        )
+        if resize_res and resize_res[0]:
+            reference = resize_res[0][0]
+
+        ctx.alignment_reference = reference
+        ctx.alignment_reference_ready = True
+        ctx.reference_image = reference
+        ctx.ref_dtype = reference.dtype
+        ctx.ref_h, ctx.ref_w = reference.shape[:2]
+        print(
+            f"[MFDenoiser][Batch] persistent reference ready "
+            f"{_frame_info(reference)}"
+        )
+        return reference
+
+    def _load_alignment_batch(self, ctx, batch_range):
+        """Load one bounded comparison batch, excluding the reference frame."""
+        start, end = batch_range
+        first_target = max(1, int(start))
+        if first_target >= end:
+            return AlignmentBatchJob(
+                start_index=first_target,
+                end_index=first_target,
+                reference=ctx.alignment_reference,
+                target_dims=(ctx.ref_h, ctx.ref_w),
+            )
+
+        paths = ctx.image_paths[first_target:end]
+        frames = []
+        if paths:
+            if getattr(ctx, "use_tonemapped_loading", False):
+                frames = [
+                    self._load_single_frame_tonemapped(ctx, path)
+                    for path in paths
+                    if not (ctx.stop_requested and ctx.stop_requested())
+                ]
+            else:
+                load_res = load_images_from_paths(
+                    paths,
+                    ctx.stop_requested,
+                    linear_mode=ctx.is_linear_mode,
+                    capture_ref_proxy=False,
+                    update_progress=None,
+                )
+                frames = load_res[0] if isinstance(load_res, tuple) else load_res
+            resize_res = resize_all_with_padding(
+                frames,
+                method="preserve",
+                stop_requested=ctx.stop_requested,
+                force_even=True,
+            )
+            if resize_res and resize_res[0]:
+                frames = resize_res[0]
+
+        job = AlignmentBatchJob(
+            start_index=first_target,
+            end_index=end,
+            paths=paths,
+            frames=frames or [],
+            reference=ctx.alignment_reference,
+            target_dims=(ctx.ref_h, ctx.ref_w),
+        )
+        print(
+            f"[MFDenoiser][Batch] loaded alignment job "
+            f"indices={job.start_index}:{job.end_index} frames={len(job.frames)}"
+        )
+        return job
+
+    def _begin_alignment_prefetch(self, ctx):
+        """Enable bounded prefetch for legacy per-frame alignment APIs."""
+        self._prepare_alignment_reference(ctx)
+        ctx.alignment_batch_size = max(1, int(ctx.params.get("batch_size", 8)))
+        ctx.alignment_prefetch_active = True
+        ctx.alignment_prefetch_start = -1
+        ctx.alignment_prefetch_end = -1
+        ctx.alignment_prefetch_frames.clear()
+        ctx.alignment_batches_processed = 0
+        print(
+            f"[MFDenoiser][Batch] prefetch enabled batch_size="
+            f"{ctx.alignment_batch_size} total={ctx.total_images}"
+        )
+        # Prime the first bounded buffer before the backend starts requesting
+        # individual frames. Subsequent batches are swapped in on demand.
+        if ctx.batch_plan:
+            first_start, _ = ctx.batch_plan[0]
+            self._prefetch_frame_for_path(ctx, ctx.image_paths[first_start])
+
+    def _prefetch_frame_for_path(self, ctx, path):
+        """Return a preloaded frame, refilling the bounded batch when needed."""
+        try:
+            index = ctx.image_paths.index(path)
+        except ValueError:
+            return None
+        if index == 0:
+            return ctx.alignment_reference
+
+        batch = next(
+            (
+                (int(batch_start), int(batch_end))
+                for batch_start, batch_end in (ctx.batch_plan or [])
+                if int(batch_start) <= index < int(batch_end)
+            ),
+            None,
+        )
+        if batch is None:
+            batch_size = max(1, ctx.alignment_batch_size)
+            start = 1 + ((index - 1) // batch_size) * batch_size
+            end = min(ctx.total_images, start + batch_size)
+        else:
+            start, end = batch
+            start = max(1, start)
+        if not (
+            ctx.alignment_prefetch_start <= index < ctx.alignment_prefetch_end
+            and path in ctx.alignment_prefetch_frames
+        ):
+            ctx.alignment_prefetch_frames.clear()
+            job = self._load_alignment_batch(ctx, (start, end))
+            ctx.alignment_prefetch_start = start
+            ctx.alignment_prefetch_end = end
+            ctx.alignment_prefetch_frames.update(
+                (frame_path, frame) for frame_path, frame in zip(job.paths, job.frames)
+            )
+            ctx.alignment_batches_processed += 1
+            print(
+                f"[MFDenoiser][Batch] active batch "
+                f"{start}:{end} ({len(ctx.alignment_prefetch_frames)} frames)"
+            )
+        return ctx.alignment_prefetch_frames.get(path)
+
+    def _end_alignment_prefetch(self, ctx):
+        """Release the current comparison batch but retain no alignment state."""
+        if ctx.alignment_prefetch_active:
+            ctx.alignment_prefetch_frames.clear()
+            ctx.alignment_prefetch_active = False
+            ctx.alignment_prefetch_start = -1
+            ctx.alignment_prefetch_end = -1
+            gc.collect()
+            print(
+                f"[MFDenoiser][Batch] prefetch released "
+                f"batches={ctx.alignment_batches_processed}"
+            )
+
+    @staticmethod
+    def _release_alignment_batch(job):
+        """Release comparison-frame ownership without touching the reference."""
+        job.frames.clear()
+        job.paths.clear()
+        gc.collect()
 
     def _can_stream_load_for_merge(self, ctx, alignment_algorithm):
         """Return True when images can stay as paths until the merge stage."""
@@ -886,6 +1093,17 @@ class MFDenoiserAlgorithm:
         return frame
 
     def _load_single_frame(self, ctx, path, target_dims=None):
+        if getattr(ctx, "alignment_prefetch_active", False):
+            reference_path = ctx.image_paths[0] if ctx.image_paths else None
+            if path != reference_path:
+                prefetched = self._prefetch_frame_for_path(ctx, path)
+                if prefetched is not None:
+                    frame = prefetched
+                    if target_dims is not None and frame.shape[:2] != tuple(
+                        target_dims
+                    ):
+                        frame = resize_with_padding(frame, target_dims)
+                    return frame
         if getattr(ctx, "use_tonemapped_loading", False):
             return self._load_single_frame_tonemapped(
                 ctx, path, target_dims=target_dims
@@ -989,6 +1207,7 @@ class MFDenoiserAlgorithm:
         _progress(
             ctx.update_progress, 25, f"Planning feature matching: {algorithm.NAME}"
         )
+        self._begin_alignment_prefetch(ctx)
         ctx.use_tonemapped_loading = True
         try:
             motion_plan = algorithm.build_motion_plan(
@@ -1000,6 +1219,9 @@ class MFDenoiserAlgorithm:
             )
         finally:
             ctx.use_tonemapped_loading = False
+        # Motion estimation may use a tone-mapped representation.  Rebuild a
+        # bounded raw-frame prefetch for the subsequent warp/crop pass.
+        self._end_alignment_prefetch(ctx)
         ctx.motion_plan = motion_plan
         motion_by_index = {item["index"]: item for item in motion_plan}
 
@@ -1025,6 +1247,7 @@ class MFDenoiserAlgorithm:
             os.remove(ctx.hdf5_path)
 
         saved_count = 0
+        self._begin_alignment_prefetch(ctx)
         with h5py.File(ctx.hdf5_path, "w") as h5f:
             write_alignment_cache_attrs(
                 h5f,
@@ -1070,7 +1293,6 @@ class MFDenoiserAlgorithm:
                     continue
 
                 save_to_hdf5(h5f, f"image_{index}", aligned, extract_exif(path))
-                h5f.flush()
                 saved_count += 1
                 print(
                     f"[MFDenoiser][FeatureMatching] saved image_{index} "
@@ -1090,6 +1312,7 @@ class MFDenoiserAlgorithm:
         ctx.frames = []
         ctx.data_source = ctx.hdf5_path
         ctx.needs_alignment = False
+        self._end_alignment_prefetch(ctx)
         print(
             f"[MFDenoiser][FeatureMatching] finished saved={saved_count} "
             f"hdf5_path={ctx.hdf5_path}"
@@ -1149,7 +1372,7 @@ class MFDenoiserAlgorithm:
                 print("[MFDenoiser][Align] released prior VRAM cache for dense flow")
             except Exception as exc:
                 print(f"[MFDenoiser][Align] VRAM cache release skipped: {exc}")
-            reference = self._load_single_frame(ctx, ctx.image_paths[0])
+            reference = self._prepare_alignment_reference(ctx)
             if reference is None:
                 ctx.aligned_frames = []
                 return ctx
@@ -1173,13 +1396,17 @@ class MFDenoiserAlgorithm:
                 if hasattr(algorithm, "load_config")
                 else {}
             )
-            result_ctx = algorithm.build_flow_alignment(
-                ctx,
-                reference,
-                (ctx.ref_h, ctx.ref_w),
-                self,
-                config,
-            )
+            self._begin_alignment_prefetch(ctx)
+            try:
+                result_ctx = algorithm.build_flow_alignment(
+                    ctx,
+                    reference,
+                    (ctx.ref_h, ctx.ref_w),
+                    self,
+                    config,
+                )
+            finally:
+                self._end_alignment_prefetch(ctx)
             if result_ctx.clear_raw or result_ctx.params.get("clear_raw", True):
                 result_ctx.frames = []
                 result_ctx.aligned_frames = []
@@ -1231,8 +1458,54 @@ class MFDenoiserAlgorithm:
             batch_plan=batch_plan,
         ):
             return ctx
+
+        # Alignment backends release their in-memory outputs after writing
+        # HDF5. No-Denoising must still produce the persisted reference.
+        if algorithm.NAME == "No Denoising":
+            if (
+                getattr(ctx, "hdf5_path", None)
+                and os.path.exists(ctx.hdf5_path)
+                and getattr(ctx, "data_source", "") == ctx.hdf5_path
+            ):
+                with h5py.File(ctx.hdf5_path, "r") as h5f:
+                    if "image_0" in h5f:
+                        ctx.result_image = np.array(h5f["image_0"])
+            elif ctx.reference_image is not None:
+                ctx.result_image = np.array(ctx.reference_image, copy=True)
+            elif ctx.image_paths:
+                ctx.result_image = self._load_single_frame(
+                    ctx, ctx.image_paths[0]
+                )
+            print(
+                f"[MFDenoiser][Merge] No Denoising reference="
+                f"{_frame_info(ctx.result_image)}"
+            )
+            return ctx
+
         frames = ctx.aligned_frames or ctx.frames
         ctx.result_image = algorithm.run(ctx, frames, batch_plan=batch_plan)
+        if ctx.result_image is not None:
+            try:
+                from taichi_library import taichi_aot
+                from config import DEFAULT_TONE_MAPPING_PARAMS
+                if ctx.result_image.dtype in (np.float32, np.float64):
+                    img_f32 = ctx.result_image.astype(np.float32, copy=False)
+                    max_v = float(np.max(img_f32))
+                    if max_v > 1.0:
+                        img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
+                    img_tm = taichi_aot.naturalTonemapping(img_f32, **DEFAULT_TONE_MAPPING_PARAMS)
+                    if max_v > 255.0:
+                        ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+                    elif max_v > 1.0:
+                        ctx.result_image = np.clip(img_tm * 255.0, 0, 255).astype(np.uint8)
+                    else:
+                        ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+                elif ctx.result_image.dtype == np.uint16:
+                    img_f32 = ctx.result_image.astype(np.float32) / 65535.0
+                    img_tm = taichi_aot.naturalTonemapping(img_f32, **DEFAULT_TONE_MAPPING_PARAMS)
+                    ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+            except Exception as e_tm:
+                print(f"[MFDenoiser] Tone mapping result image warning: {e_tm}")
         print(f"[MFDenoiser][Merge] result={_frame_info(ctx.result_image)}")
         return ctx
 
@@ -1281,6 +1554,8 @@ class MFDenoiserAlgorithm:
         processing_mode=None,
         tile_size=None,
         tile_overlap=None,
+        batch_size=None,
+        h5_write_batch_size=None,
         alignment_backend=None,
         clear_raw=None,
     ):
@@ -1303,6 +1578,10 @@ class MFDenoiserAlgorithm:
             ctx.params["tile_size"] = int(tile_size)
         if tile_overlap is not None:
             ctx.params["tile_overlap"] = float(tile_overlap)
+        if batch_size is not None:
+            ctx.params["batch_size"] = max(1, int(batch_size))
+        if h5_write_batch_size is not None:
+            ctx.params["h5_write_batch_size"] = max(1, int(h5_write_batch_size))
         if alignment_backend is not None:
             ctx.params["alignment_plan"] = alignment_backend
         if clear_raw is not None:
@@ -1312,6 +1591,7 @@ class MFDenoiserAlgorithm:
         print(
             f"[MFDenoiser][Pipeline] start single_process={single_process} batch_id={batch_id} "
             f"alignment={ctx.params.get('alignment_plan')} denoising={ctx.params.get('merge_plan')} "
+            f"batch_size={ctx.params.get('batch_size')} "
             f"output_suffix={ctx.params.get('output_suffix')}"
         )
 
@@ -1385,6 +1665,8 @@ def _run_pipeline_entry(
     processing_mode=None,
     tile_size=None,
     tile_overlap=None,
+    batch_size=None,
+    h5_write_batch_size=None,
     alignment_backend=None,
     clear_raw=None,
 ):
@@ -1399,6 +1681,8 @@ def _run_pipeline_entry(
         processing_mode=processing_mode,
         tile_size=tile_size,
         tile_overlap=tile_overlap,
+        batch_size=batch_size,
+        h5_write_batch_size=h5_write_batch_size,
         alignment_backend=alignment_backend,
         clear_raw=clear_raw,
     )
@@ -1415,6 +1699,8 @@ def running_mf_denoiser(
     processing_mode=None,
     tile_size=None,
     tile_overlap=None,
+    batch_size=None,
+    h5_write_batch_size=None,
     alignment_backend=None,
     clear_raw=None,
 ):
@@ -1432,6 +1718,8 @@ def running_mf_denoiser(
             processing_mode=processing_mode,
             tile_size=tile_size,
             tile_overlap=tile_overlap,
+            batch_size=batch_size,
+            h5_write_batch_size=h5_write_batch_size,
             alignment_backend=alignment_backend,
             clear_raw=clear_raw,
         )
@@ -1462,6 +1750,8 @@ def running_mf_denoiser(
         processing_mode=processing_mode,
         tile_size=tile_size,
         tile_overlap=tile_overlap,
+        batch_size=batch_size,
+        h5_write_batch_size=h5_write_batch_size,
         alignment_backend=alignment_backend,
         clear_raw=clear_raw,
     )
@@ -1487,6 +1777,7 @@ def running_similarity(
     stop_callback=None,
     merging_mode=None,
     output_suffix=None,
+    batch_size=None,
     alignment_backend=None,
     clear_raw=None,
 ):
@@ -1498,6 +1789,7 @@ def running_similarity(
         stop_callback=stop_callback,
         merging_mode=merging_mode or "similarity",
         output_suffix=output_suffix or "similarity",
+        batch_size=batch_size,
         alignment_backend=alignment_backend,
         clear_raw=clear_raw,
     )

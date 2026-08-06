@@ -1,0 +1,6 @@
+cgraph:bicubic_resize_f32_2d
+cgraph:bicubic_resize_f32_3d
+cgraph:bicubic_sample_f32_2d
+cgraph:bicubic_sample_f32_3d
+cgraph:bicubic_resize_offset_f32_2d
+cgraph:bicubic_resize_offset_f32_3d

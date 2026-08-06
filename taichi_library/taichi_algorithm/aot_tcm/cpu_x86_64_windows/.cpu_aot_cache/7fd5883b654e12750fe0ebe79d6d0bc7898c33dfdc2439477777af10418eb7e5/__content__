@@ -1,0 +1,6 @@
+cgraph:arm_demosaic
+cgraph:pure_arm_demosaic
+cgraph:arm_demosaic_1channel
+cgraph:arm_demosaic_half_res
+cgraph:arm_demosaic_rgb_half_res
+cgraph:rgb_to_bgr_i32

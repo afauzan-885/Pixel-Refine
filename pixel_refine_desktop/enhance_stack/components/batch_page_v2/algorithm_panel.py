@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 from PySide6.QtCore import QThread, Qt, Signal, QTimer
+import config
 
 # Generic UI Library
 from resources.GenericUILibrary import (
@@ -478,20 +479,29 @@ class AlgorithmPanel(QWidget, SyncMixin):
                 all_settings = {}
 
             ui_settings = {
-                "alignment": (
-                    all_settings.get("alignment_algo", "No Alignment")
-                    if all_settings.get("checkbox_align_images", False)
+                config.KEY_ALIGNMENT: (
+                    all_settings.get(config.KEY_ALIGNMENT_ALGO, "No Alignment")
+                    if all_settings.get(config.KEY_CHECKBOX_ALIGN, False)
                     else "No Alignment"
                 ),
-                "super_resolution": (
-                    all_settings.get("super_resolution_algo", "No Super Resolution")
-                    if all_settings.get("checkbox_super_resolution", False)
+                config.KEY_SUPER_RESOLUTION: (
+                    all_settings.get(config.KEY_SUPER_RESOLUTION_ALGO, "No Super Resolution")
+                    if all_settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
                     else "No Super Resolution"
                 ),
-                "denoising": (
-                    all_settings.get("denoising_algo", "No Denoising")
-                    if all_settings.get("checkbox_denoising", False)
+                config.KEY_DENOISING: (
+                    all_settings.get(config.KEY_DENOISING_ALGO, "No Denoising")
+                    if all_settings.get(config.KEY_CHECKBOX_DENOISING, False)
                     else "No Denoising"
+                ),
+                config.KEY_CHECKBOX_ALIGN: bool(
+                    all_settings.get(config.KEY_CHECKBOX_ALIGN, False)
+                ),
+                config.KEY_CHECKBOX_SUPER_RES: bool(
+                    all_settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
+                ),
+                config.KEY_CHECKBOX_DENOISING: bool(
+                    all_settings.get(config.KEY_CHECKBOX_DENOISING, False)
                 ),
             }
             # Update the UI
