@@ -1,6 +1,0 @@
-cgraph:bilinear_demosaice
-cgraph:pure_bilinear_demosaice
-cgraph:bilinear_demosaice_1channel
-cgraph:bilinear_demosaice_half_res
-cgraph:bilinear_demosaice_rgb_half_res
-cgraph:rgb_to_bgr_i32

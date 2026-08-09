@@ -22,7 +22,8 @@ common_mod = importlib.reload(common_mod)
 def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
     print(f"\n>>> Compiling COMMON UTILS AOT for: {arch}")
     ti.init(arch=arch, offline_cache=False)
-    # Every public graph is f32/i32. Advertising Float64 unconditionally makes
+    # Arithmetic/color graphs remain f32/i32; CPU data-movement graphs may
+    # additionally use compact dtypes. Advertising Float64 unconditionally makes
     # otherwise portable SPIR-V fail device creation on Intel GPUs without
     # shaderFloat64 even though no graph consumes f64 data.
     module = ti.aot.Module(arch)
@@ -45,6 +46,39 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
     add_copy("copy_i32_2d", ti.i32)
     add_copy("copy_vec3_2d", ti.f32, is_vec=True)
     add_copy("copy_vec3_i32_2d", ti.i32, is_vec=True)
+
+    scatter_src = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3
+    )
+    scatter_dst = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3
+    )
+    scatter_scalars = [
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, name, ti.i32)
+        for name in ("src_y", "src_x", "dst_y", "dst_x", "core_h", "core_w")
+    ]
+    scatter_graph = ti.graph.GraphBuilder()
+    scatter_graph.dispatch(
+        common_mod._scatter_core_f32_3d_kernel,
+        scatter_src,
+        scatter_dst,
+        *scatter_scalars,
+    )
+    module.add_graph("scatter_core_f32_3d", scatter_graph.compile())
+
+    # CPU can preserve compact storage dtypes in the common copy path.  Keep
+    # these graphs out of graphics backends until their driver capability
+    # matrix proves native 8/16-bit SSBO/image support; the public wrappers
+    # already promote safely on those backends.
+    if arch == ti.cpu:
+        for suffix, dtype in (
+            ("u8", ti.u8),
+            ("u16", ti.u16),
+            ("i16", ti.i16),
+            ("f16", ti.f16),
+        ):
+            add_copy(f"copy_{suffix}_2d", dtype)
+            add_copy(f"copy_vec3_{suffix}_2d", dtype, is_vec=True)
 
     @ti.kernel
     def copy_1d_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
@@ -115,6 +149,21 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
 
     add_merge_3ch("merge_3ch_f32", ti.f32)
     add_merge_3ch("merge_3ch_i32", ti.i32)
+
+    # CPU keeps compact storage native for data-movement primitives as well
+    # as copy.  Graphics backends intentionally stay on f32/i32 until their
+    # SSBO/image format capability matrix is proven on each driver.
+    if arch == ti.cpu:
+        for suffix, dtype in (
+            ("u8", ti.u8),
+            ("u16", ti.u16),
+            ("i16", ti.i16),
+            ("f16", ti.f16),
+        ):
+            add_extract(f"extract_channel_{suffix}", dtype)
+            add_insert(f"insert_channel_{suffix}", dtype)
+            add_split_3ch(f"split_3ch_{suffix}", dtype)
+            add_merge_3ch(f"merge_3ch_{suffix}", dtype)
 
     # 3. Color Kernels
     def add_cvt(name, kernel, dtype):
@@ -407,6 +456,7 @@ if __name__ == "__main__":
     available_arches = {
         "vulkan": (ti.vulkan, "vulkan"),
         "opengl": (ti.opengl, "opengl"),
+        "gles": (ti.gles, "gles"),
         "cuda": (ti.cuda, "cuda"),
         "cpu": (ti.cpu, "cpu"),
     }

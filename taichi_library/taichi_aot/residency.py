@@ -39,6 +39,7 @@ class ResidentEntry:
     fence_ready: Optional[Callable[[], bool]] = None
     checksum: Any = None
     source_checksum: Any = None
+    invalidated: bool = False
 
     @property
     def leased(self):
@@ -173,10 +174,31 @@ class DeviceResidencyCache:
             self._evict(str(key), entry)
             return True
 
+    def invalidate_owner(self, owner):
+        """Evict idle resident entries owned by a quarantined operation."""
+        owner = str(owner)
+        invalidated = 0
+        with self._lock:
+            for key, entry in list(self._entries.items()):
+                if entry.owner != owner:
+                    continue
+                # Do not dispose a buffer while another dispatch still leases
+                # it. Mark it stale instead; ``lease`` removes it as soon as
+                # the last consumer releases the entry.
+                if not entry.can_evict():
+                    entry.invalidated = True
+                    invalidated += 1
+                    continue
+                self._evict(key, entry)
+                invalidated += 1
+        return invalidated
+
     def get(self, key):
         with self._lock:
             entry = self._entries.get(str(key))
-            if entry is None:
+            if entry is None or entry.invalidated:
+                if entry is not None and entry.can_evict():
+                    self._evict(str(key), entry)
                 self._stats["misses"] += 1
                 return None
             entry.hit_count += 1
@@ -204,6 +226,8 @@ class DeviceResidencyCache:
                 current = self._entries.get(str(key))
                 if current is not None and current.generation == generation:
                     current.ref_count = max(0, current.ref_count - 1)
+                    if current.invalidated and current.can_evict():
+                        self._evict(str(key), current)
 
     def clear(self):
         with self._lock:

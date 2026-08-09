@@ -19,10 +19,59 @@ try:
 except ImportError:  # Direct script execution.
     from aot_artifact import normalize_tcm
 
+try:
+    from .target_registry import TARGET_BACKENDS
+except ImportError:  # Direct script execution.
+    from target_registry import TARGET_BACKENDS
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ARTIFACT_DIR = PROJECT_ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm"
 PACKAGE = "taichi_library.taichi_algorithm.aot_py"
+# Family-local compiler modules live next to the algorithm source.  Keep the
+# short names in JOBS for readability and resolve them through this map so the
+# orchestration contract remains stable while the source tree is colocated.
+COLOCATED_COMPILER_PACKAGES = {
+    "compile_akaze_tcm": "taichi_library.taichi_algorithm.feature_matching",
+    "compile_ofb_tcm": "taichi_library.taichi_algorithm.feature_matching",
+    "compile_area_tcm": "taichi_library.taichi_algorithm.interpolation",
+    "compile_bicubic_tcm": "taichi_library.taichi_algorithm.interpolation",
+    "compile_bilinear_tcm": "taichi_library.taichi_algorithm.interpolation",
+    "compile_bilinear_batch_tcm": "taichi_library.taichi_algorithm.interpolation",
+    "compile_nearest_tcm": "taichi_library.taichi_algorithm.interpolation",
+    "compile_remap_tcm": "taichi_library.taichi_algorithm.interpolation",
+    "compile_arm_tcm": "taichi_library.taichi_algorithm.demosaicing",
+    "compile_bilinear_demosaice_tcm": "taichi_library.taichi_algorithm.demosaicing",
+    "compile_dcb_tcm": "taichi_library.taichi_algorithm.demosaicing",
+    "compile_hamilton_tcm": "taichi_library.taichi_algorithm.demosaicing",
+    "compile_highlight_recovery_tcm": "taichi_library.taichi_algorithm.demosaicing",
+    "compile_mlri_admm_tcm": "taichi_library.taichi_algorithm.demosaicing",
+    "compile_bilateral_grid_tcm": "taichi_library.taichi_algorithm.smoothing",
+    "compile_box_filter_tcm": "taichi_library.taichi_algorithm.smoothing",
+    "compile_gaussian_tcm": "taichi_library.taichi_algorithm.smoothing",
+    "compile_jbf_tcm": "taichi_library.taichi_algorithm.smoothing",
+    "compile_median_tcm": "taichi_library.taichi_algorithm.smoothing",
+    "compile_bm3d_tcm": "taichi_library.taichi_algorithm.denoising",
+    "compile_nlm_tcm": "taichi_library.taichi_algorithm.denoising",
+    "compile_block_matching_tcm": "taichi_library.taichi_algorithm.optical_flow",
+    "compile_farneback_tcm": "taichi_library.taichi_algorithm.optical_flow",
+    "compile_horn_schunck_tcm": "taichi_library.taichi_algorithm.optical_flow",
+    "compile_lucas_kanade_tcm": "taichi_library.taichi_algorithm.optical_flow",
+    "compile_lucas_kanade_batch_tcm": "taichi_library.taichi_algorithm.optical_flow",
+    "compile_fft_tcm": "taichi_library.taichi_algorithm.pyramid",
+    "compile_pyramid_tcm": "taichi_library.taichi_algorithm.pyramid",
+    "compile_gradients_tcm": "taichi_library.taichi_algorithm.math_ops",
+    "compile_math_ops": "taichi_library.taichi_algorithm.math_ops",
+    "compile_mtb_tcm": "taichi_library.taichi_algorithm.alignment",
+    "compile_ncc_tcm": "taichi_library.taichi_algorithm.alignment",
+    "compile_phase_corr_tcm": "taichi_library.taichi_algorithm.alignment",
+    "compile_ransac_tcm": "taichi_library.taichi_algorithm.alignment",
+    "compile_analysis_suite_tcm": "taichi_library.taichi_algorithm.image_processing",
+    "compile_extended_tcm": "taichi_library.taichi_algorithm.image_processing",
+    "compile_inpaint_tcm": "taichi_library.taichi_algorithm.image_processing",
+    "compile_seamless_clone_tcm": "taichi_library.taichi_algorithm.image_processing",
+    "compile_compression_image_tcm": "taichi_library.taichi_algorithm.compression",
+}
 FORK_PYTHON = (
     PROJECT_ROOT
     / "test_algorithm"
@@ -40,6 +89,12 @@ JOBS = {
     "bicubic": ("compile_bicubic_tcm", "compile_bicubic_aot", "path", ()),
     "bilateral_grid": ("compile_bilateral_grid_tcm", "compile_bg_aot", "path", ()),
     "bilinear": ("compile_bilinear_tcm", "compile_bilinear_tcm", "path", ()),
+    "bilinear_batch": (
+        "compile_bilinear_batch_tcm",
+        "compile_bilinear_batch",
+        "path",
+        (),
+    ),
     "bilinear_demosaice": (
         "compile_bilinear_demosaice_tcm",
         "compile_bilinear_demosaice_tcm",
@@ -86,6 +141,12 @@ JOBS = {
         "out_dir",
         (),
     ),
+    "lucas_kanade_batch": (
+        "compile_lucas_kanade_batch_tcm",
+        "compile_lucas_kanade_batch",
+        "path",
+        (),
+    ),
     "math_ops": ("compile_math_ops", "compile_math_ops", "out_dir", ()),
     "median_filter": ("compile_median_tcm", "compile_median_aot", "path", ()),
     "mlri_admm": ("compile_mlri_admm_tcm", "compile_mlri_admm_tcm", "path", ()),
@@ -104,30 +165,94 @@ JOBS = {
         "path",
         (),
     ),
+    # Research-stage native modules.  The public Camera2/SfM APIs remain
+    # Python orchestrators; these artifacts contain their portable hot paths.
+    "hdr": ("compile_research_tcm", "compile_hdr_aot", "path", ()),
+    "tone_mapping": (
+        "compile_research_tcm",
+        "compile_tone_mapping_aot",
+        "path",
+        (),
+    ),
+    "camera": ("compile_research_tcm", "compile_camera_aot", "path", ()),
+    "sfm_matching": (
+        "compile_research_tcm",
+        "compile_sfm_matching_aot",
+        "path",
+        (),
+    ),
+    "sfm_geometry": (
+        "compile_research_tcm",
+        "compile_sfm_geometry_aot",
+        "path",
+        (),
+    ),
+    "sfm_stereo": (
+        "compile_research_tcm",
+        "compile_sfm_stereo_aot",
+        "path",
+        (),
+    ),
+    "sfm_point_cloud": (
+        "compile_research_tcm",
+        "compile_sfm_point_cloud_aot",
+        "path",
+        (),
+    ),
+    "sfm_bundle": (
+        "compile_research_tcm",
+        "compile_sfm_bundle_aot",
+        "path",
+        (),
+    ),
+    "sfm_poisson": (
+        "compile_research_tcm",
+        "compile_sfm_poisson_aot",
+        "path",
+        (),
+    ),
+    # Keep the image families independently compilable.  The former
+    # image_core/image_heavy/image_guidance aggregate jobs compiled a large
+    # monolithic module and were prone to backend timeouts; the production
+    # registry below intentionally names each artifact separately.
+    "morphology": ("compile_extended_tcm", "compile_morphology_aot", "path", ()),
+    "histogram": ("compile_extended_tcm", "compile_histogram_aot", "path", ()),
+    "ssim": ("compile_extended_tcm", "compile_ssim_aot", "path", ()),
+    "warp_affine": ("compile_extended_tcm", "compile_warp_affine_aot", "path", ()),
+    "filter2d": ("compile_extended_tcm", "compile_filter2d_aot", "path", ()),
+    "copy_make_border": ("compile_extended_tcm", "compile_border_aot", "path", ()),
+    "normalize": ("compile_extended_tcm", "compile_normalize_aot", "path", ()),
+    "threshold": ("compile_extended_tcm", "compile_threshold_aot", "path", ()),
+    "gaussian_window": ("compile_extended_tcm", "compile_gaussian_window_aot", "path", ()),
+    "joint_bilateral_guidance": ("compile_extended_tcm", "compile_guidance_aot", "path", ()),
+    "enhance_image": ("compile_extended_tcm", "compile_enhance_aot", "path", ()),
+    "compression_image": (
+        "compile_compression_image_tcm",
+        "compile_compression_aot",
+        "path",
+        (),
+    ),
+    # Analysis-suite graphs use a shared source compiler but remain separate
+    # archives so a histogram/CLAHE/Canny failure cannot invalidate unrelated
+    # image kernels.  Registering them here removes the last parallel build
+    # path and lets the target-qualified runner handle all public TCM jobs.
+    "color_convert": (
+        "compile_analysis_suite_tcm",
+        "compile_color_convert",
+        "path",
+        (),
+    ),
+    "otsu": ("compile_analysis_suite_tcm", "compile_otsu", "path", ()),
+    "clahe": ("compile_analysis_suite_tcm", "compile_clahe", "path", ()),
+    "canny": ("compile_analysis_suite_tcm", "compile_canny", "path", ()),
+    "hough": ("compile_analysis_suite_tcm", "compile_hough", "path", ()),
+    "guided_filter": (
+        "compile_analysis_suite_tcm",
+        "compile_guided_filter",
+        "path",
+        (),
+    ),
 }
-
-# A backend is not a complete artifact identity.  These explicit profiles
-# keep CPU bitcode, mobile GLES archives, and vendor-specific desktop archives
-# in separate directories while preserving the historical ``--backend`` CLI.
-TARGET_BACKENDS = {
-    "cpu_x86_64_windows": "cpu",
-    "cpu_x86_64_linux": "cpu",
-    "cpu_arm64_linux": "cpu",
-    "cpu_arm64_android": "cpu",
-    "vulkan_x86_64_windows": "vulkan",
-    "vulkan_x86_64_windows_nvidia": "vulkan",
-    "vulkan_x86_64_windows_intel": "vulkan",
-    "vulkan_arm64_android": "vulkan",
-    "opengl_x86_64_windows": "opengl",
-    "opengl_x86_64_windows_nvidia": "opengl",
-    "opengl_x86_64_windows_intel": "opengl",
-    "opengl_arm64_linux": "opengl",
-    "gles_arm64_android": "opengl",
-    "gles_arm64_linux": "opengl",
-    "cuda_x86_64_windows_nvidia": "cuda",
-    "cuda_arm64_linux_nvidia": "cuda",
-}
-
 
 def _artifact_path(name: str, backend: str) -> Path:
     return ARTIFACT_DIR / f"{name}_{backend}.tcm"
@@ -152,10 +277,16 @@ def _require_backend_artifact(path: Path, backend: str) -> None:
     with zipfile.ZipFile(path, "r") as archive:
         names = set(archive.namelist())
     is_gfx = "graphs.json" in names and any(name.endswith(".spv") for name in names)
-    is_cpu = "graphs.tcb" in names and any(name.endswith(".ll") for name in names)
-    if backend == "cpu" and not is_cpu:
-        raise RuntimeError(f"{path.name} is not a CPU AOT artifact")
-    if backend in {"vulkan", "opengl"} and not is_gfx:
+    # Taichi 1.7.4 serializes both CPU and CUDA AOT graphs as LLVM/TBC
+    # archives (CUDA device code is lowered by the CUDA runtime later), while
+    # Vulkan/OpenGL/GLES archives carry SPIR-V and ``graphs.json``.  Keep the
+    # distinction explicit so a CUDA archive cannot be mistaken for a graphics
+    # artifact, but do not reject valid CUDA TCMs merely because they do not
+    # contain SPIR-V.
+    is_llvm_tcb = "graphs.tcb" in names and any(name.endswith(".ll") for name in names)
+    if backend in {"cpu", "cuda"} and not is_llvm_tcb:
+        raise RuntimeError(f"{path.name} is not a {backend} LLVM/TBC AOT artifact")
+    if backend in {"vulkan", "opengl", "gles"} and not is_gfx:
         raise RuntimeError(f"{path.name} is not a {backend} GFX AOT artifact")
 
 
@@ -165,8 +296,19 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
 
     # Compile each target with its actual Taichi architecture.  The worker uses
     # the rebuilt wheel, whose GLFW path can create the hidden native context.
-    arch = {"cpu": ti.cpu, "vulkan": ti.vulkan, "opengl": ti.opengl, "cuda": ti.cuda}[backend]
-    module = importlib.import_module(f"{PACKAGE}.{module_name}")
+    # GLES is a distinct Taichi architecture.  It must not be compiled as
+    # desktop OpenGL and then relabeled for Android: the context/GLSL profile
+    # and driver capability contract are different even though both archives
+    # carry SPIR-V payloads.
+    arch = {
+        "cpu": ti.cpu,
+        "vulkan": ti.vulkan,
+        "opengl": ti.opengl,
+        "gles": ti.gles,
+        "cuda": ti.cuda,
+    }[backend]
+    module_package = COLOCATED_COMPILER_PACKAGES.get(module_name, PACKAGE)
+    module = importlib.import_module(f"{module_package}.{module_name}")
     compiler = getattr(module, function_name)
     target = _target_artifact_path(name, target_id) if target_id else _artifact_path(name, backend)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -294,9 +436,95 @@ def _run_subprocess(backend: str, name: str, target_id: str | None = None, timeo
     return result.returncode == 0, output
 
 
+def _retarget_cpu_arm64(target_id: str, force: bool = False) -> None:
+    """Build a CPU ARM64 profile without invoking ``ti.arm64`` on x64.
+
+    Taichi 1.7.4 reports ``Arch.arm64`` but silently falls back to x64 on a
+    Windows host.  Calling the normal worker for an ARM target would
+    therefore create a mislabeled artifact.  The dedicated retargeter
+    validates each textual LLVM kernel with the AArch64 frontend and the
+    runtime builder selects the matching Android/Linux triple.
+    """
+
+    retargeter = Path(__file__).with_name("retarget_cpu_tcm_arm64.py")
+    runtime_builder = Path(__file__).with_name("build_arm64_runtime.py")
+    if not retargeter.is_file() or not runtime_builder.is_file():
+        raise RuntimeError("ARM64 cross-target helpers are missing")
+    if force:
+        retarget = subprocess.run(
+            [sys.executable, str(retargeter), "--target", target_id],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=1800.0,
+        )
+        if retarget.returncode:
+            raise RuntimeError(retarget.stdout + retarget.stderr)
+    runtime_path = (
+        ARTIFACT_DIR
+        / target_id
+        / f"runtime_{target_id[len('cpu_'):]}.bc"
+    )
+    if force or not runtime_path.is_file():
+        runtime = subprocess.run(
+            [sys.executable, str(runtime_builder), "--target", target_id],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=300.0,
+        )
+        if runtime.returncode:
+            raise RuntimeError(runtime.stdout + runtime.stderr)
+
+
+def _promote_vulkan_arm64_android() -> None:
+    """Synchronize the architecture-neutral Vulkan archives for Android.
+
+    Vulkan TCMs contain SPIR-V rather than host machine code, so the validated
+    desktop set can be reused by ARM64 Android.  Keep the promotion behind the
+    explicit target profile and its SPIR-V validator; this prevents a generic
+    or malformed archive from being mislabeled as an Android artifact.
+    """
+
+    promoter = Path(__file__).with_name("promote_vulkan_spirv_arm64.py")
+    source = ARTIFACT_DIR / "vulkan_x86_64_windows"
+    output = ARTIFACT_DIR / "vulkan_arm64_android"
+    if not promoter.is_file():
+        raise RuntimeError("Vulkan ARM64 promotion helper is missing")
+    if not source.is_dir() or not any(source.glob("*.tcm")):
+        raise RuntimeError(
+            "vulkan_x86_64_windows must be compiled before promoting ARM64 Vulkan artifacts"
+        )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(promoter),
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+            "--overwrite",
+            "--target-env",
+            "vulkan1.1",
+            "--workers",
+            str(min(8, max(1, os.cpu_count() or 1))),
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=900.0,
+    )
+    if result.returncode:
+        raise RuntimeError((result.stdout + result.stderr).strip())
+    print((result.stdout + result.stderr).strip())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", choices=("cpu", "vulkan", "opengl", "cuda"))
+    parser.add_argument("--backend", choices=("cpu", "vulkan", "opengl", "gles", "cuda"))
     parser.add_argument("--target", choices=tuple(sorted(TARGET_BACKENDS)), help="exact architecture/OS/vendor artifact profile")
     parser.add_argument("--only", help="comma-separated artifact names")
     parser.add_argument("--force", action="store_true", help="recompile existing artifacts")
@@ -317,10 +545,23 @@ def main() -> None:
         parser.error("--backend or --target is required")
 
     # CPU/CUDA archives contain host-architecture code.  Never label an x86
+    # compile as another OS/architecture merely because a filename was
+    # requested. Cross-target builds must use an explicit toolchain helper;
+    # ``ti.cpu`` on Windows produces a Windows LLVM triple.
+    cross_cpu_allowed = os.environ.get("PIXEL_REFINE_ALLOW_CROSS_CPU_AOT") == "1"
+    if args.target == "cpu_x86_64_linux" and os.name == "nt" and not cross_cpu_allowed:
+        parser.error(
+            "cpu_x86_64_linux requires a Linux worker or an explicit cross-compiler profile"
+        )
+    if args.target == "cpu_x86_64_windows" and os.name != "nt" and not cross_cpu_allowed:
+        parser.error(
+            "cpu_x86_64_windows requires a Windows worker or an explicit cross-compiler profile"
+        )
+    # CPU/CUDA archives contain host-architecture code.  Never label an x86
     # compile as ARM merely because a filename was requested.
-    if args.target and args.target.startswith(("cpu_arm64", "cuda_arm64")):
+    if args.target and args.target.startswith("cuda_arm64"):
         host = os.environ.get("PROCESSOR_ARCHITECTURE", "").lower()
-        if host not in {"arm64", "aarch64"} and not os.environ.get("PIXEL_REFINE_ALLOW_CROSS_CPU_AOT"):
+        if host not in {"arm64", "aarch64"} and not cross_cpu_allowed:
             parser.error("ARM CPU/CUDA AOT requires an ARM64 worker or an explicit cross-compiler profile")
 
     if args.worker:
@@ -331,6 +572,47 @@ def main() -> None:
     unknown = sorted(set(requested) - set(JOBS))
     if unknown:
         parser.error(f"unknown artifact(s): {', '.join(unknown)}")
+
+    # Never let a host-x64 Taichi worker emit x64 IR into an ARM directory.
+    # The dedicated path is intentionally handled before the normal worker
+    # loop and is safe to rerun because each archive is atomically promoted.
+    if args.target and args.target.startswith("cpu_arm64"):
+        target_dir = ARTIFACT_DIR / args.target
+        requested_paths = [
+            target_dir / f"{name}_{args.target}.tcm" for name in requested
+        ]
+        needs_generation = args.force or any(not path.is_file() for path in requested_paths)
+        _retarget_cpu_arm64(args.target, force=needs_generation)
+        missing = [str(path.name) for path in requested_paths if not path.is_file()]
+        if missing:
+            raise RuntimeError(
+                "ARM64 retargeter did not produce requested archives: "
+                + ", ".join(missing)
+            )
+        for name in requested:
+            print(f"[PASS] {name} ({args.target} cross-target)")
+        return
+
+    # Vulkan graphics archives are SPIR-V and therefore architecture-neutral,
+    # but they must pass the portability validator before receiving the Android
+    # target identity.  Do this automatically so a rebuild cannot leave the
+    # ARM profile with a stale partial inventory.
+    if args.target == "vulkan_arm64_android":
+        _promote_vulkan_arm64_android()
+        target_dir = ARTIFACT_DIR / args.target
+        missing = [
+            str(target_dir / f"{name}_{args.target}.tcm")
+            for name in requested
+            if not (target_dir / f"{name}_{args.target}.tcm").is_file()
+        ]
+        if missing:
+            raise RuntimeError(
+                "Vulkan ARM64 promotion did not produce requested archives: "
+                + ", ".join(missing)
+            )
+        for name in requested:
+            print(f"[PASS] {name} (vulkan_arm64_android SPIR-V promotion)")
+        return
 
     outcomes: list[tuple[str, str]] = []
     for name in requested:

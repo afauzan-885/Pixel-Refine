@@ -12,7 +12,10 @@ import json
 import subprocess
 import sys
 import tempfile
-from taichi_library.backend_config import requested_backend as _requested_backend
+from taichi_library.backend_config import (
+    is_android_runtime,
+    requested_backend as _requested_backend,
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,19 @@ def classify_device(device: str, backend: str, driver: str = "unknown"):
     if backend == "opengl":
         return BackendCapabilities(backend, vendor, device, driver, safe=True,
                                    reason="OpenGL artifact/load smoke tests validated")
+    if backend == "gles":
+        # GLES artifacts and the ARM64 bridge are statically validated, but a
+        # real Android GLES context is required before automatic dispatch can
+        # call this target.  Keep it visible to diagnostics without allowing a
+        # desktop process to treat a cross-compiled mobile target as ready.
+        return BackendCapabilities(
+            backend,
+            vendor,
+            device,
+            driver,
+            safe=False,
+            reason="GLES TCM/bridge static gates passed; Android device execution is pending",
+        )
     return BackendCapabilities(backend, vendor, device, driver)
 
 
@@ -68,6 +84,11 @@ def requested_backend():
 def backend_candidates(device: str = "unknown"):
     """Return deterministic preference order for automatic dispatch."""
     name = (device or "").lower()
+    if is_android_runtime():
+        # Android's desktop-OpenGL spelling is not a valid artifact identity;
+        # the resolver canonicalizes it to GLES. Keep the mobile preference
+        # list explicit so auto mode never attempts a desktop OpenGL bridge.
+        return ["vulkan", "gles", "cpu"]
     if "intel" in name:
         try:
             from taichi_library.vulkan_probe import intel_vulkan_is_validated

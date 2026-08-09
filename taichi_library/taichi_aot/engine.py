@@ -14,12 +14,13 @@ import numpy as np
 import typing
 import threading
 import time
+from dataclasses import dataclass
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, Future
 
 from .block import (
-    BlockCache, BlockConfig, BlockGrid, BlockRecord, BlockState, checksum,
-    is_auto_block_safe, should_use_blocks,
+    BlockCache, BlockConfig, BlockGrid, BlockPath, BlockRecord, BlockState, checksum,
+    operation_capability, should_use_blocks,
 )
 from .memory import CacheTelemetry, MemoryGovernor
 from .residency import DeviceResidencyCache
@@ -34,16 +35,20 @@ from taichi_library.backend_config import (
     normalize_vendor,
     parse_device_id,
     requested_backend,
+    is_android_runtime,
 )
 from taichi_library.device_selection import (
+    is_translation_device,
     make_device_selector,
     query_vulkan_memory_budget,
     resolve_device_selector,
     scan_vulkan_device_records,
 )
+from .artifact_targets import detect_target
 
 _UNSET = object()
 _CPU_AOT_EXTRACTION_LOCK = threading.RLock()
+_OPENGL_VENDOR_INJECTED = None
 
 
 def _materialize_cpu_aot_directory(artifact_path):
@@ -828,7 +833,10 @@ class DynamicArg(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char_p),
         ("arg_type", ctypes.c_int),  # 0: ndarray, 1: scalar
-        ("dtype", ctypes.c_int),  # 0: f32, 1: i32, 2: u8, 3: u16
+        # Keep the legacy values stable.  4/5 extend the private bridge
+        # metadata for native CPU compact graphs; this is an internal enum,
+        # not a public API/ABI change (the struct layout is unchanged).
+        ("dtype", ctypes.c_int),  # 0: f32, 1: i32, 2: u8, 3: u16, 4: i16, 5: f16
         ("dim_count", ctypes.c_int),
         ("shape", ctypes.c_int * 8),
         ("elem_dim_count", ctypes.c_int),
@@ -844,6 +852,8 @@ dtype_map = {
     np.int32: 1,
     np.uint8: 2,
     np.uint16: 3,
+    np.int16: 4,
+    np.float16: 5,
     np.float64: 0,  # Fallback
 }
 
@@ -869,6 +879,29 @@ def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value, context_name="Unkn
         arg.val_u64 = struct.unpack("<I", struct.pack("<f", float(value)))[0]
     elif isinstance(value, (TaichiGPUBuffer, TaichiPlaceholder)):
         arg.arg_type = 0
+
+        # A wrapper can outlive ``reinit()``/shutdown.  The runtime teardown
+        # deliberately clears its handle; reject the stale object here rather
+        # than passing a null pointer into the native ABI (which otherwise
+        # manifests as an access violation or a driver-specific assertion).
+        resolved_handle = (
+            value._resolve_handle()
+            if hasattr(value, "_resolve_handle")
+            else getattr(value, "handle", None)
+        )
+        if resolved_handle is None:
+            raise RuntimeError(
+                f"{context_name}: GPU buffer is no longer valid; "
+                "the AOT runtime was reinitialized or destroyed"
+            )
+        owner_engine = getattr(value, "engine", None)
+        if owner_engine is not None and getattr(value, "engine_generation", 0) != getattr(
+            owner_engine, "_generation", 0
+        ):
+            raise RuntimeError(
+                f"{context_name}: GPU buffer belongs to an old AOT runtime "
+                "generation"
+            )
 
         # Strict Metadata Alignment for AOT
         is_vec = getattr(value, "is_vector", False)
@@ -907,7 +940,8 @@ def _populate_dynamic_arg(arg: DynamicArg, name_bytes, value, context_name="Unkn
                 arg.shape[d] = shape[d]
             arg.elem_dim_count = 0
 
-        arg.val_u64 = ctypes.c_uint64(value.handle)
+        raw_handle = getattr(resolved_handle, "value", resolved_handle)
+        arg.val_u64 = ctypes.c_uint64(int(raw_handle or 0))
     else:
         # Backward compatibility for direct Taichi NDArrays (if any)
         if hasattr(value, "ptr"):
@@ -939,6 +973,63 @@ _LIB = None
 _RUNTIME = None
 
 
+def _cpu_supports_avx2():
+    """Return whether the host CPU can execute the bridge AVX2 fast path.
+
+    The native bridge contains a small AVX2 conversion path for host buffers.
+    It is deliberately kept separate from the AOT kernel target: loading an
+    AVX2 bridge on an older x86-64 CPU would otherwise fail only when a cast
+    operation is first exercised.  Windows exposes this capability through
+    ``IsProcessorFeaturePresent``; Linux/other hosts use ``/proc/cpuinfo`` as
+    a best-effort fallback.  ``PIXEL_REFINE_AOT_CPU_ISA`` can force
+    ``baseline`` or ``avx2`` for diagnostics and packaging tests.
+    """
+    forced = str(os.environ.get("PIXEL_REFINE_AOT_CPU_ISA", "auto")).strip().lower()
+    if forced in {"baseline", "sse2", "generic"}:
+        return False
+    if forced in {"avx2", "native"}:
+        return True
+
+    if os.name == "nt":
+        try:
+            # PF_AVX2_INSTRUCTIONS_AVAILABLE is 40 in the Windows API.
+            probe = ctypes.windll.kernel32.IsProcessorFeaturePresent
+            probe.argtypes = [ctypes.c_uint]
+            probe.restype = ctypes.c_int
+            return bool(probe(40))
+        except Exception:
+            pass
+
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as fh:
+            flags = fh.read().lower()
+        return "avx2" in flags
+    except Exception:
+        return False
+
+
+def _select_cpu_bridge(default_bridge):
+    """Select an ISA-compatible CPU bridge without changing its ABI."""
+    if not default_bridge or not os.path.exists(default_bridge):
+        return default_bridge
+    if _cpu_supports_avx2():
+        return default_bridge
+    extension = os.path.splitext(default_bridge)[1] or (
+        ".dll" if os.name == "nt" else ".so"
+    )
+    baseline = os.path.join(
+        os.path.dirname(default_bridge),
+        "taichi_aot_engine_baseline" + extension,
+    )
+    if os.path.exists(baseline):
+        print("[AOTEngine] AVX2 unavailable; selecting baseline CPU bridge")
+        return baseline
+    # A legacy package may contain only the historical AVX2 bridge.  Keep the
+    # existing error/diagnostic path rather than silently changing the public
+    # backend selection contract.
+    return default_bridge
+
+
 def _init_aot_bridge(backend=None):
     global _LIB, _RUNTIME
     if _LIB is not None:
@@ -968,19 +1059,41 @@ def _init_aot_bridge(backend=None):
     )
     if backend == "auto":
         backend = select_backend()
-    backend_dir = os.path.join(aot_dll_dir, backend)
-    renderer_bridge = os.path.join(backend_dir, "taichi_aot_engine_renderer.dll")
+    # Desktop keeps the historical backend directories.  ARM/Linux/Android
+    # uses target-qualified directories so a Windows DLL or an Android/Linux
+    # bridge can never be selected merely because the backend name matches.
+    target = detect_target(
+        backend=backend,
+        device=os.environ.get("PIXEL_REFINE_TARGET_VENDOR", ""),
+    )
+    target_dir = os.path.join(aot_dll_dir, target.target_id)
+    backend_dir = (
+        target_dir
+        if os.name != "nt" and os.path.isdir(target_dir)
+        else os.path.join(aot_dll_dir, backend)
+    )
+    library_ext = (
+        ".dll" if os.name == "nt" else ".dylib" if sys.platform == "darwin" else ".so"
+    )
+    renderer_bridge = os.path.join(backend_dir, "taichi_aot_engine_renderer" + library_ext)
     default_bridge = (
         renderer_bridge
-        if backend == "opengl" and os.path.exists(renderer_bridge)
-        else os.path.join(backend_dir, "taichi_aot_engine.dll")
+        if backend in {"opengl", "gles"} and os.path.exists(renderer_bridge)
+        else os.path.join(backend_dir, "taichi_aot_engine" + library_ext)
     )
-    engine_dll_path = os.environ.get(
-        "PIXEL_REFINE_AOT_ENGINE_DLL",
-        default_bridge
-        if os.path.exists(default_bridge)
-        else os.path.join(aot_dll_dir, "taichi_aot_engine.dll"),
-    )
+    if backend == "cpu":
+        default_bridge = _select_cpu_bridge(default_bridge)
+    explicit_bridge = os.environ.get("PIXEL_REFINE_AOT_ENGINE_DLL")
+    if explicit_bridge:
+        engine_dll_path = explicit_bridge
+    elif os.path.exists(default_bridge):
+        engine_dll_path = default_bridge
+    else:
+        # Keep the failure deterministic.  Falling back to a global DLL/so
+        # with a different target can corrupt the C ABI before initialization.
+        raise RuntimeError(
+            f"No native AOT bridge for target {target.target_id}: {default_bridge}"
+        )
     engine_dll_path = os.path.abspath(engine_dll_path)
 
     if os.name == "nt" and os.path.exists(aot_dll_dir):
@@ -1245,6 +1358,12 @@ def resolve_backend_config(arch=None, device_id=None, *, prefer=None, strict=Non
         backend = requested
 
     backend = normalize_backend(backend, allow_auto=False, strict=True)
+    # ``opengl`` is retained as a desktop compatibility alias, but Android
+    # must never load a desktop GL bridge or artifact under that name. Resolve
+    # the legacy setting to the explicit GLES architecture before singleton
+    # identity, bridge selection, and arch-id mapping are computed.
+    if backend == "opengl" and is_android_runtime():
+        backend = "gles"
     requested_id = parse_device_id(device_id)
     env_id = parse_device_id(os.environ.get("PIXEL_REFINE_AOT_DEVICE"))
 
@@ -1252,15 +1371,21 @@ def resolve_backend_config(arch=None, device_id=None, *, prefer=None, strict=Non
         ordinal = 0
         name = "CPU (x86_64 Windows)"
         vendor = "cpu"
-    elif backend == "opengl":
+    elif backend in {"opengl", "gles"}:
         # OpenGL's native ICD chooses the adapter through the process/context;
         # the bridge exposes one logical device.  Keep vendor/name expectations
         # for the post-init renderer check instead of treating this as a
         # Vulkan ordinal.
         ordinal = 0
         name = os.environ.get("PIXEL_REFINE_OPENGL_EXPECTED_NAME", "")
+        # ``PIXEL_REFINE_TARGET_VENDOR`` is the stable selection identity used
+        # by the artifact resolver.  Use it as the default renderer contract
+        # too, while allowing the more explicit OpenGL-only variables to
+        # override it for embedding applications.
+        expected_vendor = os.environ.get("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", "")
         vendor = normalize_vendor(
-            os.environ.get("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", "")
+            expected_vendor
+            or os.environ.get("PIXEL_REFINE_TARGET_VENDOR", "")
             or name
         )
     elif backend == "cuda":
@@ -1276,8 +1401,27 @@ def resolve_backend_config(arch=None, device_id=None, *, prefer=None, strict=Non
         vendor = "nvidia"
     else:  # Vulkan
         ordinal = requested_id if requested_id is not None else env_id
+        preferred_vendor = normalize_vendor(
+            os.environ.get("PIXEL_REFINE_TARGET_VENDOR", "")
+        )
+        if ordinal is not None and preferred_vendor != "unknown":
+            # ``PIXEL_REFINE_AOT_DEVICE`` is often restored from an older
+            # settings file (and test harnesses historically defaulted it to
+            # zero).  Treat the saved vendor as the stable identity and
+            # repair a conflicting ordinal before loading the runtime.
+            selected_vendor = normalize_vendor(get_vulkan_device_name(ordinal))
+            if selected_vendor != preferred_vendor:
+                ordinal = None
         if ordinal is None:
             ordinal = _read_cached_device_id()
+            # A selector cache is ordinal-independent, but a legacy or stale
+            # cache can still resolve to an adapter from the wrong vendor when
+            # the user changed the saved backend preference.  Never let that
+            # silently turn an NVIDIA request into Intel (or the reverse).
+            if ordinal is not None and preferred_vendor != "unknown":
+                cached_vendor = normalize_vendor(get_vulkan_device_name(ordinal))
+                if cached_vendor != preferred_vendor:
+                    ordinal = None
         if ordinal is None:
             ordinal = parse_device_id(
                 os.environ.get("PIXEL_REFINE_AOT_DEFAULT_DEVICE"), 0
@@ -1288,10 +1432,76 @@ def resolve_backend_config(arch=None, device_id=None, *, prefer=None, strict=Non
                 os.environ.get("PIXEL_REFINE_AOT_AUTOSCAN", "1") == "1"
                 and (not explicit or requested_id is None)
             ):
-                scanned = _scan_native_vulkan_device()
+                # A saved backend choice may carry a vendor identity while
+                # Vulkan ordinals are free to change after a driver update.
+                # Prefer that identity during a fresh scan so NVIDIA is not
+                # accidentally remapped to Intel (or vice versa).  The
+                # selector/fingerprint cache remains the stronger path when
+                # it is available.
+                scanned = _scan_native_vulkan_device(
+                    preferred_vendor=preferred_vendor
+                )
                 if scanned is not None:
                     ordinal = scanned
+
+        # Dozen/D3D12 adapters are translation layers, not native Vulkan
+        # devices.  They must not slip through merely because a saved or
+        # explicit ordinal points at them.  Keep the user-facing backend
+        # choice strict, but repair the ordinal to the same vendor's native
+        # adapter when one is available.  Diagnostic experiments can opt in
+        # with PIXEL_REFINE_AOT_ALLOW_TRANSLATION=1.
+        skip_translation = (
+            os.environ.get("PIXEL_REFINE_AOT_SKIP_DOZEN", "1") == "1"
+        )
+        allow_translation = (
+            os.environ.get("PIXEL_REFINE_AOT_ALLOW_TRANSLATION", "0") == "1"
+        )
+        if ordinal is not None and skip_translation and not allow_translation:
+            selected_record = None
+            try:
+                selected_record = next(
+                    (
+                        item
+                        for item in scan_vulkan_device_records()
+                        if int(item.get("ordinal", -1)) == int(ordinal)
+                    ),
+                    None,
+                )
+            except Exception:
+                selected_record = None
+            if selected_record is not None and is_translation_device(selected_record):
+                selected_vendor = normalize_vendor(
+                    selected_record.get("vendor") or selected_record.get("name")
+                )
+                replacement = _scan_native_vulkan_device(
+                    preferred_vendor=(
+                        preferred_vendor
+                        if preferred_vendor != "unknown"
+                        else selected_vendor
+                    )
+                )
+                if replacement is None or int(replacement) == int(ordinal):
+                    raise RuntimeError(
+                        "Selected Vulkan adapter is a Dozen/D3D12 translation "
+                        "device and no native adapter for the requested vendor "
+                        "is available. Install/use the native Vulkan ICD or set "
+                        "PIXEL_REFINE_AOT_ALLOW_TRANSLATION=1 only for diagnostics."
+                    )
+                print(
+                    "[AOTEngine] Vulkan translation adapter quarantined; "
+                    f"using native device {replacement} ({selected_vendor or 'requested vendor'})"
+                )
+                ordinal = int(replacement)
         name = get_vulkan_device_name(ordinal) or ""
+        if (
+            skip_translation
+            and not allow_translation
+            and is_translation_device({"name": name})
+        ):
+            raise RuntimeError(
+                f"Vulkan device {ordinal} ({name}) is a Dozen/D3D12 translation "
+                "adapter; native Vulkan is required by the current policy."
+            )
         vendor = normalize_vendor(name)
 
     config = BackendConfig(
@@ -1328,6 +1538,8 @@ def configure_taichi_backend(prefer: str = None, device_memory_GB: float = None)
     arch_choice = normalize_backend(raw_choice, allow_auto=True, strict=raw_choice not in (None, "", "auto"))
     if arch_choice == "auto":
         arch_choice = select_backend()
+    if arch_choice == "opengl" and is_android_runtime():
+        arch_choice = "gles"
     # TEMPORARILY DISABLED: Intel Vulkan automatic reroute/quarantine.
     # The General Settings compatibility matrix must expose and exercise the
     # native Intel Vulkan path explicitly. Retain this policy as comments for
@@ -1353,6 +1565,7 @@ def configure_taichi_backend(prefer: str = None, device_memory_GB: float = None)
     arch_map = {
         "vulkan": getattr(ti, "vulkan", getattr(ti, "gpu", None)),
         "opengl": getattr(ti, "opengl", None),
+        "gles": getattr(ti, "gles", None),
         "cuda": getattr(ti, "cuda", None),
         "cpu": getattr(ti, "cpu", None),
     }
@@ -1464,60 +1677,140 @@ def _raise_native_engine_error(runtime, context):
 # -------------------------------------------------------------------------
 # GPU Buffer Manager
 # -------------------------------------------------------------------------
+@dataclass(frozen=True)
+class BufferKey:
+    """Physical allocation identity used by the reusable buffer pool.
+
+    A GPU allocation is raw storage; shape and dtype are carried by the
+    ``DynamicArg`` metadata at dispatch time.  The key therefore contains the
+    memory domain and vector view information (which must not be mixed), while
+    allowing different shapes with the same byte capacity to share storage.
+    The engine generation is intentionally not part of the key: each
+    ``BufferPool`` belongs to one runtime generation and is discarded on
+    reinitialisation.
+    """
+
+    size_bytes: int
+    host_accessible: bool = False
+    dtype: str = "raw"
+    is_vector: bool = False
+    vector_dim: int = 1
+    usage: str = "storage"
+
+    def __post_init__(self):
+        if int(self.size_bytes) <= 0:
+            raise ValueError("buffer allocation size must be positive")
+        object.__setattr__(self, "size_bytes", int(self.size_bytes))
+        object.__setattr__(self, "host_accessible", bool(self.host_accessible))
+        object.__setattr__(self, "dtype", str(self.dtype or "raw"))
+        object.__setattr__(self, "is_vector", bool(self.is_vector))
+        object.__setattr__(self, "vector_dim", max(1, int(self.vector_dim)))
+        object.__setattr__(self, "usage", str(self.usage or "storage"))
+
+
 class BufferPool:
-    """Lightweight pool: tracks handles for potential reuse by exact size match."""
+    """Bounded pool for reusable raw allocations.
+
+    The old pool only covered device-local allocations and keyed handles by
+    byte size.  Full-frame NumPy uploads use host-visible allocations, so they
+    never benefited from reuse.  This pool now accepts a domain-aware
+    ``BufferKey`` while retaining the integer-size API for old callers.
+    """
 
     def __init__(self, engine=None):
         self.engine = engine
-        self.free_buffers = {}  # size -> list of handles
+        self.free_buffers = {}  # BufferKey -> list of handles
         self.max_bytes = 0
         self.pooled_bytes = 0
+        self._stats = {
+            "hits": 0,
+            "misses": 0,
+            "stores": 0,
+            "evictions": 0,
+        }
         import threading
 
         self._lock = threading.Lock()
 
-    def acquire(self, size):
+    @staticmethod
+    def _key(size_or_key, *, host_accessible=False, dtype="raw",
+             is_vector=False, vector_dim=1, usage="storage"):
+        if isinstance(size_or_key, BufferKey):
+            return size_or_key
+        return BufferKey(
+            int(size_or_key),
+            host_accessible=host_accessible,
+            dtype=dtype,
+            is_vector=is_vector,
+            vector_dim=vector_dim,
+            usage=usage,
+        )
+
+    def acquire(self, size_or_key, **kwargs):
+        key = self._key(size_or_key, **kwargs)
         with self._lock:
-            if size in self.free_buffers and self.free_buffers[size]:
-                handle = self.free_buffers[size].pop()
-                self.pooled_bytes = max(0, self.pooled_bytes - int(size))
-                if not self.free_buffers[size]:
-                    self.free_buffers.pop(size, None)
+            handles = self.free_buffers.get(key)
+            if handles:
+                handle = handles.pop()
+                self.pooled_bytes = max(0, self.pooled_bytes - key.size_bytes)
+                self._stats["hits"] += 1
+                if not handles:
+                    self.free_buffers.pop(key, None)
                 return handle
+            self._stats["misses"] += 1
             return None
 
-    def store(self, size, handle):
+    def store(self, size_or_key, handle, **kwargs):
         """Store a handle for reuse (caller decides if reuse or free)."""
+        key = self._key(size_or_key, **kwargs)
         with self._lock:
-            size = int(size)
+            size = key.size_bytes
             if self.max_bytes <= 0 or self.pooled_bytes + size > self.max_bytes:
                 runtime = self.engine.runtime if self.engine else _RUNTIME
                 if _LIB and runtime:
                     _LIB.free_gpu_buffer(runtime, handle)
+                self._stats["evictions"] += 1
                 return
-            if size not in self.free_buffers:
-                self.free_buffers[size] = []
-            self.free_buffers[size].append(handle)
+            if key not in self.free_buffers:
+                self.free_buffers[key] = []
+            self.free_buffers[key].append(handle)
             self.pooled_bytes += size
+            self._stats["stores"] += 1
 
     def set_budget(self, max_bytes):
         """Apply an adaptive cap and evict largest idle buffers first."""
         with self._lock:
             self.max_bytes = max(0, int(max_bytes))
             runtime = self.engine.runtime if self.engine else _RUNTIME
-            for size in sorted(tuple(self.free_buffers), reverse=True):
-                handles = self.free_buffers.get(size, [])
+            for key in sorted(
+                tuple(self.free_buffers),
+                key=lambda item: item.size_bytes,
+                reverse=True,
+            ):
+                handles = self.free_buffers.get(key, [])
                 while handles and self.pooled_bytes > self.max_bytes:
                     handle = handles.pop()
                     if _LIB and runtime:
                         _LIB.free_gpu_buffer(runtime, handle)
-                    self.pooled_bytes = max(0, self.pooled_bytes - int(size))
+                    self.pooled_bytes = max(
+                        0, self.pooled_bytes - key.size_bytes
+                    )
+                    self._stats["evictions"] += 1
                 if not handles:
-                    self.free_buffers.pop(size, None)
+                    self.free_buffers.pop(key, None)
 
     def clear(self):
         """Force-free all pooled handles from VRAM."""
         global _LIB, _RUNTIME
+        # ``destroy()``/``release()`` may have placed handles in the engine's
+        # retired queue rather than directly in this free-list.  Preserve the
+        # historical public meaning of ``buffer_pool.clear()`` by promoting
+        # that queue first; the engine performs one synchronization only.
+        if self.engine and hasattr(self.engine, "_drain_retired"):
+            try:
+                self.engine._drain_retired(wait=True)
+            except Exception:
+                pass
         with self._lock:
             runtime = self.engine.runtime if self.engine else _RUNTIME
             if _LIB and runtime:
@@ -1526,6 +1819,23 @@ class BufferPool:
                         _LIB.free_gpu_buffer(runtime, h)
             self.free_buffers = {}
             self.pooled_bytes = 0
+
+    def stats(self):
+        with self._lock:
+            requests = self._stats["hits"] + self._stats["misses"]
+            return {
+                **self._stats,
+                "enabled": bool(
+                    self.engine is None
+                    or getattr(self.engine, "_buffer_cache_enabled", True)
+                ),
+                "hit_rate": (
+                    self._stats["hits"] / requests if requests else 0.0
+                ),
+                "pooled_bytes": self.pooled_bytes,
+                "max_bytes": self.max_bytes,
+                "size_classes": len(self.free_buffers),
+            }
 
 
 class TaichiGPUBuffer:
@@ -1550,7 +1860,17 @@ class TaichiGPUBuffer:
         self.engine = engine
         self.is_owner = is_owner
         self.host_accessible = host_accessible
+        self.engine_generation = getattr(engine, "_generation", 0)
         self.associated_pipelines = set()
+
+    def _buffer_key(self):
+        return BufferKey(
+            self.size_bytes,
+            host_accessible=self.host_accessible,
+            dtype=np.dtype(self.dtype).str,
+            is_vector=self.is_vector,
+            vector_dim=self.vector_dim,
+        )
 
     def release(self):
         """Release the buffer back to the engine's buffer pool for reuse."""
@@ -1562,15 +1882,19 @@ class TaichiGPUBuffer:
                 ):
                     return
 
-            if self.engine and not self.host_accessible:
-                self.engine.buffer_pool.store(self.size_bytes, self.handle)
-                self.handle = None
-                self.is_owner = False
+            if self.engine:
+                self.engine._retire_buffer(self)
             else:
-                self.destroy()
+                self.destroy(force=True)
 
-    def destroy(self):
-        """Immediately release GPU VRAM. Does NOT use buffer pool reuse."""
+    def destroy(self, force=False):
+        """Release the allocation, retaining it for safe cache reuse by default.
+
+        ``destroy()`` remains terminal from the caller's point of view: the
+        wrapper loses ownership immediately.  The engine may retain the raw
+        handle in a retired queue until the native runtime has completed all
+        queued work.  Internal teardown uses ``force=True`` to bypass the pool.
+        """
         _heartbeat()
         if self.handle is not None and self.is_owner:
             # Bypass/protect buffers during recording to prevent use-after-free
@@ -1589,6 +1913,10 @@ class TaichiGPUBuffer:
                     for pipe_name in pipelines_to_clear:
                         self.engine.clear_pipeline_by_name(pipe_name)
 
+            if self.engine and not force:
+                self.engine._retire_buffer(self)
+                return
+
             global _LIB, _RUNTIME
             runtime = self.engine.runtime if self.engine else _RUNTIME
             if _LIB and runtime:
@@ -1604,7 +1932,7 @@ class TaichiGPUBuffer:
         """Force release GPU VRAM regardless of pipeline intermediate status."""
         self.is_pipeline_intermediate = False
         self.associated_pipelines.clear()
-        self.destroy()
+        self.destroy(force=True)
 
     def __del__(self):
         self.destroy()
@@ -1617,6 +1945,35 @@ class TaichiGPUBuffer:
     def nbytes(self):
         return self.size_bytes
 
+    def _resolve_handle(self):
+        """Resolve a non-owning vector view through its owning parent."""
+        parent = getattr(self, "_parent_ref", None)
+        if parent is not None:
+            return getattr(parent, "handle", None)
+        return getattr(self, "handle", None)
+
+    def _require_live(self, operation="GPU buffer access"):
+        """Return the active runtime or reject a stale wrapper."""
+        handle = self._resolve_handle()
+        if handle is None:
+            raise RuntimeError(
+                f"{operation} failed: GPU buffer is no longer valid; "
+                "the AOT runtime was reinitialized or destroyed"
+            )
+        runtime = self.engine.runtime if self.engine else _RUNTIME
+        if runtime is None:
+            raise RuntimeError(
+                f"{operation} failed: AOT runtime is not initialized"
+            )
+        if self.engine is not None and self.engine_generation != getattr(
+            self.engine, "_generation", 0
+        ):
+            raise RuntimeError(
+                f"{operation} failed: buffer belongs to an old AOT runtime "
+                "generation"
+            )
+        return runtime, handle
+
     def to_numpy(self, out=None):
         """Read GPU data. Automatically handles staging for VRAM-only buffers."""
         _heartbeat()
@@ -1627,7 +1984,7 @@ class TaichiGPUBuffer:
                 f"Output array must have shape={self.shape} dtype={self.dtype}, "
                 f"got shape={out.shape} dtype={out.dtype}"
             )
-        runtime = self.engine.runtime if self.engine else _RUNTIME
+        runtime, handle = self._require_live("GPU readback")
         engine = self.engine
         if engine and hasattr(engine, "_lock"):
             _lock_wait_begin("to_numpy")
@@ -1637,7 +1994,7 @@ class TaichiGPUBuffer:
                     _op_begin("read_from_gpu_buffer")
                     try:
                         _LIB.read_from_gpu_buffer(
-                            runtime, self.handle, out.ctypes.data, self.size_bytes
+                            runtime, handle, out.ctypes.data, self.size_bytes
                         )
                     except Exception:
                         _record_error()
@@ -1650,7 +2007,7 @@ class TaichiGPUBuffer:
                         _op_begin("copy+read_gpu_buffer")
                         try:
                             _LIB.copy_gpu_buffer(
-                                runtime, self.handle, staging.handle, self.size_bytes
+                                runtime, handle, staging.handle, self.size_bytes
                             )
                             _LIB.read_from_gpu_buffer(
                                 runtime,
@@ -1670,7 +2027,7 @@ class TaichiGPUBuffer:
                 _op_begin("read_from_gpu_buffer")
                 try:
                     _LIB.read_from_gpu_buffer(
-                        runtime, self.handle, out.ctypes.data, self.size_bytes
+                        runtime, handle, out.ctypes.data, self.size_bytes
                     )
                 except Exception:
                     _record_error()
@@ -1682,33 +2039,83 @@ class TaichiGPUBuffer:
         return out
 
     def map(self):
-        runtime = self.engine.runtime if self.engine else _RUNTIME
+        runtime, handle = self._require_live("GPU buffer map")
         if self.engine and hasattr(self.engine, "_lock"):
             with self.engine._lock:
-                return _LIB.map_gpu_buffer(runtime, self.handle)
-        return _LIB.map_gpu_buffer(runtime, self.handle)
+                return _LIB.map_gpu_buffer(runtime, handle)
+        return _LIB.map_gpu_buffer(runtime, handle)
 
     def unmap(self):
-        runtime = self.engine.runtime if self.engine else _RUNTIME
+        runtime, handle = self._require_live("GPU buffer unmap")
         if self.engine and hasattr(self.engine, "_lock"):
             with self.engine._lock:
-                _LIB.unmap_gpu_buffer(runtime, self.handle)
+                _LIB.unmap_gpu_buffer(runtime, handle)
         else:
-            _LIB.unmap_gpu_buffer(runtime, self.handle)
+            _LIB.unmap_gpu_buffer(runtime, handle)
 
     def cast(self, target_dtype, host_accessible=False):
         self_dtype_type = np.dtype(self.dtype).type
         target_dtype_type = np.dtype(target_dtype).type
         if self_dtype_type == target_dtype_type:
             return self
-        dtype_map = {np.float32: 0, np.int32: 1, np.uint8: 2, np.uint16: 3}
+        # Keep i16 on the native bridge path as well.  f16 intentionally
+        # remains on the NumPy route until a portable half-conversion contract
+        # is available for every desktop and ARM toolchain.
+        dtype_map = {
+            np.float32: 0,
+            np.int32: 1,
+            np.uint8: 2,
+            np.uint16: 3,
+            np.int16: 4,
+        }
+        native_cast_pairs = {
+            (0, 2),  # f32 -> u8
+            (2, 0),  # u8 -> f32
+            (0, 3),  # f32 -> u16
+            (3, 0),  # u16 -> f32
+            (1, 2),  # i32 -> u8
+            (1, 3),  # i32 -> u16
+            (0, 4),  # f32 -> i16
+            (4, 0),  # i16 -> f32
+            (4, 4),  # i16 -> i16 (copy)
+        }
+        # Native OpenGL buffer mapping is driver-dependent: several Windows
+        # ICDs expose a non-coherent pointer for host-visible storage, so a
+        # direct bridge cast can observe stale/undefined bytes.  Preserve
+        # correctness by taking the synchronized NumPy path on OpenGL; CPU,
+        # Vulkan, and CUDA host-visible allocations keep the native path.
+        native_host_cast = str(getattr(self.engine, "arch", "")).lower() not in {
+            "opengl",
+            "gles",
+        }
+        cast_pair = (
+            dtype_map.get(self_dtype_type),
+            dtype_map.get(target_dtype_type),
+        )
         if (
             self_dtype_type not in dtype_map
             or target_dtype_type not in dtype_map
+            or cast_pair not in native_cast_pairs
+            or not native_host_cast
             or not self.host_accessible
             or not host_accessible
         ):
-            return self.engine.upload(self.to_numpy().astype(target_dtype))
+            source = self.to_numpy()
+            # Match the defined native f32->i16 bridge contract even when
+            # OpenGL must use a synchronized host conversion.  NumPy's direct
+            # cast wraps out-of-range values and maps NaN differently, which
+            # would make backend switching alter compact intermediate data.
+            if cast_pair == (0, 4):
+                source = np.nan_to_num(
+                    source,
+                    nan=-32768.0,
+                    posinf=32767.0,
+                    neginf=-32768.0,
+                )
+                converted = np.clip(source, -32768.0, 32767.0).astype(np.int16)
+            else:
+                converted = source.astype(target_dtype)
+            return self.engine.upload(converted)
 
         engine = self.engine if self.engine is not None else AOTEngine()
         with engine._lock:
@@ -1780,6 +2187,18 @@ class AOTModuleWrapper:
 
     def run(self, graph_name, **kwargs):
         """Menjalankan grafik Taichi AOT dengan validasi argumen yang informatif."""
+        engine = self.engine if self.engine is not None else AOTEngine()
+        if not self.module_ptr:
+            raise RuntimeError(
+                f"AOT module for graph '{graph_name}' is no longer valid"
+            )
+        if getattr(self, "engine_generation", None) != getattr(
+            engine, "_generation", 0
+        ):
+            raise RuntimeError(
+                f"AOT module for graph '{graph_name}' belongs to an old runtime "
+                "generation; reload the module after reinitialization"
+            )
         num_args = len(kwargs)
         args_array = (DynamicArg * num_args)()
         # CRITICAL: Keep names alive during the C++ call to prevent dangling pointers
@@ -1796,9 +2215,8 @@ class AOTModuleWrapper:
                     f"Failed to prepare argument '{k}' for kernel '{graph_name}':\n{str(e)}"
                 )
 
-        engine = self.engine if self.engine is not None else AOTEngine()
         engine._refresh_memory_policy()
-        engine._auto_pipeline_before_run(graph_name)
+        engine._auto_pipeline_before_run(graph_name, kwargs)
         if engine.current_pipeline:
             _lock_wait_begin(f"run:{graph_name}:pipeline")
             with engine._lock:
@@ -1957,6 +2375,7 @@ class AOTEngine:
     _placeholder_id_counter = 0xFFFFFF00
 
     def __new__(cls, arch=None, device_id=None):
+        global _OPENGL_VENDOR_INJECTED
         config = resolve_backend_config(arch=arch, device_id=device_id)
         arch = config.backend
         device_id = config.device_id
@@ -1980,9 +2399,27 @@ class AOTEngine:
         # CPU and OpenGL expose one logical device through this bridge.
         # Normalize before the singleton key is formed so instances cannot
         # alias the same native runtime under arbitrary Vulkan device IDs.
-        if arch.lower() in ("cpu", "opengl"):
+        if arch.lower() in ("cpu", "opengl", "gles"):
             device_id = 0
             os.environ["PIXEL_REFINE_AOT_DEVICE"] = "0"
+
+        if arch.lower() == "opengl":
+            # The native ICD bridge reads its vendor filter during context
+            # creation (before the Python post-init renderer check).  Prop-
+            # agate the stable target selection into that filter so an Intel
+            # request does not accidentally win NVIDIA merely because the
+            # driver enumeration order puts NVIDIA first.
+            requested_vendor = os.environ.get("PIXEL_REFINE_TARGET_VENDOR", "")
+            current_vendor = os.environ.get("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", "")
+            # If the value was injected by a previous backend selection, it is
+            # safe to replace it when the user changes vendor in-process.  A
+            # value supplied explicitly by an embedding application remains
+            # authoritative.
+            if requested_vendor and (
+                not current_vendor or current_vendor == _OPENGL_VENDOR_INJECTED
+            ):
+                os.environ["PIXEL_REFINE_OPENGL_EXPECTED_VENDOR"] = requested_vendor
+                _OPENGL_VENDOR_INJECTED = requested_vendor
 
         # Load exactly one backend bridge only after the final backend and
         # device policy has been resolved. Loading Vulkan before an Intel
@@ -2010,9 +2447,10 @@ class AOTEngine:
                 "cuda": 1,
                 "cpu": 2,
                 "opengl": 3,
+                "gles": 4,
             }.get(arch.lower(), 0)
             native_device_id = int(device_id)
-            if arch.lower() in ("cpu", "opengl") and native_device_id != 0:
+            if arch.lower() in ("cpu", "opengl", "gles") and native_device_id != 0:
                 native_device_id = 0
 
             # Wrap init_aot_engine in a thread with timeout to detect hung Vulkan driver.
@@ -2033,7 +2471,7 @@ class AOTEngine:
                     _init_error[0] = e
 
             _init_thread = None
-            if arch.lower() in ("opengl", "cuda"):
+            if arch.lower() in ("opengl", "gles", "cuda"):
                 # OpenGL contexts are thread-affine. CUDA's Taichi runtime
                 # likewise binds its primary context to the initializing
                 # thread; creating it in a short-lived timeout worker leaves
@@ -2079,7 +2517,8 @@ class AOTEngine:
             )
             if arch.lower() == "opengl":
                 expected_vendor = os.environ.get(
-                    "PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", ""
+                    "PIXEL_REFINE_OPENGL_EXPECTED_VENDOR",
+                    os.environ.get("PIXEL_REFINE_TARGET_VENDOR", ""),
                 )
                 expected_name = os.environ.get(
                     "PIXEL_REFINE_OPENGL_EXPECTED_NAME", ""
@@ -2144,6 +2583,15 @@ class AOTEngine:
             instance.buffer_pool = BufferPool(instance)
             instance._local = threading.local()
             instance._staging_pool = {}
+            # Buffers released while a native queue may still reference them
+            # remain here until the next runtime synchronization.  This keeps
+            # host-visible upload allocations reusable without permitting a
+            # GPU command to observe a handle that has already been recycled.
+            instance._retired_buffers = []
+            instance._retired_bytes = 0
+            instance._buffer_cache_enabled = (
+                os.environ.get("PIXEL_REFINE_AOT_BUFFER_CACHE", "1") != "0"
+            )
             instance._pipeline_intermediates = {}
             instance.recorded_pipelines = set()
             # Automatic pipeline metadata is kept per thread at dispatch time;
@@ -2155,6 +2603,17 @@ class AOTEngine:
             instance._destroyed = False
             instance._generation = 0
             instance._block_config = BlockConfig()
+            instance._block_plan_stats = {
+                "automatic": 0,
+                "explicit": 0,
+                "full_frame": 0,
+                "full_frame_threshold": 0,
+                "full_frame_dependency": 0,
+                "full_frame_halo": 0,
+                "full_frame_quarantine": 0,
+            }
+            instance._block_plan_stats_lock = threading.Lock()
+            instance._block_quarantine = {}
             instance._cache_telemetry = CacheTelemetry()
             instance._device_memory_provider = (
                 (lambda selected_id=int(device_id): query_vulkan_memory_budget(selected_id))
@@ -2200,6 +2659,111 @@ class AOTEngine:
     def current_pipeline(self, val):
         self._local.current_pipeline = val
 
+    def _free_buffer_handle(self, handle):
+        """Free one native handle while the engine lock is already held."""
+        if handle is None:
+            return
+        runtime = getattr(self, "runtime", None)
+        if _LIB and runtime:
+            _LIB.free_gpu_buffer(runtime, handle)
+
+    def _invalidate_live_buffers(self, runtime=None):
+        """Invalidate every wrapper before its native runtime is replaced.
+
+        ``reinit()`` and ``destroy()`` used to clear the staging/pipeline
+        dictionaries but leave ordinary user-owned wrappers in
+        ``_live_buffers``.  Their Python objects could then call ``destroy``
+        against a new runtime generation, where the old numeric handle was
+        no longer valid.  A single synchronized sweep keeps the ownership
+        contract explicit for all buffer classes (full-frame, block,
+        staging, and pipeline intermediates).
+
+        The caller owns the engine lock.  ``runtime`` is deliberately
+        explicit so a teardown can release handles against the old context
+        before replacing ``self.runtime``.
+        """
+        runtime = runtime if runtime is not None else getattr(self, "runtime", None)
+        if not (_LIB and runtime):
+            for buffer in list(getattr(self, "_live_buffers", ())):
+                buffer.handle = None
+                buffer.is_owner = False
+                buffer.associated_pipelines.clear()
+            return
+
+        freed = set()
+        for buffer in list(getattr(self, "_live_buffers", ())):
+            handle = getattr(buffer, "handle", None)
+            if handle is not None and getattr(buffer, "is_owner", False):
+                # A handle should have one owner, but guarding against a
+                # duplicate prevents a double-free if a caller retained an
+                # alias while a pipeline was being torn down.
+                raw_token = getattr(handle, "value", handle)
+                token = int(raw_token or 0)
+                if token not in freed:
+                    try:
+                        _LIB.free_gpu_buffer(runtime, handle)
+                    except Exception:
+                        # Context teardown is best-effort; the wrapper is
+                        # still invalidated below so it cannot touch a stale
+                        # handle later.
+                        pass
+                    freed.add(token)
+            buffer.handle = None
+            buffer.is_owner = False
+            buffer.associated_pipelines.clear()
+            buffer.is_pipeline_intermediate = False
+
+    def _retire_buffer(self, buffer):
+        """Retire a wrapper without reusing its handle before queue completion."""
+        handle = getattr(buffer, "handle", None)
+        if handle is None or not getattr(buffer, "is_owner", False):
+            return
+        with self._lock:
+            handle = getattr(buffer, "handle", None)
+            if handle is None or not getattr(buffer, "is_owner", False):
+                return
+            buffer.handle = None
+            buffer.is_owner = False
+            key = buffer._buffer_key()
+            # During teardown or when explicitly disabled, release directly.
+            if (
+                getattr(self, "_destroyed", False)
+                or not getattr(self, "_buffer_cache_enabled", True)
+            ):
+                self._free_buffer_handle(handle)
+                return
+            self._retired_buffers.append((key, handle))
+            self._retired_bytes += key.size_bytes
+
+    def _drain_retired(self, *, wait=False, already_synchronized=False):
+        """Move retired handles to the pool after native work is complete."""
+        if not getattr(self, "_retired_buffers", None):
+            return
+        with self._lock:
+            if not self._retired_buffers:
+                return
+            if wait and not already_synchronized:
+                _op_begin("sync_runtime:retired_buffers")
+                try:
+                    _LIB.sync_runtime(self.runtime)
+                finally:
+                    _op_end()
+            retired = self._retired_buffers
+            self._retired_buffers = []
+            self._retired_bytes = 0
+            for key, handle in retired:
+                self.buffer_pool.store(key, handle)
+
+    def _buffer_pool_key(self, size, dtype, *, host_accessible,
+                         is_vector, vector_dim):
+        return BufferKey(
+            size,
+            host_accessible=host_accessible,
+            dtype=np.dtype(dtype).str,
+            is_vector=is_vector,
+            vector_dim=vector_dim,
+        )
+
     def placeholder(self, shape, dtype=np.float32, is_vector=False, vector_dim=3):
         p = TaichiPlaceholder(
             self._placeholder_id_counter, shape, dtype, is_vector, vector_dim
@@ -2213,7 +2777,7 @@ class AOTEngine:
         # below decide whether a graph can remain native.  The historical
         # PIXEL_REFINE_AOT_NATIVE_PIPELINE switch remains a compatibility
         # override, but is no longer required for normal developer usage.
-        auto_pipeline = self.arch.lower() == "opengl" and os.environ.get(
+        auto_pipeline = self.arch.lower() in ("opengl", "gles") and os.environ.get(
             "PIXEL_REFINE_AOT_NATIVE_PIPELINE") != "1"
 
         class Recorder:
@@ -2245,13 +2809,50 @@ class AOTEngine:
 
         return Recorder(self, name)
 
-    def _auto_pipeline_before_run(self, graph_name):
+    def _auto_pipeline_before_run(self, graph_name, values=None):
         """Advance an active automatic scope before a graph dispatch.
 
         Segmented plans remain graph-order preserving while synchronization is
         inserted at each planned boundary. An unexpected graph degrades to
         direct dispatch instead of leaving a partially recorded pipeline.
         """
+        # A small number of Intel desktop OpenGL ICDs can execute the same
+        # graphs successfully with direct dispatch but hang when a very wide
+        # 16+ MP frame is captured into one recorded pipeline. Detect that
+        # shape at the first dispatch and keep the computation full-frame while
+        # disabling only the risky recording layer. This is intentionally
+        # vendor/shape scoped; NVIDIA and ordinary Intel resolutions retain the
+        # faster one-big-graph path. An explicit diagnostic override is
+        # available for driver experiments.
+        if (
+            self.current_pipeline
+            and values
+            and not any(
+                isinstance(value, TaichiPlaceholder) for value in values.values()
+            )
+            and getattr(self._local, "auto_pipeline_context", None)
+            and self._should_bypass_large_intel_pipeline(values)
+        ):
+            reason = (
+                "large/wide Intel OpenGL frame uses direct full-frame dispatch "
+                "to avoid driver pipeline hang"
+            )
+            state = getattr(self._local, "auto_pipeline_context", None)
+            if state and not state.get("aborted"):
+                self._abort_auto_pipeline(reason)
+            else:
+                name = self.current_pipeline
+                self.current_pipeline = None
+                self._drop_pipeline_recording(name)
+            self._auto_pipeline_active = False
+            try:
+                self.sync()
+            except Exception:
+                pass
+            self._pipeline_bypass_reason = reason
+            print(f"[AOTEngine Pipeline] {reason}")
+            return
+
         state = getattr(self._local, "auto_pipeline_context", None)
         if not state or state.get("aborted"):
             return
@@ -2273,15 +2874,72 @@ class AOTEngine:
         state["segment_index"] = segment_index
         state["cursor"] = cursor + 1
 
+    def _should_bypass_large_intel_pipeline(self, values):
+        """Return whether a frame shape is unsafe for Intel OpenGL recording.
+
+        The direct path remains full-frame and therefore does not alter image
+        semantics.  The guard only avoids a known driver failure mode for
+        ultrawide high-resolution dispatches.  It can be disabled for a
+        controlled experiment with ``PIXEL_REFINE_AOT_FORCE_RECORDED_PIPELINE``.
+        """
+        if os.environ.get("PIXEL_REFINE_AOT_FORCE_RECORDED_PIPELINE") == "1":
+            return False
+        for value in values.values():
+            shape = getattr(value, "shape", None)
+            if self._shape_requires_large_intel_bypass(shape):
+                return True
+        return False
+
+    def _shape_requires_large_intel_bypass(self, shape):
+        """Return whether ``shape`` hits the tested Intel OpenGL hazard."""
+        if os.environ.get("PIXEL_REFINE_AOT_FORCE_RECORDED_PIPELINE") == "1":
+            return False
+        if str(getattr(self, "arch", "")).lower() != "opengl":
+            return False
+        identity = " ".join(
+            str(item)
+            for item in (
+                getattr(self, "gpu_name", ""),
+                getattr(getattr(self, "_backend_config", None), "vendor", ""),
+            )
+        ).lower()
+        if "intel" not in identity or shape is None:
+            return False
+        try:
+            if len(shape) < 2:
+                return False
+            height, width = int(shape[0]), int(shape[1])
+        except (TypeError, ValueError):
+            return False
+        pixels = height * width
+        short_side = max(1, min(height, width))
+        long_side = max(height, width)
+        return pixels >= 16_000_000 and (
+            long_side >= 6144 or long_side / short_side >= 2.5
+        )
+
     def _drop_pipeline_recording(self, name, *, destroy_intermediates=False):
         """Cancel recording while preserving caller-owned GPU buffers."""
         if not name:
             return
+        key = str(name)
+        encoded_name = key.encode("utf-8")
+        # A recorded graph is owned by the module that first dispatched it;
+        # clearing only the legacy global slot can leave backend-local state
+        # alive on graphics drivers. Clear both the compatibility slot and
+        # every loaded module before switching to direct dispatch.
         try:
-            _LIB.clear_pipeline(None, str(name).encode("utf-8"))
+            _LIB.clear_pipeline(None, encoded_name)
         except Exception:
             pass
-        key = str(name)
+        for module in tuple(getattr(self, "modules", {}).values()):
+            module_ptr = getattr(module, "module_ptr", None)
+            if not module_ptr:
+                continue
+            try:
+                _LIB.clear_pipeline(module_ptr, encoded_name)
+            except Exception:
+                pass
         self.recorded_pipelines.discard(key)
         for buf in self._pipeline_intermediates.pop(key, []):
             buf.associated_pipelines.discard(key)
@@ -2353,12 +3011,68 @@ class AOTEngine:
         with self._lock:
             _lock_wait_end()
             size = int(np.prod(shape) * np.dtype(dtype).itemsize)
+
+            # Admit a pipeline allocation before entering the native driver.
+            # OpenGL ICDs commonly report GL_INVALID_OPERATION from glGenBuffers
+            # after an over-committed SSBO sequence instead of returning a
+            # recoverable out-of-memory result.  The resident estimate is kept
+            # in Python so the automatic planner can abandon recording (or an
+            # explicit legacy recording can fail clearly) before the driver is
+            # asked to create the next buffer.  Upload/staging allocations are
+            # intentionally excluded because they are not pipeline residents.
+            if self.current_pipeline and not host_accessible:
+                decision = self._refresh_memory_policy()
+                limit = int(
+                    getattr(decision, "pipeline_resident_limit", 0) or 0
+                )
+                if limit > 0:
+                    resident = sum(
+                        int(
+                            getattr(buf, "size_bytes", getattr(buf, "nbytes", 0))
+                            or 0
+                        )
+                        for buf in self._pipeline_intermediates.get(
+                            self.current_pipeline, ()
+                        )
+                    )
+                    projected = resident + size
+                    if projected > limit:
+                        state = getattr(
+                            self._local, "auto_pipeline_context", None
+                        )
+                        if state and state.get("mode") == "recorded":
+                            self._abort_auto_pipeline(
+                                "resident budget exceeded before allocation "
+                                f"({projected} > {limit} bytes)"
+                            )
+                        else:
+                            raise RuntimeError(
+                                "AOT pipeline allocation exceeds the adaptive "
+                                "resident-memory limit "
+                                f"({projected} > {limit} bytes); "
+                                "reduce the graph footprint or use automatic "
+                                "pipeline planning."
+                            )
+
             v_dim = (
                 vector_dim
                 if vector_dim is not None
                 else (shape[-1] if is_vector and len(shape) >= 2 else 1)
             )
-            handle = self.buffer_pool.acquire(size) if not host_accessible else None
+            pool_key = self._buffer_pool_key(
+                size,
+                dtype,
+                host_accessible=host_accessible,
+                is_vector=is_vector,
+                vector_dim=v_dim,
+            )
+            # A free warm slot is returned without synchronization.  If the
+            # matching slot was just retired by the preceding frame, perform
+            # one bounded queue wait and promote all retired handles together.
+            handle = self.buffer_pool.acquire(pool_key)
+            if handle is None and self._retired_buffers:
+                self._drain_retired(wait=True)
+                handle = self.buffer_pool.acquire(pool_key)
             if not handle:
                 _op_begin("allocate_gpu_buffer")
                 try:
@@ -2469,6 +3183,20 @@ class AOTEngine:
 
     def _ensure_memory_cache_runtime(self):
         """Lazily initialize policy components for lightweight/test engine instances."""
+        if not hasattr(self, "_block_plan_stats"):
+            self._block_plan_stats = {
+                "automatic": 0,
+                "explicit": 0,
+                "full_frame": 0,
+                "full_frame_threshold": 0,
+                "full_frame_dependency": 0,
+                "full_frame_halo": 0,
+                "full_frame_quarantine": 0,
+            }
+        if not hasattr(self, "_block_plan_stats_lock"):
+            self._block_plan_stats_lock = threading.Lock()
+        if not hasattr(self, "_block_quarantine"):
+            self._block_quarantine = {}
         if not hasattr(self, "_cache_telemetry"):
             self._cache_telemetry = CacheTelemetry()
         if not hasattr(self, "_memory_governor"):
@@ -2576,6 +3304,7 @@ class AOTEngine:
         existing = cache.peek(record.block_id)
         if (
             existing is not None
+            and not getattr(existing, "invalidated", False)
             and existing.checksum == record.checksum
             and existing.source_checksum == record.source_checksum
         ):
@@ -2630,15 +3359,54 @@ class AOTEngine:
             if getattr(buf, "handle", None) is not None and getattr(buf, "is_owner", False):
                 resident += int(getattr(buf, "size_bytes", 0) or 0)
         pooled = int(getattr(self.buffer_pool, "pooled_bytes", 0) or 0)
-        status["resident_bytes"] = resident + pooled
+        retired = int(getattr(self, "_retired_bytes", 0) or 0)
+        status["resident_bytes"] = resident + pooled + retired
         status["live_bytes"] = resident
         status["pooled_bytes"] = pooled
+        status["retired_bytes"] = retired
         status["resident_limit"] = int(status.get("pipeline_resident_limit", 0) or 0)
         status["resident_over_limit"] = bool(
-            status["resident_limit"] > 0 and resident > status["resident_limit"]
+            status["resident_limit"] > 0
+            and resident + pooled + retired > status["resident_limit"]
         )
-        status["resident_headroom_bytes"] = max(0, status["resident_limit"] - resident)
+        status["resident_headroom_bytes"] = max(
+            0, status["resident_limit"] - (resident + pooled + retired)
+        )
         return status
+
+    def recommend_block_batch_size(self, tile_bytes=0, *, extra_bytes=0, cap=4):
+        """Choose a bounded number of resident tiles for batched block work.
+
+        Block execution historically synchronized after every tile.  Callers
+        that can defer readback use this helper to keep a small number of
+        output slots resident without bypassing the memory governor.  The
+        recommendation is deliberately conservative: it is limited by the
+        governor's concurrency hint, current resident headroom, and ``cap``.
+        A result of one is always safe and preserves the old execution shape.
+        """
+        try:
+            status = self.get_memory_status()
+        except Exception:
+            return 1
+
+        limit = max(1, int(cap))
+        decision = getattr(self, "_memory_governor", None)
+        decision = decision.snapshot() if decision is not None else {}
+        pressure = str(decision.get("pressure", "healthy")).lower()
+        if pressure in {"critical", "emergency"}:
+            return 1
+
+        hinted = int(decision.get("max_concurrency", 1) or 1)
+        count = max(1, min(limit, hinted))
+        per_slot = max(0, int(tile_bytes)) + max(0, int(extra_bytes))
+        headroom = int(status.get("resident_headroom_bytes", 0) or 0)
+        resident_limit = int(status.get("resident_limit", 0) or 0)
+        if per_slot > 0:
+            if resident_limit > 0 and headroom < per_slot:
+                return 1
+            if headroom > 0:
+                count = min(count, max(1, headroom // per_slot))
+        return max(1, int(count))
 
     def plan_pipeline(self, graphs):
         """Plan graph grouping automatically from current memory telemetry.
@@ -2728,6 +3496,9 @@ class AOTEngine:
     def get_block_cache_stats(self):
         self._ensure_memory_cache_runtime()
         stats = self._cache_telemetry.snapshot()
+        with self._block_plan_stats_lock:
+            planner_stats = dict(self._block_plan_stats)
+            quarantine = dict(self._block_quarantine)
         stats.update({
             "entries": len(self._block_cache),
             "size_bytes": self._block_cache.size_bytes,
@@ -2737,12 +3508,22 @@ class AOTEngine:
             "owner_targets": self._block_cache.owner_targets(),
             "device": self._device_block_cache.stats(),
             "buffer_pool": {
-                "pooled_bytes": self.buffer_pool.pooled_bytes,
-                "max_bytes": self.buffer_pool.max_bytes,
-                "size_classes": len(self.buffer_pool.free_buffers),
+                **self.buffer_pool.stats(),
+                "retired_bytes": int(getattr(self, "_retired_bytes", 0) or 0),
             },
+            "planner": planner_stats,
+            "quarantine": quarantine,
+            "last_execution": self.get_last_block_execution(),
         })
         return stats
+
+    def set_last_block_execution(self, payload):
+        """Store the most recent block orchestration telemetry per thread."""
+        self._local.last_block_execution = dict(payload or {})
+
+    def get_last_block_execution(self):
+        """Return host-side block telemetry without exposing native handles."""
+        return dict(getattr(self._local, "last_block_execution", {}) or {})
 
     def configure_block_reservation(self, operation, soft_bytes=0, hard_bytes=None, weight=1.0):
         """Configure an elastic owner quota for the feature-gated VRAM cache."""
@@ -2759,8 +3540,50 @@ class AOTEngine:
             self._block_cache.clear()
             self._device_block_cache.clear()
 
+    def _record_block_plan(self, bucket):
+        self._ensure_memory_cache_runtime()
+        with self._block_plan_stats_lock:
+            self._block_plan_stats[bucket] = self._block_plan_stats.get(bucket, 0) + 1
+
+    def quarantine_block_operation(self, operation, reason):
+        """Disable block planning for one operation in this runtime generation.
+
+        A failed tile must not poison later frames.  The same-backend
+        full-frame path remains available, while cached partial tiles are
+        invalidated before the next request.
+        """
+        self._ensure_memory_cache_runtime()
+        name = str(operation)
+        with self._block_plan_stats_lock:
+            self._block_quarantine[name] = str(reason)[:512]
+        try:
+            self._block_cache.invalidate_owner(name)
+        except Exception:
+            pass
+        try:
+            self._device_block_cache.invalidate_owner(name)
+        except Exception:
+            pass
+
+    def clear_block_quarantine(self, operation=None):
+        """Clear one or all block failure quarantines for controlled retesting."""
+        self._ensure_memory_cache_runtime()
+        with self._block_plan_stats_lock:
+            if operation is None:
+                self._block_quarantine.clear()
+            else:
+                self._block_quarantine.pop(str(operation), None)
+
     def plan_blocks(self, operation, shape, nbytes, halo=0):
         """Plan explicit or pressure-triggered blocks for parity-safe operations."""
+        capability = operation_capability(operation)
+        if str(operation) in getattr(self, "_block_quarantine", {}):
+            self._local.last_block_plan = {
+                "operation": str(operation), "selected": False,
+            }
+            self._record_block_plan("full_frame")
+            self._record_block_plan("full_frame_quarantine")
+            return None
         decision = (
             self._refresh_memory_policy()
             if self._block_config.adaptive_memory else None
@@ -2768,7 +3591,8 @@ class AOTEngine:
         explicit = should_use_blocks(operation, nbytes, self._block_config)
         automatic = bool(
             decision is not None
-            and is_auto_block_safe(operation)
+            and capability.automatic_safe
+            and int(halo) >= int(capability.min_halo)
             and int(nbytes) >= max(
                 1,
                 min(
@@ -2778,14 +3602,167 @@ class AOTEngine:
             )
         )
         if not explicit and not automatic:
+            self._local.last_block_plan = {
+                "operation": str(operation), "selected": False,
+            }
+            self._record_block_plan("full_frame")
+            if int(nbytes) < max(
+                1,
+                min(
+                    int(self._block_config.threshold_bytes),
+                    int(decision.target_chunk_bytes) if decision is not None else int(self._block_config.threshold_bytes),
+                ),
+            ):
+                self._record_block_plan("full_frame_threshold")
+            elif capability.path == BlockPath.GLOBAL or not capability.automatic_safe:
+                self._record_block_plan("full_frame_dependency")
+            elif int(halo) < int(capability.min_halo):
+                self._record_block_plan("full_frame_halo")
             return None
+        self._record_block_plan("explicit" if explicit else "automatic")
+        self._local.last_block_plan = {
+            "operation": str(operation), "selected": True,
+        }
         size = self._block_config.normalized_size()
         if decision is not None:
-            recommended = int(decision.recommended_block_size)
+            # Refine the generic governor estimate using the operation's
+            # channel count.  The resident policy remains conservative
+            # f32-based, but grayscale/flow operations no longer inherit the
+            # full RGB footprint unnecessarily.
+            shape_tuple = tuple(int(item) for item in shape)
+            channels = 1
+            if len(shape_tuple) >= 3 and 1 <= shape_tuple[-1] <= 4:
+                channels = shape_tuple[-1]
+            recommended = int(
+                self._memory_governor.recommend_block_size(
+                    channels=channels,
+                    sample_bytes=4,
+                    live_buffers=4,
+                )
+            )
             if automatic and not self._block_config.enabled:
                 size = (recommended, recommended)
             else:
                 size = (min(size[0], recommended), min(size[1], recommended))
+        return BlockGrid(shape, size=size, halo=halo)
+
+    def plan_generic_blocks(
+        self,
+        operation,
+        shape,
+        nbytes,
+        *,
+        halo=0,
+        mode="auto",
+        automatic=True,
+        min_halo=0,
+        block_size=None,
+        threshold_bytes=None,
+    ):
+        """Plan an explicitly described custom block operation.
+
+        Unlike :meth:`plan_blocks`, this method intentionally does not consult
+        ``OPERATION_CAPABILITIES``.  A caller-owned ``BlockComputeSpec`` is the
+        authority for custom tile semantics.  Memory sizing, lifecycle, and
+        quarantine remain engine-owned so a custom optical-flow or feature
+        matcher cannot bypass the shared safety mechanisms.
+
+        ``mode='force'`` means force the *custom grid*, not force an unsafe
+        allocation: the selected size is still clamped by the adaptive memory
+        recommendation when telemetry is available.
+        """
+        mode = str(mode).lower().strip()
+        if mode not in {"auto", "force", "off"}:
+            raise ValueError("generic block mode must be 'auto', 'force', or 'off'")
+        name = str(operation)
+        if name in getattr(self, "_block_quarantine", {}):
+            self._local.last_block_plan = {
+                "operation": name,
+                "selected": False,
+                "generic": True,
+                "reason": "quarantined",
+            }
+            self._record_block_plan("generic_full_frame_quarantine")
+            return None
+
+        halo = int(halo)
+        min_halo = int(min_halo)
+        if halo < min_halo:
+            self._local.last_block_plan = {
+                "operation": name,
+                "selected": False,
+                "generic": True,
+                "reason": "insufficient_halo",
+            }
+            self._record_block_plan("generic_full_frame_halo")
+            return None
+
+        decision = (
+            self._refresh_memory_policy()
+            if self._block_config.adaptive_memory else None
+        )
+        configured_threshold = int(self._block_config.threshold_bytes)
+        threshold = configured_threshold if threshold_bytes is None else max(0, int(threshold_bytes))
+        target_chunk = (
+            int(decision.target_chunk_bytes)
+            if decision is not None else threshold
+        )
+        # Keep the same non-zero lower bound used by the native planner.  A
+        # zero budget must not make every positive-sized custom input appear
+        # below a zero threshold and accidentally select an unbounded grid.
+        effective_threshold = max(1, min(threshold, target_chunk))
+        size_bytes = int(nbytes)
+        selected = False
+        reason = ""
+        if mode == "force":
+            selected = True
+            reason = "custom force mode"
+        elif mode == "auto" and bool(automatic):
+            selected = size_bytes >= effective_threshold
+            reason = (
+                "adaptive budget threshold reached"
+                if selected else "below adaptive budget threshold"
+            )
+        else:
+            reason = "custom block mode disabled"
+
+        if not selected:
+            self._local.last_block_plan = {
+                "operation": name,
+                "selected": False,
+                "generic": True,
+                "reason": reason,
+            }
+            self._record_block_plan("generic_full_frame")
+            if mode == "off":
+                self._record_block_plan("generic_full_frame_disabled")
+            elif size_bytes < effective_threshold:
+                self._record_block_plan("generic_full_frame_threshold")
+            return None
+
+        self._record_block_plan("generic_forced" if mode == "force" else "generic_automatic")
+        self._local.last_block_plan = {
+            "operation": name,
+            "selected": True,
+            "generic": True,
+            "reason": reason,
+        }
+
+        size = block_size or self._block_config.normalized_size()
+        if decision is not None:
+            shape_tuple = tuple(int(item) for item in shape)
+            channels = 1
+            if len(shape_tuple) >= 3 and 1 <= shape_tuple[-1] <= 4:
+                channels = shape_tuple[-1]
+            recommended = int(
+                self._memory_governor.recommend_block_size(
+                    channels=channels,
+                    sample_bytes=4,
+                    live_buffers=4,
+                )
+            )
+            normalized = BlockConfig(size=size).normalized_size()
+            size = (min(normalized[0], recommended), min(normalized[1], recommended))
         return BlockGrid(shape, size=size, halo=halo)
 
     def get_staging_buffer(self, shape, dtype):
@@ -2956,7 +3933,7 @@ class AOTEngine:
                 return self.modules[p]
             if self.arch.lower() == "vulkan":
                 device_name = get_vulkan_device_name(self.device_id)
-            elif self.arch.lower() == "opengl":
+            elif self.arch.lower() in ("opengl", "gles"):
                 # Hybrid systems can run this same logical OpenGL backend on
                 # physically different renderers. Keep artifact quarantine and
                 # validation records isolated per actual adapter.
@@ -2976,7 +3953,14 @@ class AOTEngine:
                 with _suppress_native_stderr(self.arch.lower() == "vulkan"):
                     ptr = _LIB.load_aot_module(self.runtime, p.encode("utf-8"))
             except Exception as exc:
-                set_status(cache_key, "quarantined", error=str(exc))
+                set_status(
+                    cache_key,
+                    "quarantined",
+                    backend=self.arch,
+                    device=device_name,
+                    artifact=os.path.basename(p),
+                    error=str(exc),
+                )
                 raise
             if not ptr:
                 native_error = _get_native_engine_error(self.runtime)
@@ -2985,7 +3969,14 @@ class AOTEngine:
                     self.reinit(self.device_id)
                 except Exception:
                     pass
-                set_status(cache_key, "quarantined", error=native_error or "load returned null")
+                set_status(
+                    cache_key,
+                    "quarantined",
+                    backend=self.arch,
+                    device=device_name,
+                    artifact=os.path.basename(p),
+                    error=native_error or "load returned null",
+                )
                 raise RuntimeError(
                     f"\n[AOTEngine Load Error] Failed to load TCM module at: {p}\n"
                     f"  HINT: Ensure the .tcm file exists and is compatible with the active GPU backend ({self.arch.upper()})."
@@ -3065,6 +4056,10 @@ class AOTEngine:
                 raise
             finally:
                 _op_end()
+            # Native work is complete now; recycled host/device allocations
+            # can safely become available to the next full-frame or block
+            # dispatch without another synchronization round trip.
+            self._drain_retired(already_synchronized=True)
 
     @contextmanager
     def reserve_device_execution(self, owner="operation"):
@@ -3088,20 +4083,90 @@ class AOTEngine:
     def reinit(self, device_id=0):
         with self._lock:
             active_arch = self.arch.lower()
+
+            # A Windows OpenGL ICD context is not safely restartable in the
+            # same process on several Intel drivers: destroying the imported
+            # runtime and immediately creating a second raw ICD context leaves
+            # the driver's thread-local dispatch table invalid, and the next
+            # glGenBuffers reports GL_INVALID_OPERATION.  Android GLES has the
+            # same ownership rule: the application owns the current EGL
+            # context. Reinitialize graph/module/buffer state while retaining
+            # the validated native context for both graphics paths. This gives
+            # callers the same public lifecycle contract without forcing a
+            # fragile context teardown.
+            if active_arch in ("opengl", "gles"):
+                try:
+                    self.sync()
+                except Exception:
+                    pass
+                try:
+                    self._drain_retired(already_synchronized=True)
+                except Exception:
+                    pass
+                try:
+                    self.clear_pipelines()
+                except Exception:
+                    self.recorded_pipelines.clear()
+                    self._pipeline_intermediates = {}
+                for mod in list(getattr(self, "modules", {}).values()):
+                    try:
+                        if mod.module_ptr:
+                            _LIB.destroy_aot_module(mod.module_ptr)
+                            mod.module_ptr = None
+                    except Exception:
+                        pass
+                self.modules = {}
+                for buf in list(getattr(self, "_live_buffers", ())):
+                    try:
+                        buf._force_destroy()
+                    except Exception:
+                        pass
+                self._staging_pool = {}
+                try:
+                    self.buffer_pool.clear()
+                except Exception:
+                    pass
+                self.recorded_pipelines.clear()
+                self._pipeline_intermediates = {}
+                if hasattr(self, "_local"):
+                    self._local.current_pipeline = None
+                    self._local.auto_pipeline_context = None
+                self._destroyed = False
+                self._generation = getattr(self, "_generation", 0) + 1
+                return
+
             # Taichi's x64 C runtime only accepts device index 0. Keep the
             # public reinit API uniform while preventing a CPU recovery from
             # accidentally requesting a GPU device index.
             requested_device = (
-                0 if active_arch in ("cpu", "opengl") else int(device_id)
+                0 if active_arch in ("cpu", "opengl", "gles") else int(device_id)
             )
             old_runtime = self.runtime
+            # Complete queued work before invalidating wrappers.  This is
+            # essential for the same-size allocation cache: a retired handle
+            # may be reusable only in its original runtime generation.
+            try:
+                if old_runtime:
+                    _LIB.sync_runtime(old_runtime)
+            except Exception:
+                pass
             for mod in list(self.modules.values()):
+                try:
+                    if mod.module_ptr:
+                        _LIB.destroy_aot_module(mod.module_ptr)
+                except Exception:
+                    pass
                 mod.module_ptr = None
             self.modules = {}
             self.recorded_pipelines.clear()
-            self._pipeline_intermediates = {}
             if hasattr(self, "_local"):
                 self._local.auto_pipeline_context = None
+            try:
+                self._drain_retired(already_synchronized=True)
+            except Exception:
+                pass
+            self._invalidate_live_buffers(old_runtime)
+            self._pipeline_intermediates = {}
             self._staging_pool = {}
             try:
                 self.buffer_pool.clear()
@@ -3123,6 +4188,7 @@ class AOTEngine:
                         "cuda": 1,
                         "cpu": 2,
                         "opengl": 3,
+                        "gles": 4,
                     }.get(active_arch, 0),
                     requested_device,
                 )
@@ -3172,6 +4238,16 @@ class AOTEngine:
                         self._executor.shutdown(wait=False)
                     self._executor = None
 
+                # Stop queued work before releasing pipeline/staging/live
+                # handles.  Some drivers tolerate freeing during teardown,
+                # while others report a device error or keep the stale handle
+                # alive until the context is gone.
+                try:
+                    if getattr(self, "runtime", None):
+                        _LIB.sync_runtime(self.runtime)
+                except Exception:
+                    pass
+
                 # 2. Clear all pipelines and their intermediate GPU buffers
                 for name in list(getattr(self, "_pipeline_intermediates", {}).keys()):
                     try:
@@ -3199,6 +4275,20 @@ class AOTEngine:
                             except Exception:
                                 pass
                 self._staging_pool = {}
+
+                # Retired handles are not in the free pool yet.  Synchronize
+                # once, promote them, then let the normal pool drain release
+                # every native allocation before the runtime is destroyed.
+                try:
+                    self._drain_retired(wait=True)
+                except Exception:
+                    pass
+
+                # Ordinary user-owned buffers are not registered in a
+                # pipeline/staging dictionary.  Invalidate them explicitly
+                # so Python wrappers cannot later free their numeric handles
+                # against a destroyed runtime.
+                self._invalidate_live_buffers(self.runtime)
 
                 # 4. Drain buffer pool free list
                 try:

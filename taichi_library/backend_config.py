@@ -13,8 +13,8 @@ import os
 from typing import Mapping, Optional
 
 
-CANONICAL_BACKENDS = ("cpu", "cuda", "vulkan", "opengl")
-GPU_BACKENDS = frozenset(("cuda", "vulkan", "opengl"))
+CANONICAL_BACKENDS = ("cpu", "cuda", "vulkan", "opengl", "gles")
+GPU_BACKENDS = frozenset(("cuda", "vulkan", "opengl", "gles"))
 
 _ALIASES = {
     "host": "cpu",
@@ -33,7 +33,13 @@ _ALIASES = {
     "vulkan_x86_64_windows": "vulkan",
     "gl": "opengl",
     "egl": "opengl",
-    "gles": "opengl",
+    "gles": "gles",
+    "opengl_es": "gles",
+    "opengl_es3": "gles",
+    "opengl_es_2": "gles",
+    "opengl_es_3": "gles",
+    "gles2": "gles",
+    "gles3": "gles",
     "opengl_desktop": "opengl",
     "opengl_x86_64": "opengl",
     "opengl_x86_64_windows": "opengl",
@@ -59,6 +65,24 @@ def normalize_backend(value, *, allow_auto: bool = True, strict: bool = False) -
         allowed = ", ".join(CANONICAL_BACKENDS)
         raise ValueError(f"Unsupported backend {value!r}; choose one of: {allowed}")
     return "auto" if allow_auto else "cpu"
+
+
+def is_android_runtime(environ: Optional[Mapping[str, str]] = None) -> bool:
+    """Return whether the current process is running inside Android.
+
+    Android Python distributions do not consistently report a distinct
+    ``sys.platform`` value, so use the standard runtime environment markers.
+    Keeping this helper dependency-free lets the loader canonicalize an old
+    ``opengl`` setting to the target-qualified ``gles`` backend before a
+    bridge or artifact is selected.
+    """
+
+    env = os.environ if environ is None else environ
+    return bool(
+        env.get("ANDROID_ROOT")
+        or env.get("ANDROID_DATA")
+        or "ANDROID_ARGUMENT" in env
+    )
 
 
 def normalize_vendor(value) -> str:
@@ -141,6 +165,8 @@ class BackendConfig:
             return "cuda_x86_64_windows_nvidia"
         if self.backend == "vulkan":
             return "vulkan_desktop"
+        if self.backend == "gles":
+            return "gles_mobile"
         return "opengl_desktop"
 
     def with_device(self, *, device_id=None, vendor=None, device_name=None):
@@ -182,6 +208,7 @@ __all__ = [
     "CANONICAL_BACKENDS",
     "GPU_BACKENDS",
     "backend_env",
+    "is_android_runtime",
     "normalize_backend",
     "normalize_vendor",
     "parse_device_id",

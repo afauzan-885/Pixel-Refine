@@ -19,7 +19,9 @@ from dataclasses import dataclass, asdict
 import json
 import os
 import platform as _platform
+import re
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -247,13 +249,62 @@ def resolve_artifact(
             ]
         )
     for candidate in exact_candidates:
-        if candidate.is_file():
+        if candidate.is_file() and _artifact_matches_target(candidate, target):
             return candidate
-    if allow_legacy:
+    # ARM/mobile targets must never fall back to the historical unqualified
+    # filename: those archives were generated for the desktop ABI and a
+    # caller passing ``allow_legacy=True`` must not be able to mix them by
+    # accident.  Desktop migration callers retain the explicit opt-in.
+    if allow_legacy and not target.is_arm and not target.is_mobile:
         legacy = base / f"{algorithm}_{target.backend}.tcm"
-        if legacy.is_file():
+        if legacy.is_file() and _artifact_matches_target(legacy, target):
             return legacy
     return None
+
+
+def _artifact_matches_target(path: Path, target: TargetSpec) -> bool:
+    """Reject a target-qualified archive emitted for another ABI/OS.
+
+    Graphics TCMs carry SPIR-V and are architecture-neutral, so payload kind
+    is sufficient there. CPU/CUDA TCMs contain LLVM text whose target triple
+    is authoritative; checking it prevents a host-Windows archive from being
+    silently loaded by a Linux process merely because it was placed in the
+    Linux target directory.
+    """
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            names = set(archive.namelist())
+            if target.backend in {"vulkan", "opengl", "gles"}:
+                return "graphs.json" in names and any(
+                    name.endswith(".spv") for name in names
+                )
+            llvm_files = [name for name in names if name.endswith(".ll")]
+            if "graphs.tcb" not in names or not llvm_files:
+                return False
+            sample = archive.read(llvm_files[0]).decode("utf-8", errors="replace")
+            triples = re.findall(r'target triple = "([^"]+)"', sample)
+            if not triples:
+                return False
+            triple = triples[0].lower()
+            if target.backend == "cuda":
+                return "nvptx64" in triple
+            if target.arch == "x86_64":
+                arch_ok = "x86_64" in triple or "amd64" in triple
+            elif target.arch == "arm64":
+                arch_ok = "aarch64" in triple or "arm64" in triple
+            else:
+                arch_ok = target.arch in triple
+            if not arch_ok:
+                return False
+            if target.os == "windows":
+                return "windows" in triple or "win32" in triple
+            if target.os == "linux":
+                return "linux" in triple and "android" not in triple
+            if target.os == "android":
+                return "android" in triple
+            return True
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return False
 
 
 def load_target_manifest(path: os.PathLike[str] | str) -> Mapping[str, Any]:

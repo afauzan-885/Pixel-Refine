@@ -156,6 +156,104 @@ else:
     )
 
 
+    # The AOT image families live in their own small modules so each TCM can be
+    # compiled and loaded independently.  Re-export them here as the normal
+    # taichi_algorithm API when AOT mode is active; the JIT branch above keeps its
+    # original implementations and signatures.
+if AOT_MODE == "1":
+    def _aot_extended(name):
+        # Lazy import keeps compiler workers from constructing the runtime
+        # during package initialization.  The canonical implementation lives
+        # under taichi_algorithm; taichi_aot only provides compatibility shims.
+        from taichi_library.taichi_algorithm.image_processing import extended_aot as _extended
+        return getattr(_extended, name)
+
+    def _aot_jpeg(name):
+        from taichi_library.taichi_algorithm.compression import jpeg_aot as _jpeg
+        return getattr(_jpeg, name)
+
+    def dilate(src, kernel=None, iterations=1):
+        return _aot_extended("dilate_aot")(src, kernel=kernel, iterations=iterations)
+
+    def erode(src, kernel=None, iterations=1):
+        return _aot_extended("erode_aot")(src, kernel=kernel, iterations=iterations)
+
+    def filter2d(src, kernel, border_mode="REFLECT_101"):
+        return _aot_extended("filter2d_aot")(src, kernel, border_mode=border_mode)
+
+    def normalize(src, min_val=0.0, max_val=1.0, norm_type="MINMAX"):
+        return _aot_extended("normalize_aot")(src, alpha=min_val, beta=max_val, norm_type=norm_type)
+
+    def copyMakeBorder(src, top, bottom, left, right, borderType=4, dst=None, value=0):
+        result = _aot_extended("copy_make_border_aot")(src, top, bottom, left, right, border_type=borderType, value=value)
+        if dst is not None:
+            dst[...] = result
+            return dst
+        return result
+
+    copy_make_border = copyMakeBorder
+
+    def threshold(src, thresh, maxval=255, type=THRESH_BINARY):
+        return _aot_extended("threshold_aot")(src, thresh=thresh, maxval=maxval, thresh_type=type)
+
+    def ssim(img1, img2, window_size=11, data_range=None, k1=0.01, k2=0.03):
+        return _aot_extended("ssim_aot")(img1, img2, window_size=window_size, data_range=data_range, k1=k1, k2=k2)
+
+    def gpu_histogram(src, bins=256, range=(0, 256)):
+        return _aot_extended("histogram_aot")(src, bins=bins, range=range)
+
+    histogram = gpu_histogram
+
+    def gaussian_window(*args, **kwargs):
+        return _aot_extended("gaussian_window_aot")(*args, **kwargs)
+
+    create_gaussian_window = gaussian_window
+
+    def warp_affine(*args, **kwargs):
+        return _aot_extended("warp_affine_aot")(*args, **kwargs)
+
+    def joint_bilateral_guidance(*args, **kwargs):
+        return _aot_extended("joint_bilateral_guidance_aot")(*args, **kwargs)
+
+    def enhance_image(*args, **kwargs):
+        return _aot_extended("enhance_image_aot")(*args, **kwargs)
+
+    enhance_grayscale = enhance_image
+
+    def encode_grayscale_aot(*args, **kwargs):
+        return _aot_jpeg("encode_grayscale_aot")(*args, **kwargs)
+
+    def encode_rgb_aot(*args, **kwargs):
+        return _aot_jpeg("encode_rgb_aot")(*args, **kwargs)
+
+    def jpeg_encode_aot(*args, **kwargs):
+        return _aot_jpeg("jpeg_encode_aot")(*args, **kwargs)
+
+    # Keep the singleton OpenCV-like facade on the same native paths as the
+    # module-level functions.  Without this bridge ``ta.dilate`` and friends
+    # would still resolve to the historical approximation in aot_wrapper.
+    for _name, _function in {
+        "dilate": dilate,
+        "erode": erode,
+        "filter2d": filter2d,
+        "normalize": normalize,
+        "copyMakeBorder": copyMakeBorder,
+        "copy_make_border": copy_make_border,
+        "threshold": threshold,
+        "ssim": ssim,
+        "gpu_histogram": gpu_histogram,
+        "histogram": histogram,
+        "warp_affine": warp_affine,
+        "gaussian_window": gaussian_window,
+        "create_gaussian_window": create_gaussian_window,
+        "joint_bilateral_guidance": joint_bilateral_guidance,
+        "enhance_image": enhance_image,
+        "enhance_grayscale": enhance_grayscale,
+        "jpeg_encode_aot": jpeg_encode_aot,
+    }.items():
+        setattr(type(ta), _name, staticmethod(_function))
+
+
 # --- Constants ---
 INTER_LINEAR = 1
 INTER_NEAREST = 0
@@ -637,6 +735,14 @@ __all__ = [
     "OPTFLOW_FARNEBACK_GAUSSIAN",
     "dilate",
     "erode",
+    "warp_affine",
+    "gaussian_window",
+    "create_gaussian_window",
+    "joint_bilateral_guidance",
+    "enhance_image",
+    "encode_grayscale_aot",
+    "encode_rgb_aot",
+    "jpeg_encode_aot",
     # New native GPU modules
     "filter2d",
     "normalize",
@@ -657,6 +763,7 @@ __all__ = [
     "THRESH_OTSU",
     "ssim",
     "gpu_histogram",
+    "histogram",
     "compute_spatial_weight",
     "NoiseEstimator",
     "hdr_fuse",

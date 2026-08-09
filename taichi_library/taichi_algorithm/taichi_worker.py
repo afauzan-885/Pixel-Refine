@@ -154,6 +154,11 @@ class _TaichiWorker(threading.Thread):
                 if opengl_arch is None:
                     raise RuntimeError("This Taichi build does not expose the OpenGL JIT arch")
                 ti.init(arch=opengl_arch, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
+            elif forced_arch == "gles":
+                gles_arch = getattr(ti, "gles", None)
+                if gles_arch is None:
+                    raise RuntimeError("This Taichi build does not expose the GLES JIT arch")
+                ti.init(arch=gles_arch, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
             else:
                 # Fallback chain: Vulkan -> GPU -> CPU
                 try:

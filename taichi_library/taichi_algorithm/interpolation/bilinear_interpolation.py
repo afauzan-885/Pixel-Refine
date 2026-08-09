@@ -149,6 +149,62 @@ if TAICHI_AVAILABLE:
             xa, xb = tm.clamp(x0, 0, w_src - 1), tm.clamp(x0 + 1, 0, w_src - 1)
             dst[r, c] = tm.mix(tm.mix(src[ya, xa], src[ya, xb], fx), tm.mix(src[yb, xa], src[yb, xb], fx), fy)
 
+    @ti.kernel
+    def _bilinear_resize_batch_offset_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        offsets: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        h_src: ti.i32,
+        w_src: ti.i32,
+        h_dst: ti.i32,
+        w_dst: ti.i32,
+    ):
+        """Resize a bounded batch of output tiles in one dispatch."""
+        for batch, r, c in ti.ndrange(dst.shape[0], dst.shape[1], dst.shape[2]):
+            gr = r + offsets[batch, 0]
+            gc = c + offsets[batch, 1]
+            y = (float(gr) + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x = (float(gc) + 0.5) * (float(w_src) / float(w_dst)) - 0.5
+            y0, x0 = int(ti.floor(y)), int(ti.floor(x))
+            fy, fx = y - float(y0), x - float(x0)
+            ya, yb = tm.clamp(y0, 0, h_src - 1), tm.clamp(y0 + 1, 0, h_src - 1)
+            xa, xb = tm.clamp(x0, 0, w_src - 1), tm.clamp(x0 + 1, 0, w_src - 1)
+            dst[batch, r, c] = tm.mix(
+                tm.mix(src[ya, xa], src[ya, xb], fx),
+                tm.mix(src[yb, xa], src[yb, xb], fx),
+                fy,
+            )
+
+    @ti.kernel
+    def _bilinear_resize_batch_offset_kernel_vec3(
+        src: ti.types.ndarray(
+            dtype=ti.types.vector(3, ti.f32), ndim=2
+        ),
+        dst: ti.types.ndarray(
+            dtype=ti.types.vector(3, ti.f32), ndim=3
+        ),
+        offsets: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        h_src: ti.i32,
+        w_src: ti.i32,
+        h_dst: ti.i32,
+        w_dst: ti.i32,
+    ):
+        """Vector3 variant of the batched offset resize graph."""
+        for batch, r, c in ti.ndrange(dst.shape[0], dst.shape[1], dst.shape[2]):
+            gr = r + offsets[batch, 0]
+            gc = c + offsets[batch, 1]
+            y = (float(gr) + 0.5) * (float(h_src) / float(h_dst)) - 0.5
+            x = (float(gc) + 0.5) * (float(w_src) / float(w_dst)) - 0.5
+            y0, x0 = int(ti.floor(y)), int(ti.floor(x))
+            fy, fx = y - float(y0), x - float(x0)
+            ya, yb = tm.clamp(y0, 0, h_src - 1), tm.clamp(y0 + 1, 0, h_src - 1)
+            xa, xb = tm.clamp(x0, 0, w_src - 1), tm.clamp(x0 + 1, 0, w_src - 1)
+            dst[batch, r, c] = tm.mix(
+                tm.mix(src[ya, xa], src[ya, xb], fx),
+                tm.mix(src[yb, xa], src[yb, xb], fx),
+                fy,
+            )
+
 
 def bilinear_resize(src, target_h: int, target_w: int, dst=None, buffer_provider="pool"):
     """

@@ -1,4 +1,5 @@
 #include <cstring>
+#include <cmath>
 #include <cwchar>
 #include <cstdlib>
 #include <fstream>
@@ -12,7 +13,12 @@
 #include <unordered_set>
 #include <vector>
 #include <mutex>
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#endif
 
 
 #ifdef _WIN32
@@ -70,13 +76,46 @@ static bool is_debug_logging_enabled() {
     return enabled;
 }
 
+// Match the saturating narrowing used by the SIMD conversion paths for every
+// scalar tail and baseline bridge.  The old scalar casts were implementation
+// defined for values outside [0, 1] (and for NaN), which could make CPU/ARM
+// and GPU host-buffer normalization disagree at the dtype boundary.
+static inline uint8_t ti_normalized_to_u8(float value) noexcept {
+  if (!(value > 0.0f))
+    return 0;
+  if (value >= 1.0f)
+    return 255;
+  return static_cast<uint8_t>(value * 255.0f + 0.5f);
+}
+
+static inline uint16_t ti_normalized_to_u16(float value) noexcept {
+  if (!(value > 0.0f))
+    return 0;
+  if (value >= 1.0f)
+    return 65535;
+  return static_cast<uint16_t>(value * 65535.0f + 0.5f);
+}
+
+// Keep signed 16-bit host-buffer casts defined across MSVC, Clang, and the
+// ARM toolchains.  A floating-point value outside the representable range is
+// clamped instead of relying on implementation-defined narrowing behavior.
+static inline int16_t ti_float_to_i16(float value) noexcept {
+  if (!(value > -32768.0f))
+    return -32768;
+  if (value >= 32767.0f)
+    return 32767;
+  return static_cast<int16_t>(value);
+}
+
 // -----------------------------------------------------------------------
 // Dynamic Argument Structure
 // -----------------------------------------------------------------------
 struct DynamicArg {
   const char *name;
   int arg_type; // 0: ndarray, 1: scalar
-  int dtype;    // 0: f32, 1: i32, 2: u8, 3: u16
+  // Keep 0..3 stable for existing callers; 4/5 are compact CPU extensions.
+  // This private struct is layout-compatible with the Python ctypes mirror.
+  int dtype;    // 0: f32, 1: i32, 2: u8, 3: u16, 4: i16, 5: f16
   int dim_count;
   int32_t shape[8];
   int elem_dim_count;
@@ -1103,6 +1142,8 @@ EXPORT void *init_aot_engine(int arch_id, int device_id) {
     arch = TI_ARCH_X64;
   else if (arch_id == 3)
     arch = TI_ARCH_OPENGL;
+  else if (arch_id == 4)
+    arch = TI_ARCH_GLES;
   try {
     // Use specified device_id
     auto ctx = std::make_unique<EngineContext>();
@@ -1190,10 +1231,10 @@ EXPORT void *init_aot_engine(int arch_id, int device_id) {
         // ScopedOpenGLContext will bind it around every native operation.
         ctx->eglMakeCurrent(EGL_NO_DISPLAY, EGL_NO_SURFACE, EGL_NO_SURFACE,
                             EGL_NO_CONTEXT);
+      }
 #else
       ctx->device_name = current_opengl_renderer();
 #endif
-    }
     }
     ctx->destroying = false;
     ctx->session_id = next_session_id++;
@@ -1239,11 +1280,19 @@ EXPORT const char *get_runtime_device_name(void *runtime) {
 EXPORT const char *get_runtime_context_backend(void *runtime) {
   EngineContext *ctx = as_engine(runtime);
   static thread_local std::string backend;
-  if (!ctx || ctx->arch != TI_ARCH_OPENGL) {
+  // GLES is a separate Taichi architecture (and has its own target-qualified
+  // bridge/artifacts), but it still belongs to the native graphics family for
+  // diagnostics.  Returning an empty string here made mobile diagnostics look
+  // like an uninitialised runtime even when the GLES bridge was loaded.
+  if (!ctx || (ctx->arch != TI_ARCH_OPENGL && ctx->arch != TI_ARCH_GLES)) {
     backend.clear();
     return backend.c_str();
   }
 #ifdef _WIN32
+  if (ctx->arch == TI_ARCH_GLES) {
+    backend = "GLES-native";
+    return backend.c_str();
+  }
   // Legacy window-system contexts are intentionally not supported in the
   // native bridge. Keep the diagnostic value explicit when initialization did
   // not establish an ICD/EGL provider instead of reporting a backend that is
@@ -1251,7 +1300,7 @@ EXPORT const char *get_runtime_context_backend(void *runtime) {
   backend = ctx->icd_mode ? "ICD"
                           : (ctx->egl_mode ? "EGL" : "native-unavailable");
 #else
-  backend = "native";
+  backend = ctx->arch == TI_ARCH_GLES ? "GLES-native" : "native";
 #endif
   return backend.c_str();
 }
@@ -1798,7 +1847,344 @@ EXPORT bool ti_cast_buffer(void *src_ptr, void *dst_ptr,
                            int num_elements, int src_type, int dst_type) {
   if (!src_ptr || !dst_ptr)
     return false;
+  if (num_elements < 0)
+    return false;
 
+  // i16 is part of the private dtype ABI used by compact CPU/ARM graphs.  It
+  // is handled before the ISA-specific branches so every bridge (baseline,
+  // AVX2, NEON, Vulkan, OpenGL, and CUDA) has identical defined semantics.
+  // The hot image-normalization conversions below retain their SIMD paths;
+  // these signed-16 conversions are primarily used for compact intermediate
+  // buffers and avoid an unnecessary NumPy round-trip.
+  if (src_type == 4 && dst_type == 4) {
+    std::memmove(dst_ptr, src_ptr,
+                 static_cast<size_t>(num_elements) * sizeof(int16_t));
+    return true;
+  }
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+  if (src_type == 0 && dst_type == 4) { // f32 -> i16 (NEON)
+    const float *s = static_cast<const float *>(src_ptr);
+    int16_t *d = static_cast<int16_t *>(dst_ptr);
+    const float32x4_t lo_bound = vdupq_n_f32(-32768.0f);
+    const float32x4_t hi_bound = vdupq_n_f32(32767.0f);
+    int i = 0;
+    for (; i <= num_elements - 8; i += 8) {
+      float32x4_t f0 = vld1q_f32(s + i);
+      float32x4_t f1 = vld1q_f32(s + i + 4);
+      // Replace NaN with the lower bound before clamping.  This matches the
+      // scalar helper and keeps ARM/x86 tails deterministic.
+      f0 = vbslq_f32(vceqq_f32(f0, f0), f0, lo_bound);
+      f1 = vbslq_f32(vceqq_f32(f1, f1), f1, lo_bound);
+      f0 = vmaxq_f32(lo_bound, vminq_f32(hi_bound, f0));
+      f1 = vmaxq_f32(lo_bound, vminq_f32(hi_bound, f1));
+      const int32x4_t i0 = vcvtq_s32_f32(f0);
+      const int32x4_t i1 = vcvtq_s32_f32(f1);
+      vst1q_s16(d + i, vcombine_s16(vqmovn_s32(i0), vqmovn_s32(i1)));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = ti_float_to_i16(s[i]);
+    return true;
+  }
+  if (src_type == 4 && dst_type == 0) { // i16 -> f32 (NEON)
+    const int16_t *s = static_cast<const int16_t *>(src_ptr);
+    float *d = static_cast<float *>(dst_ptr);
+    int i = 0;
+    for (; i <= num_elements - 8; i += 8) {
+      const int16x8_t v = vld1q_s16(s + i);
+      vst1q_f32(d + i, vcvtq_f32_s32(vmovl_s16(vget_low_s16(v))));
+      vst1q_f32(d + i + 4, vcvtq_f32_s32(vmovl_s16(vget_high_s16(v))));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = static_cast<float>(s[i]);
+    return true;
+  }
+#elif (defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)) && defined(PIXEL_REFINE_AOT_BASELINE)
+  // SSE2 is mandatory on x86-64 and is the baseline bridge's safe SIMD
+  // option.  Keep this separate from the AVX2 block below so an older CPU
+  // never decodes an AVX instruction merely because the DLL was loaded.
+  if (src_type == 0 && dst_type == 4) { // f32 -> i16 (SSE2)
+    const float *s = static_cast<const float *>(src_ptr);
+    int16_t *d = static_cast<int16_t *>(dst_ptr);
+    const __m128 lo_bound = _mm_set1_ps(-32768.0f);
+    const __m128 hi_bound = _mm_set1_ps(32767.0f);
+    const __m128i zero_i = _mm_setzero_si128();
+    int i = 0;
+    for (; i <= num_elements - 4; i += 4) {
+      __m128 f = _mm_loadu_ps(s + i);
+      const __m128 valid = _mm_cmpord_ps(f, f);
+      // Match ti_float_to_i16(): NaN becomes the lower bound.
+      f = _mm_or_ps(_mm_and_ps(valid, f),
+                    _mm_andnot_ps(valid, lo_bound));
+      f = _mm_max_ps(lo_bound, _mm_min_ps(hi_bound, f));
+      const __m128i v = _mm_cvttps_epi32(f);
+      _mm_storel_epi64(reinterpret_cast<__m128i *>(d + i),
+                       _mm_packs_epi32(v, zero_i));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = ti_float_to_i16(s[i]);
+    return true;
+  }
+  if (src_type == 4 && dst_type == 0) { // i16 -> f32 (SSE2)
+    const int16_t *s = static_cast<const int16_t *>(src_ptr);
+    float *d = static_cast<float *>(dst_ptr);
+    const __m128i zero_i = _mm_setzero_si128();
+    int i = 0;
+    for (; i <= num_elements - 4; i += 4) {
+      const __m128i v = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(s + i));
+      const __m128i sign = _mm_cmpgt_epi16(zero_i, v);
+      const __m128i widened = _mm_unpacklo_epi16(v, sign);
+      _mm_storeu_ps(d + i, _mm_cvtepi32_ps(widened));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = static_cast<float>(s[i]);
+    return true;
+  }
+#elif (defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)) && !defined(PIXEL_REFINE_AOT_BASELINE)
+  if (src_type == 0 && dst_type == 4) { // f32 -> i16 (AVX2)
+    const float *s = static_cast<const float *>(src_ptr);
+    int16_t *d = static_cast<int16_t *>(dst_ptr);
+    const __m256 lo_bound = _mm256_set1_ps(-32768.0f);
+    const __m256 hi_bound = _mm256_set1_ps(32767.0f);
+    int i = 0;
+    for (; i <= num_elements - 8; i += 8) {
+      __m256 f = _mm256_loadu_ps(s + i);
+      // _mm256_max/min_ps select the numeric operand for NaN, so a NaN is
+      // normalized to the lower bound just like ti_float_to_i16().
+      f = _mm256_max_ps(lo_bound, _mm256_min_ps(hi_bound, f));
+      const __m256i v = _mm256_cvttps_epi32(f);
+      const __m128i signed_packed = _mm_packs_epi32(
+          _mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
+      _mm_storeu_si128(reinterpret_cast<__m128i *>(d + i), signed_packed);
+    }
+    for (; i < num_elements; ++i)
+      d[i] = ti_float_to_i16(s[i]);
+    return true;
+  }
+  if (src_type == 4 && dst_type == 0) { // i16 -> f32 (AVX2)
+    const int16_t *s = static_cast<const int16_t *>(src_ptr);
+    float *d = static_cast<float *>(dst_ptr);
+    int i = 0;
+    for (; i <= num_elements - 8; i += 8) {
+      const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(s + i));
+      const __m256i widened = _mm256_cvtepi16_epi32(v);
+      _mm256_storeu_ps(d + i, _mm256_cvtepi32_ps(widened));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = static_cast<float>(s[i]);
+    return true;
+  }
+#endif
+
+  if (src_type == 4 && dst_type == 0) { // i16 -> f32
+    const int16_t *s = static_cast<const int16_t *>(src_ptr);
+    float *d = static_cast<float *>(dst_ptr);
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = static_cast<float>(s[i]);
+    return true;
+  }
+  if (src_type == 0 && dst_type == 4) { // f32 -> i16
+    const float *s = static_cast<const float *>(src_ptr);
+    int16_t *d = static_cast<int16_t *>(dst_ptr);
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = ti_float_to_i16(s[i]);
+    return true;
+  }
+
+#if defined(PIXEL_REFINE_AOT_BASELINE)
+  // The bridge is also used on machines that predate AVX2.  SSE2 is the
+  // guaranteed x86-64 baseline, so use it for bulk host-buffer conversion
+  // while retaining scalar tails for exact edge handling.  AOT kernels remain
+  // responsible for their own target features; this function only
+  // moves/normalizes host buffers.
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+  if (src_type == 0 && dst_type == 2) { // f32 -> u8 (SSE2)
+    const float *s = static_cast<const float *>(src_ptr);
+    uint8_t *d = static_cast<uint8_t *>(dst_ptr);
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 one = _mm_set1_ps(1.0f);
+    const __m128 scale = _mm_set1_ps(255.0f);
+    const __m128 half = _mm_set1_ps(0.5f);
+    const __m128i zero_i = _mm_setzero_si128();
+    int i = 0;
+    for (; i <= num_elements - 4; i += 4) {
+      __m128 f = _mm_loadu_ps(s + i);
+      const __m128 valid = _mm_cmpord_ps(f, f);
+      f = _mm_and_ps(f, valid);  // NaN -> zero
+      f = _mm_max_ps(zero, _mm_min_ps(one, f));
+      const __m128i v = _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(f, scale), half));
+      const __m128i packed16 = _mm_packs_epi32(v, zero_i);
+      const __m128i packed8 = _mm_packus_epi16(packed16, zero_i);
+      const uint32_t value = static_cast<uint32_t>(_mm_cvtsi128_si32(packed8));
+      std::memcpy(d + i, &value, sizeof(value));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = ti_normalized_to_u8(s[i]);
+  } else if (src_type == 2 && dst_type == 0) { // u8 -> f32 (SSE2)
+    const uint8_t *s = static_cast<const uint8_t *>(src_ptr);
+    float *d = static_cast<float *>(dst_ptr);
+    const __m128 scale = _mm_set1_ps(1.0f / 255.0f);
+    const __m128i zero_i = _mm_setzero_si128();
+    int i = 0;
+    for (; i <= num_elements - 4; i += 4) {
+      uint32_t value = 0;
+      std::memcpy(&value, s + i, sizeof(value));
+      const __m128i bytes = _mm_cvtsi32_si128(static_cast<int>(value));
+      const __m128i u16 = _mm_unpacklo_epi8(bytes, zero_i);
+      const __m128i u32 = _mm_unpacklo_epi16(u16, zero_i);
+      _mm_storeu_ps(d + i, _mm_mul_ps(_mm_cvtepi32_ps(u32), scale));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = static_cast<float>(s[i]) / 255.0f;
+  } else if (src_type == 0 && dst_type == 3) { // f32 -> u16 (SSE2)
+    const float *s = static_cast<const float *>(src_ptr);
+    uint16_t *d = static_cast<uint16_t *>(dst_ptr);
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 one = _mm_set1_ps(1.0f);
+    const __m128 scale = _mm_set1_ps(65535.0f);
+    const __m128 half = _mm_set1_ps(0.5f);
+    const __m128i zero_i = _mm_setzero_si128();
+    const __m128i sign_bit = _mm_set1_epi16(static_cast<short>(0x8000));
+    const __m128i offset = _mm_set1_epi32(32768);
+    int i = 0;
+    for (; i <= num_elements - 4; i += 4) {
+      __m128 f = _mm_loadu_ps(s + i);
+      const __m128 valid = _mm_cmpord_ps(f, f);
+      f = _mm_and_ps(f, valid);  // NaN -> zero
+      f = _mm_max_ps(zero, _mm_min_ps(one, f));
+      __m128i v = _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(f, scale), half));
+      // SSE2 has no packus_epi32.  Translate [0,65535] to the signed
+      // interval before packing, then restore the high bit.
+      v = _mm_sub_epi32(v, offset);
+      v = _mm_xor_si128(_mm_packs_epi32(v, zero_i), sign_bit);
+      _mm_storel_epi64(reinterpret_cast<__m128i *>(d + i), v);
+    }
+    for (; i < num_elements; ++i)
+      d[i] = ti_normalized_to_u16(s[i]);
+  } else if (src_type == 3 && dst_type == 0) { // u16 -> f32 (SSE2)
+    const uint16_t *s = static_cast<const uint16_t *>(src_ptr);
+    float *d = static_cast<float *>(dst_ptr);
+    const __m128 scale = _mm_set1_ps(1.0f / 65535.0f);
+    const __m128i zero_i = _mm_setzero_si128();
+    int i = 0;
+    for (; i <= num_elements - 4; i += 4) {
+      const __m128i u16 = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(s + i));
+      const __m128i u32 = _mm_unpacklo_epi16(u16, zero_i);
+      _mm_storeu_ps(d + i, _mm_mul_ps(_mm_cvtepi32_ps(u32), scale));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = static_cast<float>(s[i]) / 65535.0f;
+  } else
+#endif
+  if (src_type == 0 && dst_type == 2) { // f32 -> u8
+    const float *s = (const float *)src_ptr;
+    uint8_t *d = (uint8_t *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = ti_normalized_to_u8(s[i]);
+  } else if (src_type == 2 && dst_type == 0) { // u8 -> f32
+    const uint8_t *s = (const uint8_t *)src_ptr;
+    float *d = (float *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = (float)s[i] / 255.0f;
+  } else if (src_type == 0 && dst_type == 3) { // f32 -> u16
+    const float *s = (const float *)src_ptr;
+    uint16_t *d = (uint16_t *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = ti_normalized_to_u16(s[i]);
+  } else if (src_type == 3 && dst_type == 0) { // u16 -> f32
+    const uint16_t *s = (const uint16_t *)src_ptr;
+    float *d = (float *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = (float)s[i] / 65535.0f;
+  } else if (src_type == 1 && dst_type == 3) { // i32 -> u16
+    const int32_t *s = (const int32_t *)src_ptr;
+    uint16_t *d = (uint16_t *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = (uint16_t)s[i];
+  } else if (src_type == 1 && dst_type == 2) { // i32 -> u8
+    const int32_t *s = (const int32_t *)src_ptr;
+    uint8_t *d = (uint8_t *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = (uint8_t)s[i];
+  }
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  // ARMv8-A always provides NEON/ASIMD.  Keep this path in the ARM bridge
+  // rather than relying on the scalar fallback: host/device transfers are
+  // frequently the dominant cost for CPU AOT on mobile.  The arithmetic and
+  // saturating narrowing match the x86 AVX2 path for normalized image data.
+  if (src_type == 0 && dst_type == 2) { // f32 -> u8
+    const float *s = (const float *)src_ptr;
+    uint8_t *d = (uint8_t *)dst_ptr;
+    const float32x4_t scale = vdupq_n_f32(255.0f);
+    const float32x4_t half = vdupq_n_f32(0.5f);
+    int i = 0;
+    for (; i <= num_elements - 16; i += 16) {
+      const float32x4_t f0 = vaddq_f32(vmulq_f32(vld1q_f32(s + i), scale), half);
+      const float32x4_t f1 = vaddq_f32(vmulq_f32(vld1q_f32(s + i + 4), scale), half);
+      const float32x4_t f2 = vaddq_f32(vmulq_f32(vld1q_f32(s + i + 8), scale), half);
+      const float32x4_t f3 = vaddq_f32(vmulq_f32(vld1q_f32(s + i + 12), scale), half);
+      const uint16x8_t p16 = vcombine_u16(
+          vqmovun_s32(vcvtq_s32_f32(f0)), vqmovun_s32(vcvtq_s32_f32(f1)));
+      const uint16x8_t p16_hi = vcombine_u16(
+          vqmovun_s32(vcvtq_s32_f32(f2)), vqmovun_s32(vcvtq_s32_f32(f3)));
+      vst1q_u8(d + i, vcombine_u8(vqmovn_u16(p16), vqmovn_u16(p16_hi)));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = ti_normalized_to_u8(s[i]);
+  } else if (src_type == 2 && dst_type == 0) { // u8 -> f32
+    const uint8_t *s = (const uint8_t *)src_ptr;
+    float *d = (float *)dst_ptr;
+    const float32x4_t scale = vdupq_n_f32(1.0f / 255.0f);
+    int i = 0;
+    for (; i <= num_elements - 8; i += 8) {
+      const uint16x8_t u16 = vmovl_u8(vld1_u8(s + i));
+      const uint32x4_t lo = vmovl_u16(vget_low_u16(u16));
+      const uint32x4_t hi = vmovl_u16(vget_high_u16(u16));
+      vst1q_f32(d + i, vmulq_f32(vcvtq_f32_u32(lo), scale));
+      vst1q_f32(d + i + 4, vmulq_f32(vcvtq_f32_u32(hi), scale));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = (float)s[i] / 255.0f;
+  } else if (src_type == 0 && dst_type == 3) { // f32 -> u16
+    const float *s = (const float *)src_ptr;
+    uint16_t *d = (uint16_t *)dst_ptr;
+    const float32x4_t scale = vdupq_n_f32(65535.0f);
+    const float32x4_t half = vdupq_n_f32(0.5f);
+    int i = 0;
+    for (; i <= num_elements - 8; i += 8) {
+      const float32x4_t f0 = vaddq_f32(vmulq_f32(vld1q_f32(s + i), scale), half);
+      const float32x4_t f1 = vaddq_f32(vmulq_f32(vld1q_f32(s + i + 4), scale), half);
+      vst1q_u16(d + i, vcombine_u16(vqmovun_s32(vcvtq_s32_f32(f0)),
+                                   vqmovun_s32(vcvtq_s32_f32(f1))));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = ti_normalized_to_u16(s[i]);
+  } else if (src_type == 3 && dst_type == 0) { // u16 -> f32
+    const uint16_t *s = (const uint16_t *)src_ptr;
+    float *d = (float *)dst_ptr;
+    const float32x4_t scale = vdupq_n_f32(1.0f / 65535.0f);
+    int i = 0;
+    for (; i <= num_elements - 8; i += 8) {
+      const uint16x8_t u16 = vld1q_u16(s + i);
+      const uint32x4_t lo = vmovl_u16(vget_low_u16(u16));
+      const uint32x4_t hi = vmovl_u16(vget_high_u16(u16));
+      vst1q_f32(d + i, vmulq_f32(vcvtq_f32_u32(lo), scale));
+      vst1q_f32(d + i + 4, vmulq_f32(vcvtq_f32_u32(hi), scale));
+    }
+    for (; i < num_elements; ++i)
+      d[i] = (float)s[i] / 65535.0f;
+  } else if (src_type == 1 && dst_type == 3) { // i32 -> u16
+    const int32_t *s = (const int32_t *)src_ptr;
+    uint16_t *d = (uint16_t *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = (uint16_t)s[i];
+  } else if (src_type == 1 && dst_type == 2) { // i32 -> u8
+    const int32_t *s = (const int32_t *)src_ptr;
+    uint8_t *d = (uint8_t *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = (uint8_t)s[i];
+  }
+#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
   if (src_type == 0 && dst_type == 2) { // f32 -> u8
     float *s = (float *)src_ptr;
     uint8_t *d = (uint8_t *)dst_ptr;
@@ -1818,7 +2204,7 @@ EXPORT bool ti_cast_buffer(void *src_ptr, void *dst_ptr,
       std::memcpy(d + i, &val, 8);
     }
     for (; i < num_elements; ++i)
-      d[i] = (uint8_t)(s[i] * 255.0f + 0.5f);
+      d[i] = ti_normalized_to_u8(s[i]);
   } else if (src_type == 2 && dst_type == 0) { // u8 -> f32
     uint8_t *s = (uint8_t *)src_ptr;
     float *d = (float *)dst_ptr;
@@ -1852,7 +2238,7 @@ EXPORT bool ti_cast_buffer(void *src_ptr, void *dst_ptr,
       _mm_storeu_si128((__m128i*)(d + i), packed);
     }
     for (; i < num_elements; ++i)
-      d[i] = (uint16_t)(s[i] * 65535.0f + 0.5f);
+      d[i] = ti_normalized_to_u16(s[i]);
   } else if (src_type == 3 && dst_type == 0) { // u16 -> f32
     uint16_t *s = (uint16_t *)src_ptr;
     float *d = (float *)dst_ptr;
@@ -1878,6 +2264,32 @@ EXPORT bool ti_cast_buffer(void *src_ptr, void *dst_ptr,
     for (int i = 0; i < num_elements; ++i)
       d[i] = (uint8_t)s[i];
   }
+#else
+  // Keep an explicit portable path for any future non-x86/non-ARM target.
+  // This branch is intentionally conservative; target-specific bridges can
+  // add their own SIMD implementation without changing the exported ABI.
+  if (src_type == 0 && dst_type == 2) {
+    const float *s = (const float *)src_ptr;
+    uint8_t *d = (uint8_t *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = ti_normalized_to_u8(s[i]);
+  } else if (src_type == 2 && dst_type == 0) {
+    const uint8_t *s = (const uint8_t *)src_ptr;
+    float *d = (float *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = (float)s[i] / 255.0f;
+  } else if (src_type == 0 && dst_type == 3) {
+    const float *s = (const float *)src_ptr;
+    uint16_t *d = (uint16_t *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = ti_normalized_to_u16(s[i]);
+  } else if (src_type == 3 && dst_type == 0) {
+    const uint16_t *s = (const uint16_t *)src_ptr;
+    float *d = (float *)dst_ptr;
+    for (int i = 0; i < num_elements; ++i)
+      d[i] = (float)s[i] / 65535.0f;
+  }
+#endif
   return true;
 }
 
@@ -1936,6 +2348,10 @@ static void _fill_ti_arg(TiNamedArgument &arg, const DynamicArg &dyn_arg,
       ti_dt = TI_DATA_TYPE_U8;
     else if (dyn_arg.dtype == 3)
       ti_dt = TI_DATA_TYPE_U16;
+    else if (dyn_arg.dtype == 4)
+      ti_dt = TI_DATA_TYPE_I16;
+    else if (dyn_arg.dtype == 5)
+      ti_dt = TI_DATA_TYPE_F16;
 
     arg.argument.value.ndarray.elem_type = ti_dt;
     arg.argument.value.ndarray.shape.dim_count = dyn_arg.dim_count;

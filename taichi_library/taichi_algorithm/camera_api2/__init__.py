@@ -53,6 +53,7 @@ from .yuv_converter import (
 # === Pipeline Orchestrator ===
 from .camera_pipeline import (
     CameraPipeline,
+    AOTCameraPipeline,
     PipelineStage,
     create_preview_pipeline,
     create_capture_pipeline,
@@ -65,6 +66,7 @@ from .frame_manager import (
     TripleBuffer,
     AdaptiveFrameController,
     FrameBufferPool,
+    AOTFrameBufferPool,
     FrameSlot,
 )
 
@@ -77,6 +79,7 @@ __all__ = [
     "yuv_to_gray",
     # Pipeline
     "CameraPipeline",
+    "AOTCameraPipeline",
     "PipelineStage",
     "create_preview_pipeline",
     "create_capture_pipeline",
@@ -86,5 +89,6 @@ __all__ = [
     "TripleBuffer",
     "AdaptiveFrameController",
     "FrameBufferPool",
+    "AOTFrameBufferPool",
     "FrameSlot",
 ]

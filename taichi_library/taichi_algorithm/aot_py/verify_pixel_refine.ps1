@@ -40,7 +40,7 @@ function Invoke-Comprehensive([string]$Backend) {
     $env:PIXEL_REFINE_AOT_ARCH = $Backend
     if ($Backend -eq "cpu") { $env:PIXEL_REFINE_AOT_DEVICE = "0" }
     else { $env:PIXEL_REFINE_AOT_DEVICE = [string]$VulkanDevice }
-    & $python (Join-Path $PSScriptRoot "test_comprehensif.py")
+    & $python (Join-Path $PSScriptRoot "tests/test_comprehensif.py")
     if ($LASTEXITCODE -ne 0) { throw "Suite komprehensif $Backend gagal ($LASTEXITCODE)" }
 }
 

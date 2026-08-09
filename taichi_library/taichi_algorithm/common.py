@@ -249,6 +249,37 @@ if TAICHI_AVAILABLE:
             dst[I] = src[I]
 
     @ti.kernel
+    def _scatter_core_f32_3d_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        src_y: ti.i32,
+        src_x: ti.i32,
+        dst_y: ti.i32,
+        dst_x: ti.i32,
+        core_h: ti.i32,
+        core_w: ti.i32,
+    ):
+        """Publish a tile core into a resident frame without host traffic."""
+        channels = src.shape[2]
+        for y, x, channel in ti.ndrange(src.shape[0], src.shape[1], channels):
+            if y < core_h and x < core_w:
+                sy = src_y + y
+                sx = src_x + x
+                dy = dst_y + y
+                dx = dst_x + x
+                if (
+                    sy >= 0
+                    and sy < src.shape[0]
+                    and sx >= 0
+                    and sx < src.shape[1]
+                    and dy >= 0
+                    and dy < dst.shape[0]
+                    and dx >= 0
+                    and dx < dst.shape[1]
+                ):
+                    dst[dy, dx, channel] = src[sy, sx, channel]
+
+    @ti.kernel
     def _extract_channel_kernel(
         src: ti.types.ndarray(), dst: ti.types.ndarray(), channel: int
     ):

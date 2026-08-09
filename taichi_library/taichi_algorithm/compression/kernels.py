@@ -122,6 +122,12 @@ def ac_rle_kernel(zigzag: ti.types.ndarray(), runs: ti.types.ndarray(), values: 
             if value == 0:
                 run += 1
             else:
+                for _ in range(4):
+                    if run >= 16:
+                        runs[by, bx, count] = 15
+                        values[by, bx, count] = 0
+                        count += 1
+                        run -= 16
                 runs[by, bx, count] = run
                 values[by, bx, count] = value
                 count += 1
@@ -167,7 +173,7 @@ def ac_symbol_kernel(runs: ti.types.ndarray(), values: ti.types.ndarray(), symbo
                 value = ti.cast(values[by, bx, i], ti.i32)
                 size = jpeg_category(value)
                 run = runs[by, bx, i]
-                symbols[by, bx, i] = ti.select(size == 0, 0, run * 16 + size)
+                symbols[by, bx, i] = ti.select(size == 0, ti.select(run == 0, 0, 0xF0), run * 16 + size)
                 categories[by, bx, i] = size
                 amplitudes[by, bx, i] = jpeg_amplitude(value, size)
 
@@ -216,6 +222,7 @@ def jpeg_pack_block_bits_kernel(dc_diff: ti.types.ndarray(), ac_symbols: ti.type
         dc_category = jpeg_category(ti.cast(dc_diff[linear], ti.i32))
         dc_code = dc_codes[dc_category]
         dc_length = dc_lengths[dc_category]
+        dc_amplitude = jpeg_amplitude(ti.cast(dc_diff[linear], ti.i32), dc_category)
         for bit_index in range(16):
             if bit_index < dc_length and position < max_output_bits:
                 shift = dc_length - bit_index - 1
@@ -224,7 +231,7 @@ def jpeg_pack_block_bits_kernel(dc_diff: ti.types.ndarray(), ac_symbols: ti.type
         for bit_index in range(12):
             if bit_index < dc_category and position < max_output_bits:
                 shift = dc_category - bit_index - 1
-                bits[by, bx, position] = (ti.cast(dc_diff[linear], ti.i32) >> shift) & 1
+                bits[by, bx, position] = (dc_amplitude >> shift) & 1
                 position += 1
         for token in range(64):
             if token < ac_counts[by, bx]:

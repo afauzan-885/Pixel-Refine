@@ -37,7 +37,7 @@ if os.environ.get("AOT_MODE", "1") == "0":
 try:
     from .. import common
     from ..taichi_worker import ti_thread
-    from .yuv_converter import yuv420_to_rgb, nv21_to_rgb, yuv_to_rgb_raw
+    from .yuv_converter import yuv420_to_rgb, nv21_to_rgb
     from .frame_manager import (
         LatestFrameQueue, AdaptiveFrameController,
         FrameBufferPool, TripleBuffer
@@ -528,6 +528,193 @@ class CameraPipeline:
             common.release_temp_buffer(rgb_field)
 
         return result
+
+
+# =========================================================================
+# Native AOT Camera2 Orchestrator
+# =========================================================================
+
+class AOTCameraPipeline:
+    """Camera2 pipeline backed by the portable native AOT camera graphs.
+
+    Queueing, adaptive frame dropping, timestamps, and worker lifecycle are
+    shared with the legacy pipeline.  The frame conversion and optional
+    unsharp stage use ``taichi_library.taichi_aot`` and return NumPy frames at
+    the display boundary.  This keeps the ownership rule explicit: the
+    legacy ``FrameBufferPool`` is never used for native AOT buffers.
+    """
+
+    def __init__(
+        self,
+        width=1920,
+        height=1080,
+        target_fps=30.0,
+        enable_sharpen=False,
+        sharpen_amount=0.5,
+        bilinear_chroma=True,
+    ):
+        self.width = int(width)
+        self.height = int(height)
+        self.running = False
+        self.enable_sharpen = bool(enable_sharpen)
+        self.sharpen_amount = float(sharpen_amount)
+        self.bilinear_chroma = bool(bilinear_chroma)
+        self.input_queue = LatestFrameQueue()
+        self.output_queue = LatestFrameQueue()
+        self.frame_ctrl = AdaptiveFrameController(target_fps=float(target_fps))
+        self._thread = None
+        self._total_frames = 0
+        self._total_dropped = 0
+        self._last_total_ms = 0.0
+        self._fps_history = []
+        self._last_error = None
+        # CUDA/OpenGL contexts are thread-affine in the native bridge.  Keep
+        # those dispatches on the caller thread by default; CPU can safely
+        # use the background worker.  Vulkan is kept synchronous as well so
+        # one pipeline has the same ownership rule on every desktop GPU.
+        selected_arch = os.environ.get("PIXEL_REFINE_AOT_ARCH", "auto").lower()
+        if selected_arch == "auto":
+            try:
+                from ...taichi_aot.engine import get_backend_name
+
+                selected_arch = str(get_backend_name()).lower()
+            except Exception:
+                selected_arch = "cpu"
+        self._synchronous_dispatch = selected_arch in {"cuda", "vulkan", "opengl", "gles"}
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        if self._synchronous_dispatch:
+            return
+        self._thread = threading.Thread(
+            target=self._processing_loop,
+            name="AOTCameraPipeline",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self):
+        self.running = False
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def submit_yuv(
+        self,
+        y_data,
+        u_data,
+        v_data,
+        timestamp_ns=0,
+        frame_number=0,
+        y_row_stride=None,
+        y_pixel_stride=1,
+        u_row_stride=None,
+        u_pixel_stride=1,
+        v_row_stride=None,
+        v_pixel_stride=1,
+        metadata=None,
+    ):
+        if not self.running:
+            return
+        package = {
+            "y": y_data,
+            "u": u_data,
+            "v": v_data,
+            "y_row_stride": self.width if y_row_stride is None else int(y_row_stride),
+            "y_pixel_stride": int(y_pixel_stride),
+            "u_row_stride": self.width // 2 if u_row_stride is None else int(u_row_stride),
+            "u_pixel_stride": int(u_pixel_stride),
+            "v_row_stride": self.width // 2 if v_row_stride is None else int(v_row_stride),
+            "v_pixel_stride": int(v_pixel_stride),
+        }
+        self.input_queue.offer(package, timestamp_ns, frame_number, metadata)
+        if self._synchronous_dispatch:
+            slot = self.input_queue.poll_latest()
+            if slot is not None:
+                self._process_slot(slot)
+
+    def get_latest_output(self):
+        slot = self.output_queue.poll_latest()
+        return None if slot is None else slot.field
+
+    def get_latest_output_uint8(self):
+        output = self.get_latest_output()
+        if output is None:
+            return None
+        return np.clip(np.asarray(output) * 255.0, 0.0, 255.0).astype(np.uint8)
+
+    @property
+    def fps(self):
+        return 0.0 if not self._fps_history else float(np.mean(self._fps_history))
+
+    @property
+    def total_frames(self):
+        return self._total_frames
+
+    @property
+    def dropped_frames(self):
+        return self.input_queue.dropped_frames + self._total_dropped
+
+    @property
+    def last_error(self):
+        return self._last_error
+
+    @property
+    def last_time_ms(self):
+        return self._last_total_ms
+
+    def _processing_loop(self):
+        while self.running:
+            slot = self.input_queue.poll_latest()
+            if slot is None:
+                time.sleep(0.001)
+                continue
+            self._process_slot(slot)
+
+    def _process_slot(self, slot):
+        if not self.frame_ctrl.should_process():
+            self._total_dropped += 1
+            return
+        start_ns = time.perf_counter_ns()
+        try:
+            result = self._process_frame(slot.field)
+            self._last_error = None
+        except Exception as exc:
+            self._last_error = repr(exc)
+            return
+        end_ns = time.perf_counter_ns()
+        elapsed_ms = (end_ns - start_ns) / 1_000_000.0
+        self._last_total_ms = elapsed_ms
+        self._total_frames += 1
+        self.frame_ctrl.record_processing(start_ns, end_ns)
+        if elapsed_ms > 0:
+            self._fps_history.append(1000.0 / elapsed_ms)
+            del self._fps_history[:-30]
+        self.output_queue.offer(result, slot.timestamp_ns, slot.frame_number, slot.metadata)
+
+    def _process_frame(self, frame_data):
+        from ... import taichi_aot as aot
+
+        rgb = aot.camera_yuv420_aot(
+            frame_data["y"],
+            frame_data["u"],
+            frame_data["v"],
+            self.height,
+            self.width,
+            y_row_stride=frame_data["y_row_stride"],
+            y_pixel_stride=frame_data["y_pixel_stride"],
+            u_row_stride=frame_data["u_row_stride"],
+            u_pixel_stride=frame_data["u_pixel_stride"],
+            v_row_stride=frame_data["v_row_stride"],
+            v_pixel_stride=frame_data["v_pixel_stride"],
+            bilinear_chroma=self.bilinear_chroma,
+        )
+        if self.enable_sharpen:
+            blurred = aot.gaussian_blur(rgb, sigma=1.0, kernel_size=3)
+            rgb = aot.camera_unsharp_aot(rgb, blurred, amount=self.sharpen_amount)
+        return np.ascontiguousarray(np.clip(rgb, 0.0, 1.0), dtype=np.float32)
 
 
 # =========================================================================

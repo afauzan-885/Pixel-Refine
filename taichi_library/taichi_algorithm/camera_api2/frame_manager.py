@@ -298,3 +298,74 @@ class FrameBufferPool:
         if TAICHI_AVAILABLE:
             common.cleanup_cache()
         self._preallocated = False
+
+
+class AOTFrameBufferPool:
+    """Small explicit pool for buffers owned by the native AOT engine.
+
+    ``FrameBufferPool`` above is intentionally kept as the JIT/common pool
+    used by the legacy :class:`CameraPipeline`.  AOT buffers have a different
+    owner and lifecycle, so they are not mixed with ``common.BufferCache``.
+    This class is useful to callers building a zero-copy AOT display path;
+    the NumPy-returning ``AOTCameraPipeline`` does not require it.
+    """
+
+    def __init__(self, default_h=1080, default_w=1920, channels=3):
+        self.default_h = int(default_h)
+        self.default_w = int(default_w)
+        self.channels = int(channels)
+        self._free = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(shape):
+        return tuple(int(value) for value in shape)
+
+    @staticmethod
+    def _allocate(shape):
+        from ...taichi_aot.engine import OutputArray
+
+        return OutputArray(tuple(shape), dtype=np.float32, is_vector=False)
+
+    def preallocate(self, count=4):
+        count = max(0, int(count))
+        shapes = [
+            (self.default_h, self.default_w, self.channels),
+            (self.default_h, self.default_w),
+            (self.default_h, self.default_w, 2),
+        ]
+        with self._lock:
+            for shape in shapes:
+                bucket = self._free.setdefault(self._key(shape), [])
+                for _ in range(count):
+                    bucket.append(self._allocate(shape))
+
+    def _get(self, shape):
+        key = self._key(shape)
+        with self._lock:
+            bucket = self._free.setdefault(key, [])
+            if bucket:
+                return bucket.pop()
+        return self._allocate(key)
+
+    def get_rgb_buffer(self, h=None, w=None):
+        return self._get((h or self.default_h, w or self.default_w, self.channels))
+
+    def get_gray_buffer(self, h=None, w=None):
+        return self._get((h or self.default_h, w or self.default_w))
+
+    def get_flow_buffer(self, h=None, w=None):
+        return self._get((h or self.default_h, w or self.default_w, 2))
+
+    def release_buffer(self, buffer):
+        if buffer is None:
+            return
+        with self._lock:
+            self._free.setdefault(self._key(buffer.shape), []).append(buffer)
+
+    def clear(self):
+        with self._lock:
+            buffers = [buffer for bucket in self._free.values() for buffer in bucket]
+            self._free.clear()
+        for buffer in buffers:
+            buffer.destroy()

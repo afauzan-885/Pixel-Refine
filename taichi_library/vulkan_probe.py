@@ -150,6 +150,7 @@ def vulkan_inventory_digest(project_root=None):
             / "taichi_library"
             / "taichi_algorithm"
             / "aot_py"
+            / "tests"
             / "test_comprehensif.py",
             Path(__file__).resolve(),
         )
@@ -928,6 +929,7 @@ def run_intel_vulkan_comprehensive(
         / "taichi_library"
         / "taichi_algorithm"
         / "aot_py"
+        / "tests"
         / "test_comprehensif.py"
     )
     environment = os.environ.copy()

@@ -56,7 +56,7 @@ def _prepare_opengl_flow_family(family):
     """
     global _OPENGL_FLOW_FAMILY
     engine = _get_engine()
-    if str(getattr(engine, "arch", "")).lower() != "opengl":
+    if str(getattr(engine, "arch", "")).lower() not in {"opengl", "gles"}:
         return
     if _OPENGL_FLOW_FAMILY == family:
         return
@@ -1063,38 +1063,53 @@ def CLAHE(src, clipLimit=2.0, tileGridSize=(8, 8)):
     Args:
         src: Input grayscale image (H, W) uint8.
         clipLimit: Threshold for contrast limiting.
-        tileGridSize: Size of the grid (not used, simplified).
+        tileGridSize: Size of the interpolation grid.
     Returns:
         Enhanced image (H, W).
     """
-    mod = _get_module("image_processing")
-    h, w = src.shape[:2]
-    inp = _InputArray(src.astype(np.float32))
+    if np.asarray(src).ndim != 2:
+        raise ValueError("CLAHE expects a single-channel 2D image")
+    if clipLimit <= 0:
+        raise ValueError("clipLimit must be positive")
+    if len(tileGridSize) != 2 or any(int(v) <= 0 for v in tileGridSize):
+        raise ValueError("tileGridSize must contain two positive integers")
 
-    # GPU CLAHE implementation - multi-step
-    hist_buf = _get_buf("clahe_hist", (256,), np.int32)
-    lut_buf = _get_buf("clahe_lut", (256,), np.int32)
-    out = _get_buf(f"clahe_{h}x{w}", (h, w), np.float32)
+    # The old wrapper computed two intermediate buffers and then discarded
+    # them, returning a global normalize result instead of CLAHE.  Delegate to
+    # the target-qualified three-pass AOT graph (histogram, clipped CDF, and
+    # bilinear LUT interpolation) while preserving the OpenCV-style wrapper
+    # signature and float32 output contract.
+    from taichi_library import taichi_aot
 
-    # Step 1: Compute histogram
-    mod.run("imgp_clahe_hist", src=inp, hist=hist_buf, h=h, w=w)
-    # Step 2: Clip and compute CDF
-    mod.run("imgp_clahe_clip", hist=hist_buf, lut=lut_buf, clip_limit=int(clipLimit))
-
-    # Fallback: use normalize for now (CLAHE interpolation not fully implemented)
-    return normalize(src, 0.0, 255.0)
+    source = np.ascontiguousarray(src, dtype=np.float32)
+    return taichi_aot.clahe_aot(
+        source,
+        clip_limit=float(clipLimit),
+        tile_grid_size=(int(tileGridSize[0]), int(tileGridSize[1])),
+        return_gpu=False,
+    )
 
 
 def dilate(src, kernel, iterations=1):
-    """Dilate image (simplified same as cv2.dilate)."""
-    # Simplified: use box filter as approximation
-    return blur(src, (3, 3))
+    """Dilate image through the target-qualified morphology graph."""
+    from taichi_library import taichi_aot
+
+    return taichi_aot.dilate_aot(
+        np.ascontiguousarray(src, dtype=np.float32),
+        kernel=kernel,
+        iterations=int(iterations),
+    )
 
 
 def erode(src, kernel, iterations=1):
-    """Erode image (simplified same as cv2.erode)."""
-    # Simplified: use box filter as approximation
-    return blur(src, (3, 3))
+    """Erode image through the target-qualified morphology graph."""
+    from taichi_library import taichi_aot
+
+    return taichi_aot.erode_aot(
+        np.ascontiguousarray(src, dtype=np.float32),
+        kernel=kernel,
+        iterations=int(iterations),
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1399,7 +1414,7 @@ def calcOpticalFlowPyrLK(
     # then upload the completed result as a stable public GPU buffer.
     if return_gpu:
         try:
-            if str(getattr(_get_engine(), "arch", "")).lower() == "opengl":
+            if str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}:
                 host_result = calcOpticalFlowPyrLK(
                     prev, next, prevPts=prevPts, nextPts=nextPts,
                     winSize=winSize, maxLevel=maxLevel, criteria=criteria,
@@ -1653,7 +1668,7 @@ def calcOpticalFlowPyrLK(
         # OpenGL dense-flow must never silently switch to the OpenCV helper:
         # that would make a successful call appear native while executing on
         # the CPU. Surface the driver/graph error instead.
-        if str(getattr(_get_engine(), "arch", "")).lower() == "opengl":
+        if str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}:
             raise
         if is_prev_gpu or is_next_gpu:
             raise
@@ -1861,7 +1876,7 @@ def calcOpticalFlowBlockMatching(
     _prepare_opengl_flow_family("block_matching")
     if return_gpu:
         try:
-            if str(getattr(_get_engine(), "arch", "")).lower() == "opengl":
+            if str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}:
                 host_result = calcOpticalFlowBlockMatching(
                     prev, next, prevPts=prevPts, nextPts=nextPts,
                     winSize=winSize, maxLevel=maxLevel, criteria=criteria,
@@ -2052,7 +2067,7 @@ def calcOpticalFlowBlockMatching(
             return result, diagnostics
         return result
     except Exception:
-        if str(getattr(_get_engine(), "arch", "")).lower() == "opengl":
+        if str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}:
             raise
         if is_prev_gpu or is_next_gpu:
             raise

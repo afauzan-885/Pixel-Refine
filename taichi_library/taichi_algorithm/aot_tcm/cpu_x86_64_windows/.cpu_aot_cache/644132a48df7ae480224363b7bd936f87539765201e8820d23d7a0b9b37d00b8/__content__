@@ -1,8 +1,0 @@
-cgraph:seamless_divergence_normal_f32
-cgraph:seamless_divergence_mixed_f32
-cgraph:seamless_laplacian_f32
-cgraph:seamless_jacobi_step_f32
-cgraph:seamless_composite_f32
-cgraph:seamless_copy_f32
-cgraph:seamless_to_grayscale_f32
-cgraph:seamless_init_f_channel_f32

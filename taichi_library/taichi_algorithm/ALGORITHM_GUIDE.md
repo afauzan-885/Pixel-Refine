@@ -1,5 +1,12 @@
 # 🚀 Taichi GPU Algorithm Library - Master Technical Guide
 
+> **Historical guide notice:** the current AOT runtime contract is documented
+> in [`../AOT_BACKEND_MATRIX.md`](../AOT_BACKEND_MATRIX.md). This file contains
+> earlier algorithm notes and JIT/worker experiments. Do not use its old
+> single-CUDA-context, `oom_guard`, or direct `taichi_algorithm` examples as
+> the source of truth for backend selection, TCM resolution, memory ownership,
+> block planning, or production readiness.
+
 Welcome to the definitive documentation for the `taichi_algorithm` library. This guide provides a detailed technical breakdown, practical usage examples, and **deep-dive logic explanations** for every script in this high-performance GPU pipeline.
 
 ---

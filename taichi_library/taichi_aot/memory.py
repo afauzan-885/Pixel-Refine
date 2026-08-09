@@ -85,6 +85,39 @@ class CacheTelemetry:
                 self._counters[name] = 0
 
 
+def _choose_block_size(
+    target_chunk_bytes: int,
+    *,
+    pressure: MemoryPressure,
+    shared_budget: int,
+    channels: int = 3,
+    sample_bytes: int = 4,
+    live_buffers: int = 4,
+) -> int:
+    """Choose a bounded square block for the current memory decision.
+
+    The previous policy assumed every operation was four live RGB-f32
+    buffers.  That was safe but unnecessarily conservative for grayscale or
+    two-channel work.  Keep the same hard candidate cap while deriving the
+    resident estimate from the actual operation shape/dtype supplied by the
+    planner.
+    """
+
+    if shared_budget <= 0:
+        return 256 if pressure >= MemoryPressure.CRITICAL else 512
+    channels = max(1, int(channels))
+    sample_bytes = max(1, int(sample_bytes))
+    live_buffers = max(1, int(live_buffers))
+    bytes_per_pixel = channels * sample_bytes * live_buffers
+    max_side = int(
+        (max(0, int(target_chunk_bytes)) / max(1, bytes_per_pixel)) ** 0.5
+    )
+    for candidate in (2048, 1536, 1024, 768, 512, 256):
+        if candidate <= max_side:
+            return candidate
+    return 256
+
+
 def system_memory_snapshot():
     """Read physical-memory availability without adding a psutil dependency."""
     if sys.platform == "win32":
@@ -253,6 +286,12 @@ class MemoryGovernor:
             # 24 MP full-frame graph to use more than the old fixed 25% share.
             # The shared budget above is already limited by available RAM,
             # current pressure, and (when exposed) the physical-device heap.
+            # Vulkan's memory-budget extension reports the actual free heap;
+            # multiplying that value by only 0.55 again was unnecessarily
+            # conservative on 2 GB GPUs (a 24 MP graph needs about 1.07 GB).
+            # Give a measured Vulkan heap a bounded 1.5 GB resident ceiling,
+            # while retaining the stricter shared-memory rule for CUDA/CPU
+            # paths that do not expose device-local availability.
             if shared_budget:
                 pipeline_fraction = (
                     # A 24 MP RGB graph observed in production needs about
@@ -263,13 +302,27 @@ class MemoryGovernor:
                     if pressure == MemoryPressure.HEALTHY
                     else 0.40
                 )
-                pipeline_limit = min(
-                    1024 * 1024 ** 2,
-                    max(
-                        256 * 1024 ** 2,
-                        int(shared_budget * pipeline_fraction),
-                    ),
-                )
+                if (
+                    device_heap_available
+                    and device_budget_source == "vk_ext_memory_budget"
+                    and pressure == MemoryPressure.HEALTHY
+                ):
+                    measured_limit = max(
+                        int(shared_budget * 0.85),
+                        int(device_heap_available * 0.65),
+                    )
+                    pipeline_limit = min(
+                        1536 * 1024 ** 2,
+                        max(256 * 1024 ** 2, measured_limit),
+                    )
+                else:
+                    pipeline_limit = min(
+                        1024 * 1024 ** 2,
+                        max(
+                            256 * 1024 ** 2,
+                            int(shared_budget * pipeline_fraction),
+                        ),
+                    )
                 pool_budget = min(512 * 1024 ** 2, int(shared_budget * 0.15))
                 target_chunk = min(
                     int(pipeline_limit * 0.70),
@@ -280,19 +333,17 @@ class MemoryGovernor:
                 pool_budget = 0
                 target_chunk = 64 * 1024 ** 2
 
-            # Estimate four simultaneously-live RGB f32 buffers and choose a
-            # practical square block. Algorithms can still apply their halo.
-            live_bytes_per_pixel = 4 * 3 * 4
-            max_side = int((target_chunk / max(1, live_bytes_per_pixel)) ** 0.5)
-            recommended = 256
-            for candidate in (2048, 1536, 1024, 768, 512, 256):
-                if candidate <= max_side:
-                    recommended = candidate
-                    break
-            if shared_budget == 0:
-                recommended = (
-                    256 if pressure >= MemoryPressure.CRITICAL else 512
-                )
+            # Preserve a conservative RGB-f32 default for telemetry.  The
+            # operation planner can request a shape-aware recommendation via
+            # ``recommend_block_size`` below.
+            recommended = _choose_block_size(
+                target_chunk,
+                pressure=pressure,
+                shared_budget=shared_budget,
+                channels=3,
+                sample_bytes=4,
+                live_buffers=4,
+            )
             allow_cache = budget > 0 and pressure < MemoryPressure.LOW
             self._decision = MemoryDecision(
                 pressure=pressure,
@@ -314,6 +365,32 @@ class MemoryGovernor:
                 snapshot=snapshot,
             )
             return self._decision
+
+    def recommend_block_size(
+        self,
+        *,
+        channels: int = 3,
+        sample_bytes: int = 4,
+        live_buffers: int = 4,
+        force: bool = False,
+    ) -> int:
+        """Return a shape-aware block side without changing public APIs.
+
+        ``refresh()`` remains the single source of truth for pressure and
+        budgets.  This helper only refines the block-size estimate for the
+        current operation, allowing grayscale/f16/i16 workloads to use more of
+        an iGPU's safe shared-memory budget while retaining the 2048 hard cap.
+        """
+
+        decision = self.refresh(force=force)
+        return _choose_block_size(
+            decision.target_chunk_bytes,
+            pressure=decision.pressure,
+            shared_budget=decision.shared_device_budget,
+            channels=channels,
+            sample_bytes=sample_bytes,
+            live_buffers=live_buffers,
+        )
 
     def snapshot(self, force=False):
         decision = self.refresh(force=force)

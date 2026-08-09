@@ -42,6 +42,41 @@ set "ENGINE_DEFS="
 if /I "%~1"=="cuda" set "ENGINE_DEFS=/DPIXEL_REFINE_AOT_DISABLE_OPENGL_INTEROP"
 if /I "%~1"=="cpu" set "ENGINE_DEFS=/DPIXEL_REFINE_AOT_DISABLE_OPENGL_INTEROP"
 
+rem The bridge contains an AVX2 fast path for host buffer conversion.  Keep
+rem the historical AVX2 build as the default, but allow a baseline/SSE2 DLL
+rem for older x86-64 CPUs.  The second argument (or environment variable)
+rem selects the profile without changing the exported ABI:
+rem   build_engine_msvc.bat cpu avx2       -> taichi_aot_engine.dll
+rem   build_engine_msvc.bat cpu baseline   -> taichi_aot_engine_baseline.dll
+set "BRIDGE_ISA=%PIXEL_REFINE_BRIDGE_ISA%"
+if not "%~2"=="" set "BRIDGE_ISA=%~2"
+if "%BRIDGE_ISA%"=="" set "BRIDGE_ISA=avx2"
+set "BRIDGE_ARCH=/arch:AVX2"
+set "BRIDGE_ISA_DEFS="
+set "BRIDGE_SUFFIX="
+if /I "%BRIDGE_ISA%"=="baseline" (
+  set "BRIDGE_ARCH=/arch:SSE2"
+  set "BRIDGE_ISA_DEFS=/DPIXEL_REFINE_AOT_BASELINE"
+  set "BRIDGE_SUFFIX=_baseline"
+) else if /I "%BRIDGE_ISA%"=="avx2" (
+  rem Keep the optimized default profile.
+) else (
+  echo ERROR: unsupported bridge ISA "%BRIDGE_ISA%". Use avx2 or baseline.
+  exit /b 6
+)
+set "OUTPUT=%OUTPUT_DIR%\taichi_aot_engine%BRIDGE_SUFFIX%.dll"
+
+rem Link-time optimization keeps the exported C ABI unchanged while allowing
+rem MSVC to inline the hot buffer-conversion and dispatch glue across this
+rem translation unit.  Set PIXEL_REFINE_BRIDGE_NO_LTO=1 for a diagnostic build
+rem with the older per-file optimizer only.
+set "LTO_COMPILE=/GL"
+set "LTO_LINK=/LTCG /OPT:REF /OPT:ICF"
+if "%PIXEL_REFINE_BRIDGE_NO_LTO%"=="1" (
+  set "LTO_COMPILE="
+  set "LTO_LINK="
+)
+
 if not exist "%VSDEVCMD%" (
   echo ERROR: Visual Studio 2022 Build Tools were not found.
   exit /b 2
@@ -60,13 +95,13 @@ call "%VSDEVCMD%" -arch=x64 -host_arch=x64
 if errorlevel 1 exit /b %errorlevel%
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 
-cl.exe /nologo /LD /O2 /EHsc /std:c++20 /arch:AVX2 %ENGINE_DEFS% ^
-  /Fo"%OUTPUT_DIR%\taichi_aot_engine.obj" ^
+cl.exe /nologo /LD /O2 %LTO_COMPILE% /EHsc /std:c++20 %BRIDGE_ARCH% %ENGINE_DEFS% %BRIDGE_ISA_DEFS% ^
+  /Fo"%OUTPUT_DIR%\taichi_aot_engine%BRIDGE_SUFFIX%.obj" ^
   /I"%TAICHI_INC%" ^
   /I"%TAICHI_ROOT%\external\glad\include" ^
   "%SCRIPT_DIR%\taichi_aot_engine.cpp" ^
-  /link /OUT:"%OUTPUT%" /LIBPATH:"%TAICHI_LIB%" ^
-  /IMPLIB:"%OUTPUT_DIR%\taichi_aot_engine.lib" ^
+  /link %LTO_LINK% /OUT:"%OUTPUT%" /LIBPATH:"%TAICHI_LIB%" ^
+  /IMPLIB:"%OUTPUT_DIR%\taichi_aot_engine%BRIDGE_SUFFIX%.lib" ^
   taichi_c_api.lib windowscodecs.lib advapi32.lib gdi32.lib user32.lib ole32.lib uuid.lib
 if errorlevel 1 exit /b %errorlevel%
 rem Target-qualified builds place the bridge beside the import library.  Keep

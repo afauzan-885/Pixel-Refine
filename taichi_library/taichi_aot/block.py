@@ -1,8 +1,9 @@
 """Internal block-processing primitives for the Taichi AOT runtime.
 
 This module is intentionally independent from ``engine.py``.  It defines the
-stable bookkeeping needed by future GPU block transfers while keeping existing
-public algorithms on their current full-frame path until they opt in.
+stable bookkeeping for GPU/CPU block transfers.  Only parity-qualified local
+executors are eligible for automatic blocking; every other public algorithm
+remains fail-closed on its full-frame path.
 """
 
 from __future__ import annotations
@@ -31,6 +32,35 @@ class BlockPath(str, Enum):
     BLOCK_BORDER = "block_border"
     GLOBAL = "global"
     CUSTOM = "custom"
+
+
+@dataclass(frozen=True)
+class BlockCapability:
+    """Dependency metadata used by the automatic block planner.
+
+    ``explicit_safe`` intentionally describes the historical opt-in path, not
+    a promise that every backend is bit-identical for that operation.  The
+    automatic planner only uses ``automatic_safe`` and requires the declared
+    halo.  This keeps experimental block implementations available to callers
+    that explicitly opt in while preventing memory pressure from silently
+    selecting an operation whose dependencies are not local.
+    """
+
+    operation: str
+    path: BlockPath
+    automatic_safe: bool = False
+    explicit_safe: bool = False
+    min_halo: int = 0
+    dependencies: Tuple[str, ...] = ()
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if not str(self.operation):
+            raise ValueError("operation name must not be empty")
+        if int(self.min_halo) < 0:
+            raise ValueError("min_halo must be non-negative")
+        if self.path == BlockPath.GLOBAL and self.explicit_safe:
+            raise ValueError("global reductions cannot be block-explicit-safe")
 
 
 class BlockState(str, Enum):
@@ -314,18 +344,81 @@ class BlockCache:
             record = self._records.get(block_id)
             if record is None:
                 return False
-            self._size_bytes -= self.data_nbytes(record.data)
             owner = str(record.owner or "default")
+            # A checksum failure normally concerns an idle record.  Remove it
+            # immediately so it cannot consume an entry/byte quota or be
+            # returned by a later peek.  If another worker still leases the
+            # record, detach it only after the lease is released; clearing its
+            # payload here would create a use-after-free for that consumer.
+            if record.pinned or record.ref_count:
+                record.state = BlockState.CORRUPT
+                record.checksum = None
+                record.source_checksum = None
+                record.dirty = False
+                if self._telemetry is not None:
+                    self._telemetry.add("invalidations")
+                return True
+            entry_bytes = self.data_nbytes(record.data)
+            self._size_bytes = max(0, self._size_bytes - entry_bytes)
             self._owner_bytes[owner] = max(
-                0, self._owner_bytes.get(owner, 0) - self.data_nbytes(record.data)
+                0, self._owner_bytes.get(owner, 0) - entry_bytes
             )
             record.state = BlockState.CORRUPT
             record.data = None
             record.checksum = None
+            record.source_checksum = None
             record.dirty = False
+            self._records.pop(block_id, None)
+            if self._owner_bytes.get(owner, 0) == 0:
+                self._owner_bytes.pop(owner, None)
+                self._owner_hits.pop(owner, None)
             if self._telemetry is not None:
                 self._telemetry.add("invalidations")
             return True
+
+    def invalidate_owner(self, owner: str) -> int:
+        """Invalidate cached records belonging to one quarantined operation.
+
+        Idle records are removed immediately.  Leased/pinned records remain
+        attached until their owner releases them, but are marked corrupt so
+        another worker can never reuse their payload.
+        """
+        owner = str(owner)
+        invalidated = 0
+        with self._lock:
+            for block_id, record in list(self._records.items()):
+                if str(record.owner or "default") != owner:
+                    continue
+                # A quarantine can be raised by one worker while another
+                # worker is still consuming a record.  Do not detach the
+                # payload from a leased/pinned record: mark it unusable for
+                # future lookups and let the normal lifecycle release it.
+                if record.pinned or record.ref_count:
+                    record.state = BlockState.CORRUPT
+                    record.checksum = None
+                    record.source_checksum = None
+                    record.dirty = False
+                    invalidated += 1
+                    if self._telemetry is not None:
+                        self._telemetry.add("invalidations")
+                    continue
+                entry_bytes = self.data_nbytes(record.data)
+                self._size_bytes = max(0, self._size_bytes - entry_bytes)
+                self._owner_bytes[owner] = max(
+                    0, self._owner_bytes.get(owner, 0) - entry_bytes
+                )
+                record.state = BlockState.CORRUPT
+                record.data = None
+                record.checksum = None
+                record.dirty = False
+                self._records.pop(block_id, None)
+                invalidated += 1
+                if self._telemetry is not None:
+                    self._telemetry.add("invalidations")
+            if self._owner_bytes.get(owner, 0) == 0:
+                self._owner_bytes.pop(owner, None)
+                self._owner_hits.pop(owner, None)
+        return invalidated
 
     def collect(self, requesting_owner=None) -> Tuple[str, ...]:
         """Evict oldest clean, unpinned, unused records until within capacity."""
@@ -405,6 +498,17 @@ OPERATION_PATHS = {
     "smooth_flow": BlockPath.BLOCK_BORDER,
     "joint_bilateral_filter": BlockPath.BLOCK_BORDER,
     "guided_filter": BlockPath.BLOCK_BORDER,
+    # Extended image kernels have independent tile executors.  Keep their
+    # names separate from the older ``*_filter`` aliases so diagnostics and
+    # cache ownership remain unambiguous.
+    "morphology": BlockPath.BLOCK_BORDER,
+    "filter2d": BlockPath.BLOCK_BORDER,
+    "threshold": BlockPath.BLOCK,
+    "normalize": BlockPath.BLOCK,
+    "joint_bilateral_guidance": BlockPath.BLOCK_BORDER,
+    "enhance_image": BlockPath.BLOCK,
+    "highlight_recovery": BlockPath.BLOCK_BORDER,
+    "cvtColor_extended": BlockPath.BLOCK,
     "resize": BlockPath.BLOCK,
     "image_pyramid": BlockPath.BLOCK,
     "remap": BlockPath.BLOCK,
@@ -428,18 +532,82 @@ OPERATION_PATHS = {
     "farneback_flow": BlockPath.BLOCK_BORDER,
     "lucas_kanade": BlockPath.BLOCK_BORDER,
     "block_matching": BlockPath.BLOCK_BORDER,
-    "tone_map_srgb": BlockPath.BLOCK,
-    "canny_aot": BlockPath.BLOCK_BORDER,
-    "clahe_aot": BlockPath.BLOCK_BORDER,
+    # These APIs currently have no validated tile executor.  Keep them
+    # registered for diagnostics, but fail closed to their full-frame paths.
+    "tone_map_srgb": BlockPath.DIRECT,
+    "canny_aot": BlockPath.CUSTOM,
+    "clahe_aot": BlockPath.CUSTOM,
     "otsu_threshold": BlockPath.GLOBAL,
     "joint_bilateral_upsample": BlockPath.GLOBAL,
     "fft": BlockPath.GLOBAL,
     "histogram": BlockPath.GLOBAL,
+    # Public AOT algorithms without a validated block executor are listed
+    # explicitly so diagnostics and planner telemetry never classify them as
+    # an unknown operation. They stay fail-closed on the full-frame path.
+    "generate_hanning_window_2d": BlockPath.DIRECT,
+    "mean_division": BlockPath.GLOBAL,
+    "normalize_accumulator": BlockPath.GLOBAL,
+    "stitch_tile": BlockPath.GLOBAL,
+    "stitch_tile_normalized": BlockPath.GLOBAL,
+    "cvtColor": BlockPath.BLOCK,
+    "normalize_image": BlockPath.DIRECT,
+    "to_gamma_proxy": BlockPath.DIRECT,
+    "fft2": BlockPath.GLOBAL,
+    "ifft2": BlockPath.GLOBAL,
+    "ransac_flow_cleanup": BlockPath.GLOBAL,
+    "ransac_flow_cleanup_aot": BlockPath.GLOBAL,
+    "ncc_alignment": BlockPath.GLOBAL,
+    "zncc": BlockPath.GLOBAL,
+    "bilateral_grid_filter": BlockPath.CUSTOM,
+    "phase_correlation": BlockPath.GLOBAL,
+    "build_flow_maps": BlockPath.CUSTOM,
+    "mlri_admm_demosaic": BlockPath.CUSTOM,
+    "mlri_admm_demosaic_1channel": BlockPath.CUSTOM,
+    "mlri_admm_demosaic_half_res": BlockPath.CUSTOM,
+    "mlri_admm_demosaic_rgb_half_res": BlockPath.CUSTOM,
+    "mlri_admm_demosaic_3channel": BlockPath.CUSTOM,
+    "naturalTonemapping": BlockPath.DIRECT,
+    "rotate_by_flip": BlockPath.DIRECT,
+    "demosaic": BlockPath.CUSTOM,
+    "generate_brief_pattern": BlockPath.DIRECT,
+    "ofb": BlockPath.GLOBAL,
+    "akaze": BlockPath.GLOBAL,
+    "find_homography": BlockPath.GLOBAL,
+    "inpaint": BlockPath.CUSTOM,
+    "seamless_clone": BlockPath.GLOBAL,
+    "align_mtb": BlockPath.GLOBAL,
+    "hough_lines_aot": BlockPath.GLOBAL,
+    # Extended-module public names are aliases of the operation keys above.
+    # Keeping them in the registry makes capability reports complete even
+    # when an embedding application names the high-level API directly.
+    "dilate_aot": BlockPath.BLOCK_BORDER,
+    "erode_aot": BlockPath.BLOCK_BORDER,
+    "filter2d_aot": BlockPath.BLOCK_BORDER,
+    "threshold_aot": BlockPath.BLOCK,
+    "normalize_aot": BlockPath.BLOCK,
+    "joint_bilateral_guidance_aot": BlockPath.BLOCK_BORDER,
+    "enhance_image_aot": BlockPath.BLOCK,
+    "guided_filter_aot": BlockPath.BLOCK_BORDER,
+    "non_local_means_aot": BlockPath.BLOCK_BORDER,
+    "histogram_aot": BlockPath.GLOBAL,
+    "ssim_aot": BlockPath.GLOBAL,
+    "warp_affine_aot": BlockPath.DIRECT,
+    "copy_make_border_aot": BlockPath.DIRECT,
+    "gaussian_window_aot": BlockPath.DIRECT,
+    "otsu_threshold_aot": BlockPath.GLOBAL,
+    "inpaint_aot": BlockPath.CUSTOM,
+    "seamless_clone_aot": BlockPath.GLOBAL,
+    "bm3d": BlockPath.CUSTOM,
+    # Public camel-case wrappers delegate to the conservative snake-case
+    # operation names above; keep the aliases non-selectable if referenced
+    # directly by a future caller.
+    "lucasKanade": BlockPath.CUSTOM,
+    "blockMatching": BlockPath.CUSTOM,
 }
 
 # Conservative automatic set. These operations have local dependency radii
-# and existing halo-aware executors. Global reductions, remap, demosaic, and
-# optical flow remain full-frame unless explicitly enabled and parity-tested.
+# and existing halo-aware executors. Global reductions and the non-local flow
+# families remain full-frame unless explicitly enabled and parity-tested.
 AUTO_BLOCK_SAFE = frozenset({
     "copy",
     "copy_field",
@@ -450,12 +618,115 @@ AUTO_BLOCK_SAFE = frozenset({
     "extract_channel",
     "insert_channel",
     "enhance_grayscale",
+    "resize",
     "gaussian_blur",
     "box_filter",
     "median_filter",
     "sobel",
     "laplacian",
+    "non_local_means",
+    "smooth_flow",
+    "joint_bilateral_filter",
+    "guided_filter",
+    "morphology",
+    "filter2d",
+    "threshold",
+    "normalize",
+    "joint_bilateral_guidance",
+    "enhance_image",
+    "highlight_recovery",
+    "cvtColor",
+    "cvtColor_extended",
+    "dilate_aot",
+    "erode_aot",
+    "filter2d_aot",
+    "threshold_aot",
+    "normalize_aot",
+    "joint_bilateral_guidance_aot",
+    "enhance_image_aot",
+    "guided_filter_aot",
+    "non_local_means_aot",
+    "remap",
+    "remap_with_flow",
+    "warp_perspective",
+    "image_pyramid",
+    "hamilton_demosaic",
+    "hamilton_demosaic_1channel",
+    "hamilton_demosaic_half_res",
+    "hamilton_demosaic_rgb_half_res",
+    "hamilton_demosaic_3channel",
+    "dcb_demosaic",
+    "dcb_demosaic_1channel",
+    "dcb_demosaic_half_res",
+    "dcb_demosaic_rgb_half_res",
+    "dcb_demosaic_3channel",
+    "arm_demosaic",
+    "arm_demosaic_1channel",
+    "arm_demosaic_half_res",
+    "arm_demosaic_rgb_half_res",
+    "pure_arm_demosaic",
 })
+
+
+def _build_operation_capabilities():
+    """Build one conservative capability record per known operation.
+
+    The map is derived from ``OPERATION_PATHS`` so adding a new operation
+    cannot accidentally make it eligible for automatic blocking.  Operations
+    must be added to ``AUTO_BLOCK_SAFE`` after their tile executor, halo
+    handling, and parity tests are complete.
+    """
+
+    capabilities = {}
+    for name, path in OPERATION_PATHS.items():
+        path = BlockPath(path)
+        capabilities[name] = BlockCapability(
+            operation=name,
+            path=path,
+            automatic_safe=name in AUTO_BLOCK_SAFE,
+            explicit_safe=path in (BlockPath.BLOCK, BlockPath.BLOCK_BORDER),
+            min_halo=1 if path == BlockPath.BLOCK_BORDER else 0,
+            reason=(
+                "local pointwise/stencil executor is parity-tested"
+                if name in AUTO_BLOCK_SAFE
+                else "explicit/experimental block path; automatic selection disabled"
+            ),
+        )
+
+    # These algorithms compose non-local or multi-stage dependencies.  Their
+    # historical block executors remain opt-in, but the planner must not turn
+    # them on solely because an input exceeds the memory threshold.
+    dependency_overrides = {
+        "image_pyramid": ("resize",),
+        "remap_with_flow": ("remap",),
+        "warp_perspective": ("remap",),
+        "canny_aot": ("gaussian_blur", "sobel"),
+        "hamilton_demosaic": ("gaussian_blur",),
+        "arm_demosaic": ("gaussian_blur",),
+        "farneback_flow": ("image_pyramid", "remap"),
+        "lucas_kanade": ("image_pyramid", "remap"),
+        "block_matching": ("image_pyramid", "remap"),
+    }
+    for name, dependencies in dependency_overrides.items():
+        capability = capabilities.get(name)
+        if capability is not None:
+            capabilities[name] = BlockCapability(
+                operation=capability.operation,
+                path=capability.path,
+                automatic_safe=capability.automatic_safe,
+                explicit_safe=capability.explicit_safe,
+                min_halo=capability.min_halo,
+                dependencies=dependencies,
+                reason=(
+                    "dependency-aware tiled executor is parity-tested"
+                    if capability.automatic_safe
+                    else "depends on non-local or multi-stage operations"
+                ),
+            )
+    return capabilities
+
+
+OPERATION_CAPABILITIES = _build_operation_capabilities()
 
 
 def normalize_block_size(size: BlockSize) -> Tuple[int, int]:
@@ -476,18 +747,36 @@ def operation_path(name: str) -> BlockPath:
     return OPERATION_PATHS.get(name, BlockPath.DIRECT)
 
 
+def operation_capability(name: str) -> BlockCapability:
+    """Return dependency-aware block metadata for ``name``.
+
+    Unknown operations deliberately resolve to a direct, non-blocked path.
+    This is the fail-closed behavior required for newly added algorithms.
+    """
+
+    key = str(name)
+    capability = OPERATION_CAPABILITIES.get(key)
+    if capability is not None:
+        return capability
+    return BlockCapability(
+        operation=key or "<unknown>",
+        path=BlockPath.DIRECT,
+        reason="operation is not registered in the block capability table",
+    )
+
+
 def is_auto_block_safe(name: str) -> bool:
     """Whether adaptive memory pressure may enable blocking implicitly."""
-    return str(name) in AUTO_BLOCK_SAFE
+    return operation_capability(name).automatic_safe
 
 
 def should_use_blocks(name: str, nbytes: int, config: BlockConfig) -> bool:
     """True only for explicitly block-safe operations above the memory threshold."""
-    path = operation_path(name)
+    capability = operation_capability(name)
     return bool(
         config.enabled
         and int(nbytes) >= config.threshold_bytes
-        and path in (BlockPath.BLOCK, BlockPath.BLOCK_BORDER)
+        and capability.explicit_safe
     )
 
 

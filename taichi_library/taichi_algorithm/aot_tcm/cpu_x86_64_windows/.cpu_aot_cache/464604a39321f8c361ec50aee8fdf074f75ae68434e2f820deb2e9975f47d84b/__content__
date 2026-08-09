@@ -1,6 +1,0 @@
-cgraph:bgr2hsv_f32
-cgraph:hsv2bgr_f32
-cgraph:bgr2ycrcb_f32
-cgraph:ycrcb2bgr_f32
-cgraph:bgr2lab_f32
-cgraph:lab2bgr_f32

@@ -30,7 +30,11 @@ class BackendManager:
     def _load_runtime_status():
         root = os.environ.get("PIXEL_REFINE_AOT_CACHE", os.path.join(tempfile.gettempdir(), "pixel_refine_aot_cache"))
         result = {}
-        for backend in ("cpu", "vulkan", "opengl"):
+        # Keep the status cache aligned with the canonical backend registry.
+        # Omitting CUDA/GLES here made a persisted qualification invisible to
+        # the decision layer even though their target-qualified artifacts were
+        # present and the public selector could request them explicitly.
+        for backend in ("cpu", "cuda", "vulkan", "opengl", "gles"):
             try:
                 with open(os.path.join(root, f"runtime_{backend}.json"), encoding="utf-8") as f:
                     result[backend] = json.load(f).get("status", "unknown")

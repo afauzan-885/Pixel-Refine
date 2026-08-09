@@ -1,6 +1,16 @@
 # Taichi GPU AOT Algorithms & Engine
 
-This directory contains GPU-accelerated algorithms compiled via Taichi Ahead-of-Time (AOT) compiler into modular `.tcm` packages. These modules run natively on GPU backends (Vulkan, CUDA, CPU) via our modular C++ DLL execution engines.
+> **Current documentation:** read [`AOT_BACKEND_MATRIX.md`](../AOT_BACKEND_MATRIX.md)
+> first. It is the canonical developer/AI handoff for target-qualified
+> runtime selection, memory/cache policy, block capability, build matrix, and
+> verification gates. This file is a short algorithm index and historical
+> usage overview, not a second backend contract.
+
+This directory contains algorithms compiled through Taichi Ahead-of-Time
+(AOT) into target-qualified `.tcm` packages. The same public Python call is
+dispatched to CPU, CUDA, Vulkan, OpenGL, or GLES according to the selected
+target. The native bridge, C API runtime, and TCM archive must belong to the
+same backend/OS/architecture/ABI profile.
 
 ---
 
@@ -13,32 +23,100 @@ This directory contains GPU-accelerated algorithms compiled via Taichi Ahead-of-
                                       |
                                       v
                         +----------------------------+
-                        |  taichi_aot Engine Router  |
+                        | taichi_aot Runtime Router  |
                         +----------------------------+
                                       |
                 +---------------------+---------------------+
                 |                     |                     |
                 v                     v                     v
-        [modular CPU]          [modular Vulkan]       [modular CUDA]
-     (taichi_aot_cpu.dll)   (taichi_aot_vulkan.dll) (taichi_aot_cuda.dll)
+        [CPU/CUDA]              [Vulkan/OpenGL]        [GLES/ARM]
+      target bridge            target bridge          target bridge
                 |                     |                     |
                 +---------------------+---------------------+
                                       | (Loads AOT Modules)
                                       v
                              +------------------+
                              |   .tcm Modules   |
-                             | (e.g. Can, MTB)  |
+                             | (target .tcm)     |
                              +------------------+
 ```
 
-### Key Optimizations
+### Key runtime guarantees
 
-1. **Dynamic Shape Context Refresh**:
-   Graph cache automatically tracks the shape signatures of input arguments. If shape sizes transition (e.g., down scale pyramid levels), the driver reloads the compute graph dynamically to prevent C-API shape mismatch warnings.
-2. **Two-Tier Buffer Pool**:
-   VRAM allocations are rounded to $256 \times 256$ block tiles to prevent expensive GPU driver calls at runtime.
-3. **Win32 Job Objects**:
-   Prevents zombie child processes (such as `vulkaninfo.exe`) from leaking VRAM by automatically binding them to the parent process job.
+1. **Shape and lifecycle protection**: graph and buffer metadata are checked
+   before dispatch; reinitialization invalidates stale wrappers.
+2. **Allocation and result caching**: full-frame buffers and validated tile
+   records have independent bounded caches with pressure-based eviction.
+3. **Target-qualified dispatch**: an archive is never relabeled as another
+   platform, vendor, or ABI.
+4. **Safe fallback**: an unqualified or failed native/tile path returns to the
+   same-backend full-frame/reference path while preserving the public API.
+
+For exact environment variables, target IDs, dtype policy, and build/test
+commands, use the canonical matrix document linked above instead of copying
+old examples from this index.
+
+## Maintained source layout
+
+All reusable algorithm implementations and public AOT dispatchers are kept in
+this package:
+
+* `aot_api/` — cross-family public AOT dispatch (`research.py` and
+  `research_pipeline.py`) plus compatibility shims.
+* algorithm-family directories (`alignment/`, `demosaicing/`, `denoising/`,
+  `image_processing/`, `optical_flow/`, and others) — kernels, public family
+  APIs, and their `compile_*.py` scripts in one place. JPEG is maintained in
+  `compression/jpeg_aot.py`; the former `aot_api/jpeg.py` is only a shim.
+* `aot_py/` — shared compiler orchestration and build tooling; executable
+  validation lives in `aot_py/tests/`.
+* `aot_tcm/` — target-qualified compiled modules. These are artifacts, not
+  Python algorithm source.
+
+`taichi_library.taichi_aot` remains the stable import path, but is now a thin
+runtime façade. New algorithms should be added under `taichi_algorithm` and
+exported through `aot_api`; do not add implementation files to the runtime
+package.
+
+For a family-local compiler, run it through its package path so imports and
+artifact roots are deterministic, for example:
+
+```powershell
+python -m taichi_library.taichi_algorithm.feature_matching.compile_akaze_tcm
+python -m taichi_library.taichi_algorithm.optical_flow.compile_lucas_kanade_tcm
+python -m taichi_library.taichi_algorithm.demosaicing.compile_hamilton_tcm
+python -m taichi_library.taichi_algorithm.image_processing.compile_analysis_suite_tcm
+```
+
+Use `aot_py/compile_aot_backend_suite.py` for target-qualified batch builds;
+it resolves each job to the colocated compiler automatically. Shared
+orchestration (`compile_common_tcm.py` and `compile_research_tcm.py`)
+intentionally remains in `aot_py` because it spans multiple families.
+
+### Block pre-communication (Lucas--Kanade)
+
+The dense Lucas--Kanade block path uses
+`optical_flow/lucas_kanade_batch.py` and the
+`lucas_kanade_batch` target-qualified TCM job. Tiles with the same halo shape
+are packed into one `(batch, height, width)` dispatch. A scatter graph writes
+only each tile core into one resident `(H, W, 2)` atlas, so the host performs
+one readback per cold invocation instead of one readback per tile. The memory
+governor caps the atlas at 256 MiB (or one quarter of the resident limit) and
+admits at most two in-flight batches only when the device-pool budget can hold
+them; otherwise it retains the one-fence bounded path. Cache records may store
+either a full halo tile or a core-only atlas slice and are validated by shape.
+
+Useful diagnostics are returned by `taichi_aot.get_last_block_execution()`:
+`readback_strategy` is `atlas` for a cold atlas invocation and
+`resident_output_bytes` reports its resident footprint. Set
+`PIXEL_REFINE_AOT_DISABLE_LK_ATLAS=1` or
+`PIXEL_REFINE_AOT_DISABLE_LK_BATCH_PIPELINE=1` only for controlled regression
+comparisons. OpenGL remains on its established host/reference LK path until a
+driver-produced native batch artifact passes the target validator.
+
+The same resident-core sink is available as the `common` graph
+`scatter_core_f32_3d`. It is used by the generic Block Matching and Farneback
+GPU-tile paths, preserving their existing kernels while consolidating tile
+readback into one atlas readback per cold invocation.
 
 ---
 
@@ -57,7 +135,7 @@ The following algorithms are compiled and available in `aot_tcm/`:
 
 ## Latency & Memory Profiling
 
-Our comprehensive verification suite (`aot_py/test_comprehensif.py`) automatically profile:
+Our comprehensive verification suite (`aot_py/tests/test_comprehensif.py`) automatically profile:
 1. **Latency (ms)**: High-resolution computational time.
 2. **RAM delta (MB)**: Memory footprint using `psutil`.
 3. **Active VRAM (MB)**: Physically allocated GPU memory.
