@@ -54,6 +54,7 @@ from taichi_library.device_selection import (
     scan_vulkan_device_records,
 )
 from .artifact_targets import detect_target
+from .tcm_preflight import preflight_tcm
 
 _UNSET = object()
 _CPU_AOT_EXTRACTION_LOCK = threading.RLock()
@@ -618,8 +619,62 @@ def _heartbeat():
         _vram_reclaimed = False
 
 
+# -------------------------------------------------------------------------
+# CUDA Thread-Local Primary Context Auto-Binding Manager
+# Ensures worker threads (QThread, ThreadPoolExecutor, BurstCacheWorker)
+# automatically bind the active CUDA primary context before invoking C-API driver calls.
+# -------------------------------------------------------------------------
+_CUDA_DRIVER_LIB = None
+_CUDA_PRIMARY_CTX_MAP = {}  # device_id (int) -> ctypes.c_void_p (primary context)
+_CUDA_CTX_LOCK = threading.Lock()
+
+
+def _get_cuda_primary_context(device_id: int = 0):
+    global _CUDA_DRIVER_LIB, _CUDA_PRIMARY_CTX_MAP
+    with _CUDA_CTX_LOCK:
+        if device_id in _CUDA_PRIMARY_CTX_MAP:
+            return _CUDA_PRIMARY_CTX_MAP[device_id]
+        try:
+            if _CUDA_DRIVER_LIB is None:
+                if os.name == "nt":
+                    _CUDA_DRIVER_LIB = ctypes.CDLL("nvcuda.dll")
+                else:
+                    _CUDA_DRIVER_LIB = ctypes.CDLL("libcuda.so")
+                _CUDA_DRIVER_LIB.cuInit(0)
+
+            dev = ctypes.c_int()
+            res_dev = _CUDA_DRIVER_LIB.cuDeviceGet(ctypes.byref(dev), int(device_id))
+            if res_dev != 0:
+                return None
+
+            ctx = ctypes.c_void_p()
+            res_ctx = _CUDA_DRIVER_LIB.cuDevicePrimaryCtxRetain(ctypes.byref(ctx), dev)
+            if res_ctx != 0 or not ctx.value:
+                return None
+
+            _CUDA_PRIMARY_CTX_MAP[device_id] = ctx
+            return ctx
+        except Exception:
+            return None
+
+
+def ensure_cuda_context(device_id: int = 0):
+    """Bind CUDA primary context for the calling thread if using CUDA backend."""
+    ctx = _get_cuda_primary_context(device_id)
+    if ctx and _CUDA_DRIVER_LIB:
+        try:
+            _CUDA_DRIVER_LIB.cuCtxSetCurrent(ctx)
+        except Exception:
+            pass
+
+
 def _op_begin(name: str):
     """Mark the start of a blocking GPU/DLL operation."""
+    # Ensure CUDA thread-local primary context is bound for the calling thread
+    for inst in list(AOTEngine._instances.values()):
+        if getattr(inst, "arch", "").lower() == "cuda":
+            ensure_cuda_context(getattr(inst, "device_id", 0))
+
     global _op_start_time, _op_name, _last_activity_time, _vram_reclaimed
     if not _AUTO_DESTROY_ENABLED:
         return
@@ -687,8 +742,16 @@ def _watchdog_run():
     main_thread = threading.main_thread()
     while True:
         time.sleep(_WATCHDOG_INTERVAL_S)
-        if not _AUTO_DESTROY_ENABLED:
-            # If auto-destroy is disabled, only check main thread liveness
+        # Eksperimen: Untuk backend CUDA, nonaktifkan Watchdog idle reclamation dan error circuit breaker
+        # agar Primary CUDA Context tetap aktif 100% dan GC diatur murni per-algoritma.
+        is_cuda = False
+        for inst in list(AOTEngine._instances.values()):
+            if getattr(inst, "arch", "").lower() == "cuda":
+                is_cuda = True
+                break
+
+        if not _AUTO_DESTROY_ENABLED or is_cuda:
+            # If auto-destroy is disabled or CUDA is active, only check main thread liveness
             if not main_thread.is_alive():
                 _global_cleanup("watchdog-main-thread-dead")
                 os._exit(1)  # Hard kill when auto-destroy disabled
@@ -777,31 +840,19 @@ def _watchdog_run():
                     pass
 
                 # Smart VRAM reclamation logic:
+                # We do NOT call buffer_pool.clear() or native free_gpu_buffer from
+                # the Watchdog background thread, because doing so on CUDA breaks the
+                # primary context on Windows driver implementations.
+                # Instead, we trim idle staging buffers and trigger Python GC so unreferenced
+                # memory is freed safely without losing the active CUDA context.
                 try:
-                    # Obtain the global engine instance if it exists and clear its pools
                     for key, inst in list(AOTEngine._instances.items()):
                         with inst._lock:
-                            # 1. Clear cached staging buffers
-                            for entries in list(
-                                getattr(inst, "_staging_pool", {}).values()
-                            ):
-                                for entry in entries:
-                                    buf = entry.get("buffer")
-                                    if buf and buf.handle is not None and buf.is_owner:
-                                        try:
-                                            _LIB.free_gpu_buffer(
-                                                inst.runtime, buf.handle
-                                            )
-                                            buf.handle = None
-                                            buf.is_owner = False
-                                        except Exception:
-                                            pass
-                            inst._staging_pool = {}
+                            # Trim idle staging pool
+                            if hasattr(inst, "_staging_pool"):
+                                inst._staging_pool.clear()
 
-                            # 2. Clear buffer pool
-                            inst.buffer_pool.clear()
-
-                    # 3. Trigger Python garbage collection to free unreferenced wrappers
+                    # Trigger Python garbage collection to release unreferenced GPU buffers
                     import gc as _gc
 
                     _gc.collect()
@@ -1077,7 +1128,7 @@ def _init_aot_bridge(backend=None):
             pass
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    aot_dll_dir = os.path.abspath(
+    legacy_aot_dll_dir = os.path.abspath(
         os.path.join(script_dir, "../taichi_algorithm/aot_py/aot_dll")
     )
     # The bridge is only loaded after AOTEngine has resolved a concrete
@@ -1097,9 +1148,26 @@ def _init_aot_bridge(backend=None):
         backend=backend,
         device=os.environ.get("TARGET_VENDOR", ""),
     )
+    # Prefer the isolated LLVM20 bundle when it is present.  The resolver is
+    # target-qualified, so a CUDA bridge can never be selected for Vulkan or
+    # OpenGL merely because a similarly named file exists.  The repository
+    # tree remains a compatibility fallback for source-only/rollback runs.
+    aot_dll_dir = legacy_aot_dll_dir
+    staged_bundle = None
+    try:
+        from taichi_library.llvm20_runtime_paths import bundle_root
+
+        staged_bundle = bundle_root(target.target_id)
+    except (ImportError, OSError, ValueError):
+        staged_bundle = None
+    if staged_bundle is not None:
+        aot_dll_dir = str(staged_bundle)
+        print(f"[AOTEngine] LLVM20 runtime bundle selected: {aot_dll_dir}")
     target_dir = os.path.join(aot_dll_dir, target.target_id)
     backend_dir = (
-        target_dir
+        aot_dll_dir
+        if staged_bundle is not None
+        else target_dir
         if os.name != "nt" and os.path.isdir(target_dir)
         else os.path.join(aot_dll_dir, backend)
     )
@@ -1941,6 +2009,8 @@ class TaichiGPUBuffer:
                 return
 
             global _LIB, _RUNTIME
+            if self.engine and getattr(self.engine, "arch", "").lower() == "cuda":
+                ensure_cuda_context(getattr(self.engine, "device_id", 0))
             runtime = self.engine.runtime if self.engine else _RUNTIME
             if _LIB and runtime:
                 if self.engine and hasattr(self.engine, "_lock"):
@@ -1998,6 +2068,8 @@ class TaichiGPUBuffer:
     def to_numpy(self, out=None):
         """Read GPU data. Automatically handles staging for VRAM-only buffers."""
         _heartbeat()
+        if self.engine is not None:
+            self.engine._assert_native_context_owner("to_numpy")
         if out is None:
             out = np.empty(self.shape, dtype=self.dtype)
         elif out.shape != self.shape or out.dtype != self.dtype:
@@ -2060,6 +2132,8 @@ class TaichiGPUBuffer:
         return out
 
     def map(self):
+        if self.engine is not None:
+            self.engine._assert_native_context_owner("map")
         runtime, handle = self._require_live("GPU buffer map")
         if self.engine and hasattr(self.engine, "_lock"):
             with self.engine._lock:
@@ -2067,6 +2141,8 @@ class TaichiGPUBuffer:
         return _LIB.map_gpu_buffer(runtime, handle)
 
     def unmap(self):
+        if self.engine is not None:
+            self.engine._assert_native_context_owner("unmap")
         runtime, handle = self._require_live("GPU buffer unmap")
         if self.engine and hasattr(self.engine, "_lock"):
             with self.engine._lock:
@@ -2215,6 +2291,7 @@ class AOTModuleWrapper:
     def run(self, graph_name, **kwargs):
         """Menjalankan grafik Taichi AOT dengan validasi argumen yang informatif."""
         engine = self.engine if self.engine is not None else AOTEngine()
+        engine._assert_native_context_owner(f"run:{graph_name}")
         if getattr(engine, "_destroyed", False) or not getattr(engine, "runtime", None):
             raise RuntimeError(
                 f"AOT runtime for graph '{graph_name}' is no longer active; "
@@ -2807,6 +2884,15 @@ class AOTEngine:
             instance._async_reservations = 0
             instance._async_pending_limit = _MAX_ASYNC_PENDING
             instance._lock = threading.RLock()
+            # Windows OpenGL/GLES ICD contexts are thread-affine.  The native
+            # bridge does not provide a context migration/dispatch queue, so
+            # retain the creating thread and fail closed before a worker can
+            # turn a context error into a misleading allocation failure.
+            instance._native_context_owner_thread_id = (
+                threading.get_ident()
+                if arch.lower() in {"opengl", "gles"}
+                else None
+            )
             instance._destroyed = False
             instance._generation = 0
             instance._block_config = BlockConfig()
@@ -3764,6 +3850,7 @@ class AOTEngine:
         host_accessible=False,
         vector_dim=None,
     ):
+        self._assert_native_context_owner("allocate")
         if not host_accessible and hasattr(self, "_memory_governor"):
             self._refresh_memory_policy()
         _lock_wait_begin("allocate")
@@ -3863,6 +3950,28 @@ class AOTEngine:
                     self._pipeline_intermediates[self.current_pipeline] = []
                 self._pipeline_intermediates[self.current_pipeline].append(buf)
             return buf
+
+    def _assert_native_context_owner(self, operation: str) -> None:
+        """Reject unsupported cross-thread OpenGL/GLES native dispatch.
+
+        CPU/CUDA/Vulkan remain lock-serialized as before.  OpenGL/GLES needs
+        the actual ICD context owner thread, not merely a Python mutex; a
+        mutex cannot make a context current on a different Windows thread.
+        """
+
+        backend = str(getattr(self, "arch", "")).lower()
+        owner = getattr(self, "_native_context_owner_thread_id", None)
+        if backend in {"opengl", "gles"} and owner is not None:
+            current = threading.get_ident()
+            if current != owner:
+                raise RuntimeError(
+                    "OpenGL/GLES native operation is thread-affine: "
+                    f"{operation} must run on context-owner thread {owner}, "
+                    f"not worker thread {current}. The bridge has no safe "
+                    "context migration queue; dispatch this operation through "
+                    "the owner thread or use a backend with thread-safe native "
+                    "submission."
+                )
 
     def clear_pipeline_by_name(self, name):
         """Safely erases a pipeline from C++ and forces destruction of its intermediate buffers."""
@@ -4876,40 +4985,113 @@ class AOTEngine:
     ) -> TaichiGPUBuffer:
         """Universal Fast-Copy bridge using Pinned Memory DMA."""
         obj_type = self._is_external_gpu_obj(data)
-        shape = getattr(data, "shape", (1,))
+        shape = getattr(data, "shape", None)
         dtype = np.float32
+        # Host-export based interop objects (OpenCV UMat and ONNX OrtValue in
+        # particular) do not reliably expose shape/dtype metadata themselves.
+        # Materialize them once, before allocating the staging buffer, so the
+        # exported host array—not the placeholder ``(1,)`` shape—is the ABI
+        # source of truth.  This remains a staged transfer; it deliberately
+        # does not turn a foreign allocation into a borrowed GPU handle.
+        materialized = None
 
         if obj_type == "pytorch":
             import torch
 
             dtype_map = {
                 torch.float32: np.float32,
+                torch.float16: np.float16,
                 torch.uint8: np.uint8,
+                torch.uint16: np.uint16,
+                torch.int16: np.int16,
                 torch.int32: np.int32,
             }
-            dtype = dtype_map.get(data.dtype, np.float32)
-        elif hasattr(data, "dtype"):
-            dtype = data.dtype
+            dtype = dtype_map.get(data.dtype)
+            if dtype is None:
+                raise TypeError(
+                    f"unsupported PyTorch interop dtype {data.dtype}; "
+                    "convert explicitly to float16/float32/int16/int32/uint8/uint16"
+                )
+        elif obj_type == "opencv" and hasattr(data, "get"):
+            materialized = data.get()
+        elif obj_type == "onnx":
+            if hasattr(data, "numpy"):
+                materialized = data.numpy()
+            elif hasattr(data, "cpu"):
+                materialized = data.cpu().numpy()
+            else:
+                raise TypeError(
+                    "ONNX OrtValue does not expose a safe host export"
+                )
+        elif hasattr(data, "__cuda_array_interface__"):
+            if hasattr(data, "get"):
+                materialized = data.get()
+            else:
+                try:
+                    import cupy as cp
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "CUDA array interop requires an object with .get() or "
+                        "the optional CuPy package; refusing to memcpy a device "
+                        "pointer as host memory"
+                    ) from exc
+                materialized = cp.asnumpy(cp.asarray(data))
+
+        if materialized is not None:
+            materialized = np.ascontiguousarray(materialized)
+            if materialized.ndim == 0:
+                materialized = materialized.reshape((1,))
+            shape = tuple(int(dimension) for dimension in materialized.shape)
+            dtype = materialized.dtype
+        else:
+            if shape is None:
+                shape = (1,)
+            else:
+                shape = tuple(int(dimension) for dimension in shape)
+            if hasattr(data, "dtype") and obj_type != "pytorch":
+                dtype = data.dtype
+
+        # Apply the same RGB/flow vector convention after host export.  This
+        # is necessary for UMat/OrtValue, whose public ``shape`` attribute is
+        # absent or callable and therefore cannot be inspected by upload().
+        if not is_vector and len(shape) == 3:
+            if shape[2] == 3:
+                is_vector = True
+                vector_dim = 3
+            elif shape[2] == 2:
+                is_vector = True
+                vector_dim = 2
 
         staging = self.acquire_staging_buffer(shape, dtype)
         try:
             ptr = staging.map()
+            try:
+                if obj_type == "pytorch":
+                    import torch
 
-            if obj_type == "pytorch":
-                import torch
-
-                target_view = torch.from_blob(
-                    ptr, shape, dtype=data.dtype, device="cpu"
-                )
-                target_view.copy_(data.detach(), non_blocking=False)
-            elif hasattr(data, "__cuda_array_interface__"):
-                src_ptr = data.__cuda_array_interface__["data"][0]
-                ctypes.memmove(ptr, src_ptr, staging.nbytes)
-            else:
-                temp = np.ascontiguousarray(data)
-                ctypes.memmove(ptr, temp.ctypes.data, temp.nbytes)
-
-            staging.unmap()
+                    target_view = torch.from_blob(
+                        ptr, shape, dtype=data.dtype, device="cpu"
+                    )
+                    target_view.copy_(data.detach(), non_blocking=False)
+                else:
+                    # A CUDA array-interface ``data`` field is a device
+                    # address, never a host pointer.  The old direct
+                    # ctypes.memmove path could dereference it and corrupt
+                    # memory.  Prefer an object's synchronized host getter;
+                    # otherwise use CuPy's CUDA-aware device-to-host copy.
+                    if materialized is not None:
+                        temp = materialized
+                    else:
+                        temp = data
+                    temp = np.ascontiguousarray(temp)
+                    if temp.nbytes != staging.nbytes:
+                        raise ValueError(
+                            "external interop byte size does not match its declared "
+                            f"shape/dtype ({temp.nbytes} != {staging.nbytes})"
+                        )
+                    ctypes.memmove(ptr, temp.ctypes.data, staging.nbytes)
+            finally:
+                staging.unmap()
             vram_target = self.allocate(
                 shape, dtype, is_vector=is_vector, vector_dim=vector_dim
             )
@@ -4937,20 +5119,23 @@ class AOTEngine:
 
         ext_type = self._is_external_gpu_obj(data)
 
-        # Auto-detect Vector Fields (RGB=3, Flow=2)
-        if not is_vector and hasattr(data, "shape"):
-            if len(data.shape) == 3:
-                if data.shape[2] == 3:
-                    is_vector = True
-                    vector_dim = 3
-                elif data.shape[2] == 2:
-                    is_vector = True
-                    vector_dim = 2
-
         if ext_type:
             return self._upload_fast_interop(
                 data, is_vector=is_vector, vector_dim=vector_dim
             )
+
+        # Auto-detect Vector Fields (RGB=3, Flow=2) for ordinary array-like
+        # inputs. External objects are handled above because their shape may
+        # be a method (OrtValue) or unavailable until host export (UMat).
+        if not is_vector and hasattr(data, "shape"):
+            raw_shape = getattr(data, "shape", None)
+            if raw_shape is not None and not callable(raw_shape) and len(raw_shape) == 3:
+                if raw_shape[2] == 3:
+                    is_vector = True
+                    vector_dim = 3
+                elif raw_shape[2] == 2:
+                    is_vector = True
+                    vector_dim = 2
 
         arr = np.ascontiguousarray(data)
         buf = self.allocate(
@@ -4980,6 +5165,12 @@ class AOTEngine:
                 if os.path.exists(f"{base}_{self.arch.lower()}{ext}")
                 else path
             )
+            # TCM ABI validation is deliberately opt-in during migration.  A
+            # packed archive is checked before CPU extraction or native bridge
+            # loading; unpacked legacy CPU directories retain the historical
+            # path.  This keeps current applications compatible while making
+            # manifest failures fail-closed when the gate is enabled.
+            tcm_manifest_path = p if str(p).lower().endswith(".tcm") else None
             # LLVM/CPU AOT in Taichi 1.7.4 consumes the unpacked module
             # directory. Graphics runtimes consume .tcm directly. Prefer a
             # checked-in CPU directory when present, otherwise safely
@@ -5004,6 +5195,67 @@ class AOTEngine:
                 )
             else:
                 device_name = "logical-device"
+            if tcm_manifest_path and os.environ.get("AOT_TCM_ABI_PREFLIGHT", "0") == "1":
+                target_device_name = device_name
+                if self.arch.lower() == "cuda":
+                    # CUDA's load diagnostics use a logical device label, but
+                    # the TCM target contract still needs the NVIDIA vendor.
+                    # Preserve the resolved backend config instead of asking
+                    # the contract to infer a vendor from "logical-device".
+                    target_device_name = (
+                        getattr(getattr(self, "_backend_config", None), "vendor", "")
+                        or os.environ.get("TARGET_VENDOR", "nvidia")
+                    )
+                elif self.arch.lower() == "cpu":
+                    target_device_name = ""
+                requested_target = detect_target(
+                    backend=self.arch,
+                    device=target_device_name,
+                )
+                feature_text = os.environ.get("AOT_TCM_RUNTIME_FEATURES", "")
+                if feature_text.strip():
+                    runtime_features = {
+                        item.strip().upper()
+                        for item in feature_text.split(",")
+                        if item.strip()
+                    }
+                elif self.arch.lower() in {"vulkan", "opengl", "gles"}:
+                    # The graphics AOT profile is compute/SSBO based.  A
+                    # future native capability probe can replace this default
+                    # through AOT_TCM_RUNTIME_FEATURES without changing the
+                    # manifest or public algorithm API.
+                    runtime_features = {"COMPUTE", "SSBO"}
+                else:
+                    runtime_features = set()
+                try:
+                    runtime_abi = int(os.environ.get("AOT_TCM_RUNTIME_ABI", "1"))
+                except ValueError as exc:
+                    raise RuntimeError("AOT_TCM_RUNTIME_ABI must be an integer") from exc
+                preflight = preflight_tcm(
+                    tcm_manifest_path,
+                    requested_target=requested_target,
+                    runtime_abi=runtime_abi,
+                    runtime_features=runtime_features,
+                    allow_legacy=os.environ.get("AOT_TCM_ABI_ALLOW_LEGACY", "1") != "0",
+                )
+                if not preflight.allowed:
+                    set_status(
+                        artifact_key(
+                            tcm_manifest_path,
+                            self.arch,
+                            self.device_id,
+                            device_name,
+                        ),
+                        "quarantined",
+                        backend=self.arch,
+                        device=device_name,
+                        artifact=os.path.basename(tcm_manifest_path),
+                        error=preflight.reason,
+                    )
+                    raise RuntimeError(
+                        f"[AOTEngine TCM ABI] {preflight.status}: "
+                        f"{os.path.basename(tcm_manifest_path)}: {preflight.reason}"
+                    )
             cache_key = artifact_key(p, self.arch, self.device_id, device_name)
             cached = get_status(cache_key)
             if cached and cached.get("status") == "quarantined":
@@ -5297,6 +5549,8 @@ class AOTEngine:
         This is called automatically by the global atexit / signal cleanup handler.
         """
         with self._lock:
+            if getattr(self, "arch", "").lower() == "cuda":
+                ensure_cuda_context(getattr(self, "device_id", 0))
             if not getattr(self, "_destroyed", False):
                 self._destroyed = True
 

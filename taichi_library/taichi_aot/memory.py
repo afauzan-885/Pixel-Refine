@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import ctypes
+import math
+import numbers
 import os
 import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
 from enum import IntEnum
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 
+MIB = 1024**2
 GIB = 1024**3
 
 
@@ -60,6 +63,165 @@ class MemoryDecision:
     # into unbounded resident growth.
     staging_pool_budget: int = 0
     retired_buffer_budget: int = 0
+
+
+def validate_memory_decision(decision) -> dict:
+    """Return structural diagnostics for a memory-governor decision.
+
+    This is deliberately a pure, backend-neutral contract check.  It does not
+    change a decision or attempt to query a device, so callers can include the
+    result in telemetry and tests without introducing allocation or dispatch
+    side effects.  A failed check means the decision must not be treated as a
+    trustworthy admission policy.
+    """
+
+    if isinstance(decision, MemoryDecision):
+        values = asdict(decision)
+    elif isinstance(decision, Mapping):
+        values = dict(decision)
+    else:
+        return {
+            "valid": False,
+            "issues": ["decision must be MemoryDecision or mapping"],
+        }
+
+    issues = []
+
+    def _strict_integer(value) -> Optional[int]:
+        """Parse an integer without silently truncating probe metadata.
+
+        The governor emits integers, but JSON/driver telemetry can contain
+        booleans, fractional values, or non-finite floats.  ``int(value)``
+        would accept some of those (for example ``True`` or ``1.5``), which
+        could make an invalid budget appear safe.  Decimal integer strings
+        remain accepted for compatibility with serialized reports.
+        """
+
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, numbers.Integral):
+            return int(value)
+        if isinstance(value, numbers.Real):
+            numeric = float(value)
+            if math.isfinite(numeric) and numeric.is_integer():
+                return int(numeric)
+            return None
+        if isinstance(value, str):
+            try:
+                return int(value.strip(), 10)
+            except (TypeError, ValueError):
+                return None
+        return None
+    nonnegative = (
+        "host_cache_budget",
+        "shared_device_budget",
+        "device_pool_budget",
+        "pipeline_resident_limit",
+        "target_chunk_bytes",
+        "recommended_block_size",
+        "system_reserve_bytes",
+        "device_heap_budget",
+        "device_heap_usage",
+        "device_heap_available",
+        "staging_pool_budget",
+        "retired_buffer_budget",
+    )
+    for name in nonnegative:
+        if name not in values:
+            continue
+        parsed = _strict_integer(values[name])
+        if parsed is None:
+            issues.append(f"{name} must be an integer")
+        elif parsed < 0:
+            issues.append(f"{name} must be non-negative")
+
+    def _int(name):
+        parsed = _strict_integer(values.get(name, 0) or 0)
+        return parsed if parsed is not None else 0
+
+    shared = _int("shared_device_budget")
+    pipeline = _int("pipeline_resident_limit")
+    pool = _int("device_pool_budget")
+    target = _int("target_chunk_bytes")
+    lifecycle = _int("staging_pool_budget") + _int("retired_buffer_budget")
+    if pipeline > shared and shared:
+        issues.append("pipeline_resident_limit exceeds shared_device_budget")
+    if pool > shared:
+        issues.append("device_pool_budget exceeds shared_device_budget")
+    if target > pipeline and pipeline:
+        issues.append("target_chunk_bytes exceeds pipeline_resident_limit")
+    if lifecycle > shared and shared:
+        issues.append("lifecycle budgets exceed shared_device_budget")
+
+    # A driver-reported heap sample is only a safe admission signal when its
+    # counters are internally bounded.  Some providers return zero for the
+    # heap budget when the extension is unavailable; in that case the
+    # availability/usage fields are intentionally treated as advisory.  Once
+    # a positive heap budget is present, a value above it is contradictory and
+    # must fail closed instead of allowing an oversized resident allocation.
+    device_heap_budget = _int("device_heap_budget")
+    if device_heap_budget > 0:
+        if _int("device_heap_usage") > device_heap_budget:
+            issues.append("device_heap_usage exceeds device_heap_budget")
+        if _int("device_heap_available") > device_heap_budget:
+            issues.append("device_heap_available exceeds device_heap_budget")
+
+    block = _int("recommended_block_size")
+    if block and (block < 256 or block > 2048):
+        issues.append("recommended_block_size is outside the 256..2048 contract")
+
+    # Snapshot counters are part of the admission telemetry.  They must be
+    # internally consistent before a caller treats the decision as reliable;
+    # an available value above total would otherwise produce an impossible
+    # ratio and could over-admit shared-memory work.
+    snapshot_present = "snapshot" in values
+    snapshot = values.get("snapshot")
+    if isinstance(snapshot, MemorySnapshot):
+        snapshot_values = {
+            "total_bytes": snapshot.total_bytes,
+            "available_bytes": snapshot.available_bytes,
+            "timestamp": snapshot.timestamp,
+        }
+    elif isinstance(snapshot, Mapping):
+        snapshot_values = snapshot
+    else:
+        snapshot_values = None
+        if snapshot_present:
+            issues.append(
+                "snapshot must be MemorySnapshot or mapping when provided"
+            )
+    if snapshot_values is not None:
+        total = _strict_integer(snapshot_values.get("total_bytes"))
+        available = _strict_integer(snapshot_values.get("available_bytes"))
+        if total is None or total < 0:
+            issues.append("snapshot.total_bytes must be a non-negative integer")
+        if available is None or available < 0:
+            issues.append("snapshot.available_bytes must be a non-negative integer")
+        if total is not None and available is not None and available > total:
+            issues.append("snapshot.available_bytes exceeds snapshot.total_bytes")
+        # ``timestamp`` is telemetry rather than an admission counter, so
+        # legacy mapping payloads may omit it.  When a producer supplies it,
+        # however, NaN/inf (or another non-numeric value) makes freshness and
+        # watchdog decisions unknowable and must fail closed.  Do not impose
+        # a wall-clock/monotonic-origin policy here; only require a finite
+        # numeric value to remain compatible with existing adapters.
+        if "timestamp" in snapshot_values:
+            raw_timestamp = snapshot_values.get("timestamp")
+            if isinstance(raw_timestamp, bool):
+                timestamp = None
+            else:
+                try:
+                    timestamp = float(raw_timestamp)
+                except (TypeError, ValueError):
+                    timestamp = None
+            if timestamp is None or not math.isfinite(timestamp):
+                issues.append("snapshot.timestamp must be finite when provided")
+
+    return {
+        "valid": not issues,
+        "issues": issues,
+        "checked_fields": len(nonnegative),
+    }
 
 
 class CacheTelemetry:
@@ -112,12 +274,31 @@ def _choose_block_size(
 
     if shared_budget <= 0:
         return 256 if pressure >= MemoryPressure.CRITICAL else 512
+
+    # Pressure is an admission signal as well as a budget signal.  A large
+    # target chunk can still mathematically fit a 2048 tile while the host or
+    # device is already under pressure; retaining that tile would increase
+    # transient peaks and make recovery less predictable.  Keep the policy
+    # monotonic and bounded: healthy may use the full native cap, while each
+    # pressure tier lowers the maximum independently of dtype/shape math.
+    if pressure >= MemoryPressure.EMERGENCY:
+        pressure_cap = 256
+    elif pressure >= MemoryPressure.CRITICAL:
+        pressure_cap = 512
+    elif pressure >= MemoryPressure.LOW:
+        pressure_cap = 1024
+    elif pressure >= MemoryPressure.CAUTIOUS:
+        pressure_cap = 1536
+    else:
+        pressure_cap = 2048
     channels = max(1, int(channels))
     sample_bytes = max(1, int(sample_bytes))
     live_buffers = max(1, int(live_buffers))
     bytes_per_pixel = channels * sample_bytes * live_buffers
     max_side = int((max(0, int(target_chunk_bytes)) / max(1, bytes_per_pixel)) ** 0.5)
     for candidate in (2048, 1536, 1024, 768, 512, 256):
+        if candidate > pressure_cap:
+            continue
         if candidate <= max_side:
             return candidate
     return 256

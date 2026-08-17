@@ -264,7 +264,22 @@ if TAICHI_AVAILABLE:
 # PYTHON API (JIT + AOT compatible)
 # =============================================================================
 
-def statistical_outlier_removal(points, k=20, std_multiplier=2.0):
+def _resolve_backend(value=None):
+    """Select point-cloud leaf without allowing import-time AOT state to leak."""
+    backend = "auto" if value is None else str(value).strip().lower()
+    if backend not in {"auto", "numpy", "taichi"}:
+        raise ValueError("backend must be one of 'auto', 'numpy', or 'taichi'")
+    if backend == "auto":
+        return "taichi" if TAICHI_AVAILABLE else "numpy"
+    if backend == "taichi":
+        if not TAICHI_AVAILABLE:
+            raise RuntimeError("backend='taichi' requires AOT_MODE=0 and Taichi")
+        runtime = ti.lang.impl.get_runtime()
+        if getattr(runtime, "prog", None) is None:
+            ti.init(arch=ti.cpu)
+    return backend
+
+def statistical_outlier_removal(points, k=20, std_multiplier=2.0, *, backend=None):
     """
     Statistical Outlier Removal (SOR).
 
@@ -286,7 +301,8 @@ def statistical_outlier_removal(points, k=20, std_multiplier=2.0):
     if n < k + 1:
         return points.copy(), np.arange(n, dtype=np.int32)
 
-    if not TAICHI_AVAILABLE:
+    selected_backend = _resolve_backend(backend)
+    if selected_backend == "numpy":
         return _sor_numpy(points, k, std_multiplier)
 
     # GPU path
@@ -301,7 +317,7 @@ def statistical_outlier_removal(points, k=20, std_multiplier=2.0):
     return points[keep_indices].copy(), keep_indices
 
 
-def radius_outlier_removal(points, radius=0.1, min_neighbors=5):
+def radius_outlier_removal(points, radius=0.1, min_neighbors=5, *, backend=None):
     """
     Radius Outlier Removal (ROR).
 
@@ -320,7 +336,8 @@ def radius_outlier_removal(points, radius=0.1, min_neighbors=5):
     if n == 0:
         return points.copy(), np.empty(0, dtype=np.int32)
 
-    if not TAICHI_AVAILABLE:
+    selected_backend = _resolve_backend(backend)
+    if selected_backend == "numpy":
         return _ror_numpy(points, radius, min_neighbors)
 
     keep_mask = np.zeros(n, dtype=np.int32)
@@ -330,7 +347,7 @@ def radius_outlier_removal(points, radius=0.1, min_neighbors=5):
     return points[keep_indices].copy(), keep_indices
 
 
-def voxel_downsample(points, voxel_size=0.01):
+def voxel_downsample(points, voxel_size=0.01, *, backend=None):
     """
     Voxel Grid Downsampling: reduce point density.
 
@@ -347,7 +364,8 @@ def voxel_downsample(points, voxel_size=0.01):
     if n == 0:
         return points.copy()
 
-    if not TAICHI_AVAILABLE:
+    selected_backend = _resolve_backend(backend)
+    if selected_backend == "numpy":
         return _voxel_downsample_numpy(points, voxel_size)
 
     # GPU path: compute voxel hash, then aggregate via numpy (hash table)
@@ -382,7 +400,7 @@ def voxel_downsample(points, voxel_size=0.01):
     return downsampled
 
 
-def estimate_normals(points, k=20):
+def estimate_normals(points, k=20, *, backend=None):
     """
     Normal estimation via PCA dari k-nearest neighbors.
 
@@ -405,7 +423,8 @@ def estimate_normals(points, k=20):
     if k < 3:
         return np.tile([0.0, 0.0, 1.0], (n, 1)).astype(np.float32)
 
-    if not TAICHI_AVAILABLE:
+    selected_backend = _resolve_backend(backend)
+    if selected_backend == "numpy":
         return _estimate_normals_numpy(points, k)
 
     # GPU path: compute KNN first
@@ -425,7 +444,7 @@ def estimate_normals(points, k=20):
     return normals.astype(np.float32)
 
 
-def preprocess_point_cloud(points, voxel_size=0.01, sor_k=20, sor_std=2.0):
+def preprocess_point_cloud(points, voxel_size=0.01, sor_k=20, sor_std=2.0, *, backend=None):
     """
     Full preprocessing pipeline: SOR + voxel downsample + normal estimation.
 
@@ -441,19 +460,24 @@ def preprocess_point_cloud(points, voxel_size=0.01, sor_k=20, sor_std=2.0):
         keep_indices: (M,) int32
     """
     # Step 1: Statistical outlier removal
-    filtered, indices = statistical_outlier_removal(points, k=sor_k, std_multiplier=sor_std)
+    selected_backend = _resolve_backend(backend)
+    filtered, indices = statistical_outlier_removal(
+        points, k=sor_k, std_multiplier=sor_std, backend=selected_backend
+    )
 
     if len(filtered) == 0:
         return filtered, np.empty((0, 3), dtype=np.float32), indices
 
     # Step 2: Voxel downsample
-    downsampled = voxel_downsample(filtered, voxel_size=voxel_size)
+    downsampled = voxel_downsample(filtered, voxel_size=voxel_size, backend=selected_backend)
 
     if len(downsampled) == 0:
         return downsampled, np.empty((0, 3), dtype=np.float32), np.empty(0, dtype=np.int32)
 
     # Step 3: Normal estimation
-    normals = estimate_normals(downsampled, k=min(20, len(downsampled) - 1))
+    normals = estimate_normals(
+        downsampled, k=min(20, len(downsampled) - 1), backend=selected_backend
+    )
 
     return downsampled, normals, indices
 

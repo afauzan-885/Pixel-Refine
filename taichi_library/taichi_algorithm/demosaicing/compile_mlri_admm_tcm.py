@@ -11,6 +11,10 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+from taichi_library.taichi_algorithm.demosaicing.demosaic_aot_builder import (
+    register_mlri_graphs,
+)
+
 @ti.kernel
 def _preprocess_bayer_kernel(
     bayer: ti.types.ndarray(),
@@ -548,18 +552,32 @@ def _mlri_admm_reconstruct_and_postprocess_kernel(
         G = G * (1.0 - final_factor) + L * final_factor
         B = B * (1.0 - final_factor) + L * final_factor
 
-        # sRGB conversion & Gamma curve
+        # Algebraic Sigmoid Dynamic Range Compression
+        dst[r, c, 0] = R / ti.math.sqrt(1.0 + R * R)
+        dst[r, c, 1] = G / ti.math.sqrt(1.0 + G * G)
+        dst[r, c, 2] = B / ti.math.sqrt(1.0 + B * B)
+
+
+@ti.kernel
+def _mlri_admm_srgb_tonemap(
+    src_linear: ti.types.ndarray(),
+    cmatrix: ti.types.ndarray(),
+    dst_srgb: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+):
+    for r, c in ti.ndrange(h, w):
+        R = src_linear[r, c, 0]
+        G = src_linear[r, c, 1]
+        B = src_linear[r, c, 2]
+
         sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
         sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
         sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
 
-        sR = sR / ti.math.sqrt(1.0 + sR * sR)
-        sG = sG / ti.math.sqrt(1.0 + sG * sG)
-        sB = sB / ti.math.sqrt(1.0 + sB * sB)
-
-        dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
-        dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
-        dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+        dst_srgb[r, c, 0] = ti.math.pow(ti.math.clamp(sR, 0.0, 1.0), 1.0 / 2.22)
+        dst_srgb[r, c, 1] = ti.math.pow(ti.math.clamp(sG, 0.0, 1.0), 1.0 / 2.22)
+        dst_srgb[r, c, 2] = ti.math.pow(ti.math.clamp(sB, 0.0, 1.0), 1.0 / 2.22)
 
 @ti.kernel
 def _mlri_admm_reconstruct_portable_kernel(
@@ -899,393 +917,33 @@ def compile_mlri_admm_tcm(arch, save_path):
     ti.init(arch=arch)
     module = ti.aot.Module(arch)
 
-    # Arguments definition
-    bayer_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "bayer", ti.f32, ndim=2)
-    wb_bayer_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "wb_bayer", ti.f32, ndim=2)
-    green_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "green", ti.f32, ndim=2)
-    r_diff_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "r_diff", ti.f32, ndim=2)
-    b_diff_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b_diff", ti.f32, ndim=2)
-    
-    # 2 temporary arrays allocated by host for guided filter coefficients and ADMM double-buffering
-    temp_a_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "temp_a", ti.f32, ndim=2)
-    temp_b_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "temp_b", ti.f32, ndim=2)
-    
-    cmatrix_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "cmatrix", ti.f32, ndim=2)
-    dst_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
-    matrix_args = [
-        ti.graph.Arg(ti.graph.ArgKind.SCALAR, f"m{row}{col}", ti.f32)
-        for row in range(3)
-        for col in range(3)
-    ]
-
-    wb_r_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_r", ti.f32)
-    wb_g1_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_g1", ti.f32)
-    wb_b_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_b", ti.f32)
-    wb_g2_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_g2", ti.f32)
-    black_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "black", ti.f32)
-    white_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "white", ti.f32)
-
-    h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
-    w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
-    c00_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c00", ti.i32)
-    c01_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c01", ti.i32)
-    c10_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c10", ti.i32)
-    c11_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c11", ti.i32)
-    
-    denoise_strength_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "denoise_strength", ti.f32)
-
-    def dispatch_admm_step1(graph):
-        if arch == ti.vulkan:
-            graph.dispatch(
-                _admm_step1_red_kernel,
-                green_arg, r_diff_arg, temp_a_arg, h_arg, w_arg,
-            )
-            graph.dispatch(
-                _admm_step1_blue_kernel,
-                green_arg, b_diff_arg, temp_b_arg, h_arg, w_arg,
-            )
-        else:
-            graph.dispatch(
-                _admm_step1_kernel,
-                green_arg, r_diff_arg, b_diff_arg,
-                temp_a_arg, temp_b_arg, h_arg, w_arg,
-            )
-
-    def dispatch_admm_step2(graph):
-        if arch == ti.vulkan:
-            graph.dispatch(
-                _admm_step2_red_kernel,
-                wb_bayer_arg, r_diff_arg, temp_a_arg, h_arg, w_arg,
-                c00_arg, c01_arg, c10_arg, c11_arg,
-            )
-            graph.dispatch(
-                _admm_step2_blue_kernel,
-                wb_bayer_arg, b_diff_arg, temp_b_arg, h_arg, w_arg,
-                c00_arg, c01_arg, c10_arg, c11_arg,
-            )
-            graph.dispatch(
-                _admm_step2_green_kernel,
-                wb_bayer_arg, green_arg, h_arg, w_arg,
-                c00_arg, c01_arg, c10_arg, c11_arg,
-            )
-        else:
-            graph.dispatch(
-                _admm_step2_kernel,
-                wb_bayer_arg, green_arg, r_diff_arg, b_diff_arg,
-                temp_a_arg, temp_b_arg, h_arg, w_arg,
-                c00_arg, c01_arg, c10_arg, c11_arg,
-            )
-
-    # 1. Full RGB demosaic
-    g_mlri_admm = ti.graph.GraphBuilder()
-    g_mlri_admm.dispatch(
-        _preprocess_bayer_kernel,
-        bayer_arg,
-        wb_bayer_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        black_arg,
-        white_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
+    register_mlri_graphs(
+        module,
+        kernels={
+            "preprocess": _preprocess_bayer_kernel,
+            "denoise": _bayer_bilateral_denoise_kernel,
+            "gbtf_green": _gbtf_green_interpolation_kernel,
+            "init_diff": _initial_color_difference_kernel,
+            "gf_coeff": _mlri_laplacian_coeff_kernel,
+            "gf_apply": _guided_filter_apply_and_reconstruct_kernel,
+            "admm1": _admm_step1_kernel,
+            "admm1_red": _admm_step1_red_kernel,
+            "admm1_blue": _admm_step1_blue_kernel,
+            "admm2": _admm_step2_kernel,
+            "admm2_red": _admm_step2_red_kernel,
+            "admm2_blue": _admm_step2_blue_kernel,
+            "admm2_green": _admm_step2_green_kernel,
+            "reconstruct": _mlri_admm_reconstruct_and_postprocess_kernel,
+            "reconstruct_portable": _mlri_admm_reconstruct_portable_kernel,
+            "srgb_tonemap": _mlri_admm_srgb_tonemap,
+            "gray_1ch": _mlri_admm_green_to_grayscale_1channel_fused_kernel,
+            "green_half_res": _mlri_admm_green_half_res_fused_kernel,
+            "rgb_half_res": _mlri_admm_rgb_half_res_fused_kernel,
+            "gray": _mlri_admm_to_grayscale_3channel_kernel,
+            "gray_portable": _mlri_admm_to_grayscale_portable_kernel,
+        },
+        arch=arch,
     )
-    # Stride-2 Bayer Bilateral Denoising: reads wb_bayer -> writes denoised to temp_a
-    g_mlri_admm.dispatch(
-        _bayer_bilateral_denoise_kernel,
-        wb_bayer_arg,
-        temp_a_arg,
-        h_arg,
-        w_arg,
-        denoise_strength_arg,
-    )
-    # GBTF green interpolation reads denoised bayer (temp_a) -> writes to green
-    g_mlri_admm.dispatch(
-        _gbtf_green_interpolation_kernel,
-        temp_a_arg,
-        green_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    # Dense difference initialization: reads denoised bayer (temp_a) & green -> writes to r_diff, b_diff
-    g_mlri_admm.dispatch(
-        _initial_color_difference_kernel,
-        temp_a_arg,
-        green_arg,
-        r_diff_arg,
-        b_diff_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    # Guided filter for Red: inputs green (guidance) & r_diff (input), outputs to temp_a and temp_b
-    eps_val = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "eps", ti.f32)
-    g_mlri_admm.dispatch(
-        _mlri_laplacian_coeff_kernel,
-        green_arg,
-        r_diff_arg,
-        temp_a_arg,
-        temp_b_arg,
-        h_arg,
-        w_arg,
-        eps_val,
-    )
-    # Apply GF and reconstruct Red channel directly to r_diff
-    g_mlri_admm.dispatch(
-        _guided_filter_apply_and_reconstruct_kernel,
-        green_arg,
-        temp_a_arg,
-        temp_b_arg,
-        r_diff_arg,
-        h_arg,
-        w_arg,
-    )
-    # Guided filter for Blue: inputs green & b_diff, outputs to temp_a and temp_b
-    g_mlri_admm.dispatch(
-        _mlri_laplacian_coeff_kernel,
-        green_arg,
-        b_diff_arg,
-        temp_a_arg,
-        temp_b_arg,
-        h_arg,
-        w_arg,
-        eps_val,
-    )
-    # Apply GF and reconstruct Blue channel directly to b_diff
-    g_mlri_admm.dispatch(
-        _guided_filter_apply_and_reconstruct_kernel,
-        green_arg,
-        temp_a_arg,
-        temp_b_arg,
-        b_diff_arg,
-        h_arg,
-        w_arg,
-    )
-    # Run 3 ADMM iterations (Double-Buffered)
-    for _ in range(3):
-        # Step 1: Reads r_diff, b_diff -> writes updates to temp_a, temp_b
-        dispatch_admm_step1(g_mlri_admm)
-        # Step 2: Reads temp_a, temp_b -> writes stabilized & fidelity-enforced output back to r_diff, b_diff
-        dispatch_admm_step2(g_mlri_admm)
-    if arch == ti.vulkan:
-        g_mlri_admm.dispatch(
-            _mlri_admm_reconstruct_portable_kernel,
-            green_arg, r_diff_arg, b_diff_arg, dst_arg,
-            *matrix_args,
-            wb_r_arg, wb_g1_arg, wb_b_arg, wb_g2_arg, h_arg, w_arg,
-        )
-    else:
-        g_mlri_admm.dispatch(
-            _mlri_admm_reconstruct_and_postprocess_kernel,
-            green_arg,
-            r_diff_arg,
-            b_diff_arg,
-            cmatrix_arg,
-            dst_arg,
-            wb_r_arg,
-            wb_g1_arg,
-            wb_b_arg,
-            wb_g2_arg,
-            h_arg,
-            w_arg,
-        )
-    module.add_graph("mlri_admm_demosaic", g_mlri_admm.compile())
-
-    # 2. Fast 1-channel grayscale
-    g_gray_1ch = ti.graph.GraphBuilder()
-    dst_gray_1ch_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
-    g_gray_1ch.dispatch(
-        _mlri_admm_green_to_grayscale_1channel_fused_kernel,
-        bayer_arg,
-        dst_gray_1ch_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        black_arg,
-        white_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    module.add_graph("mlri_admm_demosaic_1channel", g_gray_1ch.compile())
-
-    # 3. Half res green
-    g_half_res = ti.graph.GraphBuilder()
-    dst_half_res_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
-    g_half_res.dispatch(
-        _mlri_admm_green_half_res_fused_kernel,
-        bayer_arg,
-        dst_half_res_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        black_arg,
-        white_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    module.add_graph("mlri_admm_demosaic_half_res", g_half_res.compile())
-
-    # 4. Half res RGB
-    g_rgb_half_res = ti.graph.GraphBuilder()
-    dst_rgb_half_res_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
-    g_rgb_half_res.dispatch(
-        _mlri_admm_rgb_half_res_fused_kernel,
-        bayer_arg,
-        cmatrix_arg,
-        dst_rgb_half_res_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        black_arg,
-        white_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    module.add_graph("mlri_admm_demosaic_rgb_half_res", g_rgb_half_res.compile())
-
-    # 5. Full 3-channel grayscale
-    g_gray_3ch = ti.graph.GraphBuilder()
-    dst_gray_3ch_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
-    g_gray_3ch.dispatch(
-        _preprocess_bayer_kernel,
-        bayer_arg,
-        wb_bayer_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        black_arg,
-        white_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    g_gray_3ch.dispatch(
-        _bayer_bilateral_denoise_kernel,
-        wb_bayer_arg,
-        temp_a_arg,
-        h_arg,
-        w_arg,
-        denoise_strength_arg,
-    )
-    g_gray_3ch.dispatch(
-        _gbtf_green_interpolation_kernel,
-        temp_a_arg,
-        green_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    g_gray_3ch.dispatch(
-        _initial_color_difference_kernel,
-        temp_a_arg,
-        green_arg,
-        r_diff_arg,
-        b_diff_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    g_gray_3ch.dispatch(
-        _mlri_laplacian_coeff_kernel,
-        green_arg,
-        r_diff_arg,
-        temp_a_arg,
-        temp_b_arg,
-        h_arg,
-        w_arg,
-        eps_val,
-    )
-    g_gray_3ch.dispatch(
-        _guided_filter_apply_and_reconstruct_kernel,
-        green_arg,
-        temp_a_arg,
-        temp_b_arg,
-        r_diff_arg,
-        h_arg,
-        w_arg,
-    )
-    g_gray_3ch.dispatch(
-        _mlri_laplacian_coeff_kernel,
-        green_arg,
-        b_diff_arg,
-        temp_a_arg,
-        temp_b_arg,
-        h_arg,
-        w_arg,
-        eps_val,
-    )
-    g_gray_3ch.dispatch(
-        _guided_filter_apply_and_reconstruct_kernel,
-        green_arg,
-        temp_a_arg,
-        temp_b_arg,
-        b_diff_arg,
-        h_arg,
-        w_arg,
-    )
-    for _ in range(3):
-        dispatch_admm_step1(g_gray_3ch)
-        dispatch_admm_step2(g_gray_3ch)
-    if arch == ti.vulkan:
-        g_gray_3ch.dispatch(
-            _mlri_admm_to_grayscale_portable_kernel,
-            green_arg, r_diff_arg, b_diff_arg, dst_gray_3ch_arg,
-            *matrix_args,
-            wb_r_arg, wb_g1_arg, wb_b_arg, wb_g2_arg, h_arg, w_arg,
-        )
-    else:
-        g_gray_3ch.dispatch(
-            _mlri_admm_to_grayscale_3channel_kernel,
-            green_arg,
-            r_diff_arg,
-            b_diff_arg,
-            cmatrix_arg,
-            dst_gray_3ch_arg,
-            wb_r_arg,
-            wb_g1_arg,
-            wb_b_arg,
-            wb_g2_arg,
-            h_arg,
-            w_arg,
-        )
-    module.add_graph("mlri_admm_demosaic_3channel", g_gray_3ch.compile())
 
     module.archive(save_path)
     print(f"Successfully compiled and archived to: {save_path}")

@@ -4,15 +4,20 @@ os.environ["AOT_MODE"] = "0"
 import taichi as ti
 import sys
 
-file_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "aot_py"))
+file_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
-    sys.path.append(project_root)
+    sys.path.insert(0, project_root)
 
-try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
-except ImportError:
-    from aot_artifact import archive_module
+from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
+
+from taichi_library.taichi_algorithm.demosaicing.demosaic_aot_builder import (
+    register_arm_graphs,
+)
+from taichi_library.taichi_algorithm.demosaicing.demosaic_postprocess import (
+    median_filter_3x3_clamp,
+    rgb_to_bgr_i32,
+)
 
 @ti.func
 def _fast_gamma(x: ti.f32) -> ti.f32:
@@ -22,6 +27,12 @@ def _fast_gamma(x: ti.f32) -> ti.f32:
 @ti.func
 def _get_gain_fast(ym: ti.i32, xm: ti.i32, g00: ti.f32, g01: ti.f32, g10: ti.f32, g11: ti.f32) -> ti.f32:
     return ti.select(ym == 0, ti.select(xm == 0, g00, g01), ti.select(xm == 0, g10, g11))
+
+@ti.func
+def _sample_raw(bayer: ti.template(), r: ti.i32, c: ti.i32, black: ti.f32, inv_range: ti.f32, r_mod: ti.i32, c_mod: ti.i32, g00: ti.f32, g01: ti.f32, g10: ti.f32, g11: ti.f32) -> ti.f32:
+    val = ti.math.clamp((bayer[r, c] - black) * inv_range, 0.0, 1.0)
+    gain = _get_gain_fast(r_mod, c_mod, g00, g01, g10, g11)
+    return val * gain
 
 @ti.func
 def _get_green_gain(nr: ti.i32, nc: ti.i32, c00: ti.i32, c01: ti.i32, c10: ti.i32, c11: ti.i32, wb_g1: ti.f32, wb_g2: ti.f32) -> ti.f32:
@@ -67,44 +78,33 @@ def _arm_preprocess_and_green_interpolation_kernel(
         # Preprocess and Apply WB
         val = ti.math.clamp((bayer[r, c] - black) * inv_range, 0.0, 1.0)
         gain = _get_gain_fast(r_mod, c_mod, gain_c00, gain_c01, gain_c10, gain_c11)
-        wb_bayer[r, c] = val * gain
+        wb_val = val * gain
+        wb_bayer[r, c] = wb_val
 
-    # Interpolate Green channel using Laplacian soft-decision edge weights
-    for r, c in ti.ndrange(h, w):
-        r_mod = r % 2
-        c_mod = c % 2
-        color_idx = ti.select(r_mod == 0, ti.select(c_mod == 0, c00, c01), ti.select(c_mod == 0, c10, c11))
+        # Direct Green Channel Reconstruction
         is_green = (color_idx == 1) or (color_idx == 3)
-
         if is_green:
-            green[r, c] = wb_bayer[r, c]
+            green[r, c] = wb_val
         else:
             if r > 1 and r < h - 2 and c > 1 and c < w - 2:
-                # ARM Multi-scale directional gradients
-                dh = ti.abs(wb_bayer[r, c - 1] - wb_bayer[r, c + 1]) + ti.abs(2.0 * wb_bayer[r, c] - wb_bayer[r, c - 2] - wb_bayer[r, c + 2])
-                dv = ti.abs(wb_bayer[r - 1, c] - wb_bayer[r + 1, c]) + ti.abs(2.0 * wb_bayer[r, c] - wb_bayer[r - 2, c] - wb_bayer[r + 2, c])
+                p_c = wb_val
+                p_l1, p_r1 = _sample_raw(bayer, r, c - 1, black, inv_range, r_mod, 1 - c_mod, gain_c00, gain_c01, gain_c10, gain_c11), _sample_raw(bayer, r, c + 1, black, inv_range, r_mod, 1 - c_mod, gain_c00, gain_c01, gain_c10, gain_c11)
+                p_l2, p_r2 = _sample_raw(bayer, r, c - 2, black, inv_range, r_mod, c_mod, gain_c00, gain_c01, gain_c10, gain_c11), _sample_raw(bayer, r, c + 2, black, inv_range, r_mod, c_mod, gain_c00, gain_c01, gain_c10, gain_c11)
+                p_u1, p_d1 = _sample_raw(bayer, r - 1, c, black, inv_range, 1 - r_mod, c_mod, gain_c00, gain_c01, gain_c10, gain_c11), _sample_raw(bayer, r + 1, c, black, inv_range, 1 - r_mod, c_mod, gain_c00, gain_c01, gain_c10, gain_c11)
+                p_u2, p_d2 = _sample_raw(bayer, r - 2, c, black, inv_range, r_mod, c_mod, gain_c00, gain_c01, gain_c10, gain_c11), _sample_raw(bayer, r + 2, c, black, inv_range, r_mod, c_mod, gain_c00, gain_c01, gain_c10, gain_c11)
 
-                # Soft decision weights
+                dh = ti.abs(p_l1 - p_r1) + ti.abs(2.0 * p_c - p_l2 - p_r2)
+                dv = ti.abs(p_u1 - p_d1) + ti.abs(2.0 * p_c - p_u2 - p_d2)
+
                 eps = 1e-6
-                dh_sq = dh * dh
-                dv_sq = dv * dv
-                w_h = dv_sq / (dh_sq + dv_sq + eps)
+                w_h = (dv * dv) / (dh * dh + dv * dv + eps)
                 w_v = 1.0 - w_h
 
-                # Edge-directed interpolations
-                g_h = (wb_bayer[r, c - 1] + wb_bayer[r, c + 1]) * 0.5 + (2.0 * wb_bayer[r, c] - wb_bayer[r, c - 2] - wb_bayer[r, c + 2]) * 0.25
-                g_v = (wb_bayer[r - 1, c] + wb_bayer[r + 1, c]) * 0.5 + (2.0 * wb_bayer[r, c] - wb_bayer[r - 2, c] - wb_bayer[r + 2, c]) * 0.25
+                g_h = (p_l1 + p_r1) * 0.5 + (2.0 * p_c - p_l2 - p_r2) * 0.25
+                g_v = (p_u1 + p_d1) * 0.5 + (2.0 * p_c - p_u2 - p_d2) * 0.25
                 green[r, c] = w_h * g_h + w_v * g_v
             else:
-                # Boundary pixels fallback
-                g_val = 0.0
-                g_count = 0.0
-                for dr, dc in ti.static([(-1, 0), (1, 0), (0, -1), (0, 1)]):
-                    nr, nc = r + dr, c + dc
-                    if nr >= 0 and nr < h and nc >= 0 and nc < w:
-                        g_val += wb_bayer[nr, nc]
-                        g_count += 1.0
-                green[r, c] = g_val / g_count
+                green[r, c] = wb_val
 
 @ti.kernel
 def _arm_red_blue_residual_kernel(
@@ -177,27 +177,6 @@ def _arm_red_blue_residual_kernel(
         b_diff[r, c] = B - G
 
 @ti.kernel
-def _arm_median_filter_3x3_kernel(
-    src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int
-):
-    """Highly optimized 3x3 Median Filter on difference residual channels"""
-    for y, x in ti.ndrange(h, w):
-        vals = ti.Vector([0.0] * 9)
-        idx = 0
-        for dy in ti.static(range(-1, 2)):
-            for dx in ti.static(range(-1, 2)):
-                ny = ti.math.clamp(y + dy, 0, h - 1)
-                nx = ti.math.clamp(x + dx, 0, w - 1)
-                vals[idx] = src[ny, nx]
-                idx += 1
-        # In-register sort
-        for i in range(9):
-            for j in range(i + 1, 9):
-                if vals[j] < vals[i]:
-                    vals[i], vals[j] = vals[j], vals[i]
-        dst[y, x] = vals[4]
-
-@ti.kernel
 def _arm_reconstruct_and_postprocess_kernel(
     green: ti.types.ndarray(),
     r_diff_filtered: ti.types.ndarray(),
@@ -240,16 +219,37 @@ def _arm_reconstruct_and_postprocess_kernel(
 
         final_factor = factor * chroma_damage
 
-        neutral = (R + G + B) / 3.0
-        R = R * (1.0 - final_factor) + neutral * final_factor
-        G = G * (1.0 - final_factor) + neutral * final_factor
-        B = B * (1.0 - final_factor) + neutral * final_factor
+        L = ti.max(R, ti.max(G, B))
+        R = R * (1.0 - final_factor) + L * final_factor
+        G = G * (1.0 - final_factor) + L * final_factor
+        B = B * (1.0 - final_factor) + L * final_factor
 
-        # Return white-balanced camera RGB. Color conversion and display tone
-        # mapping are separate downstream modules.
-        dst[r, c, 0] = ti.max(R, 0.0)
-        dst[r, c, 1] = ti.max(G, 0.0)
-        dst[r, c, 2] = ti.max(B, 0.0)
+        # Algebraic Sigmoid Dynamic Range Compression
+        dst[r, c, 0] = R / ti.math.sqrt(1.0 + R * R)
+        dst[r, c, 1] = G / ti.math.sqrt(1.0 + G * G)
+        dst[r, c, 2] = B / ti.math.sqrt(1.0 + B * B)
+
+
+@ti.kernel
+def _arm_srgb_tonemap(
+    src_linear: ti.types.ndarray(),
+    cmatrix: ti.types.ndarray(),
+    dst_srgb: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+):
+    for r, c in ti.ndrange(h, w):
+        R = src_linear[r, c, 0]
+        G = src_linear[r, c, 1]
+        B = src_linear[r, c, 2]
+
+        sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
+        sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
+        sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
+
+        dst_srgb[r, c, 0] = ti.math.pow(ti.math.clamp(sR, 0.0, 1.0), 1.0 / 2.22)
+        dst_srgb[r, c, 1] = ti.math.pow(ti.math.clamp(sG, 0.0, 1.0), 1.0 / 2.22)
+        dst_srgb[r, c, 2] = ti.math.pow(ti.math.clamp(sB, 0.0, 1.0), 1.0 / 2.22)
 
 @ti.kernel
 def _pure_arm_demosaic_kernel(
@@ -494,138 +494,26 @@ def _arm_rgb_half_res_fused_kernel(
         dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
         dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
 
-@ti.kernel
-def _rgb_to_bgr_i32_kernel(
-    src: ti.types.ndarray(dtype=ti.f32, ndim=3),
-    dst: ti.types.ndarray(dtype=ti.i32, ndim=3),
-    h: ti.i32,
-    w: ti.i32,
-):
-    for r, c in ti.ndrange(h, w):
-        val_r = ti.math.clamp(src[r, c, 0] * 65535.0 + 0.5, 0.0, 65535.0)
-        val_g = ti.math.clamp(src[r, c, 1] * 65535.0 + 0.5, 0.0, 65535.0)
-        val_b = ti.math.clamp(src[r, c, 2] * 65535.0 + 0.5, 0.0, 65535.0)
-
-        dst[r, c, 0] = ti.cast(ti.round(val_b), ti.i32)
-        dst[r, c, 1] = ti.cast(ti.round(val_g), ti.i32)
-        dst[r, c, 2] = ti.cast(ti.round(val_r), ti.i32)
-
 def compile_arm_tcm(arch=ti.vulkan, save_path="arm_vulkan.tcm"):
     print(f"\n>>> Compiling ARM Demosaice AOT for: {arch}")
     ti.init(arch=arch, offline_cache=False)
     module = ti.aot.Module(arch)
-    
-    # Graphs argument declarations
-    bayer_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "bayer", ti.f32, ndim=2)
-    cmatrix_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "cmatrix", ti.f32, ndim=2)
-    dst_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
-    
-    wb_bayer_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "wb_bayer", ti.f32, ndim=2)
-    green_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "green", ti.f32, ndim=2)
-    r_diff_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "r_diff", ti.f32, ndim=2)
-    b_diff_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b_diff", ti.f32, ndim=2)
-    r_diff_f_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "r_diff_filtered", ti.f32, ndim=2)
-    b_diff_f_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b_diff_filtered", ti.f32, ndim=2)
 
-    wb_r_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_r", ti.f32)
-    wb_g1_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_g1", ti.f32)
-    wb_b_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_b", ti.f32)
-    wb_g2_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_g2", ti.f32)
-    black_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "black", ti.f32)
-    white_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "white", ti.f32)
-
-    h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
-    w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
-
-    c00_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c00", ti.i32)
-    c01_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c01", ti.i32)
-    c10_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c10", ti.i32)
-    c11_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c11", ti.i32)
-
-    # 1. arm_demosaic Graph (3-Pass Fused)
-    g_arm = ti.graph.GraphBuilder()
-    g_arm.dispatch(
-        _arm_preprocess_and_green_interpolation_kernel,
-        bayer_arg, wb_bayer_arg, green_arg,
-        wb_r_arg, wb_g1_arg, wb_b_arg, wb_g2_arg,
-        black_arg, white_arg, h_arg, w_arg,
-        c00_arg, c01_arg, c10_arg, c11_arg
+    register_arm_graphs(
+        module,
+        kernels={
+            "preprocess_green": _arm_preprocess_and_green_interpolation_kernel,
+            "red_blue_residual": _arm_red_blue_residual_kernel,
+            "median3x3": median_filter_3x3_clamp,
+            "reconstruct_postprocess": _arm_reconstruct_and_postprocess_kernel,
+            "srgb_tonemap": _arm_srgb_tonemap,
+            "pure": _pure_arm_demosaic_kernel,
+            "green_1ch": _arm_green_to_grayscale_1channel_fused_kernel,
+            "green_half_res": _arm_green_half_res_fused_kernel,
+            "rgb_half_res": _arm_rgb_half_res_fused_kernel,
+            "rgb_to_bgr_i32": rgb_to_bgr_i32,
+        },
     )
-    g_arm.dispatch(
-        _arm_red_blue_residual_kernel,
-        wb_bayer_arg, green_arg, r_diff_arg, b_diff_arg,
-        h_arg, w_arg, c00_arg, c01_arg, c10_arg, c11_arg
-    )
-    g_arm.dispatch(
-        _arm_median_filter_3x3_kernel,
-        r_diff_arg, r_diff_f_arg, h_arg, w_arg
-    )
-    g_arm.dispatch(
-        _arm_median_filter_3x3_kernel,
-        b_diff_arg, b_diff_f_arg, h_arg, w_arg
-    )
-    g_arm.dispatch(
-        _arm_reconstruct_and_postprocess_kernel,
-        green_arg, r_diff_f_arg, b_diff_f_arg, cmatrix_arg, dst_arg,
-        wb_r_arg, wb_g1_arg, wb_b_arg, wb_g2_arg, h_arg, w_arg
-    )
-    module.add_graph("arm_demosaic", g_arm.compile())
-    
-    # 2. pure_arm_demosaic Graph
-    g_pure = ti.graph.GraphBuilder()
-    g_pure.dispatch(
-        _pure_arm_demosaic_kernel,
-        bayer_arg, dst_arg, black_arg, white_arg,
-        h_arg, w_arg, c00_arg, c01_arg, c10_arg, c11_arg
-    )
-    module.add_graph("pure_arm_demosaic", g_pure.compile())
-    
-    # 3. arm_demosaic_1channel Graph
-    g_gray_1ch = ti.graph.GraphBuilder()
-    dst_gray_1ch_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
-    g_gray_1ch.dispatch(
-        _arm_green_to_grayscale_1channel_fused_kernel,
-        bayer_arg, dst_gray_1ch_arg,
-        wb_r_arg, wb_g1_arg, wb_b_arg, wb_g2_arg,
-        black_arg, white_arg, h_arg, w_arg,
-        c00_arg, c01_arg, c10_arg, c11_arg
-    )
-    module.add_graph("arm_demosaic_1channel", g_gray_1ch.compile())
-
-    # 4. arm_demosaic_half_res Graph
-    g_half_res = ti.graph.GraphBuilder()
-    dst_half_res_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
-    g_half_res.dispatch(
-        _arm_green_half_res_fused_kernel,
-        bayer_arg, dst_half_res_arg,
-        wb_r_arg, wb_g1_arg, wb_b_arg, wb_g2_arg,
-        black_arg, white_arg, h_arg, w_arg,
-        c00_arg, c01_arg, c10_arg, c11_arg
-    )
-    module.add_graph("arm_demosaic_half_res", g_half_res.compile())
-
-    # 5. arm_demosaic_rgb_half_res Graph
-    g_rgb_half_res = ti.graph.GraphBuilder()
-    dst_rgb_half_res_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
-    g_rgb_half_res.dispatch(
-        _arm_rgb_half_res_fused_kernel,
-        bayer_arg, cmatrix_arg, dst_rgb_half_res_arg,
-        wb_r_arg, wb_g1_arg, wb_b_arg, wb_g2_arg,
-        black_arg, white_arg, h_arg, w_arg,
-        c00_arg, c01_arg, c10_arg, c11_arg
-    )
-    module.add_graph("arm_demosaic_rgb_half_res", g_rgb_half_res.compile())
-
-    # 6. rgb_to_bgr_i32 Graph
-    g_conv = ti.graph.GraphBuilder()
-    src_conv_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
-    dst_conv_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=3)
-    h_conv_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
-    w_conv_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
-    g_conv.dispatch(
-        _rgb_to_bgr_i32_kernel, src_conv_arg, dst_conv_arg, h_conv_arg, w_conv_arg
-    )
-    module.add_graph("rgb_to_bgr_i32", g_conv.compile())
 
     archive_module(module, save_path)
     print(f"Successfully compiled ARM and archived to: {save_path}")

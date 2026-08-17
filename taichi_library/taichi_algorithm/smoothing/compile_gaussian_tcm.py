@@ -19,7 +19,15 @@ except ImportError:  # Direct script execution.
     from aot_artifact import normalize_tcm
 
 def compile_gaussian_tcm():
-    arch_str = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan").lower()
+    # The suite worker sets AOT_ARCH/TARGET_BACKEND.  Prefer the explicit
+    # project override, then those worker markers, so a CPU migration can
+    # never silently emit a Vulkan archive into a CPU-qualified directory.
+    arch_str = (
+        os.environ.get("PIXEL_REFINE_AOT_ARCH")
+        or os.environ.get("TARGET_BACKEND")
+        or os.environ.get("AOT_ARCH")
+        or "vulkan"
+    ).lower()
     arch = ti.vulkan
     if arch_str == "cuda": arch = ti.cuda
     elif arch_str == "cpu": arch = ti.x64
@@ -29,7 +37,10 @@ def compile_gaussian_tcm():
     print(f"\n>>> Compiling GAUSSIAN BLUR AOT for: {arch}")
     ti.init(arch=arch, offline_cache=False)
     
-    save_dir = os.path.join(file_dir, "../aot_tcm")
+    save_dir = os.environ.get(
+        "PIXEL_REFINE_AOT_TCM_ROOT",
+        os.path.join(file_dir, "../aot_tcm"),
+    )
     os.makedirs(save_dir, exist_ok=True)
     suffix = "vulkan"
     if arch == ti.cuda: suffix = "cuda"

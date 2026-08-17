@@ -13,6 +13,24 @@ from typing import Callable, Iterable, Any
 import gc
 
 
+class PipelineCancelledError(RuntimeError):
+    """Raised when a cooperative block-pipeline cancellation is requested."""
+
+    def __init__(self, stage_index: int = 0):
+        self.stage_index = int(stage_index)
+        self.reason = "cancel_check"
+        super().__init__(f"block pipeline cancelled before stage {self.stage_index}")
+
+    def as_dict(self) -> dict[str, object]:
+        """Return bounded, JSON-safe cancellation telemetry for UI/logging."""
+
+        return {
+            "cancelled": True,
+            "stage_index": self.stage_index,
+            "reason": self.reason,
+        }
+
+
 @dataclass(frozen=True)
 class PipelineStage:
     name: str
@@ -27,7 +45,8 @@ class PipelineStage:
 
 def run_block_pipeline(source, stages: Iterable[PipelineStage], *,
                        block_size: int | None = None,
-                       threshold_bytes: int | None = None):
+                       threshold_bytes: int | None = None,
+                       cancel_check: Callable[[], bool] | None = None):
     """Run a dependency-ordered pipeline through safe block-capable APIs.
 
     The scheduler is deliberately host-array based: this avoids mixing native
@@ -35,6 +54,10 @@ def run_block_pipeline(source, stages: Iterable[PipelineStage], *,
     their own halo and full-frame policy, while this function controls memory
     pressure and stage ordering.
     """
+    if cancel_check is not None and not callable(cancel_check):
+        raise TypeError("cancel_check must be callable or None")
+    if cancel_check is not None and bool(cancel_check()):
+        raise PipelineCancelledError(0)
     import taichi_library.taichi_aot as aot
     memory = aot.get_memory_status()
     if block_size is None:
@@ -48,7 +71,9 @@ def run_block_pipeline(source, stages: Iterable[PipelineStage], *,
                        threshold_bytes=int(threshold_bytes))
     value = source
     try:
-        for stage in stages:
+        for stage_index, stage in enumerate(stages):
+            if cancel_check is not None and bool(cancel_check()):
+                raise PipelineCancelledError(stage_index)
             if not isinstance(stage, PipelineStage):
                 raise TypeError("stages must contain PipelineStage values")
             next_value = stage.operation(value)

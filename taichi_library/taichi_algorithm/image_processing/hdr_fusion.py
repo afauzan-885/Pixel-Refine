@@ -260,6 +260,23 @@ def _compute_laplacian(gray_np):
     return np.abs(lap).astype(np.float32)
 
 
+def _estimate_noise_sigma(gray_np):
+    """Estimate sensor noise locally without depending on spatial-weight."""
+
+    gray = np.asarray(gray_np, dtype=np.float32)
+    if gray.size == 0 or gray.ndim != 2 or min(gray.shape) < 3:
+        return 0.015
+    padded = np.pad(gray, 1, mode="reflect")
+    lap = (
+        padded[:-2, 1:-1] + padded[1:-1, :-2]
+        - 4.0 * padded[1:-1, 1:-1]
+        + padded[1:-1, 2:] + padded[2:, 1:-1]
+    )
+    median = np.median(lap)
+    sigma = np.median(np.abs(lap - median)) * 1.4826
+    return float(np.clip(sigma, 1e-5, 0.99999))
+
+
 def _build_gaussian_pyramid_3ch(img_gpu, n_levels):
     """Build Gaussian pyramid for 3-channel image. Returns list of GPU buffers."""
     pyramid = [img_gpu]
@@ -358,7 +375,7 @@ def hdr_fuse(
         detail_power: Power for contrast/detail weight (default 1.0).
         saturation_power: Power for saturation weight (default 1.0).
         n_levels: Number of pyramid levels (auto-calculated if None).
-        noise_estimator: NoiseEstimator instance for caching.
+        noise_estimator: Optional external estimator with an ``estimate`` method.
 
     Returns:
         Fused image (H, W, 3) or (H, W) float32 in [0, 1].
@@ -390,7 +407,6 @@ def hdr_fuse(
             if noise_estimator is not None:
                 sigma = noise_estimator.estimate(gray)
             else:
-                from .compute_spatial import _estimate_noise_sigma
                 sigma = _estimate_noise_sigma(gray)
             noise_sigmas.append(sigma)
 

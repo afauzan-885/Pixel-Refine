@@ -189,7 +189,21 @@ from .block_adapters import (
     verify_normalize_image_parity,
     verify_output_domain_parity,
     verify_map_reduce_parity,
+    GLOBAL_REDUCTION_CONTRACT_OPERATIONS,
+    global_reduction_partition_gap_report,
+    ITERATIVE_FEATURE_GAP_OPERATIONS,
+    iterative_feature_gap_report,
     optical_flow_partition_gap_report,
+    FEATURE_GEOMETRY_CONTRACT_OPERATIONS,
+    feature_geometry_partition_gap_report,
+    validate_homography_correspondence_contract,
+    bm3d_partition_gap_report,
+    moving_optical_flow_partition_gap_report,
+    verify_moving_flow_translation_contract,
+    aggregate_moving_flow_candidate_evidence,
+    aggregate_native_moving_flow_candidates,
+    qualify_native_moving_flow_candidates,
+    local_stencil_contract_report,
 )
 from .native_evidence import (
     NativePartitionEvidence,
@@ -207,6 +221,14 @@ from .native_evidence import (
     register_verified_native_opengl_stencil_evidence,
     register_verified_native_opengl_partition_evidence,
     register_verified_native_opengl_intel_evidence,
+)
+from .descriptor_parity import (
+    match_binary_descriptors_reference,
+    verify_binary_descriptor_partition_parity,
+    ratio_test_binary_descriptors_reference,
+    cross_check_binary_descriptors_reference,
+    ratio_cross_check_binary_descriptors_reference,
+    verify_binary_descriptor_matching_partition_parity,
 )
 from .generic_block import (
     BlockComputeSpec,

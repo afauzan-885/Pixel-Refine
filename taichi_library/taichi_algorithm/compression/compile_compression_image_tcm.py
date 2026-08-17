@@ -3,6 +3,12 @@ import os
 import sys
 from pathlib import Path
 
+# Compiler workers must load kernel definitions without constructing the
+# native AOT bridge first.  The public wrapper uses this project-specific flag
+# (AOT_COMPILE_ONLY alone is a legacy suite-level marker) to avoid claiming an
+# OpenGL context before Taichi's compiler initializes it.
+os.environ.setdefault("PIXEL_REFINE_AOT_COMPILE_ONLY", "1")
+
 import taichi as ti
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -19,7 +25,13 @@ from taichi_library.taichi_algorithm.compression.kernels import (
     quantize_dct_chroma_blocks_kernel,
     subsample_422_kernel,
     subsample_420_kernel,
+    subsample_chroma_422_pair_kernel,
+    subsample_chroma_420_pair_kernel,
+    rgb_to_ycbcr_422_pair_kernel,
+    rgb_to_ycbcr_420_pair_kernel,
     rgb_to_ycbcr_kernel,
+    webp_prepare_argb_kernel,
+    webp_histogram_argb_kernel,
     zigzag_blocks_kernel,
     dc_difference_kernel,
     ac_rle_kernel,
@@ -28,7 +40,16 @@ from taichi_library.taichi_algorithm.compression.kernels import (
     jpeg_symbol_histogram_kernel,
     canonical_huffman_codes_kernel,
     jpeg_pack_block_bits_kernel,
+    jpeg_pack_block_bytes_flat2d_kernel,
+    jpeg_scatter_block_bits_kernel,
     jpeg_bits_to_bytes_kernel,
+    jpeg_quantize_dct_zigzag_flat2d_kernel,
+    jpeg_prepare_tokens_flat2d_kernel,
+    png_filter_rows_kernel,
+    dng_delta_rows_kernel,
+    dng_undelta_rows_kernel,
+    hevc_dc_level_kernel,
+    av1_dc_predict_residual_4x4_kernel,
 )
 
 
@@ -94,13 +115,16 @@ def _zigzag_blocks_flat2d_kernel(src: ti.types.ndarray(dtype=ti.f32, ndim=2), ds
 
 @ti.kernel
 def _dc_difference_flat2d_kernel(zigzag: ti.types.ndarray(dtype=ti.f32, ndim=2), dc_diff: ti.types.ndarray(dtype=ti.f32, ndim=1), h_blocks: ti.i32, w_blocks: ti.i32):
-    previous = 0.0
     for index in range(h_blocks * w_blocks):
         by = index // w_blocks
         bx = index - by * w_blocks
         current = zigzag[by, bx * 64]
+        previous = 0.0
+        if index > 0:
+            previous_by = (index - 1) // w_blocks
+            previous_bx = (index - 1) - previous_by * w_blocks
+            previous = zigzag[previous_by, previous_bx * 64]
         dc_diff[index] = current - previous
-        previous = current
 
 
 @ti.kernel
@@ -127,9 +151,15 @@ def _ac_rle_flat2d_kernel(zigzag: ti.types.ndarray(dtype=ti.f32, ndim=2), runs: 
                 values[by, base + count] = value
                 count += 1
                 run = 0
-        runs[by, base + count] = 0
-        values[by, base + count] = 0
-        token_count[by, bx] = count + 1
+        # Omit EOB when the last non-zero coefficient already occupies AC
+        # position 63; otherwise the decoder consumes the EOB as the next
+        # block's header.  For trailing zeros (or an all-zero AC block), EOB
+        # remains required by the JPEG scan syntax.
+        if run > 0 or count == 0:
+            runs[by, base + count] = 0
+            values[by, base + count] = 0
+            count += 1
+        token_count[by, bx] = count
 
 
 @ti.kernel
@@ -218,10 +248,28 @@ def compile_compression(arch=ti.cpu, output: str | None = None) -> str:
                 "cuda": "cuda_x86_64_windows_nvidia" if os.name == "nt" else "cuda_arm64_linux_nvidia",
             }
             target_id = defaults[backend_name]
+        # The family compiler is also invoked by the target-suite launcher
+        # with only PIXEL_REFINE_TARGET_VARIANT set.  Select the matching
+        # Taichi backend before ti.init; writing a Vulkan/OpenGL archive from
+        # the default CPU arch would create a target-named but invalid TCM.
+        target_backend = target_id.split("_", 1)[0].lower()
+        target_arch = {
+            "cpu": ti.cpu,
+            "vulkan": ti.vulkan,
+            "opengl": ti.opengl,
+            "gles": ti.gles,
+            "cuda": ti.cuda,
+        }.get(target_backend)
+        if target_arch is not None and arch == ti.cpu and target_backend != "cpu":
+            arch = target_arch
         output = Path(__file__).parents[1] / "aot_tcm" / target_id / f"compression_image_{target_id}.tcm"
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ti.init(arch=arch, offline_cache=False)
+    actual_arch = ti.lang.impl.current_cfg().arch
+    if actual_arch != arch:
+        ti.reset()
+        raise RuntimeError(f"requested {arch}, but Taichi initialized {actual_arch}; refusing a mislabeled compression TCM")
     compression_kernels.JPEG_QUALITY_TABLE_FIELD = ti.field(dtype=ti.f32, shape=64)
     compression_kernels.JPEG_CHROMA_TABLE_FIELD = ti.field(dtype=ti.f32, shape=64)
     compression_kernels.JPEG_ZIGZAG_FIELD = ti.field(dtype=ti.i32, shape=64)
@@ -240,6 +288,27 @@ def compile_compression(arch=ti.cpu, output: str | None = None) -> str:
     builder = ti.graph.GraphBuilder()
     builder.dispatch(rgb_to_ycbcr_kernel, rgb, ycbcr, h, w)
     module.add_graph("compression_rgb_to_ycbcr", builder.compile())
+
+    fused_y = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "y_dst", ti.f32, ndim=2)
+    fused_chroma = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "chroma_dst", ti.f32, ndim=3)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(rgb_to_ycbcr_422_pair_kernel, rgb, fused_y, fused_chroma, h, w)
+    module.add_graph("compression_rgb_to_ycbcr_422_pair", builder.compile())
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(rgb_to_ycbcr_420_pair_kernel, rgb, fused_y, fused_chroma, h, w)
+    module.add_graph("compression_rgb_to_ycbcr_420_pair", builder.compile())
+
+    webp_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
+    webp_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
+    webp_channels = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "channels", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(webp_prepare_argb_kernel, webp_src, webp_dst, h, w, webp_channels)
+    module.add_graph("compression_webp_prepare_argb", builder.compile())
+
+    webp_hist = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "hist", ti.i32, ndim=2)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(webp_histogram_argb_kernel, webp_src, webp_hist, h, w)
+    module.add_graph("compression_webp_histogram_argb", builder.compile())
 
     plane = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
     blocks = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
@@ -263,6 +332,11 @@ def compile_compression(arch=ti.cpu, output: str | None = None) -> str:
     builder.dispatch(_quantize_dct_chroma_blocks_flat2d_kernel, plane, blocks_2d, quant_table, basis, hb, wb)
     module.add_graph("compression_jpeg_dct_quantize_chroma_2d", builder.compile())
 
+    dct_order_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "order", ti.i32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(jpeg_quantize_dct_zigzag_flat2d_kernel, plane, blocks_2d, quant_table, basis, dct_order_2d, hb, wb)
+    module.add_graph("compression_jpeg_dct_quantize_zigzag_2d", builder.compile())
+
     subsample_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
     subsample_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
     builder = ti.graph.GraphBuilder()
@@ -271,6 +345,15 @@ def compile_compression(arch=ti.cpu, output: str | None = None) -> str:
     builder = ti.graph.GraphBuilder()
     builder.dispatch(subsample_420_kernel, subsample_src, subsample_dst, h, w)
     module.add_graph("compression_jpeg_subsample_420", builder.compile())
+
+    chroma_pair_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
+    chroma_pair_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(subsample_chroma_422_pair_kernel, chroma_pair_src, chroma_pair_dst, h, w)
+    module.add_graph("compression_jpeg_subsample_422_pair", builder.compile())
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(subsample_chroma_420_pair_kernel, chroma_pair_src, chroma_pair_dst, h, w)
+    module.add_graph("compression_jpeg_subsample_420_pair", builder.compile())
 
     zigzag = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
     ordered = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
@@ -304,6 +387,16 @@ def compile_compression(arch=ti.cpu, output: str | None = None) -> str:
     builder = ti.graph.GraphBuilder()
     builder.dispatch(_ac_symbol_flat2d_kernel, runs_2d, values_2d, symbols_2d, categories_2d, amplitudes_2d, counts_2d, hb, wb)
     module.add_graph("compression_jpeg_ac_symbols_2d", builder.compile())
+
+    token_ordered_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ordered", ti.f32, ndim=2)
+    token_dc_diff_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dc_diff", ti.f32, ndim=1)
+    token_symbols_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "symbols", ti.i32, ndim=2)
+    token_categories_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "categories", ti.i32, ndim=2)
+    token_amplitudes_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "amplitudes", ti.i32, ndim=2)
+    token_counts_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "token_count", ti.i32, ndim=2)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(jpeg_prepare_tokens_flat2d_kernel, token_ordered_2d, token_dc_diff_2d, token_symbols_2d, token_categories_2d, token_amplitudes_2d, token_counts_2d, hb, wb)
+    module.add_graph("compression_jpeg_prepare_tokens_2d", builder.compile())
 
     dc_histogram_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dc_histogram", ti.i32, ndim=1)
     ac_histogram_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ac_histogram", ti.i32, ndim=1)
@@ -376,6 +469,72 @@ def compile_compression(arch=ti.cpu, output: str | None = None) -> str:
     builder.dispatch(jpeg_bits_to_bytes_kernel, packed_bits, packed_bit_count, output_bytes, output_count, hb, wb, max_output_bytes)
     module.add_graph("compression_jpeg_bits_to_bytes", builder.compile())
 
+    png_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=2)
+    png_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=2)
+    png_filter_types = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "filter_types", ti.i32, ndim=1)
+    png_height = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "height", ti.i32)
+    png_row_bytes = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "row_bytes", ti.i32)
+    png_bpp = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bytes_per_pixel", ti.i32)
+    png_filter_selector = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "filter_selector", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        png_filter_rows_kernel,
+        png_src,
+        png_dst,
+        png_filter_types,
+        png_height,
+        png_row_bytes,
+        png_bpp,
+        png_filter_selector,
+    )
+    module.add_graph("compression_png_filter_rows", builder.compile())
+
+    dng_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=2)
+    dng_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=2)
+    dng_height = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "height", ti.i32)
+    dng_width = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "width", ti.i32)
+    dng_modulus = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "modulus", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(dng_delta_rows_kernel, dng_src, dng_dst, dng_height, dng_width, dng_modulus)
+    module.add_graph("compression_dng_delta_rows", builder.compile())
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(dng_undelta_rows_kernel, dng_src, dng_dst, dng_height, dng_width, dng_modulus)
+    module.add_graph("compression_dng_undelta_rows", builder.compile())
+
+    hevc_residuals = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "residuals", ti.i32, ndim=1)
+    hevc_levels = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "levels", ti.i32, ndim=1)
+    hevc_count = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    hevc_block_size = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "block_size", ti.i32)
+    hevc_level_divisor = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "level_divisor", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        hevc_dc_level_kernel,
+        hevc_residuals,
+        hevc_levels,
+        hevc_count,
+        hevc_block_size,
+        hevc_level_divisor,
+    )
+    module.add_graph("compression_hevc_dc_levels", builder.compile())
+
+    av1_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.i32, ndim=2)
+    av1_residual = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "residual", ti.i32, ndim=2)
+    av1_reconstructed = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "reconstructed", ti.i32, ndim=2
+    )
+    av1_height = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "height", ti.i32)
+    av1_width = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "width", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        av1_dc_predict_residual_4x4_kernel,
+        av1_src,
+        av1_residual,
+        av1_reconstructed,
+        av1_height,
+        av1_width,
+    )
+    module.add_graph("compression_av1_dc_predict_residual_4x4", builder.compile())
+
     bits_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "bits", ti.i32, ndim=2)
     bit_count_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "bit_count", ti.i32, ndim=2)
     pack_ac_symbols_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ac_symbols", ti.i32, ndim=2)
@@ -385,6 +544,31 @@ def compile_compression(arch=ti.cpu, output: str | None = None) -> str:
     builder = ti.graph.GraphBuilder()
     builder.dispatch(_jpeg_pack_block_bits_flat2d_kernel, dc_diff_2d, pack_ac_symbols_2d, pack_ac_categories_2d, pack_ac_amplitudes_2d, pack_ac_counts_2d, dc_codes_pack, dc_lengths_pack, ac_codes_pack, ac_lengths_pack, bits_2d, bit_count_2d, hb, wb, max_output_bits)
     module.add_graph("compression_jpeg_pack_bits_2d", builder.compile())
+
+    raw_output_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=2)
+    raw_output_count_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output_count", ti.i32, ndim=2)
+    max_output_bytes_2d = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "max_output_bytes", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(jpeg_pack_block_bytes_flat2d_kernel, dc_diff_2d, pack_ac_symbols_2d, pack_ac_categories_2d, pack_ac_amplitudes_2d, pack_ac_counts_2d, dc_codes_pack, dc_lengths_pack, ac_codes_pack, ac_lengths_pack, raw_output_2d, raw_output_count_2d, hb, wb, max_output_bytes_2d)
+    module.add_graph("compression_jpeg_pack_bytes_2d", builder.compile())
+
+    scatter_block_bytes = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "block_bytes", ti.i32, ndim=2)
+    scatter_block_counts = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "block_counts", ti.i32, ndim=1)
+    scatter_offsets = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "bit_offsets", ti.i32, ndim=1)
+    scatter_output_bits = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output_bits", ti.i32, ndim=1)
+    scatter_block_count = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "block_count", ti.i32)
+    scatter_max_output_bytes = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "max_output_bytes", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        jpeg_scatter_block_bits_kernel,
+        scatter_block_bytes,
+        scatter_block_counts,
+        scatter_offsets,
+        scatter_output_bits,
+        scatter_block_count,
+        scatter_max_output_bytes,
+    )
+    module.add_graph("compression_jpeg_scatter_block_bits", builder.compile())
 
     module.archive(str(output_path))
     ti.reset()

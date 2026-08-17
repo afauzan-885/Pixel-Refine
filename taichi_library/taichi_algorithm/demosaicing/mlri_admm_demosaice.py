@@ -41,6 +41,9 @@ def mlri_admm_demosaic(
     )
     return res_buf
 
+mlri_admm = mlri_admm_demosaic
+
+
 
 def mlri_admm_demosaic_1channel(
     bayer, wb_r, wb_g1, wb_b, wb_g2,

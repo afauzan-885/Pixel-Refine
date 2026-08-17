@@ -305,7 +305,7 @@ def poisson_reconstruct(
     normals = np.ascontiguousarray(normals.astype(np.float32))
 
     # Normalize normals
-    norms = np.linalg.norm(norms, axis=1, keepdims=True)
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
     norms = np.maximum(norms, 1e-10)
     normals = normals / norms
 

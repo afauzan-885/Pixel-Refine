@@ -1,0 +1,2 @@
+cgraph:normalize_f32_to_vec3
+cgraph:normalize_vec3_f32_to_vec3_f32

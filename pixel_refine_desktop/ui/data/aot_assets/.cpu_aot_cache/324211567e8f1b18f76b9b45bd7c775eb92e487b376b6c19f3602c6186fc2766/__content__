@@ -1,0 +1,7 @@
+cgraph:precompute_gradients
+cgraph:equalize_brightness
+cgraph:phase1_coarse_analysis
+cgraph:phase2_fine_analysis
+cgraph:accumulate_spatial_merging
+cgraph:fine_analysis_and_accumulate
+cgraph:generate_fine_weights_4passes

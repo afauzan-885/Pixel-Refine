@@ -25,14 +25,12 @@ Modul taichi_algorithm yang dipanggil (reuse):
   - ta.cvtColor() / ta.cvtColor_extended(): color conversion
   - ta.farneback_flow(): optical flow alignment
   - ta.phase_correlation(): global motion estimation
-  - ta.compute_spatial_weight(): ghost rejection
   - ta.build_image_pyramid(): multi-scale processing
   - ta.resize(): scaling (bilinear, bicubic, area, nearest)
   - ta.absdiff(): frame difference
   - ta.ssim(): quality metric
   - ta.gpu_histogram(): histogram analysis
   - ta.hamilton_demosaic() / ta.arm_demosaic(): RAW Bayer demosaic
-  - ta.NoiseEstimator: noise level estimation
 
 Usage:
   from taichi_library.taichi_algorithm.camera_api2 import (

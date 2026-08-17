@@ -39,8 +39,10 @@ try:
     from ..taichi_worker import ti_thread
     from .yuv_converter import yuv420_to_rgb, nv21_to_rgb
     from .frame_manager import (
-        LatestFrameQueue, AdaptiveFrameController,
-        FrameBufferPool, TripleBuffer
+        LatestFrameQueue,
+        AdaptiveFrameController,
+        FrameBufferPool,
+        TripleBuffer,
     )
 except ImportError:
     pass
@@ -49,6 +51,7 @@ except ImportError:
 # =========================================================================
 # Pipeline Stage Interface
 # =========================================================================
+
 
 class PipelineStage:
     """
@@ -67,11 +70,11 @@ class PipelineStage:
         """
         Process input field dan return output field.
         Override di subclass.
-        
+
         Args:
             input_field: Taichi ndarray (GPU buffer)
             context: dict dengan metadata Camera2 (ISO, exposure, dll)
-        
+
         Returns:
             Taichi ndarray (GPU buffer, bisa sama atau beda dari input)
         """
@@ -86,11 +89,12 @@ class PipelineStage:
 # Concrete Pipeline Stages
 # =========================================================================
 
+
 class DenoiseStage(PipelineStage):
     """
     Adaptive denoising stage.
     Auto-select algorithm berdasarkan ISO dari Camera2 metadata.
-    
+
     ISO < 400:   skip (noise rendah)
     ISO 400-1600: guided filter (cepat, edge-preserving)
     ISO 1600-3200: NLM search=5, patch=2 (balanced)
@@ -106,8 +110,8 @@ class DenoiseStage(PipelineStage):
             return input_field
 
         iso = 100
-        if context and 'iso' in context:
-            iso = context['iso']
+        if context and "iso" in context:
+            iso = context["iso"]
 
         start = time.perf_counter_ns()
 
@@ -117,20 +121,21 @@ class DenoiseStage(PipelineStage):
         elif iso < 1600:
             # Light denoise: guided filter
             from ..smoothing.guided_filter import guided_filter
+
             result = guided_filter(input_field, radius=2, epsilon=0.01)
         elif iso < 3200:
             # Medium denoise: NLM
             from ..denoising.nlm import non_local_means
+
             result = non_local_means(
-                input_field, h_param=8.0,
-                search_window=5, patch_size=2
+                input_field, h_param=8.0, search_window=5, patch_size=2
             )
         else:
             # Heavy denoise: NLM aggressive
             from ..denoising.nlm import non_local_means
+
             result = non_local_means(
-                input_field, h_param=12.0,
-                search_window=7, patch_size=3
+                input_field, h_param=12.0, search_window=7, patch_size=3
             )
 
         elapsed = (time.perf_counter_ns() - start) / 1_000_000
@@ -158,10 +163,9 @@ class ColorEnhanceStage(PipelineStage):
 
         # CLAHE untuk adaptive contrast
         from ..image_processing.clahe import clahe
+
         result = clahe(
-            input_field,
-            clip_limit=self.clahe_clip,
-            grid_size=self.clahe_grid
+            input_field, clip_limit=self.clahe_clip, grid_size=self.clahe_grid
         )
 
         elapsed = (time.perf_counter_ns() - start) / 1_000_000
@@ -189,6 +193,7 @@ class SharpenStage(PipelineStage):
 
         # Gaussian blur
         from ..smoothing.gaussian import gaussian_blur
+
         blurred = gaussian_blur(input_field, sigma=self.sigma, kernel_size=3)
 
         # Unsharp mask: result = input + amount * (input - blurred)
@@ -196,9 +201,12 @@ class SharpenStage(PipelineStage):
             input_field.shape, ti.f32, buffer_provider="pool"
         )
         _unsharp_mask_kernel(
-            input_field, blurred, result,
+            input_field,
+            blurred,
+            result,
             self.amount,
-            input_field.shape[0], input_field.shape[1]
+            input_field.shape[0],
+            input_field.shape[1],
         )
 
         # Cleanup
@@ -210,47 +218,48 @@ class SharpenStage(PipelineStage):
 
 
 if TAICHI_AVAILABLE:
+
     @ti.kernel
     def _unsharp_mask_kernel(
         src: ti.types.ndarray(),
         blurred: ti.types.ndarray(),
         dst: ti.types.ndarray(),
         amount: float,
-        h: int, w: int
+        h: int,
+        w: int,
     ):
         """Unsharp mask: dst = src + amount * (src - blurred)"""
         for y, x in ti.ndrange(h, w):
             for c in ti.static(range(3)):
                 diff = src[y, x, c] - blurred[y, x, c]
-                dst[y, x, c] = tm.clamp(
-                    src[y, x, c] + amount * diff, 0.0, 1.0
-                )
+                dst[y, x, c] = tm.clamp(src[y, x, c] + amount * diff, 0.0, 1.0)
 
 
 # =========================================================================
 # Camera Pipeline Orchestrator
 # =========================================================================
 
+
 class CameraPipeline:
     """
     Main orchestrator untuk Camera2 real-time processing.
-    
+
     Mengelola:
     - Stage chain: YUV→RGB → Denoise → Color → Sharpen → Output
     - Buffer management: reuse GPU buffers, zero-allocation hot path
     - Adaptive frame control: skip frame jika processing lambat
     - Performance monitoring: FPS, latency per stage
-    
+
     Usage:
         pipeline = CameraPipeline(width=1920, height=1080)
         pipeline.start()
-        
+
         # Dari Camera2 callback:
         pipeline.submit_yuv(y_data, u_data, v_data, timestamp_ns)
-        
+
         # Untuk display:
         result = pipeline.get_latest_output()
-        
+
         pipeline.stop()
     """
 
@@ -318,9 +327,7 @@ class CameraPipeline:
         self.buffer_pool.preallocate(count=4)
 
         self._thread = threading.Thread(
-            target=self._processing_loop,
-            name="CameraPipeline",
-            daemon=True
+            target=self._processing_loop, name="CameraPipeline", daemon=True
         )
         self._thread.start()
 
@@ -332,17 +339,24 @@ class CameraPipeline:
             self._thread = None
 
     def submit_yuv(
-        self, y_data, u_data, v_data,
-        timestamp_ns=0, frame_number=0,
-        y_row_stride=None, y_pixel_stride=1,
-        u_row_stride=None, u_pixel_stride=1,
-        v_row_stride=None, v_pixel_stride=1,
-        metadata=None
+        self,
+        y_data,
+        u_data,
+        v_data,
+        timestamp_ns=0,
+        frame_number=0,
+        y_row_stride=None,
+        y_pixel_stride=1,
+        u_row_stride=None,
+        u_pixel_stride=1,
+        v_row_stride=None,
+        v_pixel_stride=1,
+        metadata=None,
     ):
         """
         Submit YUV frame dari Camera2 ImageReader.
         Non-blocking: jika processing belum selesai, frame lama di-drop.
-        
+
         Args:
             y_data: Y plane numpy array (H, W) uint8
             u_data: U plane numpy array (H/2, W/2) uint8
@@ -357,26 +371,30 @@ class CameraPipeline:
 
         # Package YUV data untuk queue
         yuv_package = {
-            'y': y_data,
-            'u': u_data,
-            'v': v_data,
-            'y_row_stride': y_row_stride or self.width,
-            'y_pixel_stride': y_pixel_stride,
-            'u_row_stride': u_row_stride or (self.width // 2),
-            'u_pixel_stride': u_pixel_stride,
-            'v_row_stride': v_row_stride or (self.width // 2),
-            'v_pixel_stride': v_pixel_stride,
+            "y": y_data,
+            "u": u_data,
+            "v": v_data,
+            "y_row_stride": y_row_stride or self.width,
+            "y_pixel_stride": y_pixel_stride,
+            "u_row_stride": u_row_stride or (self.width // 2),
+            "u_pixel_stride": u_pixel_stride,
+            "v_row_stride": v_row_stride or (self.width // 2),
+            "v_pixel_stride": v_pixel_stride,
         }
 
-        self.input_queue.offer(
-            yuv_package, timestamp_ns, frame_number, metadata
-        )
+        self.input_queue.offer(yuv_package, timestamp_ns, frame_number, metadata)
 
-    def submit_raw(self, raw_data, timestamp_ns=0, frame_number=0,
-                   bayer_pattern='rggb', metadata=None):
+    def submit_raw(
+        self,
+        raw_data,
+        timestamp_ns=0,
+        frame_number=0,
+        bayer_pattern="rggb",
+        metadata=None,
+    ):
         """
         Submit RAW Bayer frame dari Camera2.
-        
+
         Args:
             raw_data: RAW sensor data numpy array (H, W) uint16
             bayer_pattern: 'rggb', 'bggr', 'grbg', 'gbrg'
@@ -386,19 +404,17 @@ class CameraPipeline:
             return
 
         raw_package = {
-            'raw': raw_data,
-            'bayer_pattern': bayer_pattern,
+            "raw": raw_data,
+            "bayer_pattern": bayer_pattern,
         }
 
-        self.input_queue.offer(
-            raw_package, timestamp_ns, frame_number, metadata
-        )
+        self.input_queue.offer(raw_package, timestamp_ns, frame_number, metadata)
 
     def get_latest_output(self):
         """
         Ambil frame terbaru yang sudah di-process.
         Non-blocking, return None jika tidak ada.
-        
+
         Returns:
             numpy array (H, W, 3) float32 [0, 1] atau None
         """
@@ -493,22 +509,29 @@ class CameraPipeline:
         Stay di GPU sebisa mungkin (zero-copy).
         """
         context = {
-            'iso': metadata.get('iso', 100),
-            'exposure_time': metadata.get('exposure_time', 0),
-            'awb_gains': metadata.get('awb_gains', (1.0, 1.0, 1.0)),
+            "iso": metadata.get("iso", 100),
+            "exposure_time": metadata.get("exposure_time", 0),
+            "awb_gains": metadata.get("awb_gains", (1.0, 1.0, 1.0)),
         }
 
         # Stage 1: YUV → RGB (atau RAW → RGB)
-        if 'raw' in frame_data:
+        if "raw" in frame_data:
             from ..demosaicing.Hamilton_demosaice import hamilton_demosaic
-            rgb_field = hamilton_demosaic(frame_data['raw'])
+
+            rgb_field = hamilton_demosaic(frame_data["raw"])
         else:
             rgb_field = yuv420_to_rgb(
-                frame_data['y'], frame_data['u'], frame_data['v'],
-                self.height, self.width,
-                frame_data['y_row_stride'], frame_data['y_pixel_stride'],
-                frame_data['u_row_stride'], frame_data['u_pixel_stride'],
-                frame_data['v_row_stride'], frame_data['v_pixel_stride'],
+                frame_data["y"],
+                frame_data["u"],
+                frame_data["v"],
+                self.height,
+                self.width,
+                frame_data["y_row_stride"],
+                frame_data["y_pixel_stride"],
+                frame_data["u_row_stride"],
+                frame_data["u_pixel_stride"],
+                frame_data["v_row_stride"],
+                frame_data["v_pixel_stride"],
             )
 
         # Chain stages di GPU (zero-copy)
@@ -518,13 +541,13 @@ class CameraPipeline:
                 current = stage.process(current, context)
 
         # Download dari GPU ke NumPy (single download di akhir)
-        if hasattr(current, 'to_numpy'):
+        if hasattr(current, "to_numpy"):
             result = current.to_numpy()
         else:
             result = current
 
         # Cleanup intermediate GPU buffers
-        if rgb_field is not current and hasattr(rgb_field, 'to_numpy'):
+        if rgb_field is not current and hasattr(rgb_field, "to_numpy"):
             common.release_temp_buffer(rgb_field)
 
         return result
@@ -533,6 +556,7 @@ class CameraPipeline:
 # =========================================================================
 # Native AOT Camera2 Orchestrator
 # =========================================================================
+
 
 class AOTCameraPipeline:
     """Camera2 pipeline backed by the portable native AOT camera graphs.
@@ -572,7 +596,7 @@ class AOTCameraPipeline:
         # those dispatches on the caller thread by default; CPU can safely
         # use the background worker.  Vulkan is kept synchronous as well so
         # one pipeline has the same ownership rule on every desktop GPU.
-        selected_arch = os.environ.get("PIXEL_REFINE_AOT_ARCH", "auto").lower()
+        selected_arch = os.environ.get("AOT_ARCH", "auto").lower()
         if selected_arch == "auto":
             try:
                 from ...taichi_aot.engine import get_backend_name
@@ -580,7 +604,12 @@ class AOTCameraPipeline:
                 selected_arch = str(get_backend_name()).lower()
             except Exception:
                 selected_arch = "cpu"
-        self._synchronous_dispatch = selected_arch in {"cuda", "vulkan", "opengl", "gles"}
+        self._synchronous_dispatch = selected_arch in {
+            "cuda",
+            "vulkan",
+            "opengl",
+            "gles",
+        }
 
     def start(self):
         if self.running:
@@ -624,9 +653,13 @@ class AOTCameraPipeline:
             "v": v_data,
             "y_row_stride": self.width if y_row_stride is None else int(y_row_stride),
             "y_pixel_stride": int(y_pixel_stride),
-            "u_row_stride": self.width // 2 if u_row_stride is None else int(u_row_stride),
+            "u_row_stride": (
+                self.width // 2 if u_row_stride is None else int(u_row_stride)
+            ),
             "u_pixel_stride": int(u_pixel_stride),
-            "v_row_stride": self.width // 2 if v_row_stride is None else int(v_row_stride),
+            "v_row_stride": (
+                self.width // 2 if v_row_stride is None else int(v_row_stride)
+            ),
             "v_pixel_stride": int(v_pixel_stride),
         }
         self.input_queue.offer(package, timestamp_ns, frame_number, metadata)
@@ -692,7 +725,9 @@ class AOTCameraPipeline:
         if elapsed_ms > 0:
             self._fps_history.append(1000.0 / elapsed_ms)
             del self._fps_history[:-30]
-        self.output_queue.offer(result, slot.timestamp_ns, slot.frame_number, slot.metadata)
+        self.output_queue.offer(
+            result, slot.timestamp_ns, slot.frame_number, slot.metadata
+        )
 
     def _process_frame(self, frame_data):
         from ... import taichi_aot as aot
@@ -721,13 +756,16 @@ class AOTCameraPipeline:
 # Convenience Functions
 # =========================================================================
 
+
 def create_preview_pipeline(width=1280, height=720, target_fps=30):
     """
     Pipeline ringan untuk camera preview.
     Denoise ringan, tanpa sharpen, untuk FPS maksimal.
     """
     return CameraPipeline(
-        width=width, height=height, target_fps=target_fps,
+        width=width,
+        height=height,
+        target_fps=target_fps,
         enable_denoise=True,
         enable_color_enhance=True,
         enable_sharpen=False,
@@ -742,7 +780,9 @@ def create_capture_pipeline(width=4000, height=3000):
     Denoise kuat, CLAHE, sharpen, untuk kualitas maksimal.
     """
     return CameraPipeline(
-        width=width, height=height, target_fps=10,
+        width=width,
+        height=height,
+        target_fps=10,
         enable_denoise=True,
         enable_color_enhance=True,
         enable_sharpen=True,
@@ -758,7 +798,9 @@ def create_low_light_pipeline(width=1920, height=1080):
     Denoise agresif, tanpa sharpen (noise amplification).
     """
     return CameraPipeline(
-        width=width, height=height, target_fps=24,
+        width=width,
+        height=height,
+        target_fps=24,
         enable_denoise=True,
         enable_color_enhance=True,
         enable_sharpen=False,

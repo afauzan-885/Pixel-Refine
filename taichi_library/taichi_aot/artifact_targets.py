@@ -288,24 +288,64 @@ def _artifact_matches_target(path: Path, target: TargetSpec) -> bool:
         with zipfile.ZipFile(path, "r") as archive:
             names = set(archive.namelist())
             if target.backend in {"vulkan", "opengl", "gles"}:
-                has_spv = "graphs.json" in names and any(
-                    name.endswith(".spv") for name in names
-                )
-                has_llvm = "graphs.tcb" in names or any(
-                    name.endswith(".ll") or name.endswith(".tic") for name in names
-                )
-                if has_spv or has_llvm:
-                    return True
+                # Graphics artifacts are consumed as SPIR-V by the native
+                # Vulkan/OpenGL/GLES bridges.  A ``graphs.tcb``/LLVM payload
+                # is a CPU or CUDA archive, even when it was accidentally
+                # copied into a graphics target directory.  Accepting that
+                # payload here would make the resolver report a target match
+                # and defer the ABI failure until a driver call.  Keep this
+                # gate strict: require the Taichi graph index and at least
+                # one embedded shader, and reject LLVM-only archives.
+                # Presence of a filename alone is not enough: a truncated
+                # archive (or an LLVM/placeholder payload renamed ``.spv``)
+                # would otherwise pass resolver admission and fail later in
+                # the graphics driver with an opaque ABI error.  Verify the
+                # graph index is parseable and every shader has the SPIR-V
+                # magic word before allowing the archive to reach native
+                # dispatch.  ``spirv-val`` remains the deeper portability
+                # gate; this cheap check is intentionally loader-safe.
+                if "graphs.json" not in names:
+                    return False
+                try:
+                    graph_index = json.loads(archive.read("graphs.json"))
+                except (UnicodeDecodeError, json.JSONDecodeError, KeyError):
+                    return False
+                if not isinstance(graph_index, (list, dict)):
+                    return False
+                shader_names = [
+                    name for name in names if name.lower().endswith(".spv")
+                ]
+                if not shader_names:
+                    return False
+                # SPIR-V words are little-endian by convention.  Keep the
+                # byte-level check independent of the host architecture.
+                spirv_magic = b"\x03\x02\x23\x07"
+                for name in shader_names:
+                    payload = archive.read(name)
+                    if len(payload) < 4 or payload[:4] != spirv_magic:
+                        return False
+                return True
             llvm_files = [name for name in names if name.endswith(".ll")]
             if "graphs.tcb" not in names or not llvm_files:
                 return False
-            sample = archive.read(llvm_files[0]).decode("utf-8", errors="replace")
-            triples = re.findall(r'target triple = "([^"]+)"', sample)
+            samples = [
+                archive.read(name).decode("utf-8", errors="replace")
+                for name in llvm_files
+            ]
+            triples = [
+                triple
+                for sample in samples
+                for triple in re.findall(r'target triple = "([^"]+)"', sample)
+            ]
             if not triples:
                 return False
-            triple = triples[0].lower()
+            normalized_triples = tuple(item.lower() for item in triples)
+            triple = normalized_triples[0]
             if target.backend == "cuda":
-                return "nvptx64" in triple
+                # Research-stage CUDA archives can contain both host helper
+                # LLVM and device LLVM in one TBC.  Qualification must inspect
+                # all declared triples instead of trusting archive order.
+                return any("nvptx64" in item for item in normalized_triples)
             if target.arch == "x86_64":
                 arch_ok = "x86_64" in triple or "amd64" in triple
             elif target.arch == "arm64":
@@ -332,4 +372,56 @@ def load_target_manifest(path: os.PathLike[str] | str) -> Mapping[str, Any]:
         payload = json.load(handle)
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise ValueError("unsupported AOT target manifest schema")
+    # The top-level schema remains version 1 for compatibility with existing
+    # packaging tools.  LLVM20 is an optional nested contract: when present,
+    # reject a malformed policy before a bundle can be treated as target-aware.
+    llvm20 = payload.get("llvm20_policy")
+    if llvm20 is not None:
+        if not isinstance(llvm20, Mapping):
+            raise ValueError("llvm20_policy must be an object")
+        if llvm20.get("schema_version") != 1:
+            raise ValueError("unsupported llvm20_policy schema")
+        if int(llvm20.get("required_llvm_major", -1)) != 20:
+            raise ValueError("llvm20_policy requires LLVM major 20")
+        if llvm20.get("mixed_llvm_major_forbidden") is not True:
+            raise ValueError("llvm20_policy must forbid mixed LLVM majors")
+        graphics = llvm20.get("graphics_profiles")
+        if not isinstance(graphics, Mapping):
+            raise ValueError("llvm20_policy requires graphics_profiles")
+        vulkan = graphics.get("vulkan")
+        if not isinstance(vulkan, Mapping) or vulkan.get("vulkan_2_core") is not False:
+            raise ValueError("Vulkan policy must explicitly reject a Vulkan 2 core claim")
+    # Cross-compiled ARM artifacts are useful for ABI/codegen gates, but they
+    # must remain fail-closed until an actual matching device/driver run has
+    # been recorded.  Keep this validation optional for older manifests while
+    # rejecting contradictory qualification metadata in new ones.
+    requirements = payload.get("runtime_requirements")
+    if isinstance(requirements, Mapping):
+        for target_id, requirement in requirements.items():
+            if not isinstance(requirement, Mapping):
+                raise ValueError(f"runtime requirement {target_id!r} must be an object")
+            qualification = str(requirement.get("qualification", "") or "").strip().lower()
+            native_runtime = requirement.get("native_runtime")
+            if native_runtime is not None and not isinstance(native_runtime, bool):
+                raise ValueError(
+                    f"runtime requirement {target_id!r} native_runtime must be boolean"
+                )
+            if qualification not in {"", "compile_only", "native_runtime"}:
+                raise ValueError(
+                    f"runtime requirement {target_id!r} has unsupported qualification"
+                )
+            if qualification == "compile_only" and native_runtime is True:
+                raise ValueError(
+                    f"runtime requirement {target_id!r} cannot mark compile_only as native"
+                )
+            if qualification == "native_runtime":
+                if native_runtime is not True:
+                    raise ValueError(
+                        f"runtime requirement {target_id!r} native qualification needs native_runtime=true"
+                    )
+                evidence_id = str(requirement.get("runtime_evidence_id", "") or "").strip()
+                if not evidence_id:
+                    raise ValueError(
+                        f"runtime requirement {target_id!r} native qualification needs runtime_evidence_id"
+                    )
     return payload

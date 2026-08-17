@@ -256,9 +256,19 @@ class AutoTuneConfig:
         object.__setattr__(self, "min_pipeline_depth", max(1, int(self.min_pipeline_depth)))
         object.__setattr__(self, "max_pipeline_depth", max(self.min_pipeline_depth, int(self.max_pipeline_depth)))
         object.__setattr__(self, "warmup_samples", max(0, int(self.warmup_samples)))
-        for name in ("pressure_reduce_at", "pressure_critical_at", "cache_hit_increase_at"):
-            value = max(0.0, min(1.0, float(getattr(self, name))))
-            object.__setattr__(self, name, value)
+        # Clamp thresholds to the valid severity range and preserve their
+        # ordering.  A malformed config with ``critical < reduce`` used to
+        # make the critical branch unreachable (the elevated branch was
+        # evaluated first), which could lead to a deceptively aggressive
+        # recommendation under critical pressure.  Critical pressure must be
+        # at least as severe as the reduction threshold.
+        reduce_at = max(0.0, min(1.0, float(self.pressure_reduce_at)))
+        critical_at = max(0.0, min(1.0, float(self.pressure_critical_at)))
+        cache_at = max(0.0, min(1.0, float(self.cache_hit_increase_at)))
+        critical_at = max(reduce_at, critical_at)
+        object.__setattr__(self, "pressure_reduce_at", reduce_at)
+        object.__setattr__(self, "pressure_critical_at", critical_at)
+        object.__setattr__(self, "cache_hit_increase_at", cache_at)
 
 
 @dataclass(frozen=True)
@@ -293,6 +303,78 @@ class AutoTuneRecommendation:
             "overlap_verified": bool(self.overlap_verified),
             "telemetry": dict(self.telemetry),
         }
+
+
+def validate_autotune_recommendation(
+    recommendation: AutoTuneRecommendation | Mapping[str, Any],
+    config: Optional[AutoTuneConfig] = None,
+) -> dict[str, Any]:
+    """Validate a tuner result before it is used as a planning hint.
+
+    This is a pure, backend-neutral diagnostic.  It intentionally does not
+    clamp or mutate a recommendation: callers can use ``valid`` to fail
+    closed and retain the established full-frame/direct path.  The check is
+    useful for callers that deserialize a recommendation or combine telemetry
+    from another process, where the dataclass ``__post_init__`` guarantees no
+    longer apply.
+    """
+
+    if isinstance(recommendation, AutoTuneRecommendation):
+        values = recommendation.as_dict()
+    elif isinstance(recommendation, Mapping):
+        values = dict(recommendation)
+    else:
+        return {"valid": False, "issues": [
+            "recommendation must be AutoTuneRecommendation or mapping"
+        ]}
+
+    cfg = config if config is not None else AutoTuneConfig()
+    issues: list[str] = []
+
+    def _int(name: str, *, required: bool = True) -> Optional[int]:
+        if name not in values:
+            if required:
+                issues.append(f"{name} is missing")
+            return None
+        try:
+            value = int(values[name])
+        except (TypeError, ValueError, OverflowError):
+            issues.append(f"{name} must be an integer")
+            return None
+        return value
+
+    block_size = _int("block_size")
+    if block_size is not None:
+        if block_size not in cfg.block_candidates:
+            issues.append("block_size is not an allowed autotune candidate")
+        if not cfg.min_block_size <= block_size <= cfg.max_block_size:
+            issues.append("block_size is outside configured bounds")
+
+    depth = _int("pipeline_depth")
+    if depth is not None and not cfg.min_pipeline_depth <= depth <= cfg.max_pipeline_depth:
+        issues.append("pipeline_depth is outside configured bounds")
+
+    confidence = values.get("confidence")
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError, OverflowError):
+        issues.append("confidence must be finite and in [0, 1]")
+    else:
+        if not isfinite(confidence_value) or not 0.0 <= confidence_value <= 1.0:
+            issues.append("confidence must be finite and in [0, 1]")
+
+    samples = _int("samples")
+    if samples is not None and samples < 0:
+        issues.append("samples must be non-negative")
+
+    if "overlap_verified" in values and not isinstance(values["overlap_verified"], bool):
+        issues.append("overlap_verified must be boolean")
+
+    return {
+        "valid": not issues,
+        "issues": issues,
+        "checked_fields": ("block_size", "pipeline_depth", "confidence", "samples", "overlap_verified"),
+    }
 
 
 class ConservativeAutoTuner:
@@ -572,6 +654,28 @@ class PipelinePlan:
     def has_recordable_segments(self) -> bool:
         return self.recordable_segment_count > 0
 
+    @property
+    def segment_resident_bytes(self) -> tuple[int, ...]:
+        """Estimated resident footprint of each planned segment.
+
+        This is diagnostic metadata only: it reflects the graph contracts used
+        by the planner and does not claim that a native driver allocates these
+        bytes exactly.  Exposing the per-segment values makes a segmented
+        (block/full-frame) decision explainable without inspecting private
+        planner state.
+        """
+        return tuple(
+            sum(int(getattr(graph, "resident_bytes", 0) or 0) for graph in segment)
+            for segment in self.segments
+        )
+
+    @property
+    def resident_headroom_bytes(self) -> Optional[int]:
+        """Signed headroom against the adaptive limit, when one exists."""
+        if int(self.resident_limit) <= 0:
+            return None
+        return int(self.resident_limit) - int(self.resident_bytes)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
@@ -584,6 +688,13 @@ class PipelinePlan:
             "pipeline_depth": self.pipeline_depth,
             "recommended_block_size": self.recommended_block_size,
             "recordable_segment_count": self.recordable_segment_count,
+            "segment_graph_counts": [len(segment) for segment in self.segments],
+            "segment_resident_bytes": list(self.segment_resident_bytes),
+            "resident_headroom_bytes": self.resident_headroom_bytes,
+            "fits_resident_limit": (
+                self.resident_headroom_bytes is not None
+                and self.resident_headroom_bytes >= 0
+            ),
             "autotune": dict(self.tuning),
             # A concurrency hint is not device-overlap evidence.  Keep this
             # explicit in diagnostics so callers do not overstate telemetry.
@@ -1170,7 +1281,7 @@ AutoTune = ConservativeAutoTuner
 
 __all__ = [
     "EWMA", "PlannerTelemetry", "PipelineTelemetry", "EWMATelemetry",
-    "AutoTuneConfig", "AutoTuneRecommendation", "ConservativeAutoTuner",
+    "AutoTuneConfig", "AutoTuneRecommendation", "validate_autotune_recommendation", "ConservativeAutoTuner",
     "AutoPipelineAutotuner", "EWMATuner", "AutoTune", "GraphSpec",
     "PipelinePlan", "AutoPipelinePlanner",
 ]

@@ -39,7 +39,13 @@ def compile_bg_aot(arch, save_path):
 
     # 1. Clear Grid Graph
     g_clear = ti.graph.GraphBuilder()
-    grid_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "grid", ti.f32, ndim=4)
+    # ``grid[i, j, k]`` is a vec2 in the kernels; encoding it as scalar f32
+    # rank-4 makes the component access ``[0]`` appear as a fifth index to
+    # Taichi's graph validator.  Keep the public HxWxLx2 buffer ABI via a
+    # vector2 rank-3 ndarray descriptor.
+    grid_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "grid", ti.types.vector(2, ti.f32), ndim=3
+    )
     g_clear.dispatch(bg._bg_clear_grid, grid_arg, gn_arg, gm_arg, gl_arg)
     module.add_graph("bg_clear", g_clear.compile())
 
@@ -51,7 +57,9 @@ def compile_bg_aot(arch, save_path):
 
     # 3. Blur Graphs (X, Y, Z)
     g_blur_x = ti.graph.GraphBuilder()
-    dst_grid_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst_grid", ti.f32, ndim=4)
+    dst_grid_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "dst_grid", ti.types.vector(2, ti.f32), ndim=3
+    )
     g_blur_x.dispatch(bg._bg_blur_x, grid_arg, dst_grid_arg, rad_arg, sig_arg, gn_arg, gm_arg, gl_arg)
     module.add_graph("bg_blur_x", g_blur_x.compile())
 

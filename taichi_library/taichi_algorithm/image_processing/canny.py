@@ -110,8 +110,14 @@ if TAICHI_AVAILABLE:
                 n1 = mag[tm.clamp(y - 1, 0, h - 1), tm.clamp(x + 1, 0, w - 1)]
                 n2 = mag[tm.clamp(y + 1, 0, h - 1), tm.clamp(x - 1, 0, w - 1)]
 
-            # Suppress if not local maximum
-            if m >= n1 and m >= n2:
+            # Suppress if not local maximum.  Graphics backends can differ by
+            # a few ulps in Sobel values (for example SPIR-V versus LLVM), so
+            # an exact comparison can flip a plateau pixel and change the
+            # binary hysteresis topology.  A small normalized-space epsilon
+            # makes ties deterministic while remaining far below the public
+            # threshold tolerance.
+            nms_epsilon = 1e-6
+            if m + nms_epsilon >= n1 and m + nms_epsilon >= n2:
                 nms[y, x] = m
             else:
                 nms[y, x] = 0.0

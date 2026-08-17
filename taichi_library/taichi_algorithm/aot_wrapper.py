@@ -186,7 +186,20 @@ def _get_module(name):
             backend=getattr(engine, "arch", "cpu"),
             device=getattr(engine, "gpu_name", ""),
         )
-        tcm_root = os.path.join(file_dir, "aot_tcm")
+        # Prefer the exact target-qualified LLVM20 bundle when available.  An
+        # explicit root wins; otherwise the repository tree remains a
+        # rollback/source fallback.  Never search both roots, because mixing a
+        # legacy LLVM15 archive with an LLVM20 bridge is an ABI error.
+        explicit_tcm_root = os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT", "").strip()
+        if explicit_tcm_root:
+            tcm_root = os.path.abspath(explicit_tcm_root)
+        else:
+            from taichi_library.llvm20_runtime_paths import tcm_root as staged_tcm_root
+
+            staged_root = staged_tcm_root(target.target_id)
+            tcm_root = os.path.abspath(
+                str(staged_root) if staged_root is not None else os.path.join(file_dir, "aot_tcm")
+            )
         allow_legacy = (
             # Legacy root artifacts are migration-only and disabled by
             # default now that the target-qualified tree is complete.

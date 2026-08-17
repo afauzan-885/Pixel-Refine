@@ -46,7 +46,21 @@ class ResidentEntry:
         return self.ref_count > 0 or self.pin_count > 0
 
     def can_evict(self):
-        return not self.leased and (self.fence_ready is None or self.fence_ready())
+        """Return whether disposal is safe, conservatively on fence errors.
+
+        Fence callbacks are supplied by native runtimes and may transiently
+        fail while a device/queue is being torn down.  An exception must never
+        make cache maintenance dispose an in-flight buffer; treat it as
+        ``not ready`` and let a later maintenance pass retry the callback.
+        """
+        if self.leased:
+            return False
+        if self.fence_ready is None:
+            return True
+        try:
+            return bool(self.fence_ready())
+        except Exception:
+            return False
 
 
 class DeviceResidencyCache:
@@ -143,7 +157,12 @@ class DeviceResidencyCache:
                 return None
             previous = self._entries.get(key)
             if previous is not None:
-                if previous.leased:
+                # A producer fence is an ownership boundary even when no
+                # Python lease is active yet.  Replacing an entry before its
+                # fence signals would dispose an in-flight native buffer and
+                # can race the queue.  Keep the old entry until it is safe;
+                # the caller can retry admission after synchronization.
+                if not previous.can_evict():
                     self._stats["rejects"] += 1
                     return None
                 self._evict(key, previous)
@@ -169,7 +188,10 @@ class DeviceResidencyCache:
     def invalidate(self, key):
         with self._lock:
             entry = self._entries.get(str(key))
-            if entry is None or entry.leased:
+            # Invalidation disposes the native payload immediately.  Treat
+            # both active leases and an unsignalled/failed producer fence as
+            # non-evictable so explicit invalidation cannot race the queue.
+            if entry is None or not entry.can_evict():
                 return False
             self._evict(str(key), entry)
             return True

@@ -14,6 +14,17 @@ try:
 except ImportError:
     from aot_artifact import archive_module
 
+try:
+    from taichi_library.taichi_algorithm.demosaicing.demosaic_aot_builder import (
+        register_bilinear_graphs,
+    )
+    from taichi_library.taichi_algorithm.demosaicing.demosaic_postprocess import (
+        rgb_to_bgr_i32,
+    )
+except ImportError:
+    from demosaic_aot_builder import register_bilinear_graphs
+    from demosaic_postprocess import rgb_to_bgr_i32
+
 @ti.func
 def _fast_gamma(x: ti.f32) -> ti.f32:
     t = ti.math.sqrt(x)
@@ -49,6 +60,7 @@ def _bilinear_demosaice_fused_kernel(
     c01: ti.i32,
     c10: ti.i32,
     c11: ti.i32,
+    linear: ti.i32,
 ):
     inv_range = 1.0 / ti.max(1.0, white - black)
     
@@ -144,10 +156,16 @@ def _bilinear_demosaice_fused_kernel(
         sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
         sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
 
-        # Fast Gamma polynomial roll-off & clamp
-        dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
-        dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
-        dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+        if linear == 1:
+            # Linear RGB (WB + color matrix, no gamma) for natural tonemapping.
+            dst[r, c, 0] = ti.math.clamp(sR, 0.0, 1.0)
+            dst[r, c, 1] = ti.math.clamp(sG, 0.0, 1.0)
+            dst[r, c, 2] = ti.math.clamp(sB, 0.0, 1.0)
+        else:
+            # Fast Gamma polynomial roll-off & clamp
+            dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
+            dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
+            dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
 
 @ti.kernel
 def _pure_bilinear_demosaice_kernel(
@@ -340,6 +358,7 @@ def _bilinear_rgb_half_res_fused_kernel(
     c01: ti.i32,
     c10: ti.i32,
     c11: ti.i32,
+    linear: ti.i32,
 ):
     inv_range = 1.0 / ti.max(1.0, white - black)
     
@@ -399,188 +418,46 @@ def _bilinear_rgb_half_res_fused_kernel(
         sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
         sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
         sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
-        
-        sR = sR / ti.math.sqrt(1.0 + sR * sR)
-        sG = sG / ti.math.sqrt(1.0 + sG * sG)
-        sB = sB / ti.math.sqrt(1.0 + sB * sB)
-        
-        dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
-        dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
-        dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
 
-@ti.kernel
-def _rgb_to_bgr_i32_kernel(
-    src: ti.types.ndarray(dtype=ti.f32, ndim=3),
-    dst: ti.types.ndarray(dtype=ti.i32, ndim=3),
-    h: ti.i32,
-    w: ti.i32,
+        if linear == 1:
+            # Linear RGB (WB + color matrix, no gamma) for natural tonemapping.
+            dst[r, c, 0] = ti.math.clamp(sR, 0.0, 1.0)
+            dst[r, c, 1] = ti.math.clamp(sG, 0.0, 1.0)
+            dst[r, c, 2] = ti.math.clamp(sB, 0.0, 1.0)
+        else:
+            sR = sR / ti.math.sqrt(1.0 + sR * sR)
+            sG = sG / ti.math.sqrt(1.0 + sG * sG)
+            sB = sB / ti.math.sqrt(1.0 + sB * sB)
+
+            dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
+            dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
+            dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+
+def compile_bilinear_demosaice_tcm(
+    arch=ti.cuda,
+    save_path="bilinear_demosaice_cuda.tcm",
 ):
-    for r, c in ti.ndrange(h, w):
-        val_r = ti.math.clamp(src[r, c, 0] * 65535.0 + 0.5, 0.0, 65535.0)
-        val_g = ti.math.clamp(src[r, c, 1] * 65535.0 + 0.5, 0.0, 65535.0)
-        val_b = ti.math.clamp(src[r, c, 2] * 65535.0 + 0.5, 0.0, 65535.0)
-
-        dst[r, c, 0] = ti.cast(ti.round(val_b), ti.i32)
-        dst[r, c, 1] = ti.cast(ti.round(val_g), ti.i32)
-        dst[r, c, 2] = ti.cast(ti.round(val_r), ti.i32)
-
-def compile_bilinear_demosaice_tcm(arch=ti.vulkan, save_path="bilinear_demosaice_vulkan.tcm"):
     print(f"\n>>> Compiling Bilinear Demosaice AOT for: {arch}")
     ti.init(arch=arch, offline_cache=False)
     module = ti.aot.Module(arch)
-    
-    # 1. bilinear_demosaice Graph
-    g_fast = ti.graph.GraphBuilder()
-    
-    # Inputs and Outputs
-    bayer_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "bayer", ti.f32, ndim=2)
-    cmatrix_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "cmatrix", ti.f32, ndim=2)
-    dst_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
 
-    # Scalars
-    wb_r_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_r", ti.f32)
-    wb_g1_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_g1", ti.f32)
-    wb_b_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_b", ti.f32)
-    wb_g2_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_g2", ti.f32)
-    black_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "black", ti.f32)
-    white_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "white", ti.f32)
-
-    h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
-    w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
-
-    c00_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c00", ti.i32)
-    c01_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c01", ti.i32)
-    c10_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c10", ti.i32)
-    c11_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c11", ti.i32)
-
-    g_fast.dispatch(
-        _bilinear_demosaice_fused_kernel,
-        bayer_arg,
-        cmatrix_arg,
-        dst_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        black_arg,
-        white_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
+    register_bilinear_graphs(
+        module,
+        kernels={
+            "fast": _bilinear_demosaice_fused_kernel,
+            "pure": _pure_bilinear_demosaice_kernel,
+            "gray1ch": _bilinear_green_to_grayscale_1channel_fused_kernel,
+            "half_res": _bilinear_green_half_res_fused_kernel,
+            "rgb_half_res": _bilinear_rgb_half_res_fused_kernel,
+            "rgb_to_bgr_i32": rgb_to_bgr_i32,
+        },
     )
-    module.add_graph("bilinear_demosaice", g_fast.compile())
-    
-    # 2. pure_bilinear_demosaice Graph
-    g_pure = ti.graph.GraphBuilder()
-    g_pure.dispatch(
-        _pure_bilinear_demosaice_kernel,
-        bayer_arg,
-        dst_arg,
-        black_arg,
-        white_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    module.add_graph("pure_bilinear_demosaice", g_pure.compile())
-    
-    # 3. bilinear_demosaice_1channel Graph
-    g_gray_1ch = ti.graph.GraphBuilder()
-    dst_gray_1ch_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
-    g_gray_1ch.dispatch(
-        _bilinear_green_to_grayscale_1channel_fused_kernel,
-        bayer_arg,
-        dst_gray_1ch_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        black_arg,
-        white_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    module.add_graph("bilinear_demosaice_1channel", g_gray_1ch.compile())
-
-    # 4. bilinear_demosaice_half_res Graph
-    g_half_res = ti.graph.GraphBuilder()
-    dst_half_res_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=2)
-    g_half_res.dispatch(
-        _bilinear_green_half_res_fused_kernel,
-        bayer_arg,
-        dst_half_res_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        black_arg,
-        white_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    module.add_graph("bilinear_demosaice_half_res", g_half_res.compile())
-
-    # 5. bilinear_demosaice_rgb_half_res Graph
-    g_rgb_half_res = ti.graph.GraphBuilder()
-    dst_rgb_half_res_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
-    g_rgb_half_res.dispatch(
-        _bilinear_rgb_half_res_fused_kernel,
-        bayer_arg,
-        cmatrix_arg,
-        dst_rgb_half_res_arg,
-        wb_r_arg,
-        wb_g1_arg,
-        wb_b_arg,
-        wb_g2_arg,
-        black_arg,
-        white_arg,
-        h_arg,
-        w_arg,
-        c00_arg,
-        c01_arg,
-        c10_arg,
-        c11_arg,
-    )
-    module.add_graph("bilinear_demosaice_rgb_half_res", g_rgb_half_res.compile())
-
-    # 7. rgb_to_bgr_i32 converter
-    g_conv = ti.graph.GraphBuilder()
-    src_conv_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
-    dst_conv_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=3)
-    h_conv_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
-    w_conv_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
-    g_conv.dispatch(
-        _rgb_to_bgr_i32_kernel, src_conv_arg, dst_conv_arg, h_conv_arg, w_conv_arg
-    )
-    module.add_graph("rgb_to_bgr_i32", g_conv.compile())
 
     archive_module(module, save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 
+
 if __name__ == "__main__":
-    script_dir = file_dir
-    assets_dir = os.path.abspath(os.path.join(script_dir, "../aot_tcm"))
-    os.makedirs(assets_dir, exist_ok=True)
-    
-    archs = [(ti.vulkan, "vulkan"), (ti.cuda, "cuda"), (ti.cpu, "cpu")]
-    for arch, suffix in archs:
-        save_path = os.path.abspath(os.path.join(assets_dir, f"bilinear_demosaice_{suffix}.tcm"))
-        try:
-            compile_bilinear_demosaice_tcm(arch=arch, save_path=save_path)
-        except Exception as e:
-            print(f"Skipping {suffix} due to error: {e}")
+    # Default: desktop CUDA target-qualified artifact (matches engine loader).
+    compile_bilinear_demosaice_tcm(arch=ti.cuda)

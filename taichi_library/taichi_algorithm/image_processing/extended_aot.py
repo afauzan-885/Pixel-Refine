@@ -60,7 +60,11 @@ def _morphology(src, kernel, ksize, iterations, operation):
     # the core, so an internal tile edge never becomes an artificial border.
     # Import lazily to avoid the extended -> package -> extended import cycle.
     try:
-        from . import _run_blockwise
+        # ``extended_aot`` lives under ``image_processing`` while the shared
+        # executor is owned by ``aot_api``.  A relative import here resolves
+        # to the empty image_processing package and silently disables block
+        # execution for every extended operation.
+        from taichi_library.taichi_algorithm.aot_api import _run_blockwise
     except ImportError:  # pragma: no cover - only possible during import
         _run_blockwise = None
 
@@ -215,7 +219,7 @@ def filter2d_aot(src, kernel, border_mode="REFLECT_101"):
         raise ValueError("filter2d input must be 2D or 3D")
 
     try:
-        from . import _run_blockwise
+        from taichi_library.taichi_algorithm.aot_api import _run_blockwise
     except ImportError:  # pragma: no cover - only possible during import
         _run_blockwise = None
     halo = max(int(filt.shape[0]) // 2, int(filt.shape[1]) // 2)
@@ -332,7 +336,7 @@ def normalize_aot(src, alpha=0.0, beta=255.0, norm_type="MINMAX"):
         )
 
     try:
-        from . import _run_blockwise
+        from taichi_library.taichi_algorithm.aot_api import _run_blockwise
     except ImportError:  # pragma: no cover - only possible during import
         _run_blockwise = None
     if _run_blockwise is not None:
@@ -417,7 +421,7 @@ def threshold_aot(src, thresh=127.0, maxval=255.0, thresh_type="BINARY"):
     if data.ndim not in (2, 3):
         raise ValueError("threshold input must be 2D or 3D")
     try:
-        from . import _run_blockwise
+        from taichi_library.taichi_algorithm.aot_api import _run_blockwise
     except ImportError:  # pragma: no cover - only possible during import
         _run_blockwise = None
     result = None
@@ -480,7 +484,7 @@ def joint_bilateral_guidance_aot(src, guide, preset="medium", radius=2):
         )
 
     try:
-        from . import _run_blockwise
+        from taichi_library.taichi_algorithm.aot_api import _run_blockwise
     except ImportError:  # pragma: no cover - only possible during import
         _run_blockwise = None
     if _run_blockwise is not None:
@@ -525,7 +529,10 @@ def enhance_image_aot(src, blur, lut, micro_contrast=2.93, clarity=0.0, noise_co
         )
 
     try:
-        from . import _run_blockwise
+        # ``extended_aot`` lives under ``image_processing`` while the shared
+        # executor is owned by ``aot_api``.  Keep this lazy to avoid the
+        # extended -> package -> extended import cycle.
+        from taichi_library.taichi_algorithm.aot_api import _run_blockwise
     except ImportError:  # pragma: no cover - only possible during import
         _run_blockwise = None
     if _run_blockwise is not None:

@@ -20,6 +20,18 @@ try:
 except ImportError:
     from aot_artifact import archive_module
 
+try:
+    from taichi_library.taichi_algorithm.demosaicing.demosaic_aot_builder import (
+        register_dcb_graphs,
+    )
+    from taichi_library.taichi_algorithm.demosaicing.reduced_kernels import (
+        rgb_to_luma,
+        rgb_to_luma_half_res,
+    )
+except ImportError:
+    from demosaic_aot_builder import register_dcb_graphs
+    from reduced_kernels import rgb_to_luma, rgb_to_luma_half_res
+
 
 @ti.func
 def _cfa_color(y, x, c00, c01, c10, c11):
@@ -178,18 +190,107 @@ def _dcb_refine_chroma(
 
 
 @ti.kernel
-def _dcb_copy_rgb(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: ti.i32, w: ti.i32):
+def _dcb_copy_rgb(
+    src: ti.types.ndarray(), dst: ti.types.ndarray(),
+    wb_r: ti.f32, wb_g1: ti.f32, wb_b: ti.f32, wb_g2: ti.f32,
+    h: ti.i32, w: ti.i32,
+):
+    inv_wb_r = 1.0 / ti.max(0.1, wb_r)
+    inv_wb_g = 1.0 / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
+    inv_wb_b = 1.0 / ti.max(0.1, wb_b)
+
     for y, x in ti.ndrange(h, w):
-        for channel in ti.static(range(3)):
-            dst[y, x, channel] = ti.math.clamp(src[y, x, channel], 0.0, 1.0)
+        R = src[y, x, 0]
+        G = src[y, x, 1]
+        B = src[y, x, 2]
+
+        R_raw = R * inv_wb_r
+        G_raw = G * inv_wb_g
+        B_raw = B * inv_wb_b
+
+        max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
+        min_raw = ti.min(R_raw, ti.min(G_raw, B_raw))
+
+        factor = ti.math.clamp((max_raw - 0.55) / 0.43, 0.0, 1.0)
+        factor = factor * factor * (3.0 - 2.0 * factor)
+
+        ratio = min_raw / ti.max(1e-5, max_raw)
+        neutrality = ti.math.clamp((ratio - 0.40) / 0.45, 0.0, 1.0)
+        neutrality = neutrality * neutrality * (3.0 - 2.0 * neutrality)
+
+        final_factor = factor * neutrality
+
+        L = ti.max(R, ti.max(G, B))
+        R = R * (1.0 - final_factor) + L * final_factor
+        G = G * (1.0 - final_factor) + L * final_factor
+        B = B * (1.0 - final_factor) + L * final_factor
+
+        dst[y, x, 0] = R / ti.math.sqrt(1.0 + R * R)
+        dst[y, x, 1] = G / ti.math.sqrt(1.0 + G * G)
+        dst[y, x, 2] = B / ti.math.sqrt(1.0 + B * B)
 
 
 @ti.kernel
-def _dcb_copy_rgb_headroom(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: ti.i32, w: ti.i32):
-    """Copy linear camera RGB without discarding white-balance headroom."""
+def _dcb_copy_rgb_headroom(
+    src: ti.types.ndarray(), dst: ti.types.ndarray(),
+    wb_r: ti.f32, wb_g1: ti.f32, wb_b: ti.f32, wb_g2: ti.f32,
+    h: ti.i32, w: ti.i32,
+):
+    inv_wb_r = 1.0 / ti.max(0.1, wb_r)
+    inv_wb_g = 1.0 / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
+    inv_wb_b = 1.0 / ti.max(0.1, wb_b)
+
     for y, x in ti.ndrange(h, w):
-        for channel in ti.static(range(3)):
-            dst[y, x, channel] = ti.max(src[y, x, channel], 0.0)
+        R = src[y, x, 0]
+        G = src[y, x, 1]
+        B = src[y, x, 2]
+
+        R_raw = R * inv_wb_r
+        G_raw = G * inv_wb_g
+        B_raw = B * inv_wb_b
+
+        max_raw = ti.max(R_raw, ti.max(G_raw, B_raw))
+        min_raw = ti.min(R_raw, ti.min(G_raw, B_raw))
+
+        factor = ti.math.clamp((max_raw - 0.55) / 0.43, 0.0, 1.0)
+        factor = factor * factor * (3.0 - 2.0 * factor)
+
+        ratio = min_raw / ti.max(1e-5, max_raw)
+        neutrality = ti.math.clamp((ratio - 0.40) / 0.45, 0.0, 1.0)
+        neutrality = neutrality * neutrality * (3.0 - 2.0 * neutrality)
+
+        final_factor = factor * neutrality
+
+        L = ti.max(R, ti.max(G, B))
+        R = R * (1.0 - final_factor) + L * final_factor
+        G = G * (1.0 - final_factor) + L * final_factor
+        B = B * (1.0 - final_factor) + L * final_factor
+
+        dst[y, x, 0] = R / ti.math.sqrt(1.0 + R * R)
+        dst[y, x, 1] = G / ti.math.sqrt(1.0 + G * G)
+        dst[y, x, 2] = B / ti.math.sqrt(1.0 + B * B)
+
+
+@ti.kernel
+def _dcb_srgb_tonemap(
+    src_linear: ti.types.ndarray(),
+    cmatrix: ti.types.ndarray(),
+    dst_srgb: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+):
+    for r, c in ti.ndrange(h, w):
+        R = src_linear[r, c, 0]
+        G = src_linear[r, c, 1]
+        B = src_linear[r, c, 2]
+
+        sR = cmatrix[0, 0] * R + cmatrix[0, 1] * G + cmatrix[0, 2] * B
+        sG = cmatrix[1, 0] * R + cmatrix[1, 1] * G + cmatrix[1, 2] * B
+        sB = cmatrix[2, 0] * R + cmatrix[2, 1] * G + cmatrix[2, 2] * B
+
+        dst_srgb[r, c, 0] = ti.math.pow(ti.math.clamp(sR, 0.0, 1.0), 1.0 / 2.22)
+        dst_srgb[r, c, 1] = ti.math.pow(ti.math.clamp(sG, 0.0, 1.0), 1.0 / 2.22)
+        dst_srgb[r, c, 2] = ti.math.pow(ti.math.clamp(sB, 0.0, 1.0), 1.0 / 2.22)
 
 
 @ti.kernel
@@ -510,84 +611,31 @@ def _rgb_luma_half(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: ti.i32, 
 def compile_dcb_tcm(arch=ti.vulkan, save_path="dcb_vulkan.tcm"):
     ti.init(arch=arch, offline_cache=False)
     module = ti.aot.Module(arch)
-    bayer = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "bayer", ti.f32, ndim=2)
-    mosaic = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mosaic", ti.f32, ndim=2)
-    green = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "green", ti.f32, ndim=2)
-    rgb_a = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "rgb_a", ti.f32, ndim=3)
-    rgb_b = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "rgb_b", ti.f32, ndim=3)
-    dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.f32, ndim=3)
-    gray = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "gray", ti.f32, ndim=2)
-    wb_r = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_r", ti.f32)
-    wb_g1 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_g1", ti.f32)
-    wb_b = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_b", ti.f32)
-    wb_g2 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_g2", ti.f32)
-    black = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "black", ti.f32)
-    white = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "white", ti.f32)
-    h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
-    w = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
-    c00 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c00", ti.i32)
-    c01 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c01", ti.i32)
-    c10 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c10", ti.i32)
-    c11 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "c11", ti.i32)
-    common = (wb_r, wb_g1, wb_b, wb_g2, black, white, h, w, c00, c01, c10, c11)
 
-    full = ti.graph.GraphBuilder()
-    full.dispatch(_dcb_preprocess, bayer, mosaic, *common)
-    full.dispatch(_dcb_green, mosaic, green, h, w, c00, c01, c10, c11)
-    full.dispatch(_dcb_initial_rgb, mosaic, green, rgb_a, h, w, c00, c01, c10, c11)
-    full.dispatch(_dcb_refine_chroma, rgb_a, mosaic, rgb_b, h, w, c00, c01, c10, c11)
-    full.dispatch(_dcb_refine_chroma, rgb_b, mosaic, rgb_a, h, w, c00, c01, c10, c11)
-    full.dispatch(_dcb_copy_rgb, rgb_a, dst, h, w)
-    module.add_graph("dcb_demosaic", full.compile())
-
-    headroom = ti.graph.GraphBuilder()
-    headroom.dispatch(_dcb_preprocess_headroom, bayer, mosaic, *common)
-    headroom.dispatch(_dcb_green, mosaic, green, h, w, c00, c01, c10, c11)
-    headroom.dispatch(_dcb_initial_rgb, mosaic, green, rgb_a, h, w, c00, c01, c10, c11)
-    headroom.dispatch(_dcb_refine_chroma, rgb_a, mosaic, rgb_b, h, w, c00, c01, c10, c11)
-    headroom.dispatch(_dcb_refine_chroma, rgb_b, mosaic, rgb_a, h, w, c00, c01, c10, c11)
-    headroom.dispatch(_dcb_copy_rgb_headroom, rgb_a, dst, h, w)
-    module.add_graph("dcb_demosaic_headroom", headroom.compile())
-
-    wb_g = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "wb_g", ti.f32)
-    ratio_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ratio_src", ti.f32, ndim=3)
-    ratio_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ratio_dst", ti.f32, ndim=3)
-    recovered = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "recovered", ti.f32, ndim=3)
-    map_h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "map_h", ti.i32)
-    map_w = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "map_w", ti.i32)
-
-    ratio_seed = ti.graph.GraphBuilder()
-    ratio_seed.dispatch(_dcb_highlight_ratio_seed, dst, ratio_dst, wb_r, wb_g, wb_b, h, w, map_h, map_w)
-    module.add_graph("dcb_highlight_ratio_seed", ratio_seed.compile())
-
-    ratio_propagate = ti.graph.GraphBuilder()
-    ratio_propagate.dispatch(_dcb_highlight_ratio_propagate, ratio_src, ratio_dst, map_h, map_w)
-    module.add_graph("dcb_highlight_ratio_propagate", ratio_propagate.compile())
-
-    highlight_apply = ti.graph.GraphBuilder()
-    highlight_apply.dispatch(_dcb_highlight_apply, dst, ratio_src, recovered, wb_r, wb_g, wb_b, h, w, map_h, map_w)
-    module.add_graph("dcb_highlight_apply", highlight_apply.compile())
-
-    copy_rgb = ti.graph.GraphBuilder()
-    copy_rgb.dispatch(_dcb_copy_rgb, recovered, dst, h, w)
-    module.add_graph("dcb_copy_rgb", copy_rgb.compile())
-
-    one = ti.graph.GraphBuilder()
-    one.dispatch(_dcb_green_1ch, bayer, gray, *common)
-    module.add_graph("dcb_demosaic_1channel", one.compile())
-
-    half = ti.graph.GraphBuilder()
-    half.dispatch(_dcb_rgb_half, bayer, dst, *common)
-    module.add_graph("dcb_demosaic_rgb_half_res", half.compile())
-
-    half_gray = ti.graph.GraphBuilder()
-    half_gray.dispatch(_dcb_rgb_half, bayer, dst, *common)
-    half_gray.dispatch(_rgb_luma_half, dst, gray, h, w)
-    module.add_graph("dcb_demosaic_half_res", half_gray.compile())
-
-    luma = ti.graph.GraphBuilder()
-    luma.dispatch(_rgb_luma, rgb_a, gray, h, w)
-    module.add_graph("dcb_rgb_to_luma", luma.compile())
+    register_dcb_graphs(
+        module,
+        kernels={
+            "preprocess": _dcb_preprocess,
+            "preprocess_headroom": _dcb_preprocess_headroom,
+            "green": _dcb_green,
+            "initial_rgb": _dcb_initial_rgb,
+            "refine_chroma": _dcb_refine_chroma,
+            "copy_rgb": _dcb_copy_rgb,
+            "copy_rgb_headroom": _dcb_copy_rgb_headroom,
+            "srgb_tonemap": _dcb_srgb_tonemap,
+            "highlight_ratio_seed": _dcb_highlight_ratio_seed,
+            "highlight_ratio_propagate": _dcb_highlight_ratio_propagate,
+            "highlight_apply": _dcb_highlight_apply,
+            "green_1ch": _dcb_green_1ch,
+            "rgb_half": _dcb_rgb_half,
+            # These two kernels are ABI- and semantics-identical to the
+            # reusable reduced-resolution implementations.  Keep the local
+            # names above for compatibility with older direct imports, but
+            # register the shared implementation as the single graph source.
+            "rgb_luma": rgb_to_luma,
+            "rgb_luma_half": rgb_to_luma_half_res,
+        },
+    )
 
     archive_module(module, save_path)
     ti.reset()

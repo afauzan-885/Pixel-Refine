@@ -1,84 +1,9 @@
 {
   "schema_version": 1,
-  "artifact_contract": {
-    "filename": "<algorithm>_<backend>_<arch>[_<os>][_<vendor>][_<variant>].tcm",
-    "legacy_filename": "<algorithm>_<backend>.tcm",
-    "legacy_loading": "temporary-compatibility-only",
-    "architecture_values": ["x86_64", "arm64", "armv7"],
-    "backend_values": ["cpu", "vulkan", "opengl", "gles", "cuda"],
-    "mobile_abi_values": ["arm64-v8a", "armeabi-v7a"],
-    "native_bridge_required": true
-  },
   "target_matrix": [
-    {"backend": "cpu", "arch": "x86_64", "os": "windows"},
-    {"backend": "cpu", "arch": "x86_64", "os": "linux"},
-    {"backend": "cpu", "arch": "arm64", "os": "linux"},
-    {"backend": "cpu", "arch": "arm64", "os": "android", "abi": "arm64-v8a"},
-    {"backend": "vulkan", "arch": "x86_64", "os": "windows", "vendor": "unknown"},
-    {"backend": "vulkan", "arch": "x86_64", "os": "windows", "vendor": "nvidia"},
-    {"backend": "vulkan", "arch": "x86_64", "os": "windows", "vendor": "intel"},
-    {"backend": "vulkan", "arch": "arm64", "os": "android", "vendor": "unknown", "abi": "arm64-v8a"},
-    {"backend": "opengl", "arch": "x86_64", "os": "windows", "vendor": "unknown"},
-    {"backend": "opengl", "arch": "x86_64", "os": "windows", "vendor": "nvidia"},
-    {"backend": "opengl", "arch": "x86_64", "os": "windows", "vendor": "intel"},
-    {"backend": "opengl", "arch": "arm64", "os": "linux", "vendor": "unknown"},
-    {"backend": "gles", "arch": "arm64", "os": "android", "vendor": "unknown", "abi": "arm64-v8a"},
-    {"backend": "gles", "arch": "arm64", "os": "linux", "vendor": "unknown"},
-    {"backend": "cuda", "arch": "x86_64", "os": "windows", "vendor": "nvidia"},
-    {"backend": "cuda", "arch": "arm64", "os": "linux", "vendor": "nvidia"}
-  ],
-  "compatibility_policy": {
-    "never_mix_architecture": true,
-    "never_mix_mobile_gles_with_desktop_opengl": true,
-    "cuda_requires_nvidia": true,
-    "legacy_artifacts_must_be_quarantined_before_release": true
-  },
-  "runtime_requirements": {
-    "cpu_x86_64_linux": {
-      "toolchain": "native Linux/glibc worker or an explicit x86_64-linux cross toolchain",
-      "validation_status": "build_pending_host_linux_toolchain"
-    },
-    "cuda_arm64_linux_nvidia": {
-      "toolchain": "NVIDIA CUDA ARM64/Linux toolchain plus an AArch64 host runtime",
-      "validation_status": "build_pending_cuda_arm64_toolchain"
-    },
-    "vulkan_arm64_android": {
-      "bridge": "../aot_py/aot_dll/vulkan_arm64_android/taichi_aot_engine.so",
-      "c_api_runtime": "../aot_py/aot_dll/vulkan_arm64_android/libtaichi_c_api.so",
-      "shader_validation": "793 SPIR-V shaders pass spirv-val --target-env vulkan1.1; Shader + SPV_KHR_storage_buffer_storage_class only",
-      "validation_status": "portable_spirv_promoted_bridge_elf_neon_and_c_api_dependency_validated; device_execution_pending"
-    },
-    "gles_arm64_android": {
-      "bridge": "../aot_py/aot_dll/gles_arm64_android/taichi_aot_engine.so",
-      "c_api_runtime": "../aot_py/aot_dll/gles_arm64_android/libtaichi_c_api.so",
-      "shader_validation": "807 SPIR-V shaders pass spirv-val --target-env spv1.3; GLES artifacts compiled with ti.gles",
-      "validation_status": "native_gles_tcm_compiled_bridge_elf_neon_and_c_api_dependency_validated; device_execution_pending"
-    },
-    "cpu_arm64_linux": {
-      "runtime_bitcode": "runtime_arm64_linux.bc",
-      "bridge": "../aot_py/aot_dll/cpu_arm64_linux/taichi_aot_engine.so",
-      "c_api_runtime": "../aot_py/aot_dll/cpu_arm64_linux/libtaichi_c_api.so",
-      "llvm_triple": "aarch64-unknown-linux-gnu",
-      "validation_status": "cross_compiled_llvm_parsed_aarch64_object_codegen_validated_bridge_elf_neon_and_c_api_dependency_validated; device_execution_pending"
-    },
-    "cpu_arm64_android": {
-      "runtime_bitcode": "runtime_arm64_android.bc",
-      "bridge": "../aot_py/aot_dll/cpu_arm64_android/taichi_aot_engine.so",
-      "c_api_runtime": "../aot_py/aot_dll/cpu_arm64_android/libtaichi_c_api.so",
-      "llvm_triple": "aarch64-unknown-linux-android21",
-      "validation_status": "cross_compiled_llvm_parsed_aarch64_object_codegen_validated_bridge_elf_neon_and_c_api_dependency_validated; device_execution_pending"
-    },
-    "opengl_arm64_linux": {
-      "bridge": "../aot_py/aot_dll/opengl_arm64_linux/taichi_aot_engine.so",
-      "c_api_runtime": "../aot_py/aot_dll/opengl_arm64_linux/libtaichi_c_api.so",
-      "toolchain": "GNU AArch64 glibc cross compiler plus headless GLFW/EGL C-API build",
-      "validation_status": "native_opengl_tcm_compiled_bridge_elf_and_c_api_dependency_validated; device_execution_pending"
-    },
-    "gles_arm64_linux": {
-      "bridge": "../aot_py/aot_dll/gles_arm64_linux/taichi_aot_engine.so",
-      "c_api_runtime": "../aot_py/aot_dll/gles_arm64_linux/libtaichi_c_api.so",
-      "toolchain": "GNU AArch64 glibc cross compiler plus headless GLFW/EGL C-API build",
-      "validation_status": "native_gles_tcm_compiled_bridge_elf_and_c_api_dependency_validated; device_execution_pending"
-    }
-  }
+    {"os": "windows", "backend": "cpu", "arch": "x86_64", "vendor": "unknown"},
+    {"os": "windows", "backend": "cuda", "arch": "x86_64", "vendor": "nvidia"},
+    {"os": "windows", "backend": "opengl", "arch": "x86_64", "vendor": "unknown"},
+    {"os": "windows", "backend": "vulkan", "arch": "x86_64", "vendor": "unknown"}
+  ]
 }
