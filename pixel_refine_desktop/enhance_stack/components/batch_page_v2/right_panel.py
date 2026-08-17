@@ -18,6 +18,7 @@ from resources.animations.animation_manager import (
 )
 import json
 import os
+import config
 
 
 # Generic UI Library
@@ -67,6 +68,12 @@ class RightPanel(QWidget, SyncMixin):
         self.current_batch_id = None  # Track active batch for JSON persistence
         self._is_syncing = False  # Flag to avoid recursion during sync
         self._last_emitted_settings = None
+
+        # Debounce timer for store sync (1 second delay to avoid rapid file writes)
+        self._sync_store_timer = QTimer(self)
+        self._sync_store_timer.setSingleShot(True)
+        self._sync_store_timer.setInterval(1000)
+        self._sync_store_timer.timeout.connect(self._save_batch_settings)
 
         # Debounce timer for rapid selection changes (Breathing Room)
         self._selection_timer = QTimer(self)
@@ -118,9 +125,23 @@ class RightPanel(QWidget, SyncMixin):
         # Trigger immediate refresh for all bindings in this scope
         # (SyncMixin.on_store_changed(None, ...) handles this)
         self.on_store_changed(None, self.get_data())
+        self._normalize_alignment_form_value()
 
         # Emit signal for adaptive UI (AlgorithmPanel)
         self._on_settings_changed(save_to_store=False)
+
+    def _normalize_alignment_form_value(self):
+        raw_value = self.align_form.get_value()
+        mapping = {
+            "Farneback Optical Flow": "Farneback",
+            "Lucas Kanade Optical Flow": "Lucas Kanade",
+            "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
+            "Block Matching GPU Optical Flow": "Block Matching GPU",
+            "RAFT Optical Flow": "RAFT",
+        }
+        normalized = mapping.get(str(raw_value or "").strip())
+        if normalized:
+            self.align_form.set_value(normalized)
 
     def _save_batch_settings(self):
         """Save current UI values to store under the current batch scope."""
@@ -128,13 +149,13 @@ class RightPanel(QWidget, SyncMixin):
             return
 
         settings = {
-            "alignment_algo": self.align_form.get_value(),
-            "super_resolution_algo": self.sr_card.get_value(),
-            "denoising_algo": self.denoise_card.get_value(),
-            "checkbox_align_images": self.align_form.get_value()
+            config.KEY_ALIGNMENT_ALGO: self.align_form.get_value(),
+            config.KEY_SUPER_RESOLUTION_ALGO: self.sr_card.get_value(),
+            config.KEY_DENOISING_ALGO: self.denoise_card.get_value(),
+            config.KEY_CHECKBOX_ALIGN: self.align_form.get_value()
             not in ["None", "No Alignment"],
-            "checkbox_super_resolution": self.sr_card.is_checked,
-            "checkbox_denoising": self.denoise_card.is_checked,
+            config.KEY_CHECKBOX_SUPER_RES: self.sr_card.is_checked,
+            config.KEY_CHECKBOX_DENOISING: self.denoise_card.is_checked,
         }
 
         # Use logic module to update store
@@ -370,9 +391,13 @@ class RightPanel(QWidget, SyncMixin):
         self._update_cards_mutually_exclusive_state()
 
         settings = {
-            "alignment": self.align_form.get_value() or "",
-            "super_resolution": self.sr_card.get_value() or "",
-            "denoising": self.denoise_card.get_value() or "",
+            config.KEY_ALIGNMENT: self.align_form.get_value() or "",
+            config.KEY_SUPER_RESOLUTION: self.sr_card.get_value() or "",
+            config.KEY_DENOISING: self.denoise_card.get_value() or "",
+            config.KEY_CHECKBOX_ALIGN: self.align_form.get_value()
+            not in ("", "None", "No Alignment"),
+            config.KEY_CHECKBOX_SUPER_RES: bool(self.sr_card.is_checked),
+            config.KEY_CHECKBOX_DENOISING: bool(self.denoise_card.is_checked),
         }
 
         if settings == self._last_emitted_settings:
@@ -388,9 +413,9 @@ class RightPanel(QWidget, SyncMixin):
         self.logic.set_settings(settings)  # type: ignore
         # Note: logic.set_settings returns bool, but we ignore it here
 
-        # 3. Save to Store if triggered by user interaction
+        # 3. Save to Store if triggered by user interaction (debounced 1s)
         if save_to_store and self.current_batch_id is not None:
-            self._save_batch_settings()
+            self._sync_store_timer.start()
 
     def get_current_settings(self):
         """Public accessor for settings."""
@@ -407,40 +432,56 @@ class RightPanel(QWidget, SyncMixin):
         for batch in batches:
             self.list_group.add_item(batch.name, value=batch.id)
 
+    def refresh_after_project_load(self):
+        """Refresh project-backed batches and restore panel visibility."""
+        self._load_batches()
+        batches = self.controller.get_all_batches() if self.controller else []
+        if batches:
+            self.setMaximumWidth(16777215)
+            self.show()
+        else:
+            self.list_group.clear_selection()
+            self.hide()
+            self.setMaximumWidth(0)
+        self._update_process_all_btn_visibility()
+
     def _create_new_batch(self):
         if not self.controller:
             return
 
-        # 1. Load preferences from batch_parameter.json
-        all_params = batch_parameter_manager.load_json_state()
-        quick_create_enabled = all_params.get("quick_batch_creation", False)
+        from pixel_refine_desktop.ui.views.settings.General.general_store import get_general_store
+        store = get_general_store()
+        show_confirm = store.get("show_new_batch_confirm")
+        if show_confirm is None:
+            show_confirm = True
 
-        # 2. Generate default name (Robust check for uniqueness)
+        if show_confirm:
+            from resources.GenericUILibrary.modals import modal_confirm
+            from PySide6.QtWidgets import QDialog
+            dialog = modal_confirm(
+                message="Apakah Anda yakin ingin membuat batch baru?",
+                parent=self,
+                title="Create New Batch",
+                show_checkbox=True,
+                checkbox_text="Jangan tampilkan lagi"
+            )
+            # Connect checkbox toggled to saving setting in real-time
+            dialog.checkbox.toggled.connect(
+                lambda checked: store.set("show_new_batch_confirm", not checked)
+            )
+            
+            result = dialog.exec()
+            if result != QDialog.DialogCode.Accepted:
+                return
+
+        # Generate default name (Robust check for uniqueness)
         all_batches = self.controller.get_all_batches()
         existing_names = {b.name for b in all_batches}
 
         index = 1
         while f"Batch {index}" in existing_names:
             index += 1
-        default_name = f"Batch {index}"
-
-        name = default_name
-        should_save_preference = False
-
-        # 3. Decision: Show Dialog or Quick Create
-        if not quick_create_enabled:
-            dialog = QuickBatchDialog(default_name=default_name, parent=self)
-            if dialog.exec():
-                name, skip_next = dialog.get_data()
-                if not name:
-                    name = default_name
-
-                if skip_next:
-                    # Save preference to JSON
-                    all_params["quick_batch_creation"] = True
-                    batch_parameter_manager.save_json_state(data=all_params)
-            else:
-                return  # User cancelled
+        name = f"Batch {index}"
 
         # 4. Create Batch
         batch_id = self.controller.create_batch(name)
@@ -511,7 +552,7 @@ class RightPanel(QWidget, SyncMixin):
     def _on_selection_changed(self, selected_values):
         """Buffer selection change to prevent UI lag during rapid clicking."""
         self._pending_selection = selected_values
-        self._selection_timer.start(150)  # 200ms breathing room
+        self._selection_timer.start(50)  # 50ms breathing room
 
     def set_collapsed_state(self, collapsed):
         """Update internal collapsed state and animate height."""

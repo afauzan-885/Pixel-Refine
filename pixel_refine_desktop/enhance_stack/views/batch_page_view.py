@@ -89,7 +89,7 @@ class BatchPageView(QWidget):
         layout.addWidget(self.legacy_header)
 
         # The V1 Batch Page Layout
-        self.batch_layout = BulkPageLayout()
+        self.batch_layout = BulkPageLayout(self.db_path)
         layout.addWidget(self.batch_layout)
 
         # Wire data_changed from batch_layout to update button visibility

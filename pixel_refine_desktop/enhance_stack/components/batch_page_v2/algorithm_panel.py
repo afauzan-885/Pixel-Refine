@@ -11,8 +11,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QStackedWidget,
+    QSizePolicy,
 )
 from PySide6.QtCore import QThread, Qt, Signal, QTimer
+import config
 
 # Generic UI Library
 from resources.GenericUILibrary import (
@@ -155,6 +157,9 @@ class AlgorithmPanel(QWidget, SyncMixin):
         """Create column for alignment parameters."""
         widget = QWidget()
         widget.setObjectName("paramAlignWidget")
+        widget.setVisible(False)
+        widget.setMaximumHeight(0)
+        widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10)
@@ -250,7 +255,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
         if settings.get("super_resolution") and settings.get("super_resolution") != "No Super Resolution":
             active_algos.append(f"Super Resolusi ({settings['super_resolution']})")
 
-        msg = "Sedang memproses: " + ", ".join(active_algos) if active_algos else "Sedang memproses batch..."
+        msg = ", ".join(active_algos) if active_algos else "Memproses batch"
         
         if hasattr(self, "display_panel") and self.display_panel and hasattr(self.display_panel, "toast"):
             from resources.animations.toast.toast_manager import ToastPosition
@@ -348,7 +353,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
 
         # We can track the current stage index
         current_stage_idx = 0
-        display_msg = "Sedang memproses..."
+        display_msg = "Memproses"
         stage_percent = percent
 
         if "||" in message:
@@ -474,20 +479,29 @@ class AlgorithmPanel(QWidget, SyncMixin):
                 all_settings = {}
 
             ui_settings = {
-                "alignment": (
-                    all_settings.get("alignment_algo", "No Alignment")
-                    if all_settings.get("checkbox_align_images", False)
+                config.KEY_ALIGNMENT: (
+                    all_settings.get(config.KEY_ALIGNMENT_ALGO, "No Alignment")
+                    if all_settings.get(config.KEY_CHECKBOX_ALIGN, False)
                     else "No Alignment"
                 ),
-                "super_resolution": (
-                    all_settings.get("super_resolution_algo", "No Super Resolution")
-                    if all_settings.get("checkbox_super_resolution", False)
+                config.KEY_SUPER_RESOLUTION: (
+                    all_settings.get(config.KEY_SUPER_RESOLUTION_ALGO, "No Super Resolution")
+                    if all_settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
                     else "No Super Resolution"
                 ),
-                "denoising": (
-                    all_settings.get("denoising_algo", "No Denoising")
-                    if all_settings.get("checkbox_denoising", False)
+                config.KEY_DENOISING: (
+                    all_settings.get(config.KEY_DENOISING_ALGO, "No Denoising")
+                    if all_settings.get(config.KEY_CHECKBOX_DENOISING, False)
                     else "No Denoising"
+                ),
+                config.KEY_CHECKBOX_ALIGN: bool(
+                    all_settings.get(config.KEY_CHECKBOX_ALIGN, False)
+                ),
+                config.KEY_CHECKBOX_SUPER_RES: bool(
+                    all_settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
+                ),
+                config.KEY_CHECKBOX_DENOISING: bool(
+                    all_settings.get(config.KEY_CHECKBOX_DENOISING, False)
                 ),
             }
             # Update the UI
@@ -518,7 +532,12 @@ class AlgorithmPanel(QWidget, SyncMixin):
 
         # Relocate start button if denoising is Average, Median, or Similarity
         # (These modes have no algorithm parameters to configure)
-        is_no_algo_panel = denoising in ["Average", "Median", "Similarity"]
+        is_no_algo_panel = denoising in [
+            "Average",
+            "Median",
+            "Similarity",
+            "Similarity Fusion",
+        ]
         for btn in self._all_process_buttons:
             if hasattr(self, "display_panel") and self.display_panel and btn == self.display_panel.start_btn_ref:
                 continue
@@ -535,7 +554,11 @@ class AlgorithmPanel(QWidget, SyncMixin):
             "No Super Resolution",
         ]
         is_align_active = alignment not in none_values
-        is_algo_active = (denoising not in none_values and denoising not in ["Average", "Median", "Similarity"]) or (
+        is_algo_active = (
+            denoising not in none_values
+            and denoising
+            not in ["Average", "Median", "Similarity", "Similarity Fusion"]
+        ) or (
             super_res not in none_values
         )
 
@@ -590,8 +613,10 @@ class AlgorithmPanel(QWidget, SyncMixin):
                 duration=400,
             )
 
-         # Notify LeftPanel about overall visibility (expanded/collapsed)
-        self.visibility_state_changed.emit(target_idx != 3)
+        # The visible parameter surface has moved to SwitchableParameterPanel.
+        # Keep this legacy AlgorithmPanel collapsed so it never pushes the
+        # DisplayPanel upward when settings are saved or refreshed.
+        self.visibility_state_changed.emit(False)
 
     def set_settings(self, settings):
         self.logic.set_settings(settings)

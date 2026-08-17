@@ -386,10 +386,6 @@ def create_button_style(variant="secondary", theme=None):
         QPushButton:hover {{
             background-color: {hover_color};
         }}
-        QPushButton:pressed {{
-            background-color: {hover_color};
-            padding: 9px 15px 7px 17px;
-        }}
         QPushButton:disabled {{
             background-color: {theme.bg_secondary};
             color: {theme.text_muted};

@@ -14,11 +14,16 @@ class SplashScreen(QSplashScreen):
     Custom splash screen that displays an image, circular progress indicator,
     and status label.
     """
-    
-    def __init__(self, pixmap: QPixmap, version_string: str, flags=Qt.WindowType.WindowStaysOnTopHint):
+
+    def __init__(
+        self,
+        pixmap: QPixmap,
+        version_string: str,
+        flags=Qt.WindowType.WindowStaysOnTopHint,
+    ):
         """
         Initialize splash screen.
-        
+
         Args:
             pixmap: Image to display on splash screen
             version_string: Version text to display
@@ -29,34 +34,44 @@ class SplashScreen(QSplashScreen):
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 15)
-        
+
         main_layout.addStretch()
 
         # Custom circular progress widget
         self.progress_indicator = CircularProgress(self)
-        self.progress_indicator.setFixedSize(120, 120) 
-        main_layout.addWidget(self.progress_indicator, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.progress_indicator.setFixedSize(120, 120)
+        main_layout.addWidget(
+            self.progress_indicator, alignment=Qt.AlignmentFlag.AlignCenter
+        )
 
-        from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+        from pixel_refine_desktop.ui.views.settings.General.Language import (
+            language_config,
+        )
+
         # Label for "LOADING..."
-        self.status_label = QLabel(language_config.UI_SPLASH_LOADING, self)
+        # self.status_label = QLabel(language_config.UI_SPLASH_LOADING, self)
+        self.status_label = QLabel("LOADING...", self)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setStyleSheet("""
+        self.status_label.setStyleSheet(
+            """
             color: white; 
             font-size: 14px;
             font-weight: normal;
             letter-spacing: 4px;
             background-color: transparent;
             padding-top: 5px;
-        """)
+        """
+        )
         main_layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Label for detailed messages
         self.detail_label = QLabel("", self)
         self.detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.detail_label.setStyleSheet("color: #DDDDDD; font-size: 11px; background-color: transparent;")
+        self.detail_label.setStyleSheet(
+            "color: #DDDDDD; font-size: 11px; background-color: transparent;"
+        )
         main_layout.addWidget(self.detail_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        
+
         # Small spacer for version number
         main_layout.addSpacing(10)
 
@@ -64,21 +79,25 @@ class SplashScreen(QSplashScreen):
         self.version_label = QLabel(version_string, self)
         self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Made smaller and dimmer for elegance
-        self.version_label.setStyleSheet("""
+        self.version_label.setStyleSheet(
+            """
             color: #AAAAAA; 
             font-size: 9px; 
             background-color: transparent;
-        """)
-        main_layout.addWidget(self.version_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        """
+        )
+        main_layout.addWidget(
+            self.version_label, alignment=Qt.AlignmentFlag.AlignCenter
+        )
 
     def update_status(self, message: str, value: int) -> None:
         """
         Update progress indicator and status message.
-        
+
         Args:
             message: Status message to display
             value: Progress value (0-100)
         """
         self.progress_indicator.setValue(value)
-        self.detail_label.setText(message) 
+        self.detail_label.setText(message)
         QApplication.processEvents()

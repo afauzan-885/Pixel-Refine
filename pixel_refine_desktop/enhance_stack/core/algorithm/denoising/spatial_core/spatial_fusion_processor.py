@@ -13,6 +13,7 @@ Algorithm (per frame):
 """
 
 import os
+import gc
 import numpy as np
 
 
@@ -80,23 +81,17 @@ class SpatialFusionProcessor:
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
             taichi_bridge,
         )
-        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-            estimate_noise_in_python,
-        )
         from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
+            SpatialScratchCache,
             generate_spatial_weights_taichi,
             accumulate_spatial_merging_taichi,
         )
 
-        # Validate GPU availability
-        try:
-            from taichi_library.taichi_aot.engine import AOTEngine
-
-            _engine = AOTEngine()
-        except Exception as e:
+        engine = taichi_aot.engine
+        if str(getattr(engine, "arch", "")).lower() == "cpu":
             raise RuntimeError(
-                f"[SpatialFusion] GPU AOT engine not available: {e}. "
-                "Spatial fusion requires a compatible GPU with Vulkan support."
+                "[SpatialFusion] GPU AOT engine is running on CPU fallback. "
+                "Spatial fusion requires the active taichi_aot Vulkan/CUDA engine."
             )
 
         # Defaults
@@ -104,6 +99,35 @@ class SpatialFusionProcessor:
             work_res_h = ref_h
         if work_res_w is None:
             work_res_w = ref_w
+
+        # Reserve a bounded resident working set for the repeated frame loop.
+        # The runtime may reclaim it under pressure; callers never need to
+        # manage block ownership manually.
+        channels = (
+            reference_image_float.shape[2] if reference_image_float.ndim == 3 else 1
+        )
+        frame_bytes = (
+            int(ref_h) * int(ref_w) * max(channels, 1) * np.dtype(np.float32).itemsize
+        )
+        block_config = taichi_aot.get_block_config()
+        cache_budget = int(
+            (
+                block_config.get("device_cache_bytes", 0)
+                if isinstance(block_config, dict)
+                else getattr(block_config, "device_cache_bytes", 0)
+            )
+            or 0
+        )
+        soft_reservation = min(
+            max(frame_bytes // 4, 8 * 1024 * 1024),
+            max(cache_budget // 2, 8 * 1024 * 1024),
+        )
+        taichi_aot.configure_block_reservation(
+            "spatial_fusion",
+            soft_bytes=soft_reservation,
+            hard_bytes=max(soft_reservation, min(frame_bytes, cache_budget)),
+            weight=2.0,
+        )
 
         # Tile configuration for internal tiling
         tile_h = kwargs.get("tile_h", 16)
@@ -153,19 +177,16 @@ class SpatialFusionProcessor:
         print(f"[SpatialFusion] Reference noise sigma: {ref_noise_sigma:.6f}")
 
         # Global accumulation buffers
-        channels = (
-            reference_image_float.shape[2] if reference_image_float.ndim == 3 else 1
-        )
         final_image_sum_full_res = np.zeros((ref_h, ref_w, channels), dtype=np.float32)
         weight_map_sum_full_res = np.zeros((ref_h, ref_w), dtype=np.float32)
 
         processed_count = 0
+        # The frame loop is sequential, so these analysis buffers can be
+        # safely reused between dispatches.  In particular, the reference
+        # pyramid/gradients are invariant for the complete batch.
+        spatial_scratch = SpatialScratchCache()
 
         try:
-            from taichi_library.taichi_aot.engine import AOTEngine
-
-            engine = AOTEngine()
-
             _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
             _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
             _base_window_gpu = taichi_aot.hanning(
@@ -179,7 +200,34 @@ class SpatialFusionProcessor:
                 (work_res_h, work_res_w), dtype=np.float32, host_accessible=True
             )
 
-            batch_size = 8
+            try:
+                batch_size = int(os.environ.get("SPATIAL_BATCH_SIZE", "2"))
+            except (TypeError, ValueError):
+                batch_size = 2
+            batch_size = max(1, min(batch_size, 8))
+            try:
+                cleanup_interval = max(
+                    1,
+                    int(os.environ.get("SPATIAL_VRAM_CHECK_INTERVAL", "4")),
+                )
+            except (TypeError, ValueError):
+                cleanup_interval = 4
+
+            def cleanup_idle_vram(reason):
+                try:
+                    if hasattr(taichi_aot.engine, "sync"):
+                        taichi_aot.engine.sync()
+                    memory = taichi_aot.get_memory_status(force=True)
+                    if (
+                        memory.get("pressure") in ("high", "critical")
+                        and hasattr(engine, "buffer_pool")
+                        and engine.buffer_pool
+                    ):
+                        engine.buffer_pool.clear()
+                except Exception as exc:
+                    print(f"[SpatialFusion] VRAM cleanup skipped ({reason}): {exc}")
+                gc.collect()
+
             try:
                 for start_idx in range(0, num_images, batch_size):
                     if stop_requested and stop_requested():
@@ -253,6 +301,7 @@ class SpatialFusionProcessor:
                             buffer_provider="pool",
                             search_radius=kwargs.get("similarity_search_radius", 3),
                             early_exit_threshold=self.early_exit_threshold,
+                            scratch_cache=spatial_scratch,
                         )
 
                         # Cleanup work-res gray buffer
@@ -282,11 +331,13 @@ class SpatialFusionProcessor:
                             msg = f"Spatial Fusion: {i+1}/{num_images} (GPU AOT)"
                             update_progress(prog, msg)
 
-                    # Free chunk
+                    # Free chunk.  Memory-pressure polling and Python GC are
+                    # intentionally amortized; polling every tiny batch adds
+                    # host-side overhead and does not improve GPU dispatch.
                     del chunk_images
-                    import gc
-
-                    gc.collect()
+                    batch_number = (start_idx // batch_size) + 1
+                    if batch_number % cleanup_interval == 0 or end_idx >= num_images:
+                        cleanup_idle_vram(f"chunk {start_idx}-{end_idx}")
 
                 # Finalize: mean division
                 if processed_count > 0:
@@ -329,10 +380,13 @@ class SpatialFusionProcessor:
                             buf.destroy()
                         except:
                             pass
-                taichi_aot.unload_all_modules()
-                engine.buffer_pool.clear()
+                cleanup_idle_vram("final")
+                if os.environ.get("AOT_CLEAR_AFTER_OP", "0") == "1":
+                    taichi_aot.unload_all_modules()
+                    engine.buffer_pool.clear()
 
         finally:
+            spatial_scratch.clear()
             if ref_work_res_pass2_gpu is not None:
                 try:
                     ref_work_res_pass2_gpu.destroy()

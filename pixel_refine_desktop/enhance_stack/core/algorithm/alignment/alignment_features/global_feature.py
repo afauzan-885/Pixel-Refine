@@ -29,6 +29,7 @@ except ImportError:
 # Taichi AOT for GPU operations
 try:
     import taichi_library.taichi_aot as ta_aot
+
     TAICHI_AOT_AVAILABLE = True
 except Exception:
     ta_aot = None
@@ -179,14 +180,46 @@ def get_all_image_paths_for_batch_process(db_path, batch_id):
 
 
 def _prepare_image_array_from_raw_backup(
-    original_path, linear_mode=False, generate_ref_proxy=False, alignment_mode=False
+    original_path,
+    linear_mode=False,
+    generate_ref_proxy=False,
+    alignment_tonemapping_linear=False,
 ):
-    """CPU Backup implementation using rawpy postprocessing."""
+    """CPU Backup implementation using rawpy postprocessing.
+
+    NOTE — Hamilton-Adams GPU Tone Mapping Recipe (for future CPU parity use):
+    When alignment_tonemapping_linear=True is needed with GPU-matching output,
+    replace the block below with:
+
+        with rawpy.imread(original_path) as raw:
+            rgb_linear = raw.postprocess(
+                demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
+                use_camera_wb=True, no_auto_bright=True,
+                gamma=(1, 1), output_bps=16,
+                output_color=rawpy.ColorSpace.raw, user_flip=0,
+            )
+            img_f32 = rgb_linear.astype(np.float32) / 65535.0
+            cmatrix = raw.color_matrix[:, :3].astype(np.float32)
+            sRGB = np.matmul(img_f32, cmatrix.T)
+            # Sigmoid contrast roll-off (same as GPU AOT Hamilton)
+            sRGB = sRGB / np.sqrt(1.0 + sRGB * sRGB)
+            sRGB = np.clip(sRGB, 0.0, 1.0)
+            # Fast gamma approximation (same coefficients as GPU AOT Hamilton)
+            t = np.sqrt(sRGB)
+            gamma_rgb = t * (1.30547177 + t * (-0.78947190 + t * (0.79064221 - 0.30664208 * t)))
+            gamma_rgb = np.clip(gamma_rgb, 0.0, 1.0)
+            bgr = (gamma_rgb * 65535.0).astype(np.uint16)
+            # Swap R<->B channels for OpenCV BGR ordering
+            b = bgr[:, :, 0].copy(); bgr[:, :, 0] = bgr[:, :, 2]; bgr[:, :, 2] = b
+            bgr_f32 = bgr.astype(np.float32) / 65535.0
+            return cv2.cvtColor(bgr_f32, cv2.COLOR_BGR2GRAY)
+    """
     try:
         if not RAWPY_AVAILABLE:
             return None
         with rawpy.imread(original_path) as raw:
-            if alignment_mode:
+            if alignment_tonemapping_linear:
+                # Standard rawpy sRGB for alignment grayscale (original rawpy path)
                 rgb = raw.postprocess(
                     use_camera_wb=True,
                     output_bps=16,
@@ -265,29 +298,72 @@ def _prepare_image_array_from_raw_backup(
 
 
 def _prepare_image_array_from_raw(
-    original_path, linear_mode=False, generate_ref_proxy=False, alignment_mode=False
+    original_path,
+    linear_mode=False,
+    generate_ref_proxy=False,
+    alignment_tonemapping_linear=False,
 ):
-    """GPU-Accelerated RAW Demosaicing utilizing C++ AOT Hamilton-Adams pipeline."""
+    """GPU-Accelerated RAW Demosaicing using only Taichi for pixel processing.
+
+    rawpy is used only as a container reader for the Bayer plane and sensor
+    calibration values.  It never runs ``postprocess`` or performs demosaicing
+    in this path; the Bayer array is passed directly to ``ta_aot.demosaic``.
+    """
     try:
         if not RAWPY_AVAILABLE:
             return None
 
         import taichi_library.taichi_aot as ta_aot
 
-        # Call GPU-accelerated Demosaicing (Auto-extracts all metadata and runs on GPU)
+        # Read the Bayer plane/calibration only.  Calling demosaic(path) would
+        # make the API re-open rawpy internally and hide orientation handling.
+        with rawpy.imread(original_path) as raw:
+            bayer = raw.raw_image.astype(np.float32, copy=False)
+            wb = np.asarray(raw.camera_whitebalance, dtype=np.float32).copy()
+            if wb.size != 4:
+                wb = np.array([1.5, 1.0, 2.0, 1.0], dtype=np.float32)
+            if wb[3] <= 0.01:
+                wb[3] = wb[1]
+            wb /= max((wb[1] + wb[3]) / 2.0, 1e-6)
+            cmatrix = raw.color_matrix[:, :3].astype(np.float32)
+            black_level = float(raw.black_level_per_channel[0])
+            white_level = float(raw.white_level)
+            c00, c01 = int(raw.raw_colors[0, 0]), int(raw.raw_colors[0, 1])
+            c10, c11 = int(raw.raw_colors[1, 0]), int(raw.raw_colors[1, 1])
+
+        demosaic_kwargs = dict(
+            wb_r=float(wb[0]),
+            wb_g1=float(wb[1]),
+            wb_b=float(wb[2]),
+            wb_g2=float(wb[3]),
+            cmatrix=cmatrix,
+            black_level=black_level,
+            white_level=white_level,
+            c00=c00,
+            c01=c01,
+            c10=c10,
+            c11=c11,
+        )
+
         os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
 
-        if alignment_mode:
+        if alignment_tonemapping_linear:
             gray_full = ta_aot.demosaic(
-                original_path, method="hamilton-1channel", return_gpu=False
+                bayer,
+                method="hamilton-1channel",
+                return_gpu=False,
+                **demosaic_kwargs,
             )
             return gray_full
 
         # Active Version: Restored to JIT/AOT developed non-linear highlight logic from commit 56b751e
         bgr = ta_aot.demosaic(
-            original_path, method="hamilton", return_gpu=False, output_bgr_u16=True
+            bayer,
+            method="hamilton",
+            return_gpu=False,
+            output_bgr_u16=True,
+            **demosaic_kwargs,
         )
-
         # 5. GT Proxy Generation (if requested)
         if generate_ref_proxy:
             return (bgr, bgr.copy())
@@ -300,7 +376,7 @@ def _prepare_image_array_from_raw(
         )
         # Robust fallback to CPU backup to guarantee no application crashes
         return _prepare_image_array_from_raw_backup(
-            original_path, linear_mode, generate_ref_proxy, alignment_mode
+            original_path, linear_mode, generate_ref_proxy, alignment_tonemapping_linear
         )
 
 
@@ -309,7 +385,7 @@ def load_images_from_paths(
     stop_requested=None,
     linear_mode=False,
     capture_ref_proxy=False,
-    alignment_mode=False,
+    alignment_tonemapping_linear=False,
     update_progress=None,
     progress_start=0,
     progress_end=100,
@@ -361,6 +437,22 @@ def load_images_from_paths(
     total_paths = len(image_paths)
     loaded_count = 0
 
+    # Desktop OpenGL contexts are thread-affine.  The native AOT bridge is
+    # initialized on the caller thread, while the historical RAW loader sent
+    # every demosaic job through a ThreadPoolExecutor.  That combination can
+    # make the ICD reject otherwise-valid tile allocations (and then trigger
+    # the CPU backup).  Keep standard-image and CPU/CUDA/Vulkan loading
+    # parallel, but execute OpenGL/GLES RAW demosaic on the caller thread.
+    serial_native_raw = False
+    if TAICHI_AOT_AVAILABLE and ta_aot is not None:
+        try:
+            serial_native_raw = str(ta_aot.get_engine().arch).strip().lower() in {
+                "opengl",
+                "gles",
+            }
+        except Exception:
+            serial_native_raw = False
+
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         for idx_path, path in enumerate(image_paths):
             if stop_requested and stop_requested():
@@ -374,17 +466,48 @@ def load_images_from_paths(
 
             if ext in raw_extensions:
                 if os.path.exists(path):
-                    future = executor.submit(
-                        _prepare_image_array_from_raw,
-                        path,
-                        linear_mode,
-                        generate_ref_proxy=generate_proxy,
-                        alignment_mode=alignment_mode,
-                    )
-                    raw_futures.append(future)
+                    if serial_native_raw:
+                        try:
+                            res = _prepare_image_array_from_raw(
+                                path,
+                                linear_mode,
+                                generate_ref_proxy=generate_proxy,
+                                alignment_tonemapping_linear=alignment_tonemapping_linear,
+                            )
+                            if res is not None:
+                                if isinstance(res, tuple):
+                                    img, proxy = res
+                                    images.append(img)
+                                    if gt_proxy_result is None:
+                                        gt_proxy_result = proxy
+                                else:
+                                    images.append(res)
+                        except Exception as exc:
+                            print(f"Error loading RAW image: {exc}")
+                        finally:
+                            loaded_count += 1
+                            if update_progress:
+                                prog_val = int(
+                                    progress_start
+                                    + (loaded_count / total_paths)
+                                    * (progress_end - progress_start)
+                                )
+                                update_progress(
+                                    prog_val,
+                                    f"Loading RAW image {loaded_count}/{total_paths}...",
+                                )
+                    else:
+                        future = executor.submit(
+                            _prepare_image_array_from_raw,
+                            path,
+                            linear_mode,
+                            generate_ref_proxy=generate_proxy,
+                            alignment_tonemapping_linear=alignment_tonemapping_linear,
+                        )
+                        raw_futures.append(future)
             else:
                 if os.path.exists(path):
-                    if alignment_mode:
+                    if alignment_tonemapping_linear:
                         future = executor.submit(
                             _load_and_process_standard_alignment, path
                         )
@@ -612,15 +735,104 @@ def save_align_to_folder(
     return file_path
 
 
+def _reference_orientation(path):
+    """Read EXIF/LibRaw orientation without modifying image pixels."""
+    if not path or not os.path.exists(path):
+        return 1
+    raw_extensions = {".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2", ".pef", ".srw"}
+    # PIL/TIFF can expose a normalized DNG Orientation that differs from
+    # LibRaw's sensor flip.  For RAW inputs LibRaw is authoritative.
+    if RAWPY_AVAILABLE and os.path.splitext(path)[1].lower() in raw_extensions:
+        try:
+            with rawpy.imread(path) as raw:
+                flip = int(getattr(raw.sizes, "flip", 0))
+                return flip if flip in range(1, 9) else 1
+        except Exception:
+            pass
+    try:
+        with Image.open(path) as ref:
+            return int(ref.getexif().get(274, 1) or 1)
+    except Exception:
+        pass
+    if RAWPY_AVAILABLE:
+        try:
+            with rawpy.imread(path) as raw:
+                flip = int(getattr(raw.sizes, "flip", 0))
+                return flip if flip in range(1, 9) else 1
+        except Exception:
+            pass
+    return 1
+
+
+def _bake_orientation(image, orientation):
+    """Apply TIFF/EXIF orientation to pixels and return Orientation=1 data."""
+    orientation = int(orientation or 1)
+    if orientation == 2:
+        return np.fliplr(image)
+    if orientation == 3:
+        return np.rot90(image, 2)
+    if orientation == 4:
+        return np.flipud(image)
+    if orientation == 5:
+        return np.transpose(np.fliplr(image), (1, 0, 2)) if image.ndim == 3 else np.transpose(np.fliplr(image))
+    if orientation == 6:
+        return np.rot90(image, 3)
+    if orientation == 7:
+        return np.transpose(np.flipud(image), (1, 0, 2)) if image.ndim == 3 else np.transpose(np.flipud(image))
+    if orientation == 8:
+        return np.rot90(image, 1)
+    return image
+
+
 def save_image(image, output_path, reference_image_path=None):
     """
-    Menyimpan gambar dengan kontrol kompresi untuk file TIFF demi kompatibilitas.
-    Menyalin metadata orientasi dari gambar referensi menggunakan exiftool.
+    Menyimpan gambar dengan orientasi dibakar ke pixel.
+    Metadata output dinormalisasi ke ``Orientation=1`` agar kompatibel dengan
+    viewer TIFF yang tidak menerapkan EXIF Orientation.
     """
     try:
-        image_to_save = image
+        image_to_save = image.copy() if hasattr(image, "copy") else image
         ext = os.path.splitext(output_path)[1].lower()
         success = False
+
+        # Normalize orientation before any tone mapping or encoding.  This is
+        # intentionally the viewer-compatible policy: output pixels are
+        # portrait/landscape already and Orientation=1 is written afterwards.
+        source_orientation = _reference_orientation(reference_image_path)
+        if source_orientation != 1:
+            image_to_save = _bake_orientation(image_to_save, source_orientation)
+
+        # Apply end-to-end Natural Tone Mapping if the output array is linear float32/uint16
+        try:
+            from taichi_library import taichi_aot
+            from config import DEFAULT_TONE_MAPPING_PARAMS
+
+            if image_to_save.dtype in (np.float32, np.float64):
+                img_f32 = image_to_save.astype(np.float32, copy=False)
+                max_v = float(np.max(img_f32))
+                if max_v > 1.0:
+                    img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
+                img_tm = taichi_aot.naturalTonemapping(
+                    img_f32, **DEFAULT_TONE_MAPPING_PARAMS
+                )
+                if max_v > 255.0:
+                    image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(
+                        np.uint16
+                    )
+                elif max_v > 1.0:
+                    image_to_save = np.clip(img_tm * 255.0, 0, 255).astype(np.uint8)
+                else:
+                    image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(
+                        np.uint16
+                    )
+            elif image_to_save.dtype == np.uint16:
+                img_f32 = image_to_save.astype(np.float32) / 65535.0
+                img_tm = taichi_aot.naturalTonemapping(
+                    img_f32, **DEFAULT_TONE_MAPPING_PARAMS
+                )
+                image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+        except Exception as e_tm:
+            print(f"[save_image] Tone mapping warning: {e_tm}")
 
         if ext in [".tif", ".tiff"]:
             try:
@@ -635,7 +847,14 @@ def save_image(image, output_path, reference_image_path=None):
                     image_to_write_tifffile = image_to_save
 
                 # 2. Gunakan tifffile untuk menyimpan tanpa kompresi
-                tifffile.imwrite(output_path, image_to_write_tifffile, compression=None)
+                # Write a neutral orientation tag even when ExifTool is not
+                # installed; the pixel data has already been normalized.
+                tifffile.imwrite(
+                    output_path,
+                    image_to_write_tifffile,
+                    compression=None,
+                    extratags=[(274, "H", 1, 1, False)],
+                )
                 success = True
             except Exception as e:
                 print(f"Error: Failed to save TIFF to '{output_path}': {e}")
@@ -660,8 +879,16 @@ def save_image(image, output_path, reference_image_path=None):
                         "-overwrite_original",
                         "-TagsFromFile",
                         reference_image_path,
+                        "-IFD0:Orientation#=1",
                         output_path,
                     ],
+                    check=True,
+                    capture_output=True,
+                )
+                # ExifTool may copy the source Orientation after writing the
+                # output tags; normalize it again after the copy.
+                subprocess.run(
+                    ["exiftool", "-q", "-overwrite_original", "-IFD0:Orientation#=1", output_path],
                     check=True,
                     capture_output=True,
                 )
@@ -798,7 +1025,6 @@ def save_linear_dng(image, output_path, reference_image_path):
                 "-all:all",  # Copy all tags
                 "-SubfileType=0",  # Full resolution image
                 "-PhotometricInterpretation=LinearRaw",  # 34892
-                "-Orientation=1",  # Reset orientation
                 "-Compression=Deflate",  # [CRITICAL] Set metadata Compression=8 (Deflate)
                 "-DefaultScale=1.0",
                 "-BlackLevel=0",  # Data sudah bersih
@@ -829,24 +1055,8 @@ def save_special_jpg_and_png(
     if img_np is None:
         raise ValueError("Data gambar input (img_np) tidak boleh None.")
 
-    # Logika untuk menangani orientasi (tetap sama)
-    if reference_image_path and os.path.exists(reference_image_path):
-        try:
-            h, w = img_np.shape[:2]
-            if h > w:
-                img_np = cv2.rotate(img_np, cv2.ROTATE_180)
-            else:
-                with Image.open(reference_image_path) as ref_img:
-                    orientation = ref_img.getexif().get(274, 1)
-
-                if orientation == 3:
-                    img_np = cv2.rotate(img_np, cv2.ROTATE_180)
-                elif orientation == 6:
-                    img_np = cv2.rotate(img_np, cv2.ROTATE_90_CLOCKWISE)
-                elif orientation == 8:
-                    img_np = cv2.rotate(img_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        except Exception:
-            pass
+    # Pixel data is written unchanged; orientation is represented only by
+    # the EXIF tag copied below.
 
     # Konversi tipe data jika perlu (tetap sama)
     image_to_save = img_np
@@ -896,12 +1106,6 @@ def save_special_jpg_and_png(
                     reference_image_path,
                     dst_path,
                 ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                ["exiftool", "-overwrite_original", "-Orientation=1", dst_path],
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1311,8 +1515,16 @@ def estimate_noise_variance(
     # 1. Deteksi tepi untuk mengidentifikasi area non-datar (Taichi AOT atau OpenCV)
     if TAICHI_AOT_AVAILABLE and ta_aot is not None:
         try:
-            gray_f32 = gray_image.astype(np.float32) / 255.0 if gray_image.dtype == np.uint8 else gray_image.astype(np.float32)
-            edges_f32 = ta_aot.canny_aot(gray_f32, low_threshold=edge_threshold_low / 255.0, high_threshold=(edge_threshold_low * 2) / 255.0)
+            gray_f32 = (
+                gray_image.astype(np.float32) / 255.0
+                if gray_image.dtype == np.uint8
+                else gray_image.astype(np.float32)
+            )
+            edges_f32 = ta_aot.canny_aot(
+                gray_f32,
+                low_threshold=edge_threshold_low / 255.0,
+                high_threshold=(edge_threshold_low * 2) / 255.0,
+            )
             edges = (edges_f32 > 0.5).astype(np.uint8) * 255
         except Exception:
             edges = cv2.Canny(gray_image, edge_threshold_low, edge_threshold_low * 2)
@@ -1324,7 +1536,9 @@ def estimate_noise_variance(
     if TAICHI_AOT_AVAILABLE and ta_aot is not None:
         try:
             edges_f32 = edges.astype(np.float32)
-            dilated_f32 = ta_aot.dilate(edges_f32, kernel=kernel.astype(np.int32), ksize=dilate_kernel_size)
+            dilated_f32 = ta_aot.dilate(
+                edges_f32, kernel=kernel.astype(np.int32), ksize=dilate_kernel_size
+            )
             dilated_edges = (dilated_f32 > 127).astype(np.uint8) * 255
         except Exception:
             dilated_edges = cv2.dilate(edges, kernel, iterations=1)
@@ -1774,7 +1988,7 @@ def generate_balanced_batches(total_images, max_batch_size=10):
         current_index = end_index
 
 
-def setup_balanced_batching(total_images, language_config, max_batch_size=8):
+def setup_balanced_batching(images_or_total, language_config, max_batch_size=8):
     """
     Menyiapkan seluruh logika batching, termasuk mencetak info ke konsol.
 
@@ -1782,7 +1996,9 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=8):
     yang siap digunakan oleh perulangan di fungsi `main`.
 
     Args:
-        total_images (int): Jumlah total gambar.
+        images_or_total (int | sequence): Jumlah total gambar atau daftar
+            gambar yang akan dibagi ke dalam batch. Jika sequence diberikan,
+            hanya panjangnya yang dipakai untuk membangun rencana indeks.
         language_config: Objek konfigurasi bahasa untuk pesan.
         max_batch_size (int): Ukuran maksimum per batch.
 
@@ -1791,6 +2007,13 @@ def setup_balanced_batching(total_images, language_config, max_batch_size=8):
               yang merupakan rencana eksekusi batch. Mengembalikan list kosong jika
               tidak ada gambar.
     """
+    total_images = (
+        len(images_or_total)
+        if not isinstance(images_or_total, (int, np.integer))
+        else int(images_or_total)
+    )
+    max_batch_size = max(1, int(max_batch_size))
+
     if total_images <= 0:
         return []  # Kembalikan list kosong jika tidak ada gambar
 
@@ -2193,23 +2416,32 @@ def cleanup_old_hdf5_files(current_hdf5_path: str):
         print(f"[Cleanup] Error saat membersihkan HDF5: {e}")
 
 
-def is_hdf5_cache_valid(hdf5_path: str, ref_image_path: str) -> bool:
+def is_hdf5_cache_valid(
+    hdf5_path: str,
+    ref_image_path: str,
+    expected_alignment_name: str = None,
+    expected_cache_key: str = None,
+) -> bool:
     """
     Memvalidasi apakah cache HDF5 masih relevan dengan gambar referensi saat ini.
 
     HDF5 menyimpan atribut 'ref_image_path' saat dibuat. Fungsi ini
     membandingkan nama file (basename) dari path yang tersimpan dengan
     path referensi saat ini. Jika berbeda, cache dianggap tidak valid.
+    Opsional: validasi juga alignment_name dan cache_key.
 
     Args:
         hdf5_path: Path ke file HDF5 yang akan divalidasi.
         ref_image_path: Path lengkap dari gambar referensi saat ini.
+        expected_alignment_name: Nama algoritma alignment yang diharapkan (opsional).
+        expected_cache_key: Cache key config hash yang diharapkan (opsional).
 
     Returns:
         True jika cache valid (referensi sama), False jika tidak valid.
     """
     try:
         import h5py
+
         with h5py.File(hdf5_path, "r") as f:
             stored_ref = f.attrs.get("ref_image_path", "")
             if not stored_ref:
@@ -2220,16 +2452,93 @@ def is_hdf5_cache_valid(hdf5_path: str, ref_image_path: str) -> bool:
             current_basename = os.path.basename(ref_image_path)
             is_valid = stored_basename == current_basename
 
-            if is_valid:
-                print(
-                    f"[CacheValidation] Cache HDF5 valid. Referensi cocok: {current_basename}"
-                )
-            else:
+            if not is_valid:
                 print(
                     f"[CacheValidation] Cache HDF5 tidak valid. "
                     f"Tersimpan: '{stored_basename}', Sekarang: '{current_basename}'"
                 )
-            return is_valid
+                return False
+
+            # Optional: validate alignment algorithm name
+            if expected_alignment_name is not None:
+                stored_align = f.attrs.get("alignment_selection", "")
+                if stored_align and stored_align != expected_alignment_name:
+                    print(
+                        f"[CacheValidation] Alignment mismatch: stored='{stored_align}' "
+                        f"expected='{expected_alignment_name}'"
+                    )
+                    return False
+
+            # Optional: validate config cache key
+            if expected_cache_key is not None:
+                stored_key = f.attrs.get("alignment_cache_key", "")
+                if stored_key and stored_key != expected_cache_key:
+                    print(
+                        f"[CacheValidation] Cache key mismatch: stored='{stored_key}' "
+                        f"expected='{expected_cache_key}'"
+                    )
+                    return False
+
+            print(
+                f"[CacheValidation] Cache HDF5 valid. Referensi cocok: {current_basename}"
+            )
+            return True
     except Exception as e:
         print(f"[CacheValidation] Gagal membaca atribut HDF5: {e}")
         return False
+
+
+def build_alignment_cache_key(alignment_name: str, config: dict):
+    """Membangun cache key dari nama alignment dan config parameter.
+
+    Args:
+        alignment_name: Nama algoritma alignment (misalnya 'AKAZE', 'ORB', dll).
+        config: Dictionary parameter konfigurasi algoritma.
+
+    Returns:
+        Tuple (cache_key_str, cache_payload_dict):
+            - cache_key_str: String hash SHA-256 pendek (16 karakter) dari alignment_name + config.
+            - cache_payload_dict: Dictionary mentah yang digunakan untuk membuat hash.
+    """
+    import hashlib
+    import json as _json
+
+    # Bersihkan config dari nilai None dan sort agar deterministic
+    clean_config = {k: v for k, v in sorted((config or {}).items()) if v is not None}
+    payload = {"alignment": alignment_name, "config": clean_config}
+    payload_str = _json.dumps(payload, sort_keys=True)
+    cache_key = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()[:16]
+    return cache_key, payload
+
+
+def write_alignment_cache_attrs(
+    h5f,
+    ref_image_path: str,
+    alignment_selection: str,
+    alignment_algorithm: str,
+    alignment_process: str,
+    cache_key: str,
+    cache_payload: dict,
+):
+    """Menulis metadata alignment ke atribut HDF5 untuk validasi cache di masa depan.
+
+    Args:
+        h5f: Handle file HDF5 yang sudah dibuka (mode tulis).
+        ref_image_path: Path lengkap gambar referensi.
+        alignment_selection: Nama pilihan alignment yang dipilih pengguna.
+        alignment_algorithm: Nama algoritma alignment yang benar-benar dijalankan.
+        alignment_process: Tipe proses ('feature_matching', 'optical_flow', dll).
+        cache_key: String hash config dari build_alignment_cache_key.
+        cache_payload: Dictionary payload mentah dari build_alignment_cache_key.
+    """
+    import json as _json
+
+    h5f.attrs["ref_image_path"] = str(ref_image_path)
+    h5f.attrs["alignment_selection"] = str(alignment_selection)
+    h5f.attrs["alignment_algorithm"] = str(alignment_algorithm)
+    h5f.attrs["alignment_process"] = str(alignment_process)
+    h5f.attrs["alignment_cache_key"] = str(cache_key)
+    try:
+        h5f.attrs["alignment_cache_payload"] = _json.dumps(cache_payload)
+    except Exception:
+        pass

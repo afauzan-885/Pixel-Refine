@@ -1,709 +1,1545 @@
 """
-MFDenoiser.py — Modular Multi-Frame Denoiser Orchestrator (Cleaned Version)
+MFDenoiser.py - denoising orchestration skeleton.
 
-Manages the pipeline: Load → Align → Merge → PostProcess → Save.
+This file intentionally contains process structure only. Alignment and merging
+algorithms are left as explicit extension points so the pipeline can be rebuilt
+incrementally without triggering heavy GPU/AOT work.
 """
 
+import json
 import os
 import gc
-import json
-import time
-import traceback
 import sqlite3
+import difflib
+import re
+from dataclasses import dataclass, field
+from typing import Optional
+
 import h5py
 import numpy as np
-import cv2
-from dataclasses import dataclass, field
-from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QProgressBar, QVBoxLayout
 
-# --- Shared Utilities ---
+from config import GENERAL_SETTINGS_FILE
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+    cleanup_old_hdf5_files,
+    build_alignment_cache_key,
+    extract_exif,
+    get_all_image_paths_for_single_process,
+    is_hdf5_cache_valid,
+    load_images_from_paths,
+    resize_all_with_padding,
+    resize_with_padding,
+    save_image,
+    save_linear_dng,
+    save_to_hdf5,
+    setup_balanced_batching,
+    write_alignment_cache_attrs,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.feature_matching_utils.feature_matching_post_process import (
+    apply_global_crop,
+    apply_non_crop,
+    compute_global_crop_bounds,
+    crop_image,
+)
 from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
     BaseAlgorithmWorker,
 )
 from resources.styles.stylesheet import PROGRESS_BAR
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-    normalize_image,
-    save_image,
-    calculate_auto_scale,
-    calculate_scale_from_gt_proxy,
-    save_linear_dng,
-    get_all_image_paths_for_single_process,
-    load_images_from_paths,
-    resize_all_with_padding,
-    cleanup_old_hdf5_files,
-    is_hdf5_cache_valid,
-    estimate_noise_in_python,
-)
 
 
 def _lang():
-    """Lazy import of language_config to break circular import chain."""
     from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
     return language_config
 
 
-# ---------------------------------------------------------------------------
-# Pipeline Context — carries state between stages
-# ---------------------------------------------------------------------------
+def _progress(callback, percent, message):
+    if callback:
+        callback(int(percent), str(message))
+
+
+def _frame_info(frame):
+    if frame is None:
+        return "None"
+    shape = getattr(frame, "shape", None)
+    dtype = getattr(frame, "dtype", None)
+    return f"shape={shape}, dtype={dtype}"
+
+
+class NoAlignmentAlgorithm:
+    NAME = "No Alignment"
+    KIND = "alignment"
+    DESCRIPTION = "Skip alignment."
+
+    def run(self, ctx, frames, batch_plan=None):
+        print(
+            f"[MFDenoiser][Alignment:No Alignment] Passing through {len(frames)} frame(s)."
+        )
+        for idx, frame in enumerate(frames):
+            print(
+                f"[MFDenoiser][Alignment:No Alignment] frame_{idx}: {_frame_info(frame)}"
+            )
+        return list(frames)
+
+
+class NoDenoisingAlgorithm:
+    NAME = "No Denoising"
+    KIND = "denoising"
+    DESCRIPTION = "Return the reference/aligned first frame unchanged."
+
+    def run(self, ctx, frames, batch_plan=None):
+        print(
+            f"[MFDenoiser][Denoising:No Denoising] Received {len(frames)} frame(s). Returning frame_0."
+        )
+        if not frames:
+            return None
+        print(f"[MFDenoiser][Denoising:No Denoising] frame_0: {_frame_info(frames[0])}")
+        return np.array(frames[0], copy=True)
+
+
+class SimilarityFusionDenoisingAlgorithm:
+    NAME = "Similarity Fusion"
+    KIND = "denoising"
+    DESCRIPTION = "Run the backend-neutral Taichi AOT similarity fusion pipeline."
+
+    def run(self, ctx, frames, batch_plan=None):
+        raise RuntimeError(
+            "Similarity Fusion must be launched through MFDenoiser.running_similarity."
+        )
+
+
+class FarnebackAliasAlgorithm:
+    NAME = "Farneback"
+    KIND = "alignment"
+    DESCRIPTION = "Dense Farneback optical flow alignment."
+
+    def run(self, ctx, frames, batch_plan=None):
+        return get_alignment_registry()["Farneback Optical Flow"].run(
+            ctx, frames, batch_plan=batch_plan
+        )
+
+
+class BlockMatchingGPUAliasAlgorithm:
+    NAME = "Block Matching GPU"
+    KIND = "alignment"
+    DESCRIPTION = "Tile-based GPU block matching optical flow alignment."
+
+    def run(self, ctx, frames, batch_plan=None):
+        return get_alignment_registry()["Block Matching GPU Optical Flow"].run(
+            ctx, frames, batch_plan=batch_plan
+        )
+
+
+class RAFTAliasAlgorithm:
+    NAME = "RAFT"
+    KIND = "alignment"
+    DESCRIPTION = "ONNX RAFT optical flow alignment."
+
+    def run(self, ctx, frames, batch_plan=None):
+        return get_alignment_registry()["RAFT Optical Flow"].run(
+            ctx, frames, batch_plan=batch_plan
+        )
+
+
+class LucasKanadeAliasAlgorithm:
+    NAME = "Lucas Kanade"
+    KIND = "alignment"
+    DESCRIPTION = "Lucas Kanade optical flow alignment with switchable CPU/GPU backend."
+
+    NAME = "Lucas Kanade"
+    KIND = "alignment"
+    DESCRIPTION = "Lucas Kanade optical flow alignment with switchable CPU/GPU backend."
+
+    def _resolve_delegate(self, batch_id=None):
+        try:
+            config = get_alignment_registry()["Lucas Kanade Optical Flow"].load_config(
+                batch_id=batch_id
+            )
+            backend = str(config.get("backend", "cpu")).strip().lower()
+        except Exception as exc:
+            print(f"[LucasKanadeAlias] Failed to load backend config: {exc}")
+            backend = "cpu"
+
+        registry = get_alignment_registry()
+        if backend == "gpu":
+            return registry["Lucas Kanade GPU Optical Flow"]
+        return registry["Lucas Kanade Optical Flow"]
+
+    def run(self, ctx, frames, batch_plan=None):
+        return self._resolve_delegate(batch_id=getattr(ctx, "batch_id", None)).run(
+            ctx, frames, batch_plan=batch_plan
+        )
+
+
+def get_alignment_registry():
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.AKAZE import (
+        AKAZEAlgorithm,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
+        LightGlueAlgorithm,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
+        ORBAlgorithm,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
+        FarnebackFlowCPU,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_cpu import (
+        LucasKanadeCPU,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
+        LucasKanadeGPU,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching_gpu import (
+        BlockMatchingGPU,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.raft_flow import (
+        RAFTFlow,
+    )
+
+    algorithms = [
+        NoAlignmentAlgorithm(),
+        ORBAlgorithm(),
+        AKAZEAlgorithm(),
+        LightGlueAlgorithm(),
+        FarnebackFlowCPU(),
+        LucasKanadeCPU(),
+        LucasKanadeGPU(),
+        BlockMatchingGPU(),
+        RAFTFlow(),
+        FarnebackAliasAlgorithm(),
+        LucasKanadeAliasAlgorithm(),
+        BlockMatchingGPUAliasAlgorithm(),
+        RAFTAliasAlgorithm(),
+    ]
+    return {algo.NAME: algo for algo in algorithms}
+
+
+def get_denoising_registry():
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import (
+        AverageDenoisingAlgorithm,
+        merge_average_from_hdf5,
+        merge_average_from_paths,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_fusion import (
+        SpatialFusionDenoisingAlgorithm,
+    )
+
+    algorithms = [
+        NoDenoisingAlgorithm(),
+        AverageDenoisingAlgorithm(),
+        SpatialFusionDenoisingAlgorithm(),
+        SimilarityFusionDenoisingAlgorithm(),
+    ]
+    return {algo.NAME: algo for algo in algorithms}
+
+
+def get_available_algorithms(category):
+    if category == "alignment":
+        return get_alignment_registry()
+    if category == "denoising":
+        return get_denoising_registry()
+    return {}
+
+
+def get_algorithm_options(category):
+    if category == "alignment":
+        descriptions = {
+            name: getattr(algo, "DESCRIPTION", name)
+            for name, algo in get_available_algorithms(category).items()
+        }
+        ordered_names = [
+            "No Alignment",
+            "ORB",
+            "AKAZE",
+            "Light Glue",
+            "Farneback",
+            "Lucas Kanade",
+            "Block Matching GPU",
+            "RAFT",
+        ]
+        return [(name, descriptions.get(name, name)) for name in ordered_names]
+
+    return [
+        (name, getattr(algo, "DESCRIPTION", name))
+        for name, algo in get_available_algorithms(category).items()
+    ]
+
+
+def get_algorithm_names(category):
+    if category == "alignment":
+        return [
+            "No Alignment",
+            "ORB",
+            "AKAZE",
+            "Light Glue",
+            "Farneback",
+            "Lucas Kanade",
+            "Block Matching GPU",
+            "RAFT",
+        ]
+    return list(get_available_algorithms(category).keys())
+
+
+def _normalize_algorithm_name(name):
+    return str(name or "").strip().casefold()
+
+
+def _canonical_algorithm_key(name):
+    value = _normalize_algorithm_name(name)
+    value = value.replace("_", " ").replace("-", " ")
+    value = re.sub(r"\s+", " ", value).strip()
+    replacements = {
+        "optical flow": "",
+        "gpu optical flow": "gpu",
+        "cpu optical flow": "cpu",
+        "block matching gpu": "block matching gpu",
+        "lightglue": "light glue",
+        "light glue": "light glue",
+        "lucaskanade": "lucas kanade",
+        "lucas kanade gpu": "lucas kanade gpu",
+        "lucas kanade cpu": "lucas kanade cpu",
+        "noalignment": "no alignment",
+    }
+    for src, dst in replacements.items():
+        value = value.replace(src, dst)
+    value = re.sub(r"\s+", " ", value).strip()
+    value = value.replace("balance mode", "medium")
+    value = value.replace("balanced", "medium")
+    return value
+
+
+def _build_algorithm_alias_map(registry):
+    alias_map = {}
+    explicit_aliases = {
+        "farneback optical flow": "Farneback Optical Flow",
+        "farneback": "Farneback",
+        "lucas kanade optical flow": "Lucas Kanade Optical Flow",
+        "lucas kanade gpu optical flow": "Lucas Kanade GPU Optical Flow",
+        "lucas kanade": "Lucas Kanade",
+        "lucas kanade gpu": "Lucas Kanade GPU Optical Flow",
+        "lucas kanade cpu": "Lucas Kanade Optical Flow",
+        "block matching gpu optical flow": "Block Matching GPU Optical Flow",
+        "block matching gpu": "Block Matching GPU",
+        "blockmatchinggpu": "Block Matching GPU",
+        "raft optical flow": "RAFT Optical Flow",
+        "raft": "RAFT",
+        "lightglue": "Light Glue",
+        "light glue": "Light Glue",
+        "akaze": "AKAZE",
+        "orb": "ORB",
+        "no alignment": "No Alignment",
+        "noalignment": "No Alignment",
+        "none": "No Denoising",
+        "no denoising": "No Denoising",
+        "average": "Average",
+        "similarity": "Similarity",
+        "similarity fusion": "Similarity Fusion",
+    }
+    for alias, target in explicit_aliases.items():
+        if target in registry:
+            alias_map[_canonical_algorithm_key(alias)] = target
+
+    for name in registry.keys():
+        alias_map[_canonical_algorithm_key(name)] = name
+        alias_map[_normalize_algorithm_name(name)] = name
+    return alias_map
+
+
+def _resolve_algorithm(registry, requested_name, fallback_name):
+    if requested_name in registry:
+        return registry[requested_name]
+
+    normalized = _normalize_algorithm_name(requested_name)
+    for name, algorithm in registry.items():
+        if _normalize_algorithm_name(name) == normalized:
+            return algorithm
+
+    alias_map = _build_algorithm_alias_map(registry)
+    canonical_requested = _canonical_algorithm_key(requested_name)
+    alias_target = alias_map.get(canonical_requested)
+    if alias_target and alias_target in registry:
+        print(
+            f"[MFDenoiser][Registry] Alias-resolved '{requested_name}' -> '{alias_target}'"
+        )
+        return registry[alias_target]
+
+    choices = list(alias_map.keys())
+    fuzzy_match = difflib.get_close_matches(
+        canonical_requested, choices, n=1, cutoff=0.72
+    )
+    if fuzzy_match:
+        alias_target = alias_map.get(fuzzy_match[0])
+        if alias_target and alias_target in registry:
+            print(
+                f"[MFDenoiser][Registry] Fuzzy-resolved '{requested_name}' -> "
+                f"'{alias_target}' via '{fuzzy_match[0]}'"
+            )
+            return registry[alias_target]
+
+    fallback = registry[fallback_name]
+    print(
+        f"[MFDenoiser][Registry] Unknown algorithm '{requested_name}', "
+        f"falling back to '{fallback.NAME}'. Available={list(registry.keys())}"
+    )
+    return fallback
+
+
 @dataclass
 class PipelineContext:
     db_path: str
     image_paths: list = field(default_factory=list)
-    data_source: object = None
-    reference_image: np.ndarray = None
-    reference_float: np.ndarray = None
+    frames: list = field(default_factory=list)
+    aligned_frames: list = field(default_factory=list)
+    result_image: Optional[np.ndarray] = None
+    reference_image: Optional[np.ndarray] = None
+    ref_dtype: object = None
     ref_h: int = 0
     ref_w: int = 0
-    ref_dtype: object = None
-    output_name_base: str = ""
+    output_name_base: str = "stack"
     total_images: int = 0
-    is_linear_mode: bool = False
-    proxy_scale: float = 1.0
     hdf5_path: str = ""
+    use_hdf5_cache: bool = False
+    cache_is_valid: bool = False
+    needs_alignment: bool = True
+    batch_plan: list = field(default_factory=list)
     params: dict = field(default_factory=dict)
-    session_id: str = ""
+    is_linear_mode: bool = False
     update_progress: object = None
     stop_requested: object = None
     single_process: bool = True
     batch_id: object = None
+    clear_raw: bool = True
+    alignment_cache_key: str = ""
+    alignment_cache_payload: str = ""
+    alignment_selection_name: str = "No Alignment"
+    alignment_effective_name: str = "No Alignment"
+    alignment_runtime_snapshot: dict = field(default_factory=dict)
+    compute_runtime: dict = field(default_factory=dict)
+    # Alignment orchestration state.  The reference belongs to the pipeline,
+    # while comparison frames belong to a short-lived AlignmentBatchJob.
+    alignment_reference: Optional[np.ndarray] = None
+    alignment_reference_ready: bool = False
+    alignment_batch_size: int = 0
+    alignment_batches_processed: int = 0
+    alignment_prefetch_active: bool = False
+    alignment_prefetch_start: int = -1
+    alignment_prefetch_end: int = -1
+    alignment_prefetch_frames: dict = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# Pluggable Alignment Backends
-# ---------------------------------------------------------------------------
-class FarnebackAlignment:
-    """Taichi GPU AOT Farneback Optical Flow alignment backend."""
+@dataclass
+class AlignmentBatchJob:
+    """A bounded alignment workload owned by :class:`MFDenoiserAlgorithm`.
 
-    def align_tile(self, ref_tile, comp_tile):
-        import numpy as np
-        from taichi_library import taichi_aot
+    Alignment implementations receive this job as data only.  They must not
+    open/close HDF5, load paths, or retain the comparison frames after the job
+    returns.  ``reference`` is deliberately separate and owned by the parent
+    pipeline so it can remain stable across all jobs.
+    """
 
-        # Conv to float32 [0..255] for farneback_flow input
-        if ref_tile.ndim == 3:
-            # RGB to Gray
-            ref_gray = (
-                0.299 * ref_tile[..., 0] + 
-                0.587 * ref_tile[..., 1] + 
-                0.114 * ref_tile[..., 2]
-            ).astype(np.float32) * 255.0
-        else:
-            ref_gray = ref_tile.astype(np.float32) * 255.0
+    start_index: int
+    end_index: int
+    paths: list = field(default_factory=list)
+    frames: list = field(default_factory=list)
+    reference: Optional[np.ndarray] = None
+    target_dims: tuple = (0, 0)
+    config: dict = field(default_factory=dict)
 
-        if comp_tile.ndim == 3:
-            comp_gray = (
-                0.299 * comp_tile[..., 0] + 
-                0.587 * comp_tile[..., 1] + 
-                0.114 * comp_tile[..., 2]
-            ).astype(np.float32) * 255.0
-        else:
-            comp_gray = comp_tile.astype(np.float32) * 255.0
-
-        h, w = ref_tile.shape[:2]
-
-        # Hitung optical flow dengan Taichi AOT Farneback GPU (mengembalikan numpy array)
-        flow_np = taichi_aot.farneback_flow(
-            ref_gray,
-            comp_gray,
-            pyr_scale=0.5,
-            num_levels=3,
-            win_size=15,
-            num_iters=3,
-            poly_n=5,
-            poly_sigma=1.2,
-            flags=0,
-        )
-
-        # Lakukan warping (remap) di GPU secara langsung menggunakan flow_np
-        # return_gpu=True agar output warped tetap berada di VRAM
-        warped_gpu = taichi_aot.remap_with_flow(
-            comp_tile.astype(np.float32),
-            flow_np,
-            h,
-            w,
-            return_gpu=True,
-        )
-
-        return warped_gpu
+    @property
+    def size(self):
+        return max(0, self.end_index - self.start_index)
 
 
-# ---------------------------------------------------------------------------
-# Pluggable Merging Backends
-# ---------------------------------------------------------------------------
-class SimilarityMerge:
-    """Similarity merging backend using Taichi GPU (Vulkan) AOT merging loop."""
-
-    def merge_tiles(self, aligned_tiles):
-        import cv2
-        import numpy as np
-        from taichi_library import taichi_aot
-        from taichi_library.taichi_aot.engine import AOTEngine, TaichiGPUBuffer
-        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import estimate_noise_in_python
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
-            generate_spatial_weights_taichi,
-            accumulate_spatial_merging_taichi,
-        )
-
-        ref_tile = aligned_tiles[0]
-        tile_h, tile_w = ref_tile.shape[:2]
-        channels = ref_tile.shape[2] if ref_tile.ndim == 3 else 1
-
-        if ref_tile.ndim == 3:
-            ref_gray = taichi_aot.cvtColor((ref_tile * 255).astype(np.uint8), taichi_aot.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-        else:
-            ref_gray = ref_tile.copy()
-
-        ref_noise_sigma = estimate_noise_in_python(ref_gray)
-        if ref_noise_sigma is None or ref_noise_sigma < 1e-5:
-            ref_noise_sigma = 0.01
-
-        engine = AOTEngine()
-
-        ref_gray_gpu = taichi_aot.upload(ref_gray)
-        sum_gpu = taichi_aot.upload(ref_tile.copy())
-        
-        weight_sum_full_gpu = taichi_aot.upload(np.ones((tile_h, tile_w), dtype=np.float32))
-
-        # Setup tiling for weight generation (16x16 with 0.3 overlap)
-        tile_size_sub = 16
-        overlap_sub = 0.3
-        step_y = max(int(tile_size_sub * (1.0 - overlap_sub)), 1)
-        step_x = max(int(tile_size_sub * (1.0 - overlap_sub)), 1)
-
-        row_starts = np.arange(0, tile_h - tile_size_sub + 1, step_y, dtype=np.int32)
-        if tile_h > tile_size_sub and (row_starts.size == 0 or row_starts[-1] != tile_h - tile_size_sub):
-            row_starts = np.append(row_starts, tile_h - tile_size_sub)
-        row_starts = np.ascontiguousarray(np.unique(row_starts).astype(np.int32))
-
-        col_starts = np.arange(0, tile_w - tile_size_sub + 1, step_x, dtype=np.int32)
-        if tile_w > tile_size_sub and (col_starts.size == 0 or col_starts[-1] != tile_w - tile_size_sub):
-            col_starts = np.append(col_starts, tile_w - tile_size_sub)
-        col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
-
-        rows_gpu = taichi_aot.upload(row_starts)
-        rows_gpu.dtype = np.int32
-        cols_gpu = taichi_aot.upload(col_starts)
-        cols_gpu.dtype = np.int32
-
-        base_window_gpu = taichi_aot.hanning((tile_size_sub, tile_size_sub), exclude_boundary=False)
-        weight_work_gpu = engine.allocate((tile_h, tile_w), dtype=np.float32, host_accessible=True)
-
-        try:
-            for comp_tile in aligned_tiles[1:]:
-                # Check if already a TaichiGPUBuffer to avoid CPU-GPU upload overhead
-                if isinstance(comp_tile, TaichiGPUBuffer):
-                    comp_tile_gpu = comp_tile
-                    
-                    # Compute grayscale of GPU buffer for weight estimation
-                    # If it's a vector3, we convert it to grayscale on GPU
-                    if channels == 3:
-                        # Grab numpy array fallback or compute directly if possible
-                        # To keep it simple and robust, we download only the gray representation or cast
-                        comp_np = comp_tile.to_numpy()
-                        comp_gray = taichi_aot.cvtColor((comp_np * 255).astype(np.uint8), taichi_aot.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-                        comp_gray_gpu = taichi_aot.upload(comp_gray)
-                    else:
-                        comp_gray_gpu = comp_tile
-                else:
-                    if comp_tile.ndim == 3:
-                        comp_gray = taichi_aot.cvtColor((comp_tile * 255).astype(np.uint8), taichi_aot.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-                    else:
-                        comp_gray = comp_tile.copy()
-
-                    comp_gray_gpu = taichi_aot.upload(comp_gray)
-                    comp_tile_gpu = taichi_aot.upload(comp_tile)
-
-                generate_spatial_weights_taichi(
-                    current_image=comp_gray_gpu,
-                    reference_image=ref_gray_gpu,
-                    weight_map_sum=weight_work_gpu,
-                    base_window=base_window_gpu,
-                    stability_map=None,
-                    row_starts=rows_gpu,
-                    col_starts=cols_gpu,
-                    tile_h=tile_size_sub,
-                    tile_w=tile_size_sub,
-                    noise_sigma=ref_noise_sigma,
-                    motion_sensitivity=150.0,
-                    noise_offset_factor=0.15,
-                    equalize_brightness=False,
-                    buffer_provider="pool",
-                    search_radius=3,
-                    early_exit_threshold=0.05,
-                )
-
-                if not isinstance(comp_tile, TaichiGPUBuffer) or channels == 3:
-                    comp_gray_gpu.destroy()
-
-                accumulate_spatial_merging_taichi(
-                    current_image_full=comp_tile_gpu.view_as_vector(False),
-                    weight_map_work=weight_work_gpu,
-                    final_image_sum=sum_gpu.view_as_vector(False),
-                    weight_map_sum_full=weight_sum_full_gpu,
-                    row_starts=rows_gpu,
-                    col_starts=cols_gpu,
-                    tile_h=tile_size_sub,
-                    tile_w=tile_size_sub,
-                    h_full=tile_h,
-                    w_full=tile_w,
-                    h_work=tile_h,
-                    w_work=tile_w,
-                )
-
-                if not isinstance(comp_tile, TaichiGPUBuffer):
-                    comp_tile_gpu.destroy()
-
-            # Download and divide
-            sum_np = sum_gpu.to_numpy()
-            weight_sum_np = weight_sum_full_gpu.to_numpy()
-
-            valid_mask = weight_sum_np > 1e-6
-            merged_tile = np.zeros_like(sum_np)
-            if sum_np.ndim == 3:
-                np.divide(sum_np, weight_sum_np[..., np.newaxis], out=merged_tile, where=valid_mask[..., np.newaxis])
-                mask_3d = np.repeat(~valid_mask[..., np.newaxis], channels, axis=2)
-                merged_tile[mask_3d] = ref_tile[mask_3d]
-            else:
-                np.divide(sum_np, weight_sum_np, out=merged_tile, where=valid_mask)
-                merged_tile[~valid_mask] = ref_tile[~valid_mask]
-
-            weight_map = np.ones((tile_h, tile_w), dtype=np.float32)
-            return merged_tile, weight_map
-
-        finally:
-            for buf in [
-                sum_gpu,
-                weight_sum_full_gpu,
-                base_window_gpu,
-                rows_gpu,
-                cols_gpu,
-                weight_work_gpu,
-                ref_gray_gpu,
-            ]:
-                if buf:
-                    try:
-                        buf.destroy()
-                    except:
-                        pass
-            # Do not unload modules here to preserve runtime cache
-            pass
-
-
-
-# ---------------------------------------------------------------------------
-# MFDenoiser Algorithm — the orchestrator
-# ---------------------------------------------------------------------------
 class MFDenoiserAlgorithm:
-    """
-    Modular Multi-Frame Denoiser Orchestrator.
-    """
+    """Main orchestrator for future multi-frame denoising modes."""
 
-    def __init__(self, db_path):
+    def __init__(self, db_path="pixel_refine_database.db"):
         self.db_path = db_path
 
-    def close(self):
-        """Release resources and free memory."""
-        gc.collect()
+    @staticmethod
+    def _configure_compute_runtime(ctx):
+        """Connect this pipeline to the shared adaptive block/VRAM runtime."""
+        # Keep full-frame for backends with sufficient residency, but do not
+        # force a 12--50 MP OpenGL/GLES graph beyond its admission budget.
+        # The decision is runtime-derived and remains below the public API;
+        # unsupported individual graphs still use their same-backend
+        # full-frame path rather than silently switching to CPU.
+        mode = "full_frame"
+        block_enabled = False
+        ctx.params["processing_mode"] = mode
+        requested_size = int(ctx.params.get("tile_size", 256) or 256)
+        block_size = max(64, min(1024, requested_size))
+        block_size = max(64, (block_size // 16) * 16)
 
-    def _get_image_paths(self, batch_id=None):
-        """Fetch image paths from database."""
-        if batch_id is None:
-            return get_all_image_paths_for_single_process(self.db_path)
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT images.path
-                FROM batch_process_image
-                JOIN images ON batch_process_image.image_id_batch = images.id
-                WHERE batch_process_image.batch_id = ?
-                ORDER BY batch_process_image.is_reference_batch DESC, images.path ASC
-                """,
-                (batch_id,),
+        try:
+            from taichi_library import taichi_aot
+
+            engine = taichi_aot.get_engine()
+            backend = str(getattr(engine, "arch", "")).strip().lower()
+            memory = taichi_aot.get_memory_status(force=True)
+            pipeline_limit = int(memory.get("pipeline_resident_limit", 0) or 0)
+            pressure = str(memory.get("pressure", "healthy")).lower()
+            policy = os.environ.get("PIXEL_REFINE_MFDENOISER_BLOCK", "auto").strip().lower()
+            if policy in {"1", "true", "on", "block", "tile", "tiled"}:
+                block_enabled = True
+            elif policy in {"0", "false", "off", "full", "frame", "full_frame"}:
+                block_enabled = False
+            else:
+                # OpenGL/GLES desktop paths do not expose a reliable device
+                # heap budget.  Use bounded tiles whenever the resident limit
+                # is below the measured 768 MiB safe full-frame floor or the
+                # governor reports pressure; CUDA/Vulkan remain full-frame by
+                # default when their graph fits.
+                block_enabled = backend in {"opengl", "gles"} and (
+                    pressure != "healthy" or (pipeline_limit > 0 and pipeline_limit < 768 * 1024**2)
+                )
+            mode = "block" if block_enabled else "full_frame"
+            ctx.params["processing_mode"] = mode
+            print(
+                f"[MFDenoiser][Compute] mode={mode} backend={backend} "
+                f"pressure={pressure} pipeline_limit={pipeline_limit // (1024 * 1024)}MB"
             )
-            return [row[0] for row in cursor.fetchall()]
 
-    def _load_params(self):
-        """Load algorithm parameters from config files.
+            current = taichi_aot.get_block_config()
+            host_cache_limit = (
+                current.cache_bytes
+                if current.cache_bytes is not None
+                else 512 * 1024 * 1024
+            )
+            config = taichi_aot.set_block_mode(
+                enabled=block_enabled,
+                size=block_size,
+                threshold_bytes=0 if block_enabled else current.threshold_bytes,
+                cache_entries=max(2048, current.cache_entries),
+                cache_bytes=host_cache_limit,
+                adaptive_memory=True,
+                device_cache_enabled=block_enabled,
+                device_cache_bytes=current.device_cache_bytes,
+            )
+            memory = taichi_aot.get_memory_status(force=True)
+            ctx.compute_runtime = {
+                "available": True,
+                "block_enabled": config.enabled,
+                "block_size": config.normalized_size(),
+                "host_cache_bytes": memory["host_cache_budget"],
+                "device_cache_bytes": (
+                    config.device_cache_bytes if config.device_cache_enabled else 0
+                ),
+                "pressure": memory["pressure"],
+            }
+            print(f"[MFDenoiser][Compute] native runtime={ctx.compute_runtime}")
+        except Exception as exc:
+            ctx.compute_runtime = {
+                "available": False,
+                "block_enabled": False,
+                "reason": str(exc),
+            }
+            print(
+                "[MFDenoiser][Compute] Native block runtime unavailable; "
+                f"continuing with legacy execution: {exc}"
+            )
+        return ctx.compute_runtime
 
-        Single truth source — reads from the same config used by Similarity.py's main().
-        This ensures MFDenoiser and Similarity share identical parameter behavior.
-        """
-        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
-            load_similarity_config,
+    @staticmethod
+    def _report_compute_runtime(ctx):
+        if not ctx.compute_runtime.get("available"):
+            return
+        try:
+            from taichi_library import taichi_aot
+
+            stats = taichi_aot.get_block_cache_stats()
+            device = stats.get("device", {})
+            print(
+                "[MFDenoiser][Compute] cache "
+                f"ram_hits={stats.get('hits', 0)} "
+                f"vram_hits={device.get('hits', 0)} "
+                f"vram_entries={device.get('entries', 0)} "
+                f"vram_bytes={device.get('size_bytes', 0)}"
+            )
+        except Exception as exc:
+            print(f"[MFDenoiser][Compute] telemetry unavailable: {exc}")
+
+    def _build_fallback_alignment_snapshot(self, ctx):
+        requested_name = str(
+            ctx.params.get("alignment_plan", "No Alignment") or "No Alignment"
         )
-        from config import GENERAL_SETTINGS_FILE
-
-        sim_config = load_similarity_config()
-
-        # === Spatial Fusion Parameters (shared with Similarity.py) ===
-        tile_val = sim_config.get("similarity_spatial_tile_size", 16)
-        params = {
-            # Tiling
-            "similarity_spatial_tile_size": tile_val,
-            "tile_size": (tile_val, tile_val),
-            "similarity_spatial_overlap_percent": sim_config.get(
-                "similarity_spatial_overlap_percent", 0.30
-            ),
-            "overlap": sim_config.get("similarity_spatial_overlap_percent", 0.30),
-            # Ghost Rejection
-            "similarity_spatial_motion_sensitivity": sim_config.get(
-                "similarity_spatial_motion_sensitivity", 150.0
-            ),
-            "motion_sensitivity": sim_config.get(
-                "similarity_spatial_motion_sensitivity", 150.0
-            ),
-            "similarity_spatial_noise_mad_offset_factor": sim_config.get(
-                "similarity_spatial_noise_mad_offset_factor", 0.15
-            ),
-            "noise_offset_factor": sim_config.get(
-                "similarity_spatial_noise_mad_offset_factor", 0.15
-            ),
-            # Workers
-            "similarity_spatial_num_workers": sim_config.get(
-                "similarity_spatial_num_workers", 1
-            ),
-            # Smart Fusion (AI)
-            "similarity_smart_noise_alpha": sim_config.get(
-                "similarity_smart_noise_alpha", 1.0
-            ),
-            "similarity_smart_noise_aware_enable": sim_config.get(
-                "similarity_smart_noise_aware_enable", True
-            ),
-            "similarity_smart_noise_strength": sim_config.get(
-                "similarity_smart_noise_strength", 100.0
-            ),
-            # Backend selection
-            "merging_mode": sim_config.get("merging_mode", "spatial_fusion"),
-            "alignment_backend": sim_config.get("alignment_backend", "taichi_gpu"),
-            "optical_flow_type": sim_config.get("optical_flow_type", "farneback"),
-            # Processing
-            "use_multi_core": sim_config.get("use_multi_core", True),
-            # Spatial Fusion specific
-            "early_exit_threshold": sim_config.get("early_exit_threshold", 0.05),
-            "equalize_brightness": sim_config.get("equalize_brightness", False),
+        return {
+            "batch_id": ctx.batch_id,
+            "alignment_algo": requested_name,
+            "alignment_active": requested_name not in ("", "None", "No Alignment"),
+            "reference_path": "",
+            "params_key": "",
+            "params": {},
+            "raw_batch_entry": {},
         }
 
-        # Load linear mode from general settings
+    def _build_alignment_cache_metadata(self, ctx):
+        from pixel_refine_desktop.enhance_stack.core.logic import (
+            batch_parameter_manager,
+        )
+
+        snapshot = batch_parameter_manager.get_batch_alignment_runtime_snapshot(
+            ctx.batch_id
+        )
+        runtime_requested_name = str(
+            ctx.params.get("alignment_plan", "No Alignment") or "No Alignment"
+        )
+        runtime_alignment_active = runtime_requested_name not in (
+            "",
+            "None",
+            "No Alignment",
+        )
+
+        if not snapshot:
+            snapshot = self._build_fallback_alignment_snapshot(ctx)
+        elif runtime_alignment_active and str(
+            snapshot.get("alignment_algo", "No Alignment")
+        ) in (
+            "",
+            "None",
+            "No Alignment",
+        ):
+            print(
+                f"[MFDenoiser][CacheMeta] Batch snapshot reported "
+                f"'{snapshot.get('alignment_algo')}', overriding with runtime "
+                f"alignment '{runtime_requested_name}'."
+            )
+            snapshot = {
+                **snapshot,
+                **self._build_fallback_alignment_snapshot(ctx),
+                "raw_batch_entry": snapshot.get("raw_batch_entry", {}),
+                "reference_path": snapshot.get("reference_path", ""),
+            }
+        ctx.alignment_runtime_snapshot = snapshot
+
+        requested_name = str(
+            runtime_requested_name
+            if runtime_alignment_active
+            else (
+                snapshot.get("alignment_algo")
+                or ctx.params.get("alignment_plan", "No Alignment")
+            )
+            or "No Alignment"
+        )
+        registry = get_alignment_registry()
+        effective_name = requested_name
+        config = {}
+
+        if requested_name == "Lucas Kanade":
+            cpu_algorithm = registry["Lucas Kanade Optical Flow"]
+            snapshot_params = dict(snapshot.get("params", {}) or {})
+            gpu_snapshot_params = dict(snapshot_params.pop("gpu_params", {}) or {})
+            cpu_config = dict(cpu_algorithm.load_config(batch_id=ctx.batch_id))
+            cpu_config.update(snapshot_params)
+            backend = str(cpu_config.get("backend", "cpu")).strip().lower()
+            if backend == "gpu":
+                effective_algorithm = registry["Lucas Kanade GPU Optical Flow"]
+                config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+                config = dict(config)
+                config["backend"] = "gpu"
+                config.update(gpu_snapshot_params)
+            else:
+                effective_algorithm = registry["Lucas Kanade Optical Flow"]
+                config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+                config = dict(config)
+                config["backend"] = "cpu"
+            effective_name = effective_algorithm.NAME
+            config.update(snapshot_params)
+        elif requested_name == "Farneback":
+            effective_algorithm = registry["Farneback Optical Flow"]
+            effective_name = effective_algorithm.NAME
+            config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+            config = dict(config)
+            config.update(snapshot.get("params", {}))
+        elif requested_name == "Block Matching GPU":
+            effective_algorithm = registry["Block Matching GPU Optical Flow"]
+            effective_name = effective_algorithm.NAME
+            config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+            config = dict(config)
+            config.update(snapshot.get("params", {}))
+        elif requested_name == "RAFT":
+            effective_algorithm = registry["RAFT Optical Flow"]
+            effective_name = effective_algorithm.NAME
+            config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+            config = dict(config)
+            config.update(snapshot.get("params", {}))
+        else:
+            effective_algorithm = _resolve_algorithm(
+                registry, requested_name, "No Alignment"
+            )
+            effective_name = effective_algorithm.NAME
+            if hasattr(effective_algorithm, "load_config"):
+                try:
+                    config = effective_algorithm.load_config(batch_id=ctx.batch_id)
+                except TypeError:
+                    config = effective_algorithm.load_config()
+                config = dict(config or {})
+                config.update(snapshot.get("params", {}))
+
+        cache_key, cache_payload = build_alignment_cache_key(requested_name, config)
+        ctx.alignment_selection_name = requested_name
+        ctx.alignment_effective_name = effective_name
+        ctx.alignment_cache_key = cache_key
+        ctx.alignment_cache_payload = cache_payload
+        print(
+            f"[MFDenoiser][CacheMeta] selection={requested_name} "
+            f"effective={effective_name} key={cache_key} batch_id={ctx.batch_id}"
+        )
+        return ctx
+
+    def _get_image_paths(self, batch_id=None):
+        if batch_id is None:
+            return get_all_image_paths_for_single_process(self.db_path)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT images.path
+            FROM batch_process_image
+            JOIN images ON batch_process_image.image_id_batch = images.id
+            WHERE batch_process_image.batch_id = ?
+            ORDER BY batch_process_image.is_reference_batch DESC, images.path ASC
+            """,
+            (batch_id,),
+        )
+        paths = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return paths
+
+    def _load_params(self):
+        try:
+            from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
+                load_similarity_config,
+            )
+
+            config = load_similarity_config()
+        except Exception:
+            config = {}
+
+        params = {
+            "processing_mode": config.get("mfdenoiser_processing_mode", "auto"),
+            "tile_size": int(config.get("tile_based_tile_size", 256)),
+            "tile_overlap": float(config.get("tile_based_overlap_percent", 0.20)),
+            "alignment_plan": config.get("mfdenoiser_alignment_plan", "No Alignment"),
+            "merge_plan": config.get("mfdenoiser_merge_plan", "No Denoising"),
+            "batch_size": int(
+                config.get(
+                    "mfdenoiser_batch_size",
+                    config.get("ai_batch_size", 15),
+                )
+            ),
+            "h5_write_batch_size": int(
+                config.get("mfdenoiser_h5_write_batch_size", 4)
+            ),
+            "use_alignment_cache": bool(
+                config.get("mfdenoiser_use_alignment_cache", False)
+            ),
+            "clear_raw": bool(config.get("mfdenoiser_clear_raw", True)),
+            "output_suffix": "mf_denoiser",
+        }
+        print(f"[MFDenoiser][Config] params={params}")
+
         try:
             if os.path.exists(GENERAL_SETTINGS_FILE):
                 with open(GENERAL_SETTINGS_FILE, "r") as f:
                     general = json.load(f)
                 params["enable_linear_mode"] = general.get("enable_linear_mode", False)
-        except (IOError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
             params["enable_linear_mode"] = False
 
         return params
 
-    def stage_load_data(self, ctx):
-        """Load images, detect linear mode, calculate proxy scale."""
-        align_dir = os.path.join("database", "align")
-
-        if ctx.single_process:
-            ctx.hdf5_path = os.path.join(align_dir, "aligned_images.h5")
-            ctx.image_paths = self._get_image_paths(batch_id=None)
-        else:
-            ctx.hdf5_path = os.path.join(
-                align_dir, f"aligned_image_batch_{ctx.batch_id}.h5"
-            )
-            ctx.image_paths = self._get_image_paths(batch_id=ctx.batch_id)
-
-        ref_name = (
-            os.path.splitext(os.path.basename(ctx.image_paths[0]))[0]
-            if ctx.image_paths
-            else "mf_denoiser"
-        )
-        ctx.output_name_base = ref_name
-
-        # Cleanup old HDF5 files
-        cleanup_old_hdf5_files(ctx.hdf5_path)
-
-        # Validate HDF5 cache against current reference image
-        ref_image_path_current = ctx.image_paths[0] if ctx.image_paths else ""
-        if os.path.exists(ctx.hdf5_path) and ref_image_path_current:
-            if not is_hdf5_cache_valid(ctx.hdf5_path, ref_image_path_current):
-                try:
-                    os.remove(ctx.hdf5_path)
-                    print(f"[CacheValidation] HDF5 cache deleted: {ctx.hdf5_path}")
-                except Exception as e:
-                    print(f"[CacheValidation] Failed to delete HDF5 cache: {e}")
-
-        # Khusus untuk similarity merging mode (atau mode tiling langsung), bypass cache HDF5 agar memuat path gambar asli langsung dari disk
-        merging_mode = ctx.params.get("merging_mode", "average").lower()
-        if merging_mode in ("similarity", "spatial_fusion", "spatial"):
-            ctx.data_source = ctx.image_paths
-        else:
-            ctx.data_source = (
-                ctx.hdf5_path if os.path.exists(ctx.hdf5_path) else ctx.image_paths
-            )
-
-        if isinstance(ctx.data_source, str) and ctx.data_source.endswith(".h5"):
-            try:
-                with h5py.File(ctx.data_source, "r") as f:
-                    ctx.total_images = len(f.keys())
-            except Exception as e:
-                raise IOError(f"Failed to read HDF5: {e}")
-        elif isinstance(ctx.data_source, list):
-            ctx.total_images = len(ctx.data_source)
-
-        if not ctx.total_images:
+    def load_process(self, ctx):
+        """Load input frames and initialize shared pipeline metadata."""
+        if not ctx.image_paths:
+            self.prepare_input_paths(ctx)
+        if not ctx.image_paths:
             return ctx
 
-        is_linear = ctx.params.get("enable_linear_mode", False)
-        if ctx.image_paths:
-            _, ext = os.path.splitext(ctx.image_paths[0])
-            if is_linear and ext.lower() in (".dng", ".cr2", ".cr3", ".nef", ".arw"):
-                ctx.is_linear_mode = True
-
-        ref_res = self._load_images(
-            ctx.data_source,
-            (0, 1),
+        _progress(ctx.update_progress, 0, "Loading frames...")
+        load_res = load_images_from_paths(
+            ctx.image_paths,
             ctx.stop_requested,
             linear_mode=ctx.is_linear_mode,
-            capture_ref_proxy=ctx.is_linear_mode,
+            capture_ref_proxy=False,
+            update_progress=ctx.update_progress,
+            progress_start=0,
+            progress_end=20,
         )
-        if ctx.is_linear_mode and isinstance(ref_res, tuple):
-            reference_image, ref_proxy_gt = ref_res
-        elif isinstance(ref_res, list) and len(ref_res) > 0:
-            reference_image, ref_proxy_gt = ref_res[0], None
-        else:
-            reference_image, ref_proxy_gt = None, None
-
-        if reference_image is None:
+        frames = load_res[0] if isinstance(load_res, tuple) else load_res
+        if not frames:
             ctx.total_images = 0
+            print("[MFDenoiser][Load] No frames loaded.")
             return ctx
 
-        ctx.reference_image = reference_image
-        ctx.ref_dtype = reference_image.dtype
-        ctx.ref_h, ctx.ref_w = reference_image.shape[:2]
+        resize_res = resize_all_with_padding(
+            frames,
+            method="preserve",
+            stop_requested=ctx.stop_requested,
+            force_even=True,
+        )
+        if resize_res and resize_res[0]:
+            if ctx.params.get("clear_raw", True):
+                del frames
+                gc.collect()
+            frames = resize_res[0]
 
-        if ctx.is_linear_mode:
-            if ref_proxy_gt is not None:
-                ctx.proxy_scale = calculate_scale_from_gt_proxy(
-                    reference_image, ref_proxy_gt, reference_image.dtype
-                )
-            else:
-                ctx.proxy_scale = calculate_auto_scale(
-                    normalize_image(reference_image, reference_image.dtype),
-                    target_mean=0.25,
-                )
-
-        ctx.reference_float = normalize_image(reference_image, reference_image.dtype)
-        ctx.session_id = f"{ctx.output_name_base}_{time.strftime('%Y%m%d_%H%M%S')}"
-
+        ctx.frames = frames
+        ctx.reference_image = frames[0]
+        ctx.ref_dtype = ctx.reference_image.dtype
+        ctx.ref_h, ctx.ref_w = ctx.reference_image.shape[:2]
+        print(f"[MFDenoiser][Load] loaded_frames={len(ctx.frames)}")
+        for idx, frame in enumerate(ctx.frames):
+            print(f"[MFDenoiser][Load] frame_{idx}: {_frame_info(frame)}")
         return ctx
 
-    def _process_linear_placeholder(self, ctx):
-        """Placeholder function for processing linear RAW mode."""
-        print("[LinearMode] Routing to linear mode placeholder (Not supported yet)...")
-        if ctx.update_progress:
-            ctx.update_progress(
-                100, "Linear RAW mode is not supported yet (placeholder)."
-            )
-        return None
-
-    @staticmethod
-    def _compute_tile_starts(full_size, tile_size, overlap=0.3):
-        """Compute tile start positions for a dimension."""
-        if tile_size >= full_size:
-            return np.array([0], dtype=np.int32)
-        step = max(int(tile_size * (1.0 - overlap)), 1)
-        starts = []
-        y = 0
-        while y + tile_size <= full_size:
-            starts.append(y)
-            if y + tile_size == full_size:
-                break
-            y = min(y + step, full_size - tile_size)
-        return np.array(starts, dtype=np.int32)
-
-    @staticmethod
-    def _make_hanning_window(h, w):
-        """Generate 2D Hanning window for tile stitching."""
-        win_y = np.hanning(h).astype(np.float32)
-        win_x = np.hanning(w).astype(np.float32)
-        return np.outer(win_y, win_x)
-
-    def _resolve_alignment_backend(self, ctx):
-        backend = ctx.params.get("alignment_backend", "farneback")
-        if isinstance(backend, str):
-            if backend.lower() == "farneback":
-                return FarnebackAlignment()
-        if callable(backend) or hasattr(backend, "align_tile"):
-            return backend
-        return FarnebackAlignment()  # Fallback
-
-    def _resolve_merge_backend(self, ctx):
-        backend = ctx.params.get("merging_mode", "average")
-        if isinstance(backend, str):
-            backend = backend.lower()
-            if backend == "average":
-                from .Average import AverageMerge
-                return AverageMerge()
-            elif backend == "median":
-                from .Median import MedianMerge
-                return MedianMerge()
-            elif backend in ("similarity", "spatial_fusion", "spatial"):
-                return SimilarityMerge()
-            else:
-                raise ValueError(f"Unsupported merging mode: {backend}")
-        if callable(backend) or hasattr(backend, "merge_tiles"):
-            return backend
-        raise ValueError("No valid merging backend could be resolved.")
-
-    def run_tile_align(self, ctx, ref_tile, comp_tiles_list):
-        """Align tiles using the resolved alignment backend."""
-        backend = self._resolve_alignment_backend(ctx)
-        aligned_tiles = []
-        for comp_tile in comp_tiles_list:
-            if hasattr(backend, "align_tile"):
-                warped = backend.align_tile(ref_tile, comp_tile)
-            else:
-                # If backend is a simple callable function
-                warped = backend(ref_tile, comp_tile)
-            aligned_tiles.append(warped)
-        return aligned_tiles
-
-    def run_tile_merge(self, ctx):
-        """Modular tile merging orchestrator working in continue_to_merge mode.
-
-        Performs tile-by-tile alignment and merging in-memory using pluggable backends.
-        """
-        channels = ctx.reference_image.shape[2] if ctx.reference_image.ndim == 3 else 1
-        accumulator = np.zeros((ctx.ref_h, ctx.ref_w, channels), dtype=np.float32)
-        weight_accumulator = np.zeros((ctx.ref_h, ctx.ref_w), dtype=np.float32)
-
-        tile_size = 512
-        overlap = 0.3
-        y_starts = self._compute_tile_starts(ctx.ref_h, tile_size, overlap)
-        x_starts = self._compute_tile_starts(ctx.ref_w, tile_size, overlap)
-        total_tiles = len(y_starts) * len(x_starts)
-
-        # Resolve the merge backend
-        merge_backend = self._resolve_merge_backend(ctx)
-
-        # Load all images ONCE to avoid repeated disk reads and demosaicing inside the loop
-        if ctx.update_progress:
-            ctx.update_progress(5, "Loading and preparing all frames...")
-        batch_images = self._load_images(
-            ctx.data_source,
-            (0, ctx.total_images),
-            ctx.stop_requested,
-            linear_mode=ctx.is_linear_mode,
+    def prepare_input_paths(self, ctx):
+        """Load only paths and shared metadata; image arrays stay unloaded."""
+        ctx.image_paths = self._get_image_paths(
+            ctx.batch_id if not ctx.single_process else None
         )
+        ctx.total_images = len(ctx.image_paths)
+        print(
+            f"[MFDenoiser][Load] mode={'single' if ctx.single_process else 'batch'} "
+            f"batch_id={ctx.batch_id} paths={ctx.total_images}"
+        )
+        for idx, path in enumerate(ctx.image_paths):
+            print(f"[MFDenoiser][Load] path_{idx}: {path}")
+        if not ctx.image_paths:
+            return ctx
+
+        ref_name = os.path.splitext(os.path.basename(ctx.image_paths[0]))[0]
+        ctx.output_name_base = ref_name or "stack"
+
+        is_linear = ctx.params.get("enable_linear_mode", False)
+        _, ext = os.path.splitext(ctx.image_paths[0])
+        ctx.is_linear_mode = bool(
+            is_linear and ext.lower() in (".dng", ".cr2", ".cr3", ".nef", ".arw")
+        )
+        return ctx
+
+    def build_batch_plan(self, ctx):
+        """Create comparison-frame batches; reference frame is kept separate."""
+        batch_size = max(1, int(ctx.params.get("batch_size", 6)))
+        comparison_paths = ctx.image_paths[1:]
+        comparison_plan = setup_balanced_batching(
+            comparison_paths,
+            _lang(),
+            max_batch_size=batch_size,
+        )
+        # The batching helper works on a zero-based comparison list. Convert
+        # its ranges back to the global image-path indices while reserving
+        # index 0 exclusively for the persistent reference frame.
+        ctx.batch_plan = [(start + 1, end + 1) for start, end in comparison_plan]
+        print(f"[MFDenoiser][Batch] batch_size={batch_size} plan={ctx.batch_plan}")
+        return ctx.batch_plan
+
+    def _prepare_alignment_reference(self, ctx):
+        """Load and normalize the immutable alignment reference once.
+
+        This is intentionally separate from ``_load_single_frame`` so future
+        GPU backends can attach a persistent reference pyramid/buffer here,
+        without making the alignment algorithms aware of pipeline policy.
+        """
+        if ctx.alignment_reference_ready and ctx.alignment_reference is not None:
+            return ctx.alignment_reference
+        if not ctx.image_paths:
+            return None
+
+        reference = self._load_single_frame(ctx, ctx.image_paths[0])
+        if reference is None:
+            return None
+        resize_res = resize_all_with_padding(
+            [reference],
+            method="preserve",
+            stop_requested=ctx.stop_requested,
+            force_even=True,
+        )
+        if resize_res and resize_res[0]:
+            reference = resize_res[0][0]
+
+        ctx.alignment_reference = reference
+        ctx.alignment_reference_ready = True
+        ctx.reference_image = reference
+        ctx.ref_dtype = reference.dtype
+        ctx.ref_h, ctx.ref_w = reference.shape[:2]
+        print(
+            f"[MFDenoiser][Batch] persistent reference ready "
+            f"{_frame_info(reference)}"
+        )
+        return reference
+
+    def _load_alignment_batch(self, ctx, batch_range):
+        """Load one bounded comparison batch, excluding the reference frame."""
+        start, end = batch_range
+        first_target = max(1, int(start))
+        if first_target >= end:
+            return AlignmentBatchJob(
+                start_index=first_target,
+                end_index=first_target,
+                reference=ctx.alignment_reference,
+                target_dims=(ctx.ref_h, ctx.ref_w),
+            )
+
+        paths = ctx.image_paths[first_target:end]
         frames = []
-        while batch_images:
-            img = batch_images.pop(0)
-            frames.append(normalize_image(img, ctx.ref_dtype))
-            del img
-
-        processed_tiles = 0
-
-        for y_start in y_starts:
-            for x_start in x_starts:
-                if ctx.stop_requested and ctx.stop_requested():
-                    return None, None, 0
-
-                tile_h = min(tile_size, ctx.ref_h - y_start)
-                tile_w = min(tile_size, ctx.ref_w - x_start)
-                hanning_win = self._make_hanning_window(tile_h, tile_w)
-
-                # Extract tiles directly from in-memory frames
-                comp_tiles = [
-                    f[y_start : y_start + tile_h, x_start : x_start + tile_w]
-                    for f in frames
+        if paths:
+            if getattr(ctx, "use_tonemapped_loading", False):
+                frames = [
+                    self._load_single_frame_tonemapped(ctx, path)
+                    for path in paths
+                    if not (ctx.stop_requested and ctx.stop_requested())
                 ]
-                ref_tile = comp_tiles[0]
+            else:
+                load_res = load_images_from_paths(
+                    paths,
+                    ctx.stop_requested,
+                    linear_mode=ctx.is_linear_mode,
+                    capture_ref_proxy=False,
+                    update_progress=None,
+                )
+                frames = load_res[0] if isinstance(load_res, tuple) else load_res
+            resize_res = resize_all_with_padding(
+                frames,
+                method="preserve",
+                stop_requested=ctx.stop_requested,
+                force_even=True,
+            )
+            if resize_res and resize_res[0]:
+                frames = resize_res[0]
 
-                # Align comparison tiles against the reference tile
-                aligned_batch = self.run_tile_align(ctx, ref_tile, comp_tiles[1:])
-                aligned_tiles_all = [ref_tile] + aligned_batch
+        job = AlignmentBatchJob(
+            start_index=first_target,
+            end_index=end,
+            paths=paths,
+            frames=frames or [],
+            reference=ctx.alignment_reference,
+            target_dims=(ctx.ref_h, ctx.ref_w),
+        )
+        print(
+            f"[MFDenoiser][Batch] loaded alignment job "
+            f"indices={job.start_index}:{job.end_index} frames={len(job.frames)}"
+        )
+        return job
 
-                # Call the pluggable merge backend
-                if len(aligned_tiles_all) > 0:
-                    if hasattr(merge_backend, "merge_tiles"):
-                        merged_tile, tile_weight = merge_backend.merge_tiles(
-                            aligned_tiles_all
-                        )
-                    else:
-                        merged_tile, tile_weight = merge_backend(aligned_tiles_all)
-                else:
-                    merged_tile = ref_tile
-                    tile_weight = np.ones((tile_h, tile_w), dtype=np.float32)
+    def _begin_alignment_prefetch(self, ctx):
+        """Enable bounded prefetch for legacy per-frame alignment APIs."""
+        self._prepare_alignment_reference(ctx)
+        ctx.alignment_batch_size = max(1, int(ctx.params.get("batch_size", 8)))
+        ctx.alignment_prefetch_active = True
+        ctx.alignment_prefetch_start = -1
+        ctx.alignment_prefetch_end = -1
+        ctx.alignment_prefetch_frames.clear()
+        ctx.alignment_batches_processed = 0
+        print(
+            f"[MFDenoiser][Batch] prefetch enabled batch_size="
+            f"{ctx.alignment_batch_size} total={ctx.total_images}"
+        )
+        # Prime the first bounded buffer before the backend starts requesting
+        # individual frames. Subsequent batches are swapped in on demand.
+        if ctx.batch_plan:
+            first_start, _ = ctx.batch_plan[0]
+            self._prefetch_frame_for_path(ctx, ctx.image_paths[first_start])
 
-                # Release the GPU buffers allocated during tile alignment to prevent VRAM leak
-                from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-                for item in aligned_batch:
-                    if isinstance(item, TaichiGPUBuffer):
-                        item.destroy()
+    def _prefetch_frame_for_path(self, ctx, path):
+        """Return a preloaded frame, refilling the bounded batch when needed."""
+        try:
+            index = ctx.image_paths.index(path)
+        except ValueError:
+            return None
+        if index == 0:
+            return ctx.alignment_reference
 
-                # Stitch using Hanning window blending
-                roi_y = slice(y_start, y_start + tile_h)
-                roi_x = slice(x_start, x_start + tile_w)
+        batch = next(
+            (
+                (int(batch_start), int(batch_end))
+                for batch_start, batch_end in (ctx.batch_plan or [])
+                if int(batch_start) <= index < int(batch_end)
+            ),
+            None,
+        )
+        if batch is None:
+            batch_size = max(1, ctx.alignment_batch_size)
+            start = 1 + ((index - 1) // batch_size) * batch_size
+            end = min(ctx.total_images, start + batch_size)
+        else:
+            start, end = batch
+            start = max(1, start)
+        if not (
+            ctx.alignment_prefetch_start <= index < ctx.alignment_prefetch_end
+            and path in ctx.alignment_prefetch_frames
+        ):
+            ctx.alignment_prefetch_frames.clear()
+            job = self._load_alignment_batch(ctx, (start, end))
+            ctx.alignment_prefetch_start = start
+            ctx.alignment_prefetch_end = end
+            ctx.alignment_prefetch_frames.update(
+                (frame_path, frame) for frame_path, frame in zip(job.paths, job.frames)
+            )
+            ctx.alignment_batches_processed += 1
+            print(
+                f"[MFDenoiser][Batch] active batch "
+                f"{start}:{end} ({len(ctx.alignment_prefetch_frames)} frames)"
+            )
+        return ctx.alignment_prefetch_frames.get(path)
 
-                if channels == 3 and merged_tile.ndim == 2:
-                    merged_tile = merged_tile[..., np.newaxis]
+    def _end_alignment_prefetch(self, ctx):
+        """Release the current comparison batch but retain no alignment state."""
+        if ctx.alignment_prefetch_active:
+            ctx.alignment_prefetch_frames.clear()
+            ctx.alignment_prefetch_active = False
+            ctx.alignment_prefetch_start = -1
+            ctx.alignment_prefetch_end = -1
+            gc.collect()
+            print(
+                f"[MFDenoiser][Batch] prefetch released "
+                f"batches={ctx.alignment_batches_processed}"
+            )
 
-                if channels == 3:
-                    accumulator[roi_y, roi_x] += (
-                        merged_tile * hanning_win[..., np.newaxis]
-                    )
-                else:
-                    accumulator[roi_y, roi_x] += merged_tile * hanning_win
-
-                weight_accumulator[roi_y, roi_x] += hanning_win
-
-                processed_tiles += 1
-                if ctx.update_progress and total_tiles > 0:
-                    prog = int(10 + (processed_tiles / total_tiles) * 80)
-                    ctx.update_progress(
-                        prog, f"Processing tile {processed_tiles}/{total_tiles}..."
-                    )
-
-        # Free loaded frames
-        del frames
+    @staticmethod
+    def _release_alignment_batch(job):
+        """Release comparison-frame ownership without touching the reference."""
+        job.frames.clear()
+        job.paths.clear()
         gc.collect()
 
-        return accumulator, weight_accumulator, ctx.total_images
-
-    def normalize_result(self, ctx, sum_img, sum_weight, frame_count):
-        """Normalize accumulated result and scale back to original bit-depth."""
-        if sum_img is None or frame_count <= 0:
-            channels = (
-                ctx.reference_image.shape[2] if ctx.reference_image.ndim == 3 else 1
+    def _can_stream_load_for_merge(self, ctx, alignment_algorithm):
+        """Return True when images can stay as paths until the merge stage."""
+        merge_name = _normalize_algorithm_name(
+            ctx.params.get("merge_plan", "No Denoising")
+        )
+        alignment_name = _normalize_algorithm_name(
+            getattr(
+                alignment_algorithm,
+                "NAME",
+                ctx.params.get("alignment_plan", "No Alignment"),
             )
-            return np.zeros((ctx.ref_h, ctx.ref_w, channels), dtype=ctx.ref_dtype)
+        )
+        return merge_name == "average" and alignment_name == "no alignment"
 
-        # Normalize: divide accumulated sum by the weight map
-        valid_mask = sum_weight > 1e-6
-        normalized = np.zeros_like(sum_img)
-        np.divide(
-            sum_img,
-            sum_weight[:, :, np.newaxis],
-            out=normalized,
-            where=valid_mask[:, :, np.newaxis],
+    def _is_no_alignment_requested(self, ctx):
+        """Return True when the batch explicitly disables alignment."""
+        alignment_name = str(
+            ctx.params.get("alignment_plan", "No Alignment") or "No Alignment"
+        ).strip()
+        return alignment_name.casefold() == "no alignment"
+
+    def prepare_alignment_cache_policy(self, ctx):
+        """Resolve HDF5 cache path and decide whether alignment is needed."""
+        align_dir = os.path.join("database", "align")
+        os.makedirs(align_dir, exist_ok=True)
+        ctx.hdf5_path = (
+            os.path.join(align_dir, "aligned_images.h5")
+            if ctx.single_process
+            else os.path.join(align_dir, f"aligned_image_batch_{ctx.batch_id}.h5")
+        )
+        ctx.use_hdf5_cache = bool(ctx.params.get("use_alignment_cache", False))
+
+        if self._is_no_alignment_requested(ctx):
+            ctx.use_hdf5_cache = False
+            ctx.cache_is_valid = False
+            ctx.needs_alignment = False
+            print(
+                "[MFDenoiser][Cache] alignment disabled by batch parameter; "
+                "bypassing HDF5 alignment cache."
+            )
+            return ctx
+
+        cleanup_old_hdf5_files(ctx.hdf5_path)
+
+        ref_path = ctx.image_paths[0] if ctx.image_paths else ""
+        ctx = self._build_alignment_cache_metadata(ctx)
+        ctx.cache_is_valid = (
+            ctx.use_hdf5_cache
+            and bool(ref_path)
+            and os.path.exists(ctx.hdf5_path)
+            and is_hdf5_cache_valid(
+                ctx.hdf5_path,
+                ref_path,
+                expected_alignment_name=ctx.alignment_selection_name,
+                expected_cache_key=ctx.alignment_cache_key,
+            )
+        )
+        ctx.needs_alignment = not ctx.cache_is_valid
+        print(
+            f"[MFDenoiser][Cache] use={ctx.use_hdf5_cache} valid={ctx.cache_is_valid} "
+            f"needs_alignment={ctx.needs_alignment} hdf5_path={ctx.hdf5_path}"
+        )
+        if ctx.cache_is_valid:
+            print(f"[MFDenoiser] Alignment cache valid: {ctx.hdf5_path}")
+        elif ctx.use_hdf5_cache:
+            print(
+                f"[MFDenoiser] Alignment cache will be rebuilt later: {ctx.hdf5_path}"
+            )
+        return ctx
+
+    def _load_single_frame_tonemapped(self, ctx, path, target_dims=None):
+        import rawpy
+
+        try:
+            with rawpy.imread(path) as raw:
+                rgb_linear = raw.postprocess(
+                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
+                    use_camera_wb=True,
+                    no_auto_bright=True,
+                    gamma=(1, 1),
+                    output_bps=16,
+                    output_color=rawpy.ColorSpace.raw,
+                    user_flip=0,
+                )
+                img_f32 = rgb_linear.astype(np.float32) / 65535.0
+                cmatrix = raw.color_matrix[:, :3].astype(np.float32)
+                sRGB = np.matmul(img_f32, cmatrix.T)
+                sRGB = sRGB / np.sqrt(1.0 + sRGB * sRGB)
+                sRGB = np.clip(sRGB, 0.0, 1.0)
+                t = np.sqrt(sRGB)
+                gamma_rgb = t * (
+                    1.30547177 + t * (-0.78947190 + t * (0.79064221 - 0.30664208 * t))
+                )
+                gamma_rgb = np.clip(gamma_rgb, 0.0, 1.0)
+                rgb = (gamma_rgb * 65535.0).astype(np.uint16)
+                bgr = rgb
+                if bgr.flags["WRITEABLE"]:
+                    b_channel = bgr[:, :, 0].copy()
+                    bgr[:, :, 0] = bgr[:, :, 2]
+                    bgr[:, :, 2] = b_channel
+                frame = bgr
+        except Exception as e:
+            print(
+                f"[MFDenoiser] Custom tone mapping failed for {path}: {e}. Falling back to default loader."
+            )
+            frame = self._load_single_frame(ctx, path, target_dims=None)
+
+        if target_dims is not None and frame.shape[:2] != tuple(target_dims):
+            frame = resize_with_padding(frame, target_dims)
+        return frame
+
+    def _load_single_frame(self, ctx, path, target_dims=None):
+        if getattr(ctx, "alignment_prefetch_active", False):
+            reference_path = ctx.image_paths[0] if ctx.image_paths else None
+            if path != reference_path:
+                prefetched = self._prefetch_frame_for_path(ctx, path)
+                if prefetched is not None:
+                    frame = prefetched
+                    if target_dims is not None and frame.shape[:2] != tuple(
+                        target_dims
+                    ):
+                        frame = resize_with_padding(frame, target_dims)
+                    return frame
+        if getattr(ctx, "use_tonemapped_loading", False):
+            return self._load_single_frame_tonemapped(
+                ctx, path, target_dims=target_dims
+            )
+        load_res = load_images_from_paths(
+            [path],
+            ctx.stop_requested,
+            linear_mode=ctx.is_linear_mode,
+            capture_ref_proxy=False,
+        )
+        frames = load_res[0] if isinstance(load_res, tuple) else load_res
+        if not frames:
+            return None
+        frame = frames[0]
+        if ctx.params.get("clear_raw", True):
+            del frames
+            del load_res
+            gc.collect()
+        if target_dims is not None and frame.shape[:2] != tuple(target_dims):
+            resized = resize_with_padding(frame, target_dims)
+            if ctx.params.get("clear_raw", True):
+                del frame
+                gc.collect()
+            frame = resized
+        return frame
+
+    def _average_accumulate(self, sum_image, count, frame):
+        if frame is None:
+            return sum_image, count
+        if sum_image is None:
+            sum_image = np.zeros(frame.shape, dtype=np.float32)
+        sum_image += frame.astype(np.float32, copy=False)
+        return sum_image, count + 1
+
+    def _average_finalize(self, ctx, sum_image, count):
+        if sum_image is None or count <= 0:
+            return None
+        result = sum_image / float(count)
+        dtype = ctx.ref_dtype or getattr(ctx.reference_image, "dtype", result.dtype)
+        if np.issubdtype(dtype, np.integer):
+            info = np.iinfo(dtype)
+            result = np.clip(result, info.min, info.max)
+        return result.astype(dtype, copy=False)
+
+    def feature_matching_process(self, ctx, algorithm, batch_plan=None):
+        """Run feature-matching alignment as a pure alignment stage.
+
+        The algorithm only produces a motion/keypoint plan. MFDenoiser owns the
+        post-process policy: transform estimation, warp/crop, HDF5 persistence,
+        and cleanup.
+        """
+        if not hasattr(algorithm, "build_motion_plan"):
+            return None
+        if not ctx.image_paths:
+            return ctx
+        if ctx.cache_is_valid:
+            print(
+                f"[MFDenoiser][FeatureMatching] using valid HDF5 cache: {ctx.hdf5_path}"
+            )
+            ctx.aligned_frames = []
+            ctx.frames = []
+            ctx.data_source = ctx.hdf5_path
+            ctx.needs_alignment = False
+            return ctx
+
+        config = (
+            algorithm.load_config(batch_id=ctx.batch_id)
+            if hasattr(algorithm, "load_config")
+            else {}
+        )
+        print(
+            f"[MFDenoiser][FeatureMatching] start algorithm={algorithm.NAME} "
+            f"hdf5_path={ctx.hdf5_path}"
         )
 
-        # Fallback: fill invalid/unmapped pixels with reference image float representation
-        if not np.all(valid_mask):
-            normalized[~valid_mask] = ctx.reference_float[~valid_mask]
+        reference = self._load_single_frame(ctx, ctx.image_paths[0])
+        if reference is None:
+            print("[MFDenoiser][FeatureMatching] failed to load reference frame.")
+            ctx.aligned_frames = []
+            return ctx
 
-        # Scale back to original bit-depth (e.g. uint8/uint16) atau pertahankan float [0..1]
-        if np.issubdtype(ctx.ref_dtype, np.integer):
-            max_val = np.iinfo(ctx.ref_dtype).max
-        else:
-            max_val = 1.0
-        channels = ctx.reference_image.shape[2] if ctx.reference_image.ndim == 3 else 1
-        if channels == 1:
-            final_out = np.mean(normalized * max_val, axis=2)
-        else:
-            final_out = normalized * max_val
+        resize_res = resize_all_with_padding(
+            [reference],
+            method="preserve",
+            stop_requested=ctx.stop_requested,
+            force_even=True,
+        )
+        if resize_res and resize_res[0]:
+            reference = resize_res[0][0]
 
-        return np.clip(final_out, 0, max_val).astype(ctx.ref_dtype)
+        ctx.reference_image = reference
+        ctx.ref_dtype = reference.dtype
+        ctx.ref_h, ctx.ref_w = reference.shape[:2]
+        target_dims = (ctx.ref_h, ctx.ref_w)
 
-    def stage_save(self, ctx, result_image):
-        """Save the final result to disk. Returns output path."""
+        # Load reference tone-mapped for keypoint detection calculations
+        reference_tonemapped = self._load_single_frame_tonemapped(
+            ctx, ctx.image_paths[0], target_dims=target_dims
+        )
+
+        _progress(
+            ctx.update_progress, 25, f"Planning feature matching: {algorithm.NAME}"
+        )
+        self._begin_alignment_prefetch(ctx)
+        ctx.use_tonemapped_loading = True
+        try:
+            motion_plan = algorithm.build_motion_plan(
+                ctx,
+                reference_tonemapped,
+                target_dims,
+                self,
+                config,
+            )
+        finally:
+            ctx.use_tonemapped_loading = False
+        # Motion estimation may use a tone-mapped representation.  Rebuild a
+        # bounded raw-frame prefetch for the subsequent warp/crop pass.
+        self._end_alignment_prefetch(ctx)
+        ctx.motion_plan = motion_plan
+        motion_by_index = {item["index"]: item for item in motion_plan}
+
+        crop_bounds = None
+        global_crop = bool(config.get("enable_cropping", False)) and not bool(
+            config.get("keep_edges", False)
+        )
+        if global_crop:
+            crop_bounds = compute_global_crop_bounds(
+                motion_plan[1:],
+                reference.shape[1],
+                reference.shape[0],
+                config,
+            )
+            if crop_bounds is None:
+                print(
+                    "[MFDenoiser][FeatureMatching] global crop unavailable, using non-crop."
+                )
+                global_crop = False
+
+        os.makedirs(os.path.dirname(ctx.hdf5_path), exist_ok=True)
+        if os.path.exists(ctx.hdf5_path):
+            os.remove(ctx.hdf5_path)
+
+        saved_count = 0
+        self._begin_alignment_prefetch(ctx)
+        with h5py.File(ctx.hdf5_path, "w") as h5f:
+            write_alignment_cache_attrs(
+                h5f,
+                ref_image_path=ctx.image_paths[0],
+                alignment_selection=ctx.alignment_selection_name,
+                alignment_algorithm=ctx.alignment_effective_name or algorithm.NAME,
+                alignment_process="feature_matching",
+                cache_key=ctx.alignment_cache_key,
+                cache_payload=ctx.alignment_cache_payload,
+            )
+            h5f.attrs["global_crop"] = bool(global_crop)
+
+            for index, path in enumerate(ctx.image_paths):
+                if ctx.stop_requested and ctx.stop_requested():
+                    print("[MFDenoiser][FeatureMatching] stopped by user.")
+                    break
+
+                if index == 0:
+                    aligned = (
+                        crop_image(reference, crop_bounds)
+                        if global_crop
+                        else np.array(reference, copy=True)
+                    )
+                else:
+                    frame = self._load_single_frame(ctx, path, target_dims=target_dims)
+                    if frame is None:
+                        print(
+                            f"[MFDenoiser][FeatureMatching] failed to load image_{index}: {path}"
+                        )
+                        continue
+                    motion_item = motion_by_index.get(index)
+                    aligned = (
+                        apply_global_crop(frame, motion_item, crop_bounds, config)
+                        if global_crop
+                        else apply_non_crop(frame, motion_item, config)
+                    )
+                    del frame
+
+                if aligned is None:
+                    print(
+                        f"[MFDenoiser][FeatureMatching] skipped image_{index}: no aligned output"
+                    )
+                    continue
+
+                save_to_hdf5(h5f, f"image_{index}", aligned, extract_exif(path))
+                saved_count += 1
+                print(
+                    f"[MFDenoiser][FeatureMatching] saved image_{index} "
+                    f"{_frame_info(aligned)}"
+                )
+                del aligned
+                gc.collect()
+
+                progress = 55 + int(((index + 1) / max(1, ctx.total_images)) * 35)
+                _progress(
+                    ctx.update_progress,
+                    progress,
+                    f"Applied feature matching {index + 1}/{ctx.total_images}",
+                )
+
+        ctx.aligned_frames = []
+        ctx.frames = []
+        ctx.data_source = ctx.hdf5_path
+        ctx.needs_alignment = False
+        self._end_alignment_prefetch(ctx)
+        print(
+            f"[MFDenoiser][FeatureMatching] finished saved={saved_count} "
+            f"hdf5_path={ctx.hdf5_path}"
+        )
+        del reference
+        gc.collect()
+        return ctx
+
+    def align_process(self, ctx, batch_plan=None):
+        """Alignment stage placeholder.
+
+        Future intended structure:
+        1. optional feature matching for pre-global warp,
+        2. optional optical flow refinement,
+        3. optional persistence of aligned frames to cache/HDF5.
+
+        For now this stage deliberately performs no alignment.
+        """
+        alignment_name = ctx.params.get("alignment_plan", "No Alignment")
+        effective_alignment_name = (
+            getattr(ctx, "alignment_effective_name", "") or alignment_name
+        )
+        registry = get_alignment_registry()
+        algorithm = _resolve_algorithm(
+            registry, effective_alignment_name, "No Alignment"
+        )
+        print(
+            f"[MFDenoiser][Align] selected={alignment_name} "
+            f"effective={effective_alignment_name} resolved={algorithm.NAME} "
+            f"input_frames={len(ctx.frames)} batch_plan={batch_plan}"
+        )
+        _progress(ctx.update_progress, 25, f"Running alignment: {algorithm.NAME}")
+        if self._is_no_alignment_requested(ctx):
+            ctx.aligned_frames = list(ctx.frames)
+            ctx.data_source = "frames"
+            ctx.needs_alignment = False
+            print(
+                "[MFDenoiser][Align] No Alignment requested; using loaded frames "
+                "directly without HDF5."
+            )
+            return ctx
+        if ctx.cache_is_valid:
+            print(f"[MFDenoiser][Align] using valid HDF5 cache: {ctx.hdf5_path}")
+            ctx.aligned_frames = []
+            ctx.frames = []
+            ctx.data_source = ctx.hdf5_path
+            ctx.needs_alignment = False
+            return ctx
+        if hasattr(algorithm, "build_flow_alignment"):
+            # Dense flow owns large pyramids and accumulators. Drop reusable
+            # output tiles from earlier stages so they cannot compete for VRAM.
+            try:
+                from taichi_library import taichi_aot
+
+                taichi_aot.engine.sync()
+                taichi_aot.engine.get_device_block_cache().clear()
+                print("[MFDenoiser][Align] released prior VRAM cache for dense flow")
+            except Exception as exc:
+                print(f"[MFDenoiser][Align] VRAM cache release skipped: {exc}")
+            reference = self._prepare_alignment_reference(ctx)
+            if reference is None:
+                ctx.aligned_frames = []
+                return ctx
+            resize_res = resize_all_with_padding(
+                [reference],
+                method="preserve",
+                stop_requested=ctx.stop_requested,
+                force_even=True,
+            )
+            if resize_res and resize_res[0]:
+                resized_reference = resize_res[0][0]
+                if ctx.clear_raw or ctx.params.get("clear_raw", True):
+                    del reference
+                    gc.collect()
+                reference = resized_reference
+            ctx.reference_image = reference
+            ctx.ref_dtype = reference.dtype
+            ctx.ref_h, ctx.ref_w = reference.shape[:2]
+            config = (
+                algorithm.load_config(batch_id=ctx.batch_id)
+                if hasattr(algorithm, "load_config")
+                else {}
+            )
+            self._begin_alignment_prefetch(ctx)
+            try:
+                result_ctx = algorithm.build_flow_alignment(
+                    ctx,
+                    reference,
+                    (ctx.ref_h, ctx.ref_w),
+                    self,
+                    config,
+                )
+            finally:
+                self._end_alignment_prefetch(ctx)
+            if result_ctx.clear_raw or result_ctx.params.get("clear_raw", True):
+                result_ctx.frames = []
+                result_ctx.aligned_frames = []
+                gc.collect()
+            return result_ctx
+        feature_result = self.feature_matching_process(
+            ctx, algorithm, batch_plan=batch_plan
+        )
+        if feature_result is not None:
+            return feature_result
+        ctx.aligned_frames = algorithm.run(ctx, ctx.frames, batch_plan=batch_plan)
+        print(f"[MFDenoiser][Align] output_frames={len(ctx.aligned_frames)}")
+        for idx, frame in enumerate(ctx.aligned_frames):
+            print(f"[MFDenoiser][Align] aligned_frame_{idx}: {_frame_info(frame)}")
+        ctx.needs_alignment = False
+        return ctx
+
+    def merge_process(self, ctx, batch_plan=None):
+        """Merge stage placeholder.
+
+        Future intended structure:
+        - full-frame merge path,
+        - tile merge path with flexible tile size/overlap,
+        - optional streaming/batching for memory control.
+
+        For now this stage returns the reference frame unchanged.
+        """
+        denoising_name = ctx.params.get("merge_plan", "No Denoising")
+        registry = get_denoising_registry()
+        algorithm = _resolve_algorithm(registry, denoising_name, "No Denoising")
+        print(
+            f"[MFDenoiser][Merge] selected={denoising_name} resolved={algorithm.NAME} "
+            f"input_frames={len(ctx.aligned_frames or ctx.frames)} batch_plan={batch_plan}"
+        )
+        _progress(ctx.update_progress, 60, f"Running denoising: {algorithm.NAME}")
+        if algorithm.NAME == "Average":
+            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import (
+                merge_average_from_hdf5,
+                merge_average_from_paths,
+            )
+        if algorithm.NAME == "Average" and merge_average_from_hdf5(
+            ctx, progress_callback=ctx.update_progress
+        ):
+            return ctx
+        if algorithm.NAME == "Average" and merge_average_from_paths(
+            ctx,
+            load_single_frame=self._load_single_frame,
+            progress_callback=ctx.update_progress,
+            batch_plan=batch_plan,
+        ):
+            return ctx
+
+        # Alignment backends release their in-memory outputs after writing
+        # HDF5. No-Denoising must still produce the persisted reference.
+        if algorithm.NAME == "No Denoising":
+            if (
+                getattr(ctx, "hdf5_path", None)
+                and os.path.exists(ctx.hdf5_path)
+                and getattr(ctx, "data_source", "") == ctx.hdf5_path
+            ):
+                with h5py.File(ctx.hdf5_path, "r") as h5f:
+                    if "image_0" in h5f:
+                        ctx.result_image = np.array(h5f["image_0"])
+            elif ctx.reference_image is not None:
+                ctx.result_image = np.array(ctx.reference_image, copy=True)
+            elif ctx.image_paths:
+                ctx.result_image = self._load_single_frame(
+                    ctx, ctx.image_paths[0]
+                )
+            print(
+                f"[MFDenoiser][Merge] No Denoising reference="
+                f"{_frame_info(ctx.result_image)}"
+            )
+            return ctx
+
+        frames = ctx.aligned_frames or ctx.frames
+        ctx.result_image = algorithm.run(ctx, frames, batch_plan=batch_plan)
+        if ctx.result_image is not None:
+            try:
+                from taichi_library import taichi_aot
+                from config import DEFAULT_TONE_MAPPING_PARAMS
+                if ctx.result_image.dtype in (np.float32, np.float64):
+                    img_f32 = ctx.result_image.astype(np.float32, copy=False)
+                    max_v = float(np.max(img_f32))
+                    if max_v > 1.0:
+                        img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
+                    img_tm = taichi_aot.naturalTonemapping(img_f32, **DEFAULT_TONE_MAPPING_PARAMS)
+                    if max_v > 255.0:
+                        ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+                    elif max_v > 1.0:
+                        ctx.result_image = np.clip(img_tm * 255.0, 0, 255).astype(np.uint8)
+                    else:
+                        ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+                elif ctx.result_image.dtype == np.uint16:
+                    img_f32 = ctx.result_image.astype(np.float32) / 65535.0
+                    img_tm = taichi_aot.naturalTonemapping(img_f32, **DEFAULT_TONE_MAPPING_PARAMS)
+                    ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+            except Exception as e_tm:
+                print(f"[MFDenoiser] Tone mapping result image warning: {e_tm}")
+        print(f"[MFDenoiser][Merge] result={_frame_info(ctx.result_image)}")
+        return ctx
+
+    def save_process(self, ctx):
+        """Save the current pipeline result."""
+        if ctx.result_image is None:
+            print("[MFDenoiser][Save] No result image to save.")
+            return None
+
         output_folder = "database/stack"
         os.makedirs(output_folder, exist_ok=True)
         safe_name = (
@@ -714,19 +1550,22 @@ class MFDenoiserAlgorithm:
         )
         output_suffix = ctx.params.get("output_suffix", "mf_denoiser")
         output_path = os.path.join(output_folder, f"{safe_name}_{output_suffix}.tif")
+        print(
+            f"[MFDenoiser][Save] output_path={output_path} result={_frame_info(ctx.result_image)}"
+        )
 
         if ctx.is_linear_mode:
-            output_path = save_linear_dng(
-                result_image,
+            return save_linear_dng(
+                ctx.result_image,
                 os.path.splitext(output_path)[0] + ".dng",
                 reference_image_path=ctx.image_paths[0] if ctx.image_paths else None,
             )
-        else:
-            save_image(
-                result_image,
-                output_path,
-                reference_image_path=ctx.image_paths[0] if ctx.image_paths else None,
-            )
+
+        save_image(
+            ctx.result_image,
+            output_path,
+            reference_image_path=ctx.image_paths[0] if ctx.image_paths else None,
+        )
         return output_path
 
     def run_pipeline(
@@ -737,8 +1576,15 @@ class MFDenoiserAlgorithm:
         stop_requested=None,
         merging_mode=None,
         output_suffix=None,
+        processing_mode=None,
+        tile_size=None,
+        tile_overlap=None,
+        batch_size=None,
+        h5_write_batch_size=None,
+        alignment_backend=None,
+        clear_raw=None,
     ):
-        """Execute the full pipeline: Load → Align → Merge → PostProcess → Save."""
+        """Main orchestration entry point for MFDenoiser."""
         ctx = PipelineContext(
             db_path=self.db_path,
             single_process=single_process,
@@ -747,150 +1593,124 @@ class MFDenoiserAlgorithm:
             stop_requested=stop_requested,
         )
         ctx.params = self._load_params()
-
         if merging_mode is not None:
-            ctx.params["merging_mode"] = merging_mode
+            ctx.params["merge_plan"] = merging_mode
         if output_suffix is not None:
             ctx.params["output_suffix"] = output_suffix
+        if processing_mode is not None:
+            ctx.params["processing_mode"] = processing_mode
+        if tile_size is not None:
+            ctx.params["tile_size"] = int(tile_size)
+        if tile_overlap is not None:
+            ctx.params["tile_overlap"] = float(tile_overlap)
+        if batch_size is not None:
+            ctx.params["batch_size"] = max(1, int(batch_size))
+        if h5_write_batch_size is not None:
+            ctx.params["h5_write_batch_size"] = max(1, int(h5_write_batch_size))
+        if alignment_backend is not None:
+            ctx.params["alignment_plan"] = alignment_backend
+        if clear_raw is not None:
+            ctx.params["clear_raw"] = bool(clear_raw)
+        ctx.clear_raw = bool(ctx.params.get("clear_raw", True))
+        self._configure_compute_runtime(ctx)
+        print(
+            f"[MFDenoiser][Pipeline] start single_process={single_process} batch_id={batch_id} "
+            f"alignment={ctx.params.get('alignment_plan')} denoising={ctx.params.get('merge_plan')} "
+            f"batch_size={ctx.params.get('batch_size')} "
+            f"output_suffix={ctx.params.get('output_suffix')}"
+        )
 
-        # Stage 1: Load Data
-        ctx = self.stage_load_data(ctx)
+        ctx = self.prepare_input_paths(ctx)
         if not ctx.total_images:
-            if update_progress:
-                update_progress(100, _lang().NO_IMAGE_PATH_PROCESSED_IMAGE)
+            _progress(
+                update_progress,
+                100,
+                getattr(
+                    _lang(), "NO_IMAGE_PATH_PROCESSED_IMAGE", "No image to process."
+                ),
+            )
+            return None
+        if stop_requested and stop_requested():
             return None
 
-        # Check Linear RAW Mode
-        if ctx.is_linear_mode:
-            if ctx.params.get("enable_linear_mode", False):
-                return self._process_linear_placeholder(ctx)
-            else:
-                ctx.is_linear_mode = False
+        ctx = self.prepare_alignment_cache_policy(ctx)
+        alignment_name_for_load = getattr(
+            ctx, "alignment_effective_name", ""
+        ) or ctx.params.get("alignment_plan", "No Alignment")
+        alignment_algo_for_load = _resolve_algorithm(
+            get_alignment_registry(),
+            alignment_name_for_load,
+            "No Alignment",
+        )
+        if not ctx.cache_is_valid and not (
+            hasattr(alignment_algo_for_load, "build_motion_plan")
+            or hasattr(alignment_algo_for_load, "build_flow_alignment")
+            or self._can_stream_load_for_merge(ctx, alignment_algo_for_load)
+        ):
+            ctx = self.load_process(ctx)
+            if not ctx.total_images:
+                _progress(
+                    update_progress,
+                    100,
+                    getattr(
+                        _lang(), "NO_IMAGE_PATH_PROCESSED_IMAGE", "No image to process."
+                    ),
+                )
+                return None
+            if stop_requested and stop_requested():
+                return None
+        batch_plan = self.build_batch_plan(ctx)
 
-        # Stage 2: Merge (run_tile_merge handles both align and merge on-the-fly)
-        if ctx.update_progress:
-            merge_start = ctx.params.get("merge_progress_start", 0)
-            ctx.update_progress(merge_start, "Merging frames...")
-
-        sum_img, sum_weight, frame_count = self.run_tile_merge(ctx)
-        if ctx.stop_requested and ctx.stop_requested():
+        # run_pipeline owns the high-level policy. Later, cache/HDF5 can be
+        # enabled here and delegated to align_process helpers.
+        ctx = self.align_process(ctx, batch_plan=batch_plan)
+        if stop_requested and stop_requested():
             return None
 
-        # Stage 4: Normalize Result
-        if ctx.update_progress:
-            ctx.update_progress(95, "Finalizing fusion...")
-        result = self.normalize_result(ctx, sum_img, sum_weight, frame_count)
+        ctx = self.merge_process(ctx, batch_plan=batch_plan)
+        if stop_requested and stop_requested():
+            return None
 
-        # Stage 5: Save
-        output_path = self.stage_save(ctx, result)
+        _progress(update_progress, 95, "Saving MFDenoiser result...")
+        output_path = self.save_process(ctx)
+        self._report_compute_runtime(ctx)
+        print(f"[MFDenoiser][Pipeline] finished output_path={output_path}")
+        _progress(update_progress, 100, "MFDenoiser pipeline skeleton finished.")
         return output_path
 
-    @staticmethod
-    def _load_images(
-        data_source,
-        batch_indices,
-        stop_requested=None,
-        linear_mode=True,
-        capture_ref_proxy=False,
-        alignment_mode=False,
-        update_progress=None,
-        progress_start=0,
-        progress_end=100,
-    ):
-        """Load a batch of images from HDF5 or filesystem."""
-        batch_start, batch_end = batch_indices
-        batch_images = []
-        ref_proxy = None
 
-        if isinstance(data_source, str) and data_source.endswith(".h5"):
-            from taichi_library.taichi_aot import allocate_pinned_numpy
-
-            with h5py.File(data_source, "r") as h5f:
-                # Sort keys numerically to ensure order like image_0, image_1, image_2... instead of alphabetical (e.g. image_10 before image_2)
-                sorted_keys = sorted(h5f.keys(), key=lambda x: int(x.split('_')[1]) if '_' in x and x.split('_')[1].isdigit() else x)
-                keys = sorted_keys[batch_start:batch_end]
-                for key in keys:
-                    if stop_requested and stop_requested():
-                        break
-                    ds = h5f[key]
-                    pinned_arr = allocate_pinned_numpy(ds.shape, ds.dtype)
-                    ds.read_direct(pinned_arr)
-                    batch_images.append(pinned_arr)
-        elif isinstance(data_source, list):
-            batch_paths = data_source[batch_start:batch_end]
-            load_res = load_images_from_paths(
-                batch_paths,
-                stop_requested,
-                linear_mode=linear_mode,
-                capture_ref_proxy=capture_ref_proxy,
-                alignment_mode=alignment_mode,
-                update_progress=update_progress,
-                progress_start=progress_start,
-                progress_end=progress_end,
-            )
-            if capture_ref_proxy and isinstance(load_res, tuple):
-                batch_images, ref_proxy = load_res
-            else:
-                batch_images = load_res
-
-            resize_res = resize_all_with_padding(
-                batch_images,
-                method="preserve",
-                stop_requested=stop_requested,
-                force_even=True,
-            )
-            if resize_res and resize_res[0]:
-                batch_images = resize_res[0]
-
-        if capture_ref_proxy:
-            return batch_images, ref_proxy
-        return batch_images
-
-
-# ---------------------------------------------------------------------------
-# Module-level entry points
-# ---------------------------------------------------------------------------
-def main(
+def _run_pipeline_entry(
     db_path,
     update_progress=None,
     stop_requested=None,
     single_process=None,
     batch_id=None,
-    progress_bar=None,
     merging_mode=None,
     output_suffix=None,
+    processing_mode=None,
+    tile_size=None,
+    tile_overlap=None,
+    batch_size=None,
+    h5_write_batch_size=None,
+    alignment_backend=None,
+    clear_raw=None,
 ):
-    """Main execution block."""
-    start_time = time.perf_counter()
-    processor = None
-    try:
-        if update_progress:
-            update_progress(0, _lang().RUN_IMAGE_PROCESS_STARTED)
-
-        processor = MFDenoiserAlgorithm(db_path)
-        output_path = processor.run_pipeline(
-            single_process=single_process,
-            batch_id=batch_id,
-            update_progress=update_progress,
-            stop_requested=stop_requested,
-            merging_mode=merging_mode,
-            output_suffix=output_suffix,
-        )
-
-        if output_path and update_progress:
-            update_progress(100, f"Process Finished: {os.path.basename(output_path)}")
-
-    except Exception as e:
-        print(f"Error in MFDenoiser main: {e}")
-        traceback.print_exc()
-        if update_progress:
-            update_progress(0, f"Error: {str(e)}")
-    finally:
-        elapsed = time.perf_counter() - start_time
-        print(f"\n[MFDenoiser] Completed in {elapsed:.2f}s\n")
-        if processor:
-            processor.close()
-        gc.collect()
+    processor = MFDenoiserAlgorithm(db_path)
+    return processor.run_pipeline(
+        single_process=True if single_process is None else single_process,
+        batch_id=batch_id,
+        update_progress=update_progress,
+        stop_requested=stop_requested,
+        merging_mode=merging_mode,
+        output_suffix=output_suffix,
+        processing_mode=processing_mode,
+        tile_size=tile_size,
+        tile_overlap=tile_overlap,
+        batch_size=batch_size,
+        h5_write_batch_size=h5_write_batch_size,
+        alignment_backend=alignment_backend,
+        clear_raw=clear_raw,
+    )
 
 
 def running_mf_denoiser(
@@ -901,105 +1721,77 @@ def running_mf_denoiser(
     stop_callback=None,
     merging_mode=None,
     output_suffix=None,
+    processing_mode=None,
+    tile_size=None,
+    tile_overlap=None,
+    batch_size=None,
+    h5_write_batch_size=None,
+    alignment_backend=None,
+    clear_raw=None,
 ):
-    """UI Entry point for MF Denoiser."""
+    db_path = "pixel_refine_database.db"
 
     if batch_id is not None and progress_callback is not None:
-        try:
-            main(
-                db_path="pixel_refine_database.db",
-                update_progress=progress_callback,
-                stop_requested=stop_callback,
-                single_process=False,
-                batch_id=batch_id,
-                merging_mode=merging_mode,
-                output_suffix=output_suffix,
-            )
-        except Exception as e:
-            raise e
-        return
+        return _run_pipeline_entry(
+            db_path,
+            update_progress=progress_callback,
+            stop_requested=stop_callback,
+            single_process=False,
+            batch_id=batch_id,
+            merging_mode=merging_mode,
+            output_suffix=output_suffix,
+            processing_mode=processing_mode,
+            tile_size=tile_size,
+            tile_overlap=tile_overlap,
+            batch_size=batch_size,
+            h5_write_batch_size=h5_write_batch_size,
+            alignment_backend=alignment_backend,
+            clear_raw=clear_raw,
+        )
 
-    process_finished = False
-    dialog = QDialog(parent)
-    dialog.setWindowTitle(_lang().WINDOW_TITLE_SIMILARITY)
-    dialog.setModal(True)
-    dialog.setFixedSize(300, 90)
-    dialog.setWindowFlags(
-        Qt.WindowType.Window
-        | Qt.WindowType.CustomizeWindowHint
-        | Qt.WindowType.WindowTitleHint
-        | Qt.WindowType.WindowCloseButtonHint
+    from resources.GenericUILibrary import ProgressModal
+
+    dialog = ProgressModal(
+        title="MFDenoiser Processing",
+        message="Initializing MFDenoiser pipeline...",
+        parent=parent,
+        on_cancel_callback=stop_callback,
     )
 
-    layout = QVBoxLayout(dialog)
-    label = QLabel(_lang().WINDOW_START_PROCESSING)
-    layout.addWidget(label)
-
-    progress_bar = QProgressBar()
-    progress_bar.setRange(0, 100)
-    progress_bar.setValue(0)
-    progress_bar.setStyleSheet(PROGRESS_BAR)
-    layout.addWidget(progress_bar)
+    def update_progress(percent, message=""):
+        dialog.set_progress(percent, message)
+        if message:
+            dialog.append_log(message)
 
     worker = BaseAlgorithmWorker(
-        main,
-        "pixel_refine_database.db",
-        single_process=single_process,
+        _run_pipeline_entry,
+        db_path,
+        update_progress=update_progress,
+        stop_requested=stop_callback,
+        single_process=True if single_process is None else single_process,
         batch_id=batch_id,
         merging_mode=merging_mode,
         output_suffix=output_suffix,
+        processing_mode=processing_mode,
+        tile_size=tile_size,
+        tile_overlap=tile_overlap,
+        batch_size=batch_size,
+        h5_write_batch_size=h5_write_batch_size,
+        alignment_backend=alignment_backend,
+        clear_raw=clear_raw,
     )
 
-    worker.progress_updated.connect(
-        lambda progress, message: (
-            progress_bar.setValue(progress),
-            label.setText(message),
-        )
-    )
+    def on_finished():
+        dialog.accept()
 
-    def finish_handler():
-        nonlocal process_finished
-        process_finished = True
-        dialog.close()
-        worker.quit()
-        worker.wait()
+    def on_error(error):
+        dialog.reject()
 
-    worker.finished.connect(finish_handler)
-
-    def error_handler(error):
-        QMessageBox.critical(
-            dialog, "Error", _lang().RUN_ERROR_STATUS.format(error=error)
-        )
-        dialog.close()
-        worker.quit()
-        worker.wait()
-
-    worker.error_occurred.connect(error_handler)
-
-    def on_dialog_close(event):
-        if process_finished:
-            event.accept()
-        elif worker.isRunning():
-            reply = QMessageBox.question(
-                dialog,
-                "Cancel Process",
-                _lang().CANCEL_PROCESSING,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                worker.stop()
-                worker.quit()
-                worker.wait()
-                event.accept()
-            else:
-                event.ignore()
-        else:
-            event.accept()
-
-    dialog.closeEvent = on_dialog_close
+    worker.finished.connect(on_finished)
+    worker.error_occurred.connect(on_error)
     worker.start()
     dialog.exec()
+    return worker
 
 
 def running_similarity(
@@ -1008,6 +1800,11 @@ def running_similarity(
     batch_id=None,
     progress_callback=None,
     stop_callback=None,
+    merging_mode=None,
+    output_suffix=None,
+    batch_size=None,
+    alignment_backend=None,
+    clear_raw=None,
 ):
     return running_mf_denoiser(
         parent=parent,
@@ -1015,11 +1812,13 @@ def running_similarity(
         batch_id=batch_id,
         progress_callback=progress_callback,
         stop_callback=stop_callback,
-        merging_mode="similarity",
-        output_suffix="similarity",
+        merging_mode=merging_mode or "similarity",
+        output_suffix=output_suffix or "similarity",
+        batch_size=batch_size,
+        alignment_backend=alignment_backend,
+        clear_raw=clear_raw,
     )
 
 
-
 if __name__ == "__main__":
-    main("pixel_refine_database.db")
+    _run_pipeline_entry("pixel_refine_database.db")

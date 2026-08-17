@@ -5,9 +5,10 @@ import json
 SETTINGS_DIR = os.path.join("database", "setting")
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "app_setting.json")
 
+
 def load_language_setting():
     try:
-        with open(SETTINGS_FILE, "r") as f:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             settings = json.load(f)
         # Ambil nilai bahasa, default ke 'English' jika tidak ada
         language = settings.get("language", "English").lower()
@@ -16,7 +17,9 @@ def load_language_setting():
         language = "english"
     return language
 
+
 LANGUAGE = load_language_setting()
+
 
 def reload_language(lang_str=None):
     global LANGUAGE
@@ -24,11 +27,12 @@ def reload_language(lang_str=None):
         LANGUAGE = lang_str.lower()
     else:
         LANGUAGE = load_language_setting()
-    
+
     import sys
     import importlib
+
     current_module = sys.modules[__name__]
-    
+
     # Tentukan nama module yang akan digunakan
     if LANGUAGE == "indonesian":
         from . import lang_indonesian as lang
@@ -43,25 +47,23 @@ def reload_language(lang_str=None):
     # Ini mencegah bug "stuck language" akibat Python module cache —
     # dimana lang.__dict__ ter-overwrite oleh bahasa terakhir yang di-import.
     importlib.reload(lang)
-        
+
     # Salin semua konstanta huruf besar ke module language_config
     translations = {}
     for key, val in lang.__dict__.items():
         if key.isupper():
             translations[key] = val
             setattr(current_module, key, val)
-            
+
     # Suntikkan terjemahan ke semua modul aplikasi yang sudah mengimpor konstanta bahasa
     for name, module in list(sys.modules.items()):
-        if module and (name.startswith("pixel_refine_desktop") or name == "main_desktop"):
+        if module and (
+            name.startswith("pixel_refine_desktop") or name == "main_desktop"
+        ):
             for key, val in translations.items():
                 if hasattr(module, key):
                     setattr(module, key, val)
                 # Update referensi language_config di modul lain
-                if hasattr(module, "language_config"):
-                    sub_cfg = getattr(module, "language_config")
-                    if sub_cfg and sub_cfg is not current_module:
-                        setattr(sub_cfg, key, val)
 
-# Initial load
+
 reload_language()

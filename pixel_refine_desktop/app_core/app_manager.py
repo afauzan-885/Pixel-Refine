@@ -5,6 +5,7 @@ Manages database, folders, and application lifecycle.
 
 import os
 import sys
+import tempfile
 from shutil import rmtree
 from PySide6.QtWidgets import QMessageBox
 
@@ -57,9 +58,7 @@ class ApplicationManager:
         )
         self.comparison_cache_folder = config.COMPARISON_CACHE_DIR
 
-    def initialize_database(
-        self, db_path: str = "pixel_refine_database.db"
-    ) -> DatabaseManager:
+    def initialize_database(self, db_path: str | None = None) -> DatabaseManager:
         """
         Initialize and create database.
 
@@ -69,8 +68,15 @@ class ApplicationManager:
         Returns:
             DatabaseManager instance
         """
-        self.database_manager = DatabaseManager(db_path)
-        self.database_manager.create_database()
+        if not db_path:
+            db_path = os.environ.get("PIXEL_REFINE_SESSION_DB")
+        if not db_path:
+            db_path = os.path.join(
+                tempfile.gettempdir(),
+                f"pixel_refine_session_{os.getpid()}.sqlite",
+            )
+        self.session_db_path = os.path.abspath(db_path)
+        self.database_manager = DatabaseManager(self.session_db_path)
         return self.database_manager
 
     def setup_animator(self) -> StackedWidgetAnimator:
@@ -80,7 +86,6 @@ class ApplicationManager:
         Returns:
             StackedWidgetAnimator instance
         """
-        self.animator = StackedWidgetAnimator(self.main_window)
         self.animator = StackedWidgetAnimator(self.main_window)
         return self.animator
 
@@ -167,3 +172,17 @@ class ApplicationManager:
                 "Error",
                 f"An error occurred while deleting folder contents: {e}",
             )
+
+    def cleanup_session_database(self) -> None:
+        """Remove the private session database after Qt workers have stopped."""
+        session_db = getattr(self, "session_db_path", None)
+        if not session_db:
+            return
+        for path in (session_db, session_db + "-wal", session_db + "-shm"):
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError:
+                # A delayed worker/antivirus may still hold the file. It is a
+                # disposable temp session, so never show an error on close.
+                pass

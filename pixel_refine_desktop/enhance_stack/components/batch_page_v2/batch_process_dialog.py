@@ -25,6 +25,8 @@ from PySide6.QtGui import QColor, QGuiApplication
 from resources.GenericUILibrary import (
     DataTable,
     Button,
+    ModalDialog,
+    ProgressBar,
     get_store,
 )
 from resources.styles.stylesheet import (
@@ -49,283 +51,41 @@ class MassAlgorithmEditDialog(QDialog):
         self.batches = batches
         # Create mapping: index -> batch_id for range selection
         self.seq_to_batch_id = {i + 1: batch.id for i, batch in enumerate(self.batches)}
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import get_backend_arch
+        _alignment_choices = [
+            language_config.UI_NO_CHANGE,
+            "ORB",
+            "AKAZE",
+            "Light Glue",
+            "Farneback",
+            "Lucas Kanade",
+            "Block Matching GPU",
+            "RAFT",
+            "No Alignment",
+        ]
+        backend_arch = get_backend_arch()
+        if backend_arch == "opengl":
+            _alignment_choices = [
+                c for c in _alignment_choices
+                if c not in ("RAFT",)
+            ]
+        elif backend_arch == "cpu":
+            _alignment_choices = [
+                c for c in _alignment_choices if c not in ("RAFT",)
+            ]
+
         self.algorithms = {
-            "alignment": [
-                language_config.UI_NO_CHANGE,
-                "Farneback Optical Flow",
-                "AKAZE",
-                "ORB",
-                "Light Glue",
-                "No Alignment",
-            ],
+            "alignment": _alignment_choices,
             "super_resolution": [language_config.UI_NO_CHANGE, "No Super Resolution"],
             "denoising": [
                 language_config.UI_NO_CHANGE,
                 "Average",
                 "Median",
                 "Similarity",
+                "Similarity Fusion",
                 "No Denoising",
             ],
         }
-
-        # Use DataStore instead of direct JSON manipulation
-        self.store = get_store()
-
-        self.setWindowTitle(language_config.UI_ALGORITHM_EDIT_HEADER)
-
-        # 1. Geometry handling
-        screen = QGuiApplication.primaryScreen()
-        if screen:
-            available_rect = screen.availableGeometry()
-            screen_width = available_rect.width()
-            screen_height = available_rect.height()
-
-            dialog_width = int(screen_width * 0.15)
-            dialog_height = int(screen_height * 0.25)
-
-            dialog_width = max(dialog_width, 350)  # Slightly wider for better layout
-            dialog_height = max(dialog_height, 300)
-
-            self.resize(dialog_width, dialog_height)
-        else:
-            self.setMinimumSize(350, 300)
-
-        # Inisialisasi sisa UI
-        self.initUI()
-        self.setStyleSheet(stylesheet_global_page())
-
-    def initUI(self):
-        layout = QVBoxLayout(self)
-        grid_layout = QGridLayout()
-        grid_layout.setSpacing(15)
-
-        range_layout = QHBoxLayout()
-        from_label = QLabel(language_config.LBL_FROM_PROJECT)
-        self.from_spinbox = QSpinBox()
-        to_label = QLabel(language_config.LBL_TO_PROJECT)
-        self.to_spinbox = QSpinBox()
-        if self.seq_to_batch_id:
-            min_seq, max_seq = min(self.seq_to_batch_id.keys()), max(
-                self.seq_to_batch_id.keys()
-            )
-            self.from_spinbox.setRange(min_seq, max_seq)
-            self.to_spinbox.setRange(min_seq, max_seq)
-            self.from_spinbox.setValue(min_seq)
-            self.to_spinbox.setValue(max_seq)
-
-        range_layout.addWidget(from_label)
-        range_layout.addWidget(self.from_spinbox)
-        range_layout.addSpacing(20)
-        range_layout.addWidget(to_label)
-        range_layout.addWidget(self.to_spinbox)
-        range_layout.addStretch()
-        grid_layout.addLayout(range_layout, 0, 0, 1, 2)
-
-        # Alignment
-        self.align_checkbox = QCheckBox("Alignment:")
-        self.align_checkbox.setStyleSheet(CHECKBOX_SWITCH_STYLE)
-        self.align_combo = QComboBox()
-        self.align_combo.addItems(self.algorithms["alignment"])
-        grid_layout.addWidget(self.align_checkbox, 1, 0)
-        grid_layout.addWidget(self.align_combo, 1, 1)
-
-        # Super Resolution
-        self.sr_checkbox = QCheckBox("Super Resolution:")
-        self.sr_checkbox.setStyleSheet(CHECKBOX_SWITCH_STYLE)
-        self.sr_combo = QComboBox()
-        self.sr_combo.addItems(self.algorithms["super_resolution"])
-        grid_layout.addWidget(self.sr_checkbox, 2, 0)
-        grid_layout.addWidget(self.sr_combo, 2, 1)
-
-        # Denoising
-        self.denoise_checkbox = QCheckBox("Denoising:")
-        self.denoise_checkbox.setStyleSheet(CHECKBOX_SWITCH_STYLE)
-        self.denoise_combo = QComboBox()
-        self.denoise_combo.addItems(self.algorithms["denoising"])
-        grid_layout.addWidget(self.denoise_checkbox, 3, 0)
-        grid_layout.addWidget(self.denoise_combo, 3, 1)
-
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-
-        # Use Generic Buttons
-        self.apply_button = Button(language_config.APPY_PARAMETER, variant="primary")
-        self.cancel_button = Button(
-            language_config.CANCEL_PARAMETER, variant="secondary"
-        )
-
-        button_layout.addWidget(self.apply_button)
-        button_layout.addWidget(self.cancel_button)
-
-        layout.addLayout(grid_layout)
-        layout.addStretch()
-        layout.addLayout(button_layout)
-
-        self.apply_button.clicked.connect(self.apply_changes)
-        self.cancel_button.clicked.connect(self.reject)
-
-    def apply_changes(self):
-        start_seq = self.from_spinbox.value()
-        end_seq = self.to_spinbox.value()
-
-        if start_seq > end_seq:
-            QMessageBox.warning(
-                self,
-                language_config.MSG_WARNING_TITLE,
-                language_config.MSG_INVALID_RANGE,
-            )
-            return
-
-        config_map = [
-            {
-                "checkbox": self.align_checkbox,
-                "combo": self.align_combo,
-                "json_checkbox_key": "checkbox_align_images",
-                "json_algo_key": "alignment_algo",
-                "no_op_string": "No Alignment",
-            },
-            {
-                "checkbox": self.sr_checkbox,
-                "combo": self.sr_combo,
-                "json_checkbox_key": "checkbox_super_resolution",
-                "json_algo_key": "super_resolution_algo",
-                "no_op_string": "No Super Resolution",
-            },
-            {
-                "checkbox": self.denoise_checkbox,
-                "combo": self.denoise_combo,
-                "json_checkbox_key": "checkbox_denoising",
-                "json_algo_key": "denoising_algo",
-                "no_op_string": "No Denoising",
-            },
-        ]
-
-        updates = {}
-        processed_batches = 0
-
-        for seq_num in range(start_seq, end_seq + 1):
-            batch_id = self.seq_to_batch_id.get(seq_num)
-            if batch_id is None:
-                continue
-
-            str_id = str(batch_id)
-            processed_batches += 1
-
-            for config in config_map:
-                if config["checkbox"].isChecked():
-                    selected_algo = config["combo"].currentText()
-                    if selected_algo != language_config.UI_NO_CHANGE:
-                        # Construct DataStore keys: "{batch_id}.key"
-
-                        # Set active/inactive boolean
-                        is_active = selected_algo != config["no_op_string"]
-                        updates[f"{str_id}.{config['json_checkbox_key']}"] = is_active
-
-                        # Set algorithm name
-                        updates[f"{str_id}.{config['json_algo_key']}"] = selected_algo
-
-        if updates:
-            # Atomic bulk update to DataStore -> triggers sync in RightPanel automatically
-            self.store.update_bulk(updates, save=True)
-
-        QMessageBox.information(
-            self,
-            language_config.BATCH_SUCCESS_HEADER,
-            language_config.ALGORITHM_SUCCESS_UPDATE.format(start_seq, end_seq),
-        )
-
-        self.algorithms_updated.emit()
-        self.accept()
-
-
-class BatchProcessDialog(QDialog):
-    def __init__(self, batches_to_process, batch_page_layout, parent=None):
-        super().__init__(parent)
-        self.batches = batches_to_process
-        self.batch_page_layout = batch_page_layout
-        self.database_manager = self.batch_page_layout.database_manager
-
-        self.COLOR_SUCCESS = QColor("#D4EDDA")
-        self.COLOR_FAILED = QColor("#F8D7DA")
-        self.COLOR_CANCELLED = QColor("#D9E44C")
-
-        # Flag untuk melacak apakah pembatalan terjadi
-        self._was_cancelled = False
-
-        self.setWindowTitle(language_config.UI_BATCH_HEADER)
-        self.setMinimumSize(800, 500)
-
-        self.initUI()
-        self.populate_table()
-        self.setStyleSheet(stylesheet_global_page())
-
-    def initUI(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(10)
-
-        # --- Bagian Folder Output ---
-        folder_layout = QHBoxLayout()
-        folder_label = QLabel(language_config.ACTIVATE_SAVE_ALIGN_IMAGE_TO_FOLDER)
-        self.folder_path_edit = QLineEdit()
-        self.folder_path_edit.setReadOnly(True)
-        self.browse_button = Button(
-            language_config.SELECT_SAVE_ALIGN_IMAGE_TO_FOLDER, variant="secondary"
-        )
-        folder_layout.addWidget(folder_label)
-        folder_layout.addWidget(self.folder_path_edit)
-        folder_layout.addWidget(self.browse_button)
-        layout.addLayout(folder_layout)
-
-        # --- Bagian Tabel menggunakan DataTable ---
-        self.table_widget = DataTable(columns=["", "Project Name", "Status", "Details"])
-
-        # Custom adjustments for columns
-        header = self.table_widget.horizontalHeader()
-        header.setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents
-        )  # Checkbox
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)  # Name
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)  # Status
-        self.table_widget.setColumnWidth(2, 100)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # Details
-
-        layout.addWidget(self.table_widget)
-
-        # --- Bagian Progress Bar ---
-        progress_layout = QHBoxLayout()
-        progress_label = QLabel(language_config.OVERALL_PROGRESS)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setStyleSheet(PROGRESS_BAR)
-        progress_layout.addWidget(progress_label)
-        progress_layout.addWidget(self.progress_bar)
-        layout.addLayout(progress_layout)
-
-        # --- Bagian Tombol ---
-        button_layout = QHBoxLayout()
-        self.edit_algo_button = Button(language_config.UI_ALGORIHM_EDIT, variant="info")
-        button_layout.addWidget(self.edit_algo_button)
-        button_layout.addStretch()
-
-        self.start_button = Button(
-            language_config.PROGRESS_SECTION_PROCESS_BUTTON_TEXT, variant="primary"
-        )
-        self.close_button = Button(language_config.CLOSE_BUTTON, variant="secondary")
-
-        button_layout.addWidget(self.start_button)
-        button_layout.addWidget(self.close_button)
-        self.start_button.setObjectName("startButton")
-        layout.addLayout(button_layout)
-
-        # --- Koneksi ---
-        self.browse_button.clicked.connect(self.browse_output_folder)
-        self.start_button.clicked.connect(self.start_processing)
-        self.close_button.clicked.connect(self.close)
-        self.edit_algo_button.clicked.connect(self.open_mass_edit_dialog)
-
-    def _get_algorithm_summary(self, batch_id):
-        """Get algorithm summary using extracted logic."""
-        return get_batch_algorithm_summary(batch_id)
 
     def populate_table(self):
         self.table_widget.clear_rows()
@@ -770,3 +530,8 @@ class BatchProcessDialog(QDialog):
 
         # Resize row to fit content
         self.table_widget.resizeRowToContents(current_row)
+
+
+from pixel_refine_desktop.enhance_stack.components.bulk_page.controllers.bulk_process_controller import (
+    BatchProcessDialog,
+)

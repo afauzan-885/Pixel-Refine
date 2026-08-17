@@ -27,6 +27,9 @@ inspect_model.py
 view_images_list.py
 upx_compression.py
 nuitka_build.py
+taichi_library copy.rar
+taichi_library_experimental_20260628_150822.zip
+build_android.py
 
 # Ignore virtual environment directories
 venv/
@@ -39,6 +42,7 @@ __pycache__/
 dist/
 build/
 test_algorithm/
+ai_governance/
 pixel_refine_database.db
 build_instalasi.txt
 syarat.txt
@@ -75,3 +79,17 @@ __pycache__/
 /ai_governance/
 /taichi_library copy.rar
 /taichi_library_experimental_20260628_150822.zip
+
+# Runtime expansion of packed CPU AOT archives (content-addressed cache)
+taichi_library/taichi_algorithm/aot_tcm/.cpu_aot_cache/
+taichi_library/taichi_algorithm/aot_tcm/**/.cpu_aot_cache/
+
+# Taichi AOT generated caches, quarantine archives, and compiler intermediates
+taichi_library/**/__pycache__/
+taichi_library/**/.pytest_cache/
+taichi_library/taichi_algorithm/aot_tcm/.quarantine*/
+taichi_library/taichi_algorithm/aot_py/**/*.obj
+taichi_library/taichi_algorithm/aot_py/**/*.exp
+taichi_library/taichi_algorithm/aot_py/**/*.lib
+taichi_library/taichi_algorithm/aot_py/test_output*/
+taichi_library/taichi_algorithm/aot_py/test_report.txt

@@ -544,16 +544,22 @@ def stylesheet_global_page(theme=None):
                 border: 1px solid {theme.border_color};
                 border-radius: 6px;
             }}
+            #CombinedPanel {{
+                background-color: {theme.bg_card};
+                border: 1px solid {theme.border_color};
+                border-radius: 8px;
+                padding: 5px;
+            }}
             #BulkMainPanel {{
                 background-color: {theme.bg_secondary};
             }}
             #BulkAlgorithmPanel {{
-                background-color: {theme.bg_card};
+                background-color: {theme.bg_primary};
                 border: 1px solid {theme.border_color};
                 border-radius: 6px;
             }}
             #BulkListPanel {{
-                background-color: {theme.bg_secondary};
+                background-color: {theme.bg_primary};
                 border: 1px solid {theme.border_color};
                 border-radius: 6px;
             }}
@@ -623,9 +629,6 @@ def stylesheet_global_page(theme=None):
             .QPushButton:hover {{
                 background-color: {theme.bg_secondary};
                 border-color: {theme.border_dark};
-            }}
-            .QPushButton:pressed {{
-                background-color: {theme.border_color};
             }}
             .QPushButton#addButton, .QPushButton#processButton, .QPushButton#ApplySettingsBtn {{
                 background-color: {theme.btn_success_bg};
@@ -789,6 +792,16 @@ def stylesheet_global_page(theme=None):
             #TitleBar {{
                 background-color: {theme.bg_primary};
                 border-bottom: 1px solid {theme.border_color};
+            }}
+
+            /* === Global Tooltip === */
+            QToolTip {{
+                background-color: #FFFFFF;
+                color: #2C3E50;
+                border: 1px solid #DDE5EC;
+                border-radius: 4px;
+                padding: 6px 8px;
+                font-size: 10pt;
             }}
         """
 

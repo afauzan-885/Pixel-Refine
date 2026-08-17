@@ -68,11 +68,26 @@ class ImportManager(QObject):
             # Emit signal dengan selected file paths
             self.panel.images_to_import_selected.emit(paths)
 
-    @Slot(int, str, str)
-    def add_single_image_to_grid(self, batch_id, batch_name, image_path):
+    @Slot(int, str)
+    def add_single_image_to_grid(self, batch_id, image_path=None, legacy_image_path=None):
         """
         Menambah satu thumbnail ke grid secara real-time.
+
+        Import workers intentionally emit only ``(batch_id, image_path)``.
+        Keep the slot contract identical to the worker signal; resolving the
+        display name here avoids Qt invoking a Python slot with a missing
+        positional argument.
         """
+        # Accept the historical ``(batch_id, batch_name, image_path)`` shape as
+        # well.  A queued Qt signal may outlive the code that created it, and
+        # keeping this boundary tolerant prevents an import worker from
+        # failing merely because an older caller is still connected.
+        if legacy_image_path is not None:
+            image_path = legacy_image_path
+        if not image_path:
+            return
+
+        batch_name = self._batch_name(batch_id)
         # 1. Background Import Logic (Jika user pindah batch saat import berjalan)
         if batch_id != self.panel.current_batch_id:
             active_count = len(self.active_import_batches)
@@ -89,7 +104,7 @@ class ImportManager(QObject):
             self.panel.toast.show_progress(
                 message,
                 category="import_progress",
-                position=ToastPosition.BOTTOM_RIGHT,
+                position=ToastPosition.BOTTOM_LEFT,
                 single_mode=True,
             )
             return
@@ -132,6 +147,21 @@ class ImportManager(QObject):
         if self.panel.grid_content_stack.currentWidget() != self.panel.grid_container:
             self.panel._set_placeholder(None)
 
+    def _batch_name(self, batch_id):
+        """Best-effort batch label used only for background-import feedback."""
+        if batch_id == self.panel.current_batch_id:
+            batch = getattr(self.panel, "current_batch", None)
+            if batch is not None and getattr(batch, "name", None):
+                return batch.name
+        controller = getattr(self.panel, "controller", None)
+        try:
+            batch = controller.get_batch(batch_id) if controller else None
+            if batch is not None and getattr(batch, "name", None):
+                return batch.name
+        except Exception:
+            pass
+        return f"batch {batch_id}"
+
     @Slot(int)
     def on_batch_import_started(self, batch_id):
         """Slot to mark a batch as actively importing."""
@@ -142,7 +172,7 @@ class ImportManager(QObject):
         self.panel.toast.show_progress(
             "Mengimpor...",
             category="import_progress",
-            position=ToastPosition.BOTTOM_RIGHT,
+            position=ToastPosition.BOTTOM_LEFT,
         )
 
         # Emit signal
@@ -162,7 +192,7 @@ class ImportManager(QObject):
             self.panel.toast.show_message(
                 "Proses import selesai.",
                 duration=3000,
-                position=ToastPosition.BOTTOM_RIGHT,
+                position=ToastPosition.BOTTOM_LEFT,
                 single_mode=True,
             )
 
@@ -207,11 +237,23 @@ class ImportManager(QObject):
                 self.panel.toast.show_progress(
                     f"Mengimpor... ({progress_percent}%) - {items_left} tersisa",
                     category="import_progress",
-                    position=ToastPosition.BOTTOM_RIGHT,
+                    position=ToastPosition.BOTTOM_LEFT,
+                )
+
+            def local_on_error(error_message):
+                # QThread errors otherwise only reach stderr, leaving the UI
+                # looking like a no-op after a failed database/import task.
+                print(f"[ImportManager] Batch import item failed: {error_message}")
+                self.panel.toast.show_message(
+                    f"Import gagal: {error_message}",
+                    duration=5000,
+                    position=ToastPosition.BOTTOM_LEFT,
+                    single_mode=True,
                 )
 
             import_worker.completion_signal.connect(local_on_finished)
             import_worker.progress_signal.connect(local_on_progress)
+            import_worker.error_signal.connect(local_on_error)
 
             # Start import
             self.on_batch_import_started(batch_id)

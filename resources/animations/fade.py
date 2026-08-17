@@ -25,6 +25,8 @@ def fade_in(
 
     # === SKENARIO 1: Stacked Widget Transition ===
     if stack_widget is not None:
+        if stack_widget.currentWidget() is target_widget:
+            return
         duration_out = int(duration * 0.4)
         duration_in = int(duration * 0.6)
         animator.transition_in(

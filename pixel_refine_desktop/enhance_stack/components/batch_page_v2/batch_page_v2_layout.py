@@ -4,6 +4,7 @@ import subprocess
 import os
 from PIL import Image, UnidentifiedImageError
 import tifffile
+import config
 
 from PySide6.QtWidgets import (
     QMessageBox,
@@ -32,22 +33,25 @@ from resources.GenericUILibrary.store import (
 from pixel_refine_desktop.enhance_stack.core.logic.ImagePreviewHandler import (
     ImagePreviewHandler,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.AKAZE import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.AKAZE import (
     running_akaze,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Farneback_optical_flow import (
-    running_farneback_optical_flow,
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
+    running_farneback_flow,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.Light_Glue import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
     running_light_glue,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.ORB import running_orb
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
+    running_orb,
+)
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     save_special_jpg_and_png,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
     running_mf_denoiser,
-    running_mf_denoiser as running_similarity,
+    running_similarity as running_mf_similarity,
+    running_similarity as running_similarity_fusion,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
@@ -210,7 +214,9 @@ class BatchPageV2Layout(QWidget):
             )
         except Exception as e:
             QMessageBox.critical(
-                self, language_config.MSG_DATABASE_ERROR, language_config.MSG_DB_RETRIEVE_FAILED
+                self,
+                language_config.MSG_DATABASE_ERROR,
+                language_config.MSG_DB_RETRIEVE_FAILED,
             )
             return
 
@@ -360,6 +366,12 @@ class BatchPageV2Layout(QWidget):
                 image_paths=selected_files,
                 batch_size=15,
                 delay_ms=25,
+                # The worker defaults to batch 0 for legacy callers.  Pass
+                # the actual active batch so the display manager does not
+                # classify every imported image as a background import.
+                batch_id=getattr(
+                    self.workspace_panel.display_panel, "current_batch_id", 0
+                ),
             )
 
             # KONEKSI REAL-TIME:
@@ -373,19 +385,23 @@ class BatchPageV2Layout(QWidget):
             self.multi_thread_import_images.start()
 
         except Exception as e:
-            QMessageBox.critical(self, language_config.MSG_ERROR_TITLE, f"{language_config.MSG_IMPORT_ERROR_OCCURRED}\n{e}")
+            QMessageBox.critical(
+                self,
+                language_config.MSG_ERROR_TITLE,
+                f"{language_config.MSG_IMPORT_ERROR_OCCURRED}\n{e}",
+            )
 
     def on_import_complete(self, successful_images):
         """Dijalankan saat semua proses impor selesai."""
         # HILANGKAN Dialog Konfirmasi (QMessageBox) agar UI tidak terjeda.
-        
+
         # Pastikan progress bar disembunyikan
         if self.workspace_panel and hasattr(self.workspace_panel, "algorithm_panel"):
             algo_panel = self.workspace_panel.algorithm_panel
             if hasattr(algo_panel, "progress_bar"):
                 algo_panel.progress_bar.setValue(0)
                 algo_panel.progress_bar.setVisible(True)
-        
+
         print(f"Impor selesai: {successful_images} gambar berhasil dimasukkan.")
 
     def handle_delete_button(self):
@@ -402,13 +418,14 @@ class BatchPageV2Layout(QWidget):
             return
 
         from resources.GenericUILibrary import modal_confirm
+
         confirmed = modal_confirm.question(
             self,
             language_config.HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE.format(
                 len(selected_paths)
-            )
+            ),
         )
-        
+
         if confirmed:
             self.database_manager.single_process_delete_path_images(selected_paths)
             self.workspace_panel.remove_selected_images()
@@ -429,10 +446,10 @@ class BatchPageV2Layout(QWidget):
 
             algo_panel = self.workspace_panel.algorithm_panel
             settings = algo_panel.logic.get_settings()
-            alignment_choice = settings.get("alignment", "No Alignment")
-            denoising_choice = settings.get("denoising", "No Denoising")
+            alignment_choice = settings.get(config.KEY_ALIGNMENT, "No Alignment")
+            denoising_choice = settings.get(config.KEY_DENOISING, "No Denoising")
             super_resolution_choice = settings.get(
-                "super_resolution", "No Super Resolution"
+                config.KEY_SUPER_RESOLUTION, "No Super Resolution"
             )
 
             # Jika tidak ada algoritma yang dipilih
@@ -449,12 +466,26 @@ class BatchPageV2Layout(QWidget):
                     )
                 return
 
-            # Proses untuk Alignment
+            denoising_active = denoising_choice not in ("No Denoising", "None", "")
+            denoising_owns_alignment = denoising_choice in (
+                "Average",
+                "Similarity",
+                "Similarity Fusion",
+            )
+
+            # Proses untuk Alignment. Some denoising pipelines own alignment
+            # internally and receive the selected alignment backend.
             alignment_valid = True
-            if alignment_choice == "ORB":
+            if denoising_owns_alignment:
+                if alignment_choice not in ("", "None", "No Alignment"):
+                    print(
+                        f"[batch_page_v2_layout] Alignment '{alignment_choice}' "
+                        f"will be executed inside denoising pipeline '{denoising_choice}'."
+                    )
+            elif alignment_choice == "ORB":
                 running_orb(self, single_process=True)
-            elif alignment_choice == "Farneback Optical Flow":
-                running_farneback_optical_flow(self, single_process=True)
+            elif alignment_choice in ("Farneback", "Farneback Optical Flow"):
+                running_farneback_flow(self, single_process=True)
             elif alignment_choice == "AKAZE":
                 running_akaze(self, single_process=True)
             elif alignment_choice == "Light Glue":
@@ -482,37 +513,42 @@ class BatchPageV2Layout(QWidget):
                         QMessageBox.warning(
                             self,
                             language_config.MSG_WARNING_TITLE,
-                            language_config.MSG_ALIGN_ALGO_NOT_RECOGNIZED.format(alignment_choice),
+                            language_config.MSG_ALIGN_ALGO_NOT_RECOGNIZED.format(
+                                alignment_choice
+                            ),
                         )
                     return
-
-            super_resolution_executed = False
-            if super_resolution_choice == "Interpolation":
-                running_interpolation(self, single_process=True)
-            elif super_resolution_choice == "No Super Resolution":
-                pass
-
-            if super_resolution_executed and not batch_mode:
-                latest_image_path = get_last_image("database/stack")
-                if latest_image_path:
-                    dialog = ImageViewer(latest_image_path, self)
-                    dialog.exec()
-                else:
-                    QMessageBox.warning(
-                        self, "Caution", language_config.NOT_IMAGE_PREVIEW
-                    )
 
             # Proses untuk Denoising
             denoising_executed = False
             if denoising_choice == "Average":
-                print("[TRACE] batch_page_v2_layout: routing 'Average' → running_mf_denoiser(merging_mode='average')")
-                running_mf_denoiser(self, single_process=True, merging_mode="average", output_suffix="average")
+                print(
+                    "[TRACE] batch_page_v2_layout: routing 'Average' → running_mf_denoiser(merging_mode='average')"
+                )
+                running_mf_denoiser(
+                    self,
+                    single_process=True,
+                    merging_mode="Average",
+                    output_suffix="average",
+                    alignment_backend=alignment_choice,
+                )
                 denoising_executed = True
             elif denoising_choice == "Median":
                 running_median(self, single_process=True)
                 denoising_executed = True
             elif denoising_choice == "Similarity":
-                running_similarity(self, single_process=True, merging_mode="similarity", output_suffix="similarity")
+                running_mf_similarity(
+                    self,
+                    single_process=True,
+                    alignment_backend=alignment_choice,
+                )
+                denoising_executed = True
+            elif denoising_choice == "Similarity Fusion":
+                running_similarity_fusion(
+                    self,
+                    single_process=True,
+                    alignment_backend=alignment_choice,
+                )
                 denoising_executed = True
             elif denoising_choice == "No Denoising":
                 pass
@@ -525,6 +561,23 @@ class BatchPageV2Layout(QWidget):
                 else:
                     QMessageBox.warning(
                         self, "Warning", language_config.NOT_IMAGE_PREVIEW
+                    )
+
+            super_resolution_executed = False
+            if super_resolution_choice == "Interpolation":
+                running_interpolation(self, single_process=True)
+                super_resolution_executed = True
+            elif super_resolution_choice == "No Super Resolution":
+                pass
+
+            if super_resolution_executed and not batch_mode:
+                latest_image_path = get_last_image("database/stack")
+                if latest_image_path:
+                    dialog = ImageViewer(latest_image_path, self)
+                    dialog.exec()
+                else:
+                    QMessageBox.warning(
+                        self, "Caution", language_config.NOT_IMAGE_PREVIEW
                     )
         except Exception as e:
             QMessageBox.critical(
@@ -640,7 +693,9 @@ class BatchPageV2Layout(QWidget):
 
         if not image_files:
             QMessageBox.warning(
-                self, language_config.MSG_WARNING_TITLE, language_config.MSG_NO_PROCESSED_IMAGES_SAVE
+                self,
+                language_config.MSG_WARNING_TITLE,
+                language_config.MSG_NO_PROCESSED_IMAGES_SAVE,
             )
             return
 
@@ -761,11 +816,13 @@ class BatchPageV2Layout(QWidget):
                 algo_panel.progress_bar.setValue(value)
                 # text is not supported by minimalist ModernProgressBar
                 pass
-            
+
     def on_import_error(self, error_message):
         """Handle errors during image import."""
         QMessageBox.critical(
-            self, language_config.MSG_IMPORT_ERROR, f"{language_config.MSG_IMPORT_ERROR_OCCURRED}\n{error_message}"
+            self,
+            language_config.MSG_IMPORT_ERROR,
+            f"{language_config.MSG_IMPORT_ERROR_OCCURRED}\n{error_message}",
         )
         if self.workspace_panel and hasattr(self.workspace_panel, "algorithm_panel"):
             algo_panel = self.workspace_panel.algorithm_panel

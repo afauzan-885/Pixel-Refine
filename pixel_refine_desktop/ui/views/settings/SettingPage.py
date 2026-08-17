@@ -18,7 +18,10 @@ class SettingPage(QWidget):
 
         # Add Tabs
         self.tab_widget.addTab(general_page(), language_config.SETTING_GENERAL_LABEL)
-        # self.tab_widget.addTab(performance_page(), "Performance")
+        self.tab_widget.addTab(
+            performance_page(),
+            getattr(language_config, "SETTING_PERFORMANCE_LABEL", "Performance"),
+        )
         # self.tab_widget.addTab(advance_page(), "Advanced")
 
         self.layout.addWidget(self.tab_widget)

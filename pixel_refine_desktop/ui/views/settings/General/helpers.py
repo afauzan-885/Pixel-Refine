@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+from pathlib import Path
 from PySide6.QtWidgets import QMessageBox
 from PySide6.QtCore import QProcess, QCoreApplication
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
@@ -30,6 +31,13 @@ def restart_application():
 
         frozen = is_frozen_app()
 
+        # Keep an in-development restart on the same isolated LLVM20 profile
+        # used by the production runtime.  The legacy repository/system
+        # interpreter may still expose Taichi LLVM15 on ``sys.path``.
+        llvm20_python = Path(__file__).resolve().parents[5] / "venv" / "Scripts" / "python.exe"
+        if not frozen and llvm20_python.is_file():
+            sys_executable_abs = str(llvm20_python)
+
         arguments = []
         program_to_run = ""
 
@@ -43,11 +51,44 @@ def restart_application():
         if not os.path.exists(program_to_run):
             raise FileNotFoundError(f"Program to run not found: {program_to_run}")
 
-        started = QProcess.startDetached(program_to_run, arguments, working_dir)
+        previous_runtime_root = os.environ.get("PIXEL_REFINE_RUNTIME_ROOT")
+        previous_canonical_launch = os.environ.get("PIXEL_REFINE_CANONICAL_LAUNCH")
+        # Resolve the canonical LLVM20 release root from the shared resolver.
+        # The previous code referenced LLVM20_STAGING_ROOT without importing
+        # it, so Apply Settings failed before QProcess could start.
+        try:
+            from taichi_library.llvm20_runtime_paths import runtime_root as resolve_runtime_root
+
+            runtime_root = (
+                Path(previous_runtime_root).expanduser()
+                if previous_runtime_root
+                else resolve_runtime_root()
+            )
+        except Exception:
+            runtime_root = Path(previous_runtime_root).expanduser() if previous_runtime_root else None
+        if runtime_root is not None:
+            os.environ["PIXEL_REFINE_RUNTIME_ROOT"] = str(runtime_root)
+        else:
+            os.environ.pop("PIXEL_REFINE_RUNTIME_ROOT", None)
+        os.environ["PIXEL_REFINE_CANONICAL_LAUNCH"] = "1"
+        try:
+            started = QProcess.startDetached(program_to_run, arguments, working_dir)
+        finally:
+            if previous_runtime_root is None:
+                os.environ.pop("PIXEL_REFINE_RUNTIME_ROOT", None)
+            else:
+                os.environ["PIXEL_REFINE_RUNTIME_ROOT"] = previous_runtime_root
+            if previous_canonical_launch is None:
+                os.environ.pop("PIXEL_REFINE_CANONICAL_LAUNCH", None)
+            else:
+                os.environ["PIXEL_REFINE_CANONICAL_LAUNCH"] = previous_canonical_launch
 
         if started:
             inst = QCoreApplication.instance()
             if inst:
+                # The replacement process is already starting; do not show
+                # the normal user close confirmation during this handoff.
+                inst.setProperty("_pixel_refine_skip_close_confirmation", True)
                 inst.quit()
         else:
             print(

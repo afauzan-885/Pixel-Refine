@@ -241,6 +241,11 @@ class ProgressBar(QWidget, RealtimeMixin):
         # Note: We currently assume min is always 0 in this component
         self.set_max_value(max_val)
 
+    def setFormat(self, fmt):
+        """Compatibility method for QProgressBar format text."""
+        if hasattr(self, "label"):
+            self.label.setText(str(fmt))
+
     def setVisible(self, visible):
         """Ensure setVisible works on the main widget."""
         super().setVisible(visible)

@@ -415,22 +415,41 @@ class LoadingSpinner(QWidget):
         return qml
 
 
-class modal_confirm(QDialog):
+class ModalDialog(QDialog):
     """
-    A premium styled, frameless, custom confirmation dialog matching the exact layout of image 2.
-    It contains a clean title bar (with title and icon, but no minimize/maximize/close system buttons),
-    a blue query icon next to the confirmation message, action buttons at the bottom right,
-    and a smooth fade-in animation.
+    A premium styled, frameless, custom confirmation/generic dialog.
     """
-    def __init__(self, message="Are you sure?", parent=None):
+    def __init__(
+        self,
+        message="Are you sure?",
+        parent=None,
+        title="Confirm Delete",
+        show_checkbox=False,
+        checkbox_text="jangan tampilkan lagi",
+        close_on_click_outside=True,
+        on_close_callback=None,
+        width=480,
+        height=None,
+    ):
         super().__init__(parent)
+        self._drag_active = False
+        self._drag_position = None
+        self.close_on_click_outside = close_on_click_outside
+        self.on_close_callback = on_close_callback
+
         self.setModal(True)
         # Frameless and transparent window background
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        
-        # Set exact dialog size (matching standard confirm boxes)
-        self.setFixedSize(400, 150)
+
+        # Set dialog size (width x height) with shadow margin allowance
+        if height:
+            self.setFixedSize(width, height)
+        else:
+            self.setMinimumWidth(width)
+            # Keep confirmation dialogs compact while leaving enough room for
+            # a wrapped message and the action row.
+            self.resize(width, 160)
         
         # Setup Fade-in Animation
         self.fade_anim = QPropertyAnimation(self, b"windowOpacity")
@@ -441,7 +460,7 @@ class modal_confirm(QDialog):
         
         # Main layout
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)  # margin for drop shadow
+        main_layout.setContentsMargins(12, 12, 12, 12)  # margin for drop shadow
         
         # Card container widget for border, shadow and background
         self.container = QWidget(self)
@@ -457,9 +476,9 @@ class modal_confirm(QDialog):
         # Drop shadow effect
         from PySide6.QtWidgets import QGraphicsDropShadowEffect
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(12)
-        shadow.setColor(QColor(0, 0, 0, 45))
-        shadow.setOffset(0, 4)
+        shadow.setBlurRadius(16)
+        shadow.setColor(QColor(0, 0, 0, 50))
+        shadow.setOffset(0, 5)
         self.container.setGraphicsEffect(shadow)
         
         # Container interior layout
@@ -480,65 +499,148 @@ class modal_confirm(QDialog):
             }
         """)
         title_layout = QHBoxLayout(self.title_bar)
-        title_layout.setContentsMargins(12, 0, 12, 0)
+        title_layout.setContentsMargins(12, 0, 8, 0)
         
         # Title bar text (Logo Qt dihapus, hanya label tulisan)
-        self.title_text = QLabel("Confirm Delete")
+        self.title_text = QLabel(title)
         self.title_text.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 12px; color: #1E293B; font-weight: 500; background-color: transparent;")
         title_layout.addWidget(self.title_text)
         title_layout.addStretch()
+
+        # Top-right close button ('✕')
+        self.close_button = QPushButton("✕", self.title_bar)
+        self.close_button.setObjectName("ModalCloseBtn")
+        self.close_button.setFixedSize(22, 22)
+        self.close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_button.setStyleSheet("""
+            QPushButton#ModalCloseBtn {
+                background-color: transparent;
+                border: none;
+                color: #64748B;
+                font-size: 13px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton#ModalCloseBtn:hover {
+                background-color: #EF4444;
+                color: #FFFFFF;
+            }
+            QPushButton#ModalCloseBtn:pressed {
+                background-color: #DC2626;
+                color: #FFFFFF;
+            }
+        """)
+        self.close_button.clicked.connect(self._trigger_close_or_cancel)
+        title_layout.addWidget(self.close_button)
         
         container_layout.addWidget(self.title_bar)
         
-        # 2. Content Layout (Side-by-side Icon and Text)
-        content_widget = QWidget()
-        content_layout = QHBoxLayout(content_widget)
-        content_layout.setContentsMargins(18, 16, 18, 10)
-        content_layout.setSpacing(14)
-        
-        # Blue question icon
-        self.query_icon = QLabel()
-        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxQuestion)
-        self.query_icon.setPixmap(icon.pixmap(30, 30))
-        self.query_icon.setAlignment(Qt.AlignmentFlag.AlignTop)
-        content_layout.addWidget(self.query_icon)
-        
-        # Confirmation message label
-        self.message_label = QLabel(message)
-        self.message_label.setWordWrap(True)
-        self.message_label.setStyleSheet("""
-            font-family: 'Segoe UI', Arial, sans-serif;
-            font-size: 13.5px;
-            color: #334155;
-            line-height: 1.4;
-        """)
-        self.message_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        content_layout.addWidget(self.message_label, 1)
-        
-        container_layout.addWidget(content_widget, 1)
-        
-        # 3. Action Buttons (Yes/No)
-        button_widget = QWidget()
-        button_layout = QHBoxLayout(button_widget)
-        button_layout.setContentsMargins(18, 0, 18, 4)
-        button_layout.setSpacing(8)
-        button_layout.addStretch()
-        
-        from .buttons import Button
-        self.yes_button = Button("Yes", variant="primary")
-        self.yes_button.setFixedWidth(64)
-        self.yes_button.clicked.connect(self.accept)
-        
-        self.no_button = Button("No", variant="secondary")
-        self.no_button.setFixedWidth(64)
-        self.no_button.clicked.connect(self.reject)
-        
-        button_layout.addWidget(self.yes_button)
-        button_layout.addWidget(self.no_button)
-        
-        container_layout.addWidget(button_widget)
-        
+        if message:
+            # 2. Content Layout (Side-by-side Icon and Text)
+            content_widget = QWidget()
+            content_layout = QHBoxLayout(content_widget)
+            content_layout.setContentsMargins(14, 8, 14, 6)
+            content_layout.setSpacing(12)
+
+            # Blue question icon
+            self.query_icon = QLabel()
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxQuestion)
+            # 25 px is approximately 15% smaller than the previous 30 px icon.
+            self.query_icon.setPixmap(icon.pixmap(25, 25))
+            self.query_icon.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+            content_layout.addWidget(self.query_icon)
+
+            # Confirmation message label
+            self.message_label = QLabel(message)
+            self.message_label.setWordWrap(True)
+            self.message_label.setStyleSheet("""
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 13.5px;
+                color: #334155;
+                line-height: 1.4;
+            """)
+            self.message_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            content_layout.addWidget(self.message_label, 1)
+
+            container_layout.addWidget(content_widget, 1)
+
+            # 3. Action Buttons (Yes/No)
+            button_widget = QWidget()
+            button_layout = QHBoxLayout(button_widget)
+            button_layout.setContentsMargins(14, 0, 14, 2)
+            button_layout.setSpacing(6)
+
+            self.checkbox = None
+            if show_checkbox:
+                from PySide6.QtWidgets import QCheckBox
+                self.checkbox = QCheckBox(checkbox_text)
+                self.checkbox.setStyleSheet("""
+                    QCheckBox {
+                        font-family: 'Segoe UI', Arial, sans-serif;
+                        font-size: 12px;
+                        color: #475569;
+                    }
+                """)
+                button_layout.addWidget(self.checkbox)
+
+            button_layout.addStretch()
+
+            from .theme import get_theme, create_button_style
+            theme = get_theme()
+            from .buttons import Button
+            self.yes_button = Button("Yes", variant="primary")
+            self.yes_button.setFixedWidth(32)
+            self.yes_button.setStyleSheet(create_button_style("primary", theme) + " QPushButton { border: 1px solid #A9DFBF; padding: 2px; font-size: 8pt; }")
+            self.yes_button.clicked.connect(self.accept)
+
+            self.no_button = Button("No", variant="secondary")
+            self.no_button.setFixedWidth(32)
+            self.no_button.setStyleSheet(create_button_style("secondary", theme) + f" QPushButton {{ border: 1px solid {theme.border_color}; background-color: {theme.bg_secondary}; color: {theme.text_primary}; padding: 2px; font-size: 8pt; }}")
+            self.no_button.clicked.connect(self._trigger_close_or_cancel)
+
+            button_layout.addWidget(self.yes_button)
+            button_layout.addWidget(self.no_button)
+
+            container_layout.addWidget(button_widget)
+
         main_layout.addWidget(self.container)
+
+    def _trigger_close_or_cancel(self):
+        if callable(getattr(self, "on_close_callback", None)):
+            self.on_close_callback()
+        else:
+            self.reject()
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos_in_title = self.title_bar.mapFrom(self, event.position().toPoint())
+            if self.title_bar.rect().contains(pos_in_title):
+                self._drag_active = True
+                self._drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+                return
+            
+            # Click outside container -> trigger close / cancel
+            if getattr(self, "close_on_click_outside", True) and not self.container.geometry().contains(event.position().toPoint()):
+                self._trigger_close_or_cancel()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_active and event.buttons() == Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_position)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_active = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
         
     def showEvent(self, event):
         super().showEvent(event)
@@ -549,7 +651,7 @@ class modal_confirm(QDialog):
         """
         Static helper that shows the dialog and returns True if 'Yes' is clicked.
         """
-        dialog = modal_confirm(message, parent)
+        dialog = ModalDialog(message, parent)
         result = dialog.exec()
         return result == QDialog.DialogCode.Accepted
 
@@ -571,5 +673,426 @@ class modal_confirm(QDialog):
         qml += f"{tab}    }}\n"
         qml += f"{tab}}}"
         return qml
+
+
+modal_confirm = ModalDialog
+ModalConfirm = ModalDialog
+
+
+class AlertModal(QDialog):
+    """
+    A premium styled, frameless error/warning message dialog from GenericUILibrary.
+    Customized with ONLY an OK button at the bottom, without close/minimize/maximize buttons,
+    and with resizing strictly disabled.
+    """
+    def __init__(
+        self,
+        message="An error occurred",
+        parent=None,
+        title="Notice",
+        variant="warning",
+        width=400,
+        height=180,
+    ):
+        super().__init__(parent)
+        self._drag_active = False
+        self._drag_position = None
+
+        self.setModal(True)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(width, height)
+
+        # Setup Fade-in Animation
+        self.fade_anim = QPropertyAnimation(self, b"windowOpacity")
+        self.fade_anim.setDuration(220)
+        self.fade_anim.setStartValue(0.0)
+        self.fade_anim.setEndValue(1.0)
+        self.fade_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+
+        # Main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+
+        # Card container
+        self.container = QWidget(self)
+        self.container.setObjectName("AlertModalContainer")
+        self.container.setStyleSheet("""
+            QWidget#AlertModalContainer {
+                background-color: #F8FAFC;
+                border: 1px solid #CBD5E1;
+                border-radius: 8px;
+            }
+        """)
+
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(18)
+        shadow.setColor(QColor(0, 0, 0, 50))
+        shadow.setOffset(0, 5)
+        self.container.setGraphicsEffect(shadow)
+
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(0, 0, 0, 12)
+        container_layout.setSpacing(0)
+
+        # 1. Title bar (NO close '✕' button, NO min/max buttons)
+        self.title_bar = QWidget()
+        self.title_bar.setObjectName("AlertTitleBar")
+        self.title_bar.setFixedHeight(34)
+        self.title_bar.setStyleSheet("""
+             QWidget#AlertTitleBar {
+                background-color: #FFFFFF;
+                border-bottom: 1px solid #E2E8F0;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+            }
+        """)
+        title_layout = QHBoxLayout(self.title_bar)
+        title_layout.setContentsMargins(14, 0, 14, 0)
+
+        self.title_text = QLabel(title)
+        self.title_text.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 13px; color: #1E293B; font-weight: 600; background-color: transparent;")
+        title_layout.addWidget(self.title_text)
+        title_layout.addStretch()
+
+        container_layout.addWidget(self.title_bar)
+
+        # 2. Content section (Icon + Text)
+        content_widget = QWidget()
+        content_layout = QHBoxLayout(content_widget)
+        content_layout.setContentsMargins(18, 14, 18, 10)
+        content_layout.setSpacing(14)
+
+        self.icon_label = QLabel()
+        from PySide6.QtWidgets import QStyle
+        pixmap_map = {
+            "danger": QStyle.StandardPixmap.SP_MessageBoxCritical,
+            "error": QStyle.StandardPixmap.SP_MessageBoxCritical,
+            "warning": QStyle.StandardPixmap.SP_MessageBoxWarning,
+            "info": QStyle.StandardPixmap.SP_MessageBoxInformation,
+            "success": QStyle.StandardPixmap.SP_MessageBoxInformation,
+        }
+        pixmap_enum = pixmap_map.get(variant, QStyle.StandardPixmap.SP_MessageBoxWarning)
+        icon = self.style().standardIcon(pixmap_enum)
+        self.icon_label.setPixmap(icon.pixmap(32, 32))
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        content_layout.addWidget(self.icon_label)
+
+        self.message_label = QLabel(message)
+        self.message_label.setWordWrap(True)
+        self.message_label.setStyleSheet("""
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 13px;
+            color: #334155;
+            line-height: 1.4;
+        """)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        content_layout.addWidget(self.message_label, 1)
+
+        container_layout.addWidget(content_widget, 1)
+
+        # 3. Footer (ONLY OK button)
+        button_widget = QWidget()
+        button_layout = QHBoxLayout(button_widget)
+        button_layout.setContentsMargins(18, 0, 18, 4)
+        button_layout.addStretch()
+
+        from .buttons import Button
+        from .theme import get_theme, create_button_style
+        theme = get_theme()
+
+        btn_variant = "danger" if variant in ("danger", "error") else "primary"
+        self.ok_button = Button("OK", variant=btn_variant)
+        self.ok_button.setFixedWidth(75)
+        self.ok_button.setStyleSheet(create_button_style(btn_variant, theme) + " QPushButton { font-size: 9pt; padding: 4px 12px; }")
+        self.ok_button.clicked.connect(self.accept)
+
+        button_layout.addWidget(self.ok_button)
+        container_layout.addWidget(button_widget)
+
+        main_layout.addWidget(self.container)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos_in_title = self.title_bar.mapFrom(self, event.position().toPoint())
+            if self.title_bar.rect().contains(pos_in_title):
+                self._drag_active = True
+                self._drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_active and event.buttons() == Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_position)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_active = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.fade_anim.start()
+
+    @staticmethod
+    def show_alert(parent, message, title="Notice", variant="warning"):
+        dialog = AlertModal(message, parent=parent, title=title, variant=variant)
+        dialog.exec()
+
+
+from PySide6.QtWidgets import QTextEdit
+
+
+class ProgressModal(QDialog):
+    """
+    GenericUILibrary Premium Progress & Task Log Modal.
+    Features:
+    - Frameless translucent container with drop shadow.
+    - Title bar with title, status, and top-right close '✕' button.
+    - Animated progress bar from GenericUILibrary.
+    - Detailed real-time progress text (%, ETA, stage description).
+    - Integrated dark-themed scrollable live log console.
+    - Click-outside-to-cancel & cancel button support.
+    """
+
+    def __init__(
+        self,
+        title="Processing Task...",
+        message="Initializing pipeline...",
+        parent=None,
+        allow_cancel=True,
+        on_cancel_callback=None,
+        width=540,
+        height=380,
+    ):
+        super().__init__(parent)
+        self._drag_active = False
+        self._drag_position = None
+        self.allow_cancel = allow_cancel
+        self.on_cancel_callback = on_cancel_callback
+
+        self.setModal(True)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.resize(width, height)
+
+        # Setup Fade-in Animation
+        self.fade_anim = QPropertyAnimation(self, b"windowOpacity")
+        self.fade_anim.setDuration(220)
+        self.fade_anim.setStartValue(0.0)
+        self.fade_anim.setEndValue(1.0)
+        self.fade_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+
+        # Main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+
+        # Container
+        self.container = QWidget(self)
+        self.container.setObjectName("ProgressModalContainer")
+        self.container.setStyleSheet("""
+            QWidget#ProgressModalContainer {
+                background-color: #F8FAFC;
+                border: 1px solid #CBD5E1;
+                border-radius: 8px;
+            }
+        """)
+
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setOffset(0, 6)
+        self.container.setGraphicsEffect(shadow)
+
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(0, 0, 0, 10)
+        container_layout.setSpacing(8)
+
+        # 1. Title bar
+        self.title_bar = QWidget()
+        self.title_bar.setObjectName("TitleBar")
+        self.title_bar.setFixedHeight(34)
+        self.title_bar.setStyleSheet("""
+            QWidget#TitleBar {
+                background-color: #FFFFFF;
+                border-bottom: 1px solid #E2E8F0;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+            }
+        """)
+        title_layout = QHBoxLayout(self.title_bar)
+        title_layout.setContentsMargins(14, 0, 8, 0)
+
+        self.title_text = QLabel(title)
+        self.title_text.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 13px; color: #1E293B; font-weight: 600; background-color: transparent;")
+        title_layout.addWidget(self.title_text)
+        title_layout.addStretch()
+
+        self.close_button = QPushButton("✕", self.title_bar)
+        self.close_button.setObjectName("ModalCloseBtn")
+        self.close_button.setFixedSize(22, 22)
+        self.close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_button.setStyleSheet("""
+            QPushButton#ModalCloseBtn {
+                background-color: transparent;
+                border: none;
+                color: #64748B;
+                font-size: 13px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton#ModalCloseBtn:hover {
+                background-color: #EF4444;
+                color: #FFFFFF;
+            }
+            QPushButton#ModalCloseBtn:pressed {
+                background-color: #DC2626;
+                color: #FFFFFF;
+            }
+        """)
+        self.close_button.clicked.connect(self._trigger_cancel)
+        title_layout.addWidget(self.close_button)
+
+        container_layout.addWidget(self.title_bar)
+
+        # 2. Content section
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(16, 6, 16, 4)
+        content_layout.setSpacing(6)
+
+        status_row = QHBoxLayout()
+        self.message_label = QLabel(message)
+        self.message_label.setWordWrap(True)
+        self.message_label.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 13px; color: #1E293B; font-weight: 500;")
+        status_row.addWidget(self.message_label, 1)
+
+        self.percent_label = QLabel("0%")
+        self.percent_label.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 22px; font-weight: 700; color: #10B981; background-color: transparent;")
+        self.percent_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        status_row.addWidget(self.percent_label)
+
+        content_layout.addLayout(status_row)
+        container_layout.addWidget(content_widget)
+
+        # 3. Log Terminal Console
+        log_widget = QWidget()
+        log_layout = QVBoxLayout(log_widget)
+        log_layout.setContentsMargins(16, 0, 16, 0)
+        log_layout.setSpacing(4)
+
+        log_label = QLabel("Execution Log:")
+        log_label.setStyleSheet("font-family: 'Segoe UI', Arial; font-size: 11px; color: #64748B; font-weight: 600;")
+        log_layout.addWidget(log_label)
+
+        self.log_edit = QTextEdit()
+        self.log_edit.setReadOnly(True)
+        self.log_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #0F172A;
+                color: #38BDF8;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11px;
+                border: 1px solid #1E293B;
+                border-radius: 6px;
+                padding: 6px;
+            }
+        """)
+        self.log_edit.setFixedHeight(140)
+        log_layout.addWidget(self.log_edit)
+
+        container_layout.addWidget(log_widget, 1)
+
+        # 4. Footer
+        footer_widget = QWidget()
+        footer_layout = QHBoxLayout(footer_widget)
+        footer_layout.setContentsMargins(16, 4, 16, 4)
+        footer_layout.addStretch()
+
+        from .buttons import Button
+        self.cancel_button = Button("Cancel Process", variant="secondary")
+        self.cancel_button.setFixedWidth(110)
+        self.cancel_button.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 4px 10px;
+                border: 1px solid #CBD5E1;
+            }
+        """)
+        self.cancel_button.clicked.connect(self._trigger_cancel)
+        footer_layout.addWidget(self.cancel_button)
+
+        container_layout.addWidget(footer_widget)
+
+        main_layout.addWidget(self.container)
+
+    def set_progress(self, percent, message=None):
+        percent_val = int(percent)
+        self.percent_label.setText(f"{percent_val}%")
+        if message:
+            msg_str = str(message)
+            if "||" in msg_str:
+                parts = msg_str.split("||", 1)
+                stage_text = parts[0].strip()
+                log_detail = parts[1].strip()
+                self.message_label.setText(stage_text)
+                if log_detail:
+                    self.append_log(f"[{percent_val}%] {log_detail}")
+            else:
+                self.message_label.setText(msg_str)
+                if msg_str.strip():
+                    self.append_log(f"[{percent_val}%] {msg_str}")
+
+    def append_log(self, text):
+        if text:
+            self.log_edit.append(str(text))
+            sb = self.log_edit.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+    def _trigger_cancel(self):
+        if callable(self.on_cancel_callback):
+            self.on_cancel_callback()
+        self.reject()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos_in_title = self.title_bar.mapFrom(self, event.position().toPoint())
+            if self.title_bar.rect().contains(pos_in_title):
+                self._drag_active = True
+                self._drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+                return
+
+            if self.allow_cancel and not self.container.geometry().contains(event.position().toPoint()):
+                self._trigger_cancel()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_active and event.buttons() == Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_position)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_active = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.fade_anim.start()
 
 
