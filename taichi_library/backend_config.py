@@ -126,6 +126,11 @@ def requested_backend(
         (env.get("PIXEL_REFINE_AOT_ARCH"), "PIXEL_REFINE_AOT_ARCH"),
         (prefer, "argument_preference"),
         (env.get("PIXEL_REFINE_BACKEND"), "PIXEL_REFINE_BACKEND"),
+        # ``AOT_ARCH`` is the long-standing environment knob used by the
+        # standalone test harnesses and older callers.  Keep it as a legacy
+        # alias so an explicit CPU/CUDA/Vulkan request cannot be overwritten
+        # by automatic hardware selection during module import.
+        (env.get("AOT_ARCH"), "AOT_ARCH"),
     )
     for value, source in candidates:
         if value is None:

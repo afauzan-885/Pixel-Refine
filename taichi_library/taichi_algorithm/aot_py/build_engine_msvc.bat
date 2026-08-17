@@ -37,6 +37,11 @@ if /I "%~1"=="cuda" (
   set "TAICHI_LIB=%PROJECT_ROOT%\test_algorithm\aot_targets\build\cuda_x86_64_windows_nvidia\out"
   set "OUTPUT_DIR=%PROJECT_ROOT%\taichi_library\taichi_algorithm\aot_py\aot_dll\cuda"
 )
+rem Optional isolated validation override.  This is useful when a newer
+rem LLVM/CUDA C-API build is being tested: it keeps the public bridge output
+rem and the historical target cache untouched.
+if defined PIXEL_REFINE_TAICHI_LIB set "TAICHI_LIB=%PIXEL_REFINE_TAICHI_LIB%"
+if defined PIXEL_REFINE_BRIDGE_OUTPUT_DIR set "OUTPUT_DIR=%PIXEL_REFINE_BRIDGE_OUTPUT_DIR%"
 set "OUTPUT=%OUTPUT_DIR%\taichi_aot_engine.dll"
 set "ENGINE_DEFS="
 if /I "%~1"=="cuda" set "ENGINE_DEFS=/DPIXEL_REFINE_AOT_DISABLE_OPENGL_INTEROP"
@@ -77,6 +82,17 @@ if "%PIXEL_REFINE_BRIDGE_NO_LTO%"=="1" (
   set "LTO_LINK="
 )
 
+rem LLVM20's Windows static package is built with the static MSVC CRT.  Keep
+rem the bridge on the same CRT by default; an explicitly DLL-CRT toolchain can
+rem opt in with PIXEL_REFINE_BRIDGE_CRT=MD.
+set "BRIDGE_CRT=%PIXEL_REFINE_BRIDGE_CRT%"
+if "%BRIDGE_CRT%"=="" set "BRIDGE_CRT=MT"
+if /I not "%BRIDGE_CRT%"=="MT" if /I not "%BRIDGE_CRT%"=="MD" (
+  echo ERROR: unsupported bridge CRT "%BRIDGE_CRT%". Use MT or MD.
+  exit /b 7
+)
+set "BRIDGE_CRT_FLAG=/%BRIDGE_CRT%"
+
 if not exist "%VSDEVCMD%" (
   echo ERROR: Visual Studio 2022 Build Tools were not found.
   exit /b 2
@@ -95,7 +111,7 @@ call "%VSDEVCMD%" -arch=x64 -host_arch=x64
 if errorlevel 1 exit /b %errorlevel%
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 
-cl.exe /nologo /LD /O2 %LTO_COMPILE% /EHsc /std:c++20 %BRIDGE_ARCH% %ENGINE_DEFS% %BRIDGE_ISA_DEFS% ^
+cl.exe /nologo /LD /O2 %LTO_COMPILE% %BRIDGE_CRT_FLAG% /EHsc /std:c++20 %BRIDGE_ARCH% %ENGINE_DEFS% %BRIDGE_ISA_DEFS% ^
   /Fo"%OUTPUT_DIR%\taichi_aot_engine%BRIDGE_SUFFIX%.obj" ^
   /I"%TAICHI_INC%" ^
   /I"%TAICHI_ROOT%\external\glad\include" ^
@@ -109,6 +125,8 @@ rem the historical source-tree path as a compatibility fallback for the old
 rem CPU/Vulkan profiles.
 if exist "%TAICHI_LIB%\taichi_c_api.dll" (
   copy /y "%TAICHI_LIB%\taichi_c_api.dll" "%OUTPUT_DIR%\taichi_c_api.dll" >nul
+) else if defined PIXEL_REFINE_TAICHI_C_API_DLL if exist "%PIXEL_REFINE_TAICHI_C_API_DLL%" (
+  copy /y "%PIXEL_REFINE_TAICHI_C_API_DLL%" "%OUTPUT_DIR%\taichi_c_api.dll" >nul
 ) else if exist "%TAICHI_ROOT%\build\taichi_c_api.dll" (
   copy /y "%TAICHI_ROOT%\build\taichi_c_api.dll" "%OUTPUT_DIR%\taichi_c_api.dll" >nul
 ) else (

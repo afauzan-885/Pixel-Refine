@@ -501,6 +501,135 @@ def hdr_add_aot(dst, src):
     return _pyramid_add_aot("hdr", dst, src)
 
 
+def hdr_deghost_residual_aot(reference, target, *, scale=1.0, offset=0.0, edge_weight=0.25):
+    """Run the target-qualified HDR deghost residual graph.
+
+    Percentile exposure fitting, MAD thresholding, and confidence smoothing
+    intentionally remain policy/orchestration work in ``hdr_stack``.  This
+    adapter exposes the existing residual kernel as a qualified AOT leaf and
+    keeps the ABI explicit (f32 2-D arrays plus three f32 scalars).
+    """
+
+    ref = _as_f32(reference, ndim=2)
+    tgt = _as_f32(target, ndim=2)
+    if ref.shape != tgt.shape:
+        raise ValueError("reference and target must have matching HxW dimensions")
+    if not np.isfinite(ref).all() or not np.isfinite(tgt).all():
+        raise ValueError("reference and target must contain only finite values")
+    for name, value in (("scale", scale), ("offset", offset), ("edge_weight", edge_weight)):
+        if not np.isfinite(float(value)):
+            raise ValueError(f"{name} must be finite")
+    if float(edge_weight) < 0.0:
+        raise ValueError("edge_weight must be non-negative")
+    h, w = ref.shape
+    try:
+        return _dispatch(
+            "hdr",
+            "hdr_deghost_residual_f32",
+            inputs={"reference": ref, "target": tgt},
+            outputs={"residual": ((h, w), np.float32)},
+            scalars={
+                "scale": float(scale),
+                "offset": float(offset),
+                "edge_weight": float(edge_weight),
+            },
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        # A target artifact compiled before this graph was added can still
+        # contain the older HDR leaves.  Keep the backend boundary explicit;
+        # callers must compile the matching target rather than silently using
+        # NumPy/JIT residuals.
+        raise NotImplementedError(
+            "HDR deghost residual graph is unavailable in the selected target artifact; "
+            "compile the current hdr TCM for this backend"
+        ) from exc
+
+
+def hdr_response_quantise_aot(values, *, levels=256):
+    """Quantise normalised response samples with the HDR AOT leaf."""
+
+    data = _as_f32(values, ndim=1)
+    level_count = int(levels)
+    if level_count < 16 or level_count > 4096:
+        raise ValueError("levels must be between 16 and 4096")
+    try:
+        return _dispatch(
+            "hdr",
+            "hdr_response_quantise_f32",
+            inputs={"values": data},
+            outputs={"quantised": (data.shape, np.int32)},
+            scalars={"levels": level_count},
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        raise NotImplementedError(
+            "HDR response quantisation graph is unavailable in the selected target artifact; "
+            "compile the current hdr TCM for this backend"
+        ) from exc
+
+
+def hdr_merge_linear_aot(stack, times, *, levels=256):
+    """Merge a normalised exposure stack with the HDR AOT weighted leaf."""
+
+    data = _as_f32(stack, ndim=4)
+    exposure = _as_f32(times, ndim=1)
+    if data.shape[0] != exposure.shape[0]:
+        raise ValueError("stack frame count must match exposure time count")
+    h, w, channels = data.shape[1:]
+    if channels < 1:
+        raise ValueError("stack must contain at least one channel")
+    try:
+        return _dispatch(
+            "hdr",
+            "hdr_merge_linear_f32",
+            inputs={"stack": data, "times": exposure},
+            outputs={"output": ((h, w, channels), np.float32)},
+            scalars={
+                "h": int(h),
+                "w": int(w),
+                "channels": int(channels),
+                "frame_count": int(data.shape[0]),
+                "levels": int(levels),
+            },
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        raise NotImplementedError(
+            "HDR linear merge graph is unavailable in the selected target artifact; "
+            "compile the current hdr TCM for this backend"
+        ) from exc
+
+
+def hdr_merge_log_aot(stack, times, curve, *, levels=256):
+    """Merge a calibrated exposure stack with the HDR AOT log leaf."""
+
+    data = _as_f32(stack, ndim=4)
+    exposure = _as_f32(times, ndim=1)
+    response = _as_f32(curve, ndim=2)
+    if data.shape[0] != exposure.shape[0]:
+        raise ValueError("stack frame count must match exposure time count")
+    h, w, channels = data.shape[1:]
+    if response.shape != (int(levels), int(channels)):
+        raise ValueError("curve shape must be (levels, channel_count)")
+    try:
+        return _dispatch(
+            "hdr",
+            "hdr_merge_log_f32",
+            inputs={"stack": data, "times": exposure, "curve": response},
+            outputs={"output": ((h, w, channels), np.float32)},
+            scalars={
+                "h": int(h),
+                "w": int(w),
+                "channels": int(channels),
+                "frame_count": int(data.shape[0]),
+                "levels": int(levels),
+            },
+        )
+    except (FileNotFoundError, RuntimeError) as exc:
+        raise NotImplementedError(
+            "HDR calibrated merge graph is unavailable in the selected target artifact; "
+            "compile the current hdr TCM for this backend"
+        ) from exc
+
+
 def tone_downsample_aot(src):
     """Run one native tone-mapping Gaussian-pyramid downsample."""
 
@@ -935,6 +1064,308 @@ def sfm_bilateral_refine_depth_aot(depth_in, guide_img, *, sigma_s=2.0, sigma_r=
     )
 
 
+def sfm_sgm_path_aot(cost, *, dy, dx, p1=0.02, p2=0.20):
+    """Run one target-qualified SGM recurrence path on a cost volume.
+
+    Directional accumulation is intentionally one graph dispatch per path;
+    the caller owns the bounded aggregation over four/eight directions.  No
+    host implementation is used when the selected artifact lacks this graph.
+    """
+
+    volume = _as_f32(cost, ndim=3)
+    if volume.size == 0:
+        raise ValueError("cost volume must be non-empty")
+    if int(dy) == 0 and int(dx) == 0:
+        raise ValueError("SGM direction must be non-zero")
+    if not np.isfinite(p1) or not np.isfinite(p2) or float(p1) < 0.0 or float(p2) < float(p1):
+        raise ValueError("SGM penalties must satisfy 0 <= p1 <= p2 and be finite")
+    try:
+        return _dispatch(
+            "sfm_stereo",
+            "sfm_sgm_path_f32",
+            inputs={"cost": volume},
+            outputs={"path": (volume.shape, np.float32)},
+            scalars={
+                "dy": int(dy),
+                "dx": int(dx),
+                "p1": float(p1),
+                "p2": float(p2),
+            },
+        )
+    except (FileNotFoundError, ImportError, KeyError, OSError, RuntimeError) as exc:
+        raise NotImplementedError(
+            "SGM AOT path graph is unavailable in the selected target artifact; "
+            "compile the current sfm_stereo TCM for this backend"
+        ) from exc
+
+
+def sfm_patchmatch_iteration_aot(cost, labels, *, iteration=0, random_seed=0):
+    """Run one deterministic PatchMatch propagation iteration natively."""
+
+    volume = _as_f32(cost, ndim=3)
+    current = _as_i32(labels, ndim=2)
+    if volume.size == 0 or current.shape != volume.shape[1:]:
+        raise ValueError("labels must match the cost volume spatial shape")
+    if not np.isfinite(volume).all():
+        raise ValueError("cost volume must contain only finite values")
+    if int(iteration) < 0:
+        raise ValueError("iteration must be non-negative")
+    # ``labels`` is an in-place graph argument.  Supplying an initialised
+    # ndarray as the output keeps the current labels available to the kernel
+    # while returning the updated buffer through the normal dispatcher.
+    try:
+        return _dispatch(
+            "sfm_stereo",
+            "sfm_patchmatch_iteration_f32",
+            inputs={"cost": volume},
+            outputs={"labels": current},
+            scalars={"iteration": int(iteration), "random_seed": int(random_seed)},
+        )
+    except (FileNotFoundError, ImportError, KeyError, OSError, RuntimeError) as exc:
+        raise NotImplementedError(
+            "PatchMatch AOT iteration graph is unavailable in the selected target artifact; "
+            "compile the current sfm_stereo TCM for this backend"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Fundamental-matrix VSAC leaves
+# ---------------------------------------------------------------------------
+
+
+def vsac_fundamental_aot(
+    pts1,
+    pts2,
+    *,
+    confidence=0.999,
+    threshold=1.0,
+    max_lo=1,
+    n_hypotheses=1024,
+):
+    """Compose the target-qualified VSAC fundamental leaves.
+
+    Candidate generation, Sampson masking, and independent-point counting are
+    the maintained Taichi kernels from ``alignment.ransac``.  Selecting the
+    best candidate is intentionally a small host reduction because the AOT
+    graph ABI has no scalar-return reduction primitive.  No OpenCV/JIT
+    fallback is used: an artifact without the three VSAC graphs fails closed
+    with an actionable ``NotImplementedError``.
+    """
+    del confidence  # retained for compatibility with the JIT signature
+    p1 = _as_f32(pts1, ndim=2)
+    p2 = _as_f32(pts2, ndim=2)
+    if p1.shape != p2.shape or p1.shape[1] != 2:
+        raise ValueError("pts1 and pts2 must have matching shape (N, 2)")
+    n_pts = int(p1.shape[0])
+    if n_pts < 8:
+        raise ValueError("vsac_fundamental requires at least 8 correspondences")
+    threshold = float(threshold)
+    n_hypotheses = int(n_hypotheses)
+    max_lo = int(max_lo)
+    if not np.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("threshold must be finite and positive")
+    if n_hypotheses <= 0:
+        raise ValueError("n_hypotheses must be positive")
+    if max_lo < 0:
+        raise ValueError("max_lo must be non-negative")
+
+    import time as _time
+
+    started = _time.perf_counter()
+
+    def _run_candidates(a, b, hypotheses, seed):
+        try:
+            return _dispatch(
+                "vsac_fundamental",
+                "ransac_fundamental",
+                inputs={"pts1": a, "pts2": b},
+                outputs={
+                    "F_candidates": ((int(hypotheses), 9), np.float32),
+                    "scores": ((int(hypotheses),), np.int32),
+                },
+                scalars={
+                    "n_pts": int(a.shape[0]),
+                    "n_hypotheses": int(hypotheses),
+                    "threshold": threshold,
+                    "seed_offset": int(seed),
+                },
+            )
+        except (FileNotFoundError, ImportError, KeyError, OSError, RuntimeError) as exc:
+            raise NotImplementedError(
+                "vsac_fundamental AOT requires the ransac_fundamental graph "
+                "in a target-qualified ransac artifact"
+            ) from exc
+
+    candidates = _run_candidates(p1, p2, n_hypotheses, 42)
+    F_candidates = np.asarray(candidates["F_candidates"], dtype=np.float32)
+    scores = np.asarray(candidates["scores"], dtype=np.int32)
+    if F_candidates.ndim != 2 or F_candidates.shape != (n_hypotheses, 9):
+        raise RuntimeError("ransac_fundamental returned an invalid candidate shape")
+    best_idx = int(np.argmax(scores))
+    F_best = F_candidates[best_idx].astype(np.float64).reshape(3, 3)
+    best_score = int(scores[best_idx])
+
+    for local_idx in range(max_lo):
+        # The native mask graph identifies the current inliers.  Re-running
+        # the existing candidate kernel on that compact set is the same local
+        # optimization used by the JIT implementation.
+        mask = _dispatch(
+            "vsac_fundamental",
+            "generate_fundamental_inlier_mask",
+            inputs={"pts1": p1, "pts2": p2, "F_best": F_best.astype(np.float32).ravel()},
+            outputs={"mask_out": ((n_pts,), np.int32)},
+            scalars={"n_pts": n_pts, "threshold": threshold},
+        )
+        inlier_mask = np.asarray(mask, dtype=np.int32).reshape(-1) > 0
+        if int(np.count_nonzero(inlier_mask)) < 8:
+            break
+        refined = _run_candidates(
+            p1[inlier_mask], p2[inlier_mask], 1, 999 + local_idx
+        )
+        refined_score = int(np.asarray(refined["scores"], dtype=np.int32).reshape(-1)[0])
+        if refined_score > best_score:
+            F_best = np.asarray(refined["F_candidates"], dtype=np.float32)[0].astype(np.float64).reshape(3, 3)
+            best_score = refined_score
+
+    final_mask = _dispatch(
+        "vsac_fundamental",
+        "generate_fundamental_inlier_mask",
+        inputs={"pts1": p1, "pts2": p2, "F_best": F_best.astype(np.float32).ravel()},
+        outputs={"mask_out": ((n_pts,), np.int32)},
+        scalars={"n_pts": n_pts, "threshold": threshold},
+    )
+    inlier_mask = np.asarray(final_mask, dtype=np.int32).reshape(-1) > 0
+    indep = _dispatch(
+        "vsac_fundamental",
+        "vsac_classify_independent",
+        inputs={"pts1": p1, "pts2": p2, "F_arr": F_best.astype(np.float32).ravel()},
+        outputs={"indep_count_out": ((1,), np.int32)},
+        scalars={"n_pts": n_pts, "threshold": threshold, "epipole_thresh": 1e-4},
+    )
+    n_independent = int(np.asarray(indep, dtype=np.int32).reshape(-1)[0])
+    n_inliers = int(np.count_nonzero(inlier_mask))
+    stats = {
+        "time_ms": float((_time.perf_counter() - started) * 1000.0),
+        "n_inliers": n_inliers,
+        "n_independent": n_independent,
+        "inlier_ratio": float(n_inliers) / max(n_pts, 1),
+        "backend_boundary": "aot-native-leaves+host-selection",
+    }
+    return F_best, inlier_mask, stats
+
+
+def sfm_icp_accumulate_aot(
+    source,
+    target,
+    normals,
+    rotation,
+    translation,
+    *,
+    max_distance_sq=0.01,
+):
+    """Accumulate one bounded point-to-plane ICP iteration natively.
+
+    The expensive correspondence search and normal-equation accumulation are
+    dispatched through the maintained ``sfm_registration`` graph.  The small
+    Lie update remains in :mod:`sfm.registration`, where it is shared with the
+    explicit NumPy and Taichi-JIT paths.
+    """
+
+    source_array = _as_f32(source, ndim=2)
+    target_array = _as_f32(target, ndim=2)
+    normals_array = _as_f32(normals, ndim=2)
+    if source_array.shape[1] != 3 or target_array.shape[1] != 3:
+        raise ValueError("source and target must have shape (N, 3)")
+    if normals_array.shape != target_array.shape:
+        raise ValueError("normals must have the same shape as target")
+    rotation_array = _as_f32(rotation, ndim=2)
+    translation_array = _as_f32(translation, ndim=1)
+    if rotation_array.shape != (3, 3) or translation_array.shape != (3,):
+        raise ValueError("rotation must be (3, 3) and translation must be (3,)")
+    distance_sq = float(max_distance_sq)
+    if not np.isfinite(distance_sq) or distance_sq <= 0.0:
+        raise ValueError("max_distance_sq must be finite and positive")
+    n_source = int(source_array.shape[0])
+    result = _dispatch(
+        "sfm_registration",
+        "sfm_icp_accumulate_f32",
+        inputs={
+            "source": source_array,
+            "target": target_array,
+            "normals": normals_array,
+            "rotation": rotation_array,
+            "translation": translation_array,
+        },
+        outputs={
+            "jtj": ((6, 6), np.float32),
+            "jtr": ((6,), np.float32),
+            "residuals": ((n_source,), np.float32),
+            "correspondences": ((n_source,), np.int32),
+        },
+        scalars={"max_distance_sq": distance_sq},
+    )
+    return result
+
+
+def sfm_tsdf_integrate_aot(
+    depth,
+    intrinsics,
+    rotation,
+    translation,
+    origin,
+    tsdf,
+    weights,
+    *,
+    voxel_size=0.02,
+    truncation=0.08,
+    max_weight=65535,
+):
+    """Integrate one calibrated depth frame through the native TSDF leaf."""
+
+    depth_array = _as_f32(depth, ndim=2)
+    intrinsics_array = _as_f32(intrinsics, ndim=2)
+    rotation_array = _as_f32(rotation, ndim=2)
+    translation_array = _as_f32(translation, ndim=1)
+    origin_array = _as_f32(origin, ndim=1)
+    tsdf_array = _as_f32(tsdf, ndim=3).copy()
+    weights_array = _as_i32(weights, ndim=3).copy()
+    if intrinsics_array.shape != (3, 3):
+        raise ValueError("intrinsics must have shape (3, 3)")
+    if rotation_array.shape != (3, 3) or translation_array.shape != (3,):
+        raise ValueError("rotation must be (3, 3) and translation must be (3,)")
+    if origin_array.shape != (3,):
+        raise ValueError("origin must have shape (3,)")
+    if tsdf_array.shape != weights_array.shape:
+        raise ValueError("tsdf and weights must have matching shapes")
+    voxel = float(voxel_size)
+    trunc = float(truncation)
+    limit = int(max_weight)
+    if not np.isfinite(voxel) or voxel <= 0.0:
+        raise ValueError("voxel_size must be finite and positive")
+    if not np.isfinite(trunc) or trunc <= 0.0:
+        raise ValueError("truncation must be finite and positive")
+    if limit <= 0:
+        raise ValueError("max_weight must be positive")
+    return _dispatch_inplace(
+        "sfm_registration",
+        "sfm_tsdf_integrate_f32",
+        arrays={
+            "depth": depth_array,
+            "intrinsics": intrinsics_array,
+            "rotation": rotation_array,
+            "translation": translation_array,
+            "origin": origin_array,
+            "tsdf": tsdf_array,
+            "weights": weights_array,
+        },
+        scalars={
+            "voxel_size": voxel,
+            "truncation": trunc,
+            "max_weight": limit,
+        },
+    )
+
+
 def sfm_knn_distance_aot(points, *, k=20):
     data = _as_f32(points, ndim=2)
     if data.shape[1] != 3:
@@ -1165,6 +1596,57 @@ def sfm_poisson_step_aot(field, div_field, mask, *, omega=1.0):
     )["field"]
 
 
+# ---------------------------------------------------------------------------
+# Panorama seam leaves
+# ---------------------------------------------------------------------------
+
+
+def graph_cut_unary_aot(
+    left_gray,
+    right_gray,
+    *,
+    color_weight=1.0,
+    gradient_weight=0.5,
+    return_gpu=False,
+):
+    """Build exact graph-cut unary maps through the panorama AOT leaf.
+
+    This is intentionally only the static per-pixel portion of the seam
+    algorithm.  ``panorama.seam.graph_cut_maxflow`` retains the bounded,
+    deterministic residual push-relabel solver on the host because its
+    dynamic adjacency cannot be represented by a portable static graph.
+    Keeping the split explicit prevents an AOT call from silently changing
+    the solved energy or claiming that the dynamic solver itself is native.
+    """
+
+    left = _as_f32(left_gray, ndim=2)
+    right = _as_f32(right_gray, ndim=2)
+    if left.shape != right.shape:
+        raise ValueError("left_gray and right_gray must have matching shapes")
+    if not (np.isfinite(left).all() and np.isfinite(right).all()):
+        raise ValueError("left_gray and right_gray must contain only finite values")
+    if not np.isfinite(float(color_weight)) or float(color_weight) < 0.0:
+        raise ValueError("color_weight must be finite and non-negative")
+    if not np.isfinite(float(gradient_weight)) or float(gradient_weight) < 0.0:
+        raise ValueError("gradient_weight must be finite and non-negative")
+    h, w = left.shape
+    return _dispatch(
+        "panorama",
+        "panorama_graph_cut_unary_f32",
+        inputs={"left_gray": left, "right_gray": right},
+        outputs={
+            "unary_left": ((h, w), np.float32),
+            "unary_right": ((h, w), np.float32),
+            "color_difference": ((h, w), np.float32),
+        },
+        scalars={
+            "gradient_weight": float(gradient_weight),
+            "color_weight": float(color_weight),
+        },
+       return_gpu=return_gpu,
+   )
+
+
 RESEARCH_AOT_GRAPHS = {
     "hdr": (
         "hdr_weight_f32",
@@ -1176,6 +1658,10 @@ RESEARCH_AOT_GRAPHS = {
         "hdr_subtract_3ch_f32",
         "hdr_add_weighted_laplacian_f32",
         "hdr_add_3ch_f32",
+        "hdr_deghost_residual_f32",
+        "hdr_response_quantise_f32",
+        "hdr_merge_linear_f32",
+        "hdr_merge_log_f32",
     ),
     "tone_mapping": (
         "tone_luminance_f32",
@@ -1218,6 +1704,12 @@ RESEARCH_AOT_GRAPHS = {
         "sfm_warp_ncc_f32",
         "sfm_winner_take_all_f32",
         "sfm_bilateral_refine_depth_f32",
+        "sfm_sgm_path_f32",
+        "sfm_patchmatch_iteration_f32",
+    ),
+    "sfm_registration": (
+        "sfm_icp_accumulate_f32",
+        "sfm_tsdf_integrate_f32",
     ),
     "sfm_point_cloud": (
         "sfm_knn_distance_f32",
@@ -1239,6 +1731,14 @@ RESEARCH_AOT_GRAPHS = {
         "sfm_occupancy_mask_f32",
         "sfm_poisson_step_f32",
     ),
+    "panorama": (
+        "panorama_graph_cut_unary_f32",
+    ),
+    "ransac": (
+        "ransac_fundamental",
+        "generate_fundamental_inlier_mask",
+        "vsac_classify_independent",
+    ),
 }
 
 
@@ -1255,11 +1755,16 @@ __all__ = [
     "tone_blend_weight_aot",
     "tone_weighted_blend_aot",
     "tone_contrast_aot",
+    "vsac_fundamental_aot",
     "hdr_downsample_aot",
     "hdr_upsample_aot",
     "hdr_subtract_aot",
     "hdr_add_weighted_laplacian_aot",
     "hdr_add_aot",
+    "hdr_deghost_residual_aot",
+    "hdr_response_quantise_aot",
+    "hdr_merge_linear_aot",
+    "hdr_merge_log_aot",
     "tone_downsample_aot",
     "tone_upsample_aot",
     "tone_subtract_aot",
@@ -1281,6 +1786,10 @@ __all__ = [
     "sfm_sweep_depths_aot",
     "sfm_winner_take_all_aot",
     "sfm_bilateral_refine_depth_aot",
+    "sfm_sgm_path_aot",
+    "sfm_patchmatch_iteration_aot",
+    "sfm_icp_accumulate_aot",
+    "sfm_tsdf_integrate_aot",
     "sfm_knn_distance_aot",
     "sfm_sor_filter_aot",
     "sfm_radius_filter_aot",
@@ -1295,4 +1804,5 @@ __all__ = [
     "sfm_poisson_rasterize_aot",
     "sfm_poisson_occupancy_aot",
     "sfm_poisson_step_aot",
+    "graph_cut_unary_aot",
 ]

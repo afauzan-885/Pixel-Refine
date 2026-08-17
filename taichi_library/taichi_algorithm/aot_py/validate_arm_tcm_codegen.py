@@ -9,8 +9,9 @@ Example::
 
     python validate_arm_tcm_codegen.py --target cpu_arm64_android
 
-The LLVM 20 toolchain is used only as an offline validator.  Production
-runtime bitcode remains compiled with the matching NDK/Taichi LLVM version.
+The LLVM 20 toolchain is used as the offline validator and must match the
+runtime bitcode major. Legacy LLVM14/NDK artifacts are rejected by the ARM
+runtime build scripts.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[3]
 TCM_ROOT = ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm"
 TRIPLES = {
-    "cpu_arm64_android": "aarch64-unknown-linux-android21",
+    "cpu_arm64_android": "aarch64-unknown-linux-android26",
     "cpu_arm64_linux": "aarch64-unknown-linux-gnu",
 }
 
@@ -38,23 +39,30 @@ def _find_llc(explicit: Path | None) -> Path:
     candidates = []
     if explicit:
         candidates.append(explicit)
-    env_path = os.environ.get("PIXEL_REFINE_ARM_LLVM_LLC")
+    env_path = os.environ.get("ARM_LLVM_LLC")
     if env_path:
         candidates.append(Path(env_path))
+    # Prefer the repository-pinned LLVM20 toolchain before the historical
+    # MSYS2 fallback.  This keeps the offline ARM gate reproducible after
+    # MSYS2 is removed from a VS2022-only workstation.
+    candidates.append(
+        ROOT
+        / "test_algorithm"
+        / "llvm_msvc_dev_extract"
+        / "clang+llvm-20.1.5-x86_64-pc-windows-msvc"
+        / "bin"
+        / "llc.exe"
+    )
     found = shutil.which("llc")
     if found:
         candidates.append(Path(found))
-    # The development workstation's LLVM installation is not necessarily on
-    # PATH.  Keep this discovery best-effort and require an explicit path on
-    # other machines.
-    candidates.append(Path(r"C:\msys64\ucrt64\bin\llc.exe"))
+    # Require an explicit LLVM20 path or the pinned repository toolchain on
+    # other machines; do not depend on MSYS2 PATH state.
     for candidate in candidates:
         candidate = candidate.expanduser().resolve()
         if candidate.exists():
             return candidate
-    raise FileNotFoundError(
-        "llc was not found; pass --llc or set PIXEL_REFINE_ARM_LLVM_LLC"
-    )
+    raise FileNotFoundError("llc was not found; pass --llc or set ARM_LLVM_LLC")
 
 
 def _collect(root: Path):
@@ -84,7 +92,7 @@ def _validate_arm_ir_metadata(payload: bytes, triple: str) -> None:
     if 'target triple = "x86' in text or 'target triple = "i686' in text:
         raise ValueError("host x86 target triple remains in ARM archive")
     lowered = text.lower()
-    forbidden = ('"target-cpu"="x86', '"target-cpu"="haswell', '+sse', '+avx')
+    forbidden = ('"target-cpu"="x86', '"target-cpu"="haswell', "+sse", "+avx")
     if any(token in lowered for token in forbidden):
         raise ValueError("host x86/SSE/AVX CPU feature remains in ARM archive")
     if '"target-features"=' in text and '"target-features"="+neon"' not in text:
@@ -134,7 +142,9 @@ def _codegen(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", choices=sorted(TRIPLES), default="cpu_arm64_android")
+    parser.add_argument(
+        "--target", choices=sorted(TRIPLES), default="cpu_arm64_android"
+    )
     parser.add_argument("--root", type=Path, default=None, help="TCM target directory")
     parser.add_argument("--llc", type=Path, default=None, help="LLVM llc executable")
     parser.add_argument("--workers", type=int, default=8)

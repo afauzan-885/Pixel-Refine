@@ -60,9 +60,16 @@ class WindowsJob:
                 wintypes.DWORD,
             ]
             kernel32.SetInformationJobObject.restype = wintypes.BOOL
-            kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            kernel32.AssignProcessToJobObject.argtypes = [
+                wintypes.HANDLE,
+                wintypes.HANDLE,
+            ]
             kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.argtypes = [
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            ]
             kernel32.OpenProcess.restype = wintypes.HANDLE
             kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
             kernel32.TerminateJobObject.restype = wintypes.BOOL
@@ -137,10 +144,10 @@ def _kill_tree(pid):
 
 def run_experiment(command, timeout):
     env = os.environ.copy()
-    env["PIXEL_REFINE_AOT_EXPERIMENT"] = "1"
+    env["AOT_EXPERIMENT"] = "1"
     env.setdefault("AOT_MODE", "1")
-    env.setdefault("PIXEL_REFINE_AOT_AUTOSCAN", "0")
-    env.setdefault("PIXEL_REFINE_CLEAN_ZOMBIES", "0")
+    env.setdefault("AOT_AUTOSCAN", "0")
+    env.setdefault("CLEAN_ZOMBIES", "0")
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = (
@@ -175,7 +182,9 @@ def run_experiment(command, timeout):
                     break
                 if timeout > 0 and time.monotonic() - start > timeout:
                     timed_out = True
-                    print("[AOT-EXPERIMENT] timeout reached; terminating job", flush=True)
+                    print(
+                        "[AOT-EXPERIMENT] timeout reached; terminating job", flush=True
+                    )
                     job.terminate(124)
                     _kill_tree(proc.pid)
                     break
@@ -207,7 +216,9 @@ def main():
     if command and command[0] == "--":
         command = command[1:]
     if not command:
-        parser.error("missing command, example: python -m taichi_library.taichi_algorithm.aot_py.tools.experiment -- python scratch/my_test.py")
+        parser.error(
+            "missing command, example: python -m taichi_library.taichi_algorithm.aot_py.tools.experiment -- python scratch/my_test.py"
+        )
     raise SystemExit(run_experiment(command, args.timeout))
 
 

@@ -42,6 +42,7 @@ __pycache__/
 dist/
 build/
 test_algorithm/
+ai_governance/
 pixel_refine_database.db
 build_instalasi.txt
 syarat.txt

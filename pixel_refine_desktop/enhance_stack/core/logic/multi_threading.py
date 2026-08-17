@@ -146,7 +146,7 @@ def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
         from taichi_library import taichi_aot
 
         with taichi_lock:
-            rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton-rgb-half-res")
+            rgb_f32 = taichi_aot.demosaic(image_path, method="bilinear", half_res=True)
         if rgb_f32 is not None:
             rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
             return np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
@@ -336,9 +336,7 @@ class ImageImportThreading(BaseMultiThreading):
 
         def import_task(image_path):
             database_manager.single_process_save_image_path(image_path)
-            self.image_added_signal.emit(
-                self.batch_id, image_path
-            )
+            self.image_added_signal.emit(self.batch_id, image_path)
 
         super().__init__(import_task, image_paths, batch_size, delay_ms)
 
@@ -378,6 +376,7 @@ class BatchImageImportThreading(BaseMultiThreading):
                         self.image_added_signal.emit(item_batch_id, path)
                 self.batch_imported_signal.emit(item_batch_id, saved_paths)
                 return (item_batch_id, saved_paths)
+
         else:
             items = image_paths if image_paths is not None else []
 

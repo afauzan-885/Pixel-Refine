@@ -101,11 +101,11 @@ class NoDenoisingAlgorithm:
 class SimilarityFusionDenoisingAlgorithm:
     NAME = "Similarity Fusion"
     KIND = "denoising"
-    DESCRIPTION = "Run the isolated Similarity.py fusion pipeline."
+    DESCRIPTION = "Run the backend-neutral Taichi AOT similarity fusion pipeline."
 
     def run(self, ctx, frames, batch_plan=None):
         raise RuntimeError(
-            "Similarity Fusion must be launched through Similarity.py::running_similarity_fusion."
+            "Similarity Fusion must be launched through MFDenoiser.running_similarity."
         )
 
 
@@ -461,21 +461,46 @@ class MFDenoiserAlgorithm:
     @staticmethod
     def _configure_compute_runtime(ctx):
         """Connect this pipeline to the shared adaptive block/VRAM runtime."""
-        # Block processing stays in the codebase as an experimental path, but
-        # production image algorithms currently use the validated full-frame
-        # route.  Do not let a saved legacy value such as ``auto`` re-enable it.
+        # Keep full-frame for backends with sufficient residency, but do not
+        # force a 12--50 MP OpenGL/GLES graph beyond its admission budget.
+        # The decision is runtime-derived and remains below the public API;
+        # unsupported individual graphs still use their same-backend
+        # full-frame path rather than silently switching to CPU.
         mode = "full_frame"
         block_enabled = False
         ctx.params["processing_mode"] = mode
-        print(
-            "[MFDenoiser][Compute] Full-frame mode enforced; block runtime is experimental."
-        )
         requested_size = int(ctx.params.get("tile_size", 256) or 256)
         block_size = max(64, min(1024, requested_size))
         block_size = max(64, (block_size // 16) * 16)
 
         try:
             from taichi_library import taichi_aot
+
+            engine = taichi_aot.get_engine()
+            backend = str(getattr(engine, "arch", "")).strip().lower()
+            memory = taichi_aot.get_memory_status(force=True)
+            pipeline_limit = int(memory.get("pipeline_resident_limit", 0) or 0)
+            pressure = str(memory.get("pressure", "healthy")).lower()
+            policy = os.environ.get("PIXEL_REFINE_MFDENOISER_BLOCK", "auto").strip().lower()
+            if policy in {"1", "true", "on", "block", "tile", "tiled"}:
+                block_enabled = True
+            elif policy in {"0", "false", "off", "full", "frame", "full_frame"}:
+                block_enabled = False
+            else:
+                # OpenGL/GLES desktop paths do not expose a reliable device
+                # heap budget.  Use bounded tiles whenever the resident limit
+                # is below the measured 768 MiB safe full-frame floor or the
+                # governor reports pressure; CUDA/Vulkan remain full-frame by
+                # default when their graph fits.
+                block_enabled = backend in {"opengl", "gles"} and (
+                    pressure != "healthy" or (pipeline_limit > 0 and pipeline_limit < 768 * 1024**2)
+                )
+            mode = "block" if block_enabled else "full_frame"
+            ctx.params["processing_mode"] = mode
+            print(
+                f"[MFDenoiser][Compute] mode={mode} backend={backend} "
+                f"pressure={pressure} pipeline_limit={pipeline_limit // (1024 * 1024)}MB"
+            )
 
             current = taichi_aot.get_block_config()
             host_cache_limit = (

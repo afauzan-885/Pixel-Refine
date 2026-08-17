@@ -1,4 +1,5 @@
 """Background, isolated multi-backend AOT compilation orchestrator."""
+
 from __future__ import annotations
 
 import argparse
@@ -32,29 +33,33 @@ def _host_is_arm64() -> bool:
 def target_toolchain_pending(target: str) -> str | None:
     """Explain profiles unavailable on this worker without relabeling output."""
     target = str(target)
-    cross_allowed = os.environ.get("PIXEL_REFINE_ALLOW_CROSS_CPU_AOT") == "1"
-    if target == "cpu_x86_64_linux" and os.name == "nt" and not cross_allowed:
+    if target == "cpu_x86_64_linux" and os.name == "nt":
         return (
-            "requires a Linux/glibc worker or an explicit x86_64-linux "
-            "cross-compiler profile"
+            "requires a Linux/glibc worker; this orchestrator has no "
+            "target-aware x86_64-linux cross compiler"
         )
-    if target.startswith("cuda_arm64") and not _host_is_arm64() and not cross_allowed:
+    # This orchestrator has no CUDA ARM64 cross-compiler.  Do not let the
+    # generic CPU cross override relabel a host-x86 CUDA payload as ARM64.
+    if target.startswith("cuda_arm64") and not _host_is_arm64():
         return (
-            "requires an ARM64 CUDA host worker or an explicit CUDA ARM64 "
-            "cross-compiler profile"
+            "requires an ARM64 CUDA host worker; no CUDA ARM64 cross-compiler "
+            "is implemented by this orchestrator"
         )
     return None
 
 
 def compile_backend(backend: str, timeout: int = 900):
     env = os.environ.copy()
-    env["PIXEL_REFINE_AOT_ARCH"] = backend
-    env["PIXEL_REFINE_AOT_COMPILE_ONLY"] = "1"
+    env["AOT_ARCH"] = backend
+    env["AOT_COMPILE_ONLY"] = "1"
     try:
         proc = subprocess.run(
             [sys.executable, str(SUITE), "--backend", backend],
-            cwd=str(ROOT), env=env, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=str(ROOT),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
@@ -73,10 +78,13 @@ def compile_backend(backend: str, timeout: int = 900):
             "status": "worker_error",
             "output": str(error),
         }
-    return {"backend": backend, "returncode": proc.returncode,
-            "ok": proc.returncode == 0,
-            "status": "success" if proc.returncode == 0 else "failed",
-            "output": proc.stdout[-12000:]}
+    return {
+        "backend": backend,
+        "returncode": proc.returncode,
+        "ok": proc.returncode == 0,
+        "status": "success" if proc.returncode == 0 else "failed",
+        "output": proc.stdout[-12000:],
+    }
 
 
 def _collect_progress(futures, labels):
@@ -99,7 +107,9 @@ def _collect_progress(futures, labels):
 def compile_all(backends, workers=None, timeout=900):
     workers = workers or min(len(backends), 3)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(compile_backend, backend, timeout) for backend in backends]
+        futures = [
+            pool.submit(compile_backend, backend, timeout) for backend in backends
+        ]
         return _collect_progress(futures, tuple(backends))
 
 
@@ -114,13 +124,16 @@ def compile_target(target: str, timeout: int = 900):
         raise ValueError(f"unsupported AOT target: {target}")
     backend = TARGET_BACKENDS[target]
     env = os.environ.copy()
-    env["PIXEL_REFINE_AOT_ARCH"] = backend
-    env["PIXEL_REFINE_AOT_COMPILE_ONLY"] = "1"
+    env["AOT_ARCH"] = backend
+    env["AOT_COMPILE_ONLY"] = "1"
     try:
         proc = subprocess.run(
             [sys.executable, str(SUITE), "--target", target],
-            cwd=str(ROOT), env=env, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=str(ROOT),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
@@ -163,7 +176,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument(
-        "--backends", nargs="+",
+        "--backends",
+        nargs="+",
         default=["cpu", "vulkan", "opengl", "cuda"],
         choices=SUPPORTED_BACKENDS,
         help=(
@@ -173,7 +187,9 @@ if __name__ == "__main__":
         ),
     )
     selection.add_argument(
-        "--targets", nargs="+", choices=SUPPORTED_TARGETS,
+        "--targets",
+        nargs="+",
+        choices=SUPPORTED_TARGETS,
         help=(
             "Compile exact architecture/OS/vendor profiles using the same "
             "source compiler. Toolchains for ARM/Android must already be "
@@ -181,7 +197,8 @@ if __name__ == "__main__":
         ),
     )
     selection.add_argument(
-        "--all-targets", action="store_true",
+        "--all-targets",
+        action="store_true",
         help=(
             "Compile the complete target matrix with the same source jobs. "
             "ARM/Android profiles require their configured cross-toolchains; "
@@ -189,7 +206,8 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--best-effort", action="store_true",
+        "--best-effort",
+        action="store_true",
         help=(
             "For target-matrix builds, skip profiles whose host/cross toolchain "
             "is unavailable and report them as PENDING. Without this flag the "
@@ -198,11 +216,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument(
-        "--timeout", type=int, default=900,
+        "--timeout",
+        type=int,
+        default=900,
         help="timeout in seconds for each isolated backend/target worker",
     )
     args = parser.parse_args()
     import json
+
     if args.all_targets or args.targets:
         requested_targets = tuple(
             SUPPORTED_TARGETS if args.all_targets else args.targets
@@ -226,7 +247,8 @@ if __name__ == "__main__":
                 )
         result = (
             compile_targets(build_targets, args.workers or None, args.timeout)
-            if build_targets else []
+            if build_targets
+            else []
         )
         result.extend(pending)
     else:

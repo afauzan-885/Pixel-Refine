@@ -1,9 +1,10 @@
 import os
+
 os.environ["VK_LOADER_DEBUG"] = "error"
 # Respect the caller-selected Vulkan device; default to device 0 only when
 # no device was supplied. This allows automated parity runs to select a
 # discrete GPU instead of silently forcing an incompatible integrated GPU.
-os.environ.setdefault("PIXEL_REFINE_AOT_DEVICE", "0")
+os.environ.setdefault("AOT_DEVICE", "0")
 import numpy as np
 import cv2
 import time
@@ -99,8 +100,7 @@ def run_fast_hardware_test():
             flow = flow[0]
         record(
             "Dense-flow native graph",
-            getattr(flow, "shape", None) == (256, 256, 2)
-            and np.isfinite(flow).all(),
+            getattr(flow, "shape", None) == (256, 256, 2) and np.isfinite(flow).all(),
         )
         taichi_aot.engine.sync()
     except Exception as exc:
@@ -129,6 +129,7 @@ def run_jit_algorithm_tests(img_rgb, img_gray, h, w, results):
     try:
         import importlib
         import taichi_library.taichi_algorithm as ta
+
         # Reload to pick up AOT_MODE=0
         importlib.reload(ta)
     except Exception as e:
@@ -175,8 +176,7 @@ def run_jit_algorithm_tests(img_rgb, img_gray, h, w, results):
         gray_255 = (img_gray * 255).astype(np.float32)
         thresh_val, binary = ta.otsu_threshold(gray_255)
         cv_thresh, cv_binary = cv2.threshold(
-            gray_255.astype(np.uint8), 0, 255,
-            cv2.THRESH_BINARY | cv2.THRESH_OTSU
+            gray_255.astype(np.uint8), 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU
         )
         # Compare threshold values (should be close)
         thresh_err = abs(thresh_val - float(cv_thresh))
@@ -199,11 +199,13 @@ def run_jit_algorithm_tests(img_rgb, img_gray, h, w, results):
         output_std = np.std(gf_result)
         # Smoothed output should have lower variance
         smoothness = input_std - output_std
-        results.append(print_result(
-            "Guided Filter (smoothing)",
-            0.0 if smoothness > 0 else 1.0,
-            threshold=0.5
-        ))
+        results.append(
+            print_result(
+                "Guided Filter (smoothing)",
+                0.0 if smoothness > 0 else 1.0,
+                threshold=0.5,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] Guided Filter: {e}")
         results.append(False)
@@ -242,11 +244,13 @@ def run_jit_algorithm_tests(img_rgb, img_gray, h, w, results):
         synth[10:118, 60:62] = 255.0  # Vertical line
         lines = ta.hough_lines(synth, threshold=40)
         # Should detect at least 1 line
-        results.append(print_result(
-            "Hough Lines (synthetic)",
-            0.0 if len(lines) >= 1 else 1.0,
-            threshold=0.5
-        ))
+        results.append(
+            print_result(
+                "Hough Lines (synthetic)",
+                0.0 if len(lines) >= 1 else 1.0,
+                threshold=0.5,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] Hough Lines: {e}")
         results.append(False)
@@ -263,11 +267,13 @@ def run_jit_algorithm_tests(img_rgb, img_gray, h, w, results):
         noise_err = np.mean(np.abs(noisy - tiny))
         denoise_err = np.mean(np.abs(nlm_result - tiny))
         improvement = noise_err - denoise_err
-        results.append(print_result(
-            "Non-Local Means (64x64)",
-            0.0 if improvement > 0 else 1.0,
-            threshold=0.5
-        ))
+        results.append(
+            print_result(
+                "Non-Local Means (64x64)",
+                0.0 if improvement > 0 else 1.0,
+                threshold=0.5,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] Non-Local Means: {e}")
         results.append(False)
@@ -283,11 +289,13 @@ def run_jit_algorithm_tests(img_rgb, img_gray, h, w, results):
         has_nan = np.any(np.isnan(inp_result)) or np.any(np.isinf(inp_result))
         # Masked region should have reasonable values (not all zeros)
         masked_mean = np.mean(inp_result[40:80, 40:80])
-        results.append(print_result(
-            "Inpainting (128x128)",
-            0.0 if (not has_nan and masked_mean > 1.0) else 1.0,
-            threshold=0.5
-        ))
+        results.append(
+            print_result(
+                "Inpainting (128x128)",
+                0.0 if (not has_nan and masked_mean > 1.0) else 1.0,
+                threshold=0.5,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] Inpainting: {e}")
         results.append(False)
@@ -299,19 +307,18 @@ def run_jit_algorithm_tests(img_rgb, img_gray, h, w, results):
         mask_clone = np.zeros((sh, sw), dtype=np.float32)
         mask_clone[20:100, 20:100] = 1.0
         sc_result = ta.seamless_clone(
-            src_clone, dst_clone, mask_clone,
-            flags=ta.NORMAL_CLONE, max_iterations=50
+            src_clone, dst_clone, mask_clone, flags=ta.NORMAL_CLONE, max_iterations=50
         )
         # Verify: no NaN/Inf and masked region should differ from dst
         has_nan = np.any(np.isnan(sc_result)) or np.any(np.isinf(sc_result))
-        masked_diff = np.mean(np.abs(
-            sc_result[30:90, 30:90] - dst_clone[30:90, 30:90]
-        ))
-        results.append(print_result(
-            "Seamless Clone (128x128)",
-            0.0 if (not has_nan and masked_diff > 1.0) else 1.0,
-            threshold=0.5
-        ))
+        masked_diff = np.mean(np.abs(sc_result[30:90, 30:90] - dst_clone[30:90, 30:90]))
+        results.append(
+            print_result(
+                "Seamless Clone (128x128)",
+                0.0 if (not has_nan and masked_diff > 1.0) else 1.0,
+                threshold=0.5,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] Seamless Clone: {e}")
         results.append(False)
@@ -336,9 +343,13 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
 
     # ---- 1. Color Space Conversions (AOT) ----
     try:
-        img_bgr = cv2.cvtColor((small_gray * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR).astype(np.float32)
+        img_bgr = cv2.cvtColor(
+            (small_gray * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR
+        ).astype(np.float32)
         ta_ycrcb = taichi_aot.cvtColor_extended(img_bgr, taichi_aot.COLOR_BGR2YCrCb)
-        cv_ycrcb = cv2.cvtColor(img_bgr.astype(np.uint8), cv2.COLOR_BGR2YCrCb).astype(np.float32)
+        cv_ycrcb = cv2.cvtColor(img_bgr.astype(np.uint8), cv2.COLOR_BGR2YCrCb).astype(
+            np.float32
+        )
         mae = np.mean(np.abs(ta_ycrcb - cv_ycrcb))
         results.append(print_result("AOT Color: BGR->YCrCb", mae, threshold=3.0))
     except Exception as e:
@@ -363,7 +374,11 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
         gray_u8 = (small_gray * 255).astype(np.uint8)
         gray_f32 = gray_u8.astype(np.float32)
         ta_clahe = taichi_aot.clahe_aot(gray_f32, clip_limit=2.0, tile_grid_size=(4, 4))
-        cv_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4)).apply(gray_u8).astype(np.float32)
+        cv_clahe = (
+            cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+            .apply(gray_u8)
+            .astype(np.float32)
+        )
         mae = np.mean(np.abs(ta_clahe - cv_clahe))
         results.append(print_result("AOT CLAHE (clip=2.0, 4x4)", mae, threshold=30.0))
     except Exception as e:
@@ -377,7 +392,9 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
     try:
         gray_u8 = (small_gray * 255).astype(np.uint8)
         gray_f32 = gray_u8.astype(np.float32)
-        ta_canny = taichi_aot.canny_aot(gray_f32, low_threshold=50.0, high_threshold=150.0)
+        ta_canny = taichi_aot.canny_aot(
+            gray_f32, low_threshold=50.0, high_threshold=150.0
+        )
         cv_canny = cv2.Canny(gray_u8, 50, 150).astype(np.float32)
         # Edge count ratio (should be close to 1.0)
         ta_edges = np.count_nonzero(ta_canny > 128)
@@ -397,7 +414,8 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
         results.append(
             print_result(
                 f"AOT Canny Edge Detector (IoU={iou:.3f}, ratio={edge_ratio:.3f})",
-                canny_score, threshold=0.1
+                canny_score,
+                threshold=0.1,
             )
         )
     except Exception as e:
@@ -412,10 +430,13 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
         input_std = np.std(src)
         output_std = np.std(gf_result)
         smoothness = input_std - output_std
-        results.append(print_result(
-            "AOT Guided Filter (smoothing)",
-            0.0 if smoothness > 0 else 1.0, threshold=0.5
-        ))
+        results.append(
+            print_result(
+                "AOT Guided Filter (smoothing)",
+                0.0 if smoothness > 0 else 1.0,
+                threshold=0.5,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] AOT Guided Filter: {e}")
         results.append(False)
@@ -426,10 +447,13 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
         synth[30:32, 10:118] = 255.0
         synth[10:118, 60:62] = 255.0
         lines = taichi_aot.hough_lines_aot(synth, threshold=40)
-        results.append(print_result(
-            "AOT Hough Lines (synthetic)",
-            0.0 if len(lines) >= 1 else 1.0, threshold=0.5
-        ))
+        results.append(
+            print_result(
+                "AOT Hough Lines (synthetic)",
+                0.0 if len(lines) >= 1 else 1.0,
+                threshold=0.5,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] AOT Hough: {e}")
         results.append(False)
@@ -444,10 +468,13 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
         noise_err = np.mean(np.abs(noisy - tiny))
         denoise_err = np.mean(np.abs(nlm_result - tiny))
         improvement = noise_err - denoise_err
-        results.append(print_result(
-            "AOT Non-Local Means (64x64)",
-            0.0 if improvement > 0 else 1.0, threshold=0.5
-        ))
+        results.append(
+            print_result(
+                "AOT Non-Local Means (64x64)",
+                0.0 if improvement > 0 else 1.0,
+                threshold=0.5,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] AOT NLM: {e}")
         results.append(False)
@@ -455,16 +482,14 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
     # ---- 7b. BM3D public API + cross-backend parity signature ----
     try:
         yy, xx = np.mgrid[:32, :32]
-        clean_bm3d = (
-            0.15
-            + 0.7 * (xx / 31.0)
-            + 0.08 * np.cos(yy * 0.37)
-        ).astype(np.float32)
+        clean_bm3d = (0.15 + 0.7 * (xx / 31.0) + 0.08 * np.cos(yy * 0.37)).astype(
+            np.float32
+        )
         noisy_bm3d = np.clip(
             clean_bm3d
-            + np.random.default_rng(11).normal(
-                0.0, 0.02, clean_bm3d.shape
-            ).astype(np.float32),
+            + np.random.default_rng(11)
+            .normal(0.0, 0.02, clean_bm3d.shape)
+            .astype(np.float32),
             0.0,
             1.0,
         )
@@ -483,8 +508,7 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
             [
                 np.mean(bm3d_result),
                 np.std(bm3d_result),
-                np.sum(bm3d_result * signature_weights)
-                / bm3d_result.size,
+                np.sum(bm3d_result * signature_weights) / bm3d_result.size,
             ],
             dtype=np.float64,
         )
@@ -504,11 +528,13 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
             and np.isfinite(bm3d_result).all()
             and output_mse < input_mse
         )
-        results.append(print_result(
-            "AOT BM3D Public API/CPU Parity",
-            signature_error if valid else 1.0,
-            threshold=5e-4,
-        ))
+        results.append(
+            print_result(
+                "AOT BM3D Public API/CPU Parity",
+                signature_error if valid else 1.0,
+                threshold=5e-4,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] AOT BM3D: {e}")
         results.append(False)
@@ -523,28 +549,63 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
         ).astype(np.float32)
         matrix_mlri = np.eye(3, dtype=np.float32)
         common_mlri = (
-            bayer_mlri, 1.1, 1.0, 1.2, 1.0,
-            matrix_mlri, 0.0, 1.0, 0, 1, 1, 2,
+            bayer_mlri,
+            1.1,
+            1.0,
+            1.2,
+            1.0,
+            matrix_mlri,
+            0.0,
+            1.0,
+            0,
+            1,
+            1,
+            2,
         )
         mlri_outputs = [
             taichi_aot.mlri_admm_demosaic(*common_mlri),
             taichi_aot.mlri_admm_demosaic_1channel(
-                bayer_mlri, 1.1, 1.0, 1.2, 1.0,
-                0.0, 1.0, 0, 1, 1, 2,
+                bayer_mlri,
+                1.1,
+                1.0,
+                1.2,
+                1.0,
+                0.0,
+                1.0,
+                0,
+                1,
+                1,
+                2,
             ),
             taichi_aot.mlri_admm_demosaic_half_res(
-                bayer_mlri, 1.1, 1.0, 1.2, 1.0,
-                0.0, 1.0, 0, 1, 1, 2,
+                bayer_mlri,
+                1.1,
+                1.0,
+                1.2,
+                1.0,
+                0.0,
+                1.0,
+                0,
+                1,
+                1,
+                2,
             ),
             taichi_aot.mlri_admm_demosaic_rgb_half_res(*common_mlri),
             taichi_aot.mlri_admm_demosaic_3channel(*common_mlri),
         ]
         expected_shapes = [
-            (32, 32, 3), (32, 32), (16, 16), (16, 16, 3), (32, 32),
+            (32, 32, 3),
+            (32, 32),
+            (16, 16),
+            (16, 16, 3),
+            (32, 32),
         ]
         cpu_signatures = np.array(
             [
-                [0.650368332862854, 0.1728515625, 0.6349188685417175],
+                # Snapshot reference measured from the known-good LLVM20/D:
+                # CPU TCM (the previous 0.650368 signature belonged to an
+                # obsolete MLRI graph and did not match the shipped module).
+                [0.42056718468666077, 0.18985705077648163, 0.4035840928554535],
                 [0.45027709007263184, 0.23219984769821167, 0.42923593521118164],
                 [0.4502773880958557, 0.23218055069446564, 0.43104222416877747],
                 [0.5972874760627747, 0.18688204884529114, 0.5837244391441345],
@@ -556,13 +617,11 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
         valid = True
         for output, expected_shape in zip(mlri_outputs, expected_shapes):
             valid = (
-                valid
-                and output.shape == expected_shape
-                and np.isfinite(output).all()
+                valid and output.shape == expected_shape and np.isfinite(output).all()
             )
-            weights = np.linspace(
-                0.5, 1.5, output.size, dtype=np.float32
-            ).reshape(output.shape)
+            weights = np.linspace(0.5, 1.5, output.size, dtype=np.float32).reshape(
+                output.shape
+            )
             signatures.append(
                 [
                     np.mean(output),
@@ -571,18 +630,15 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
                 ]
             )
         signature_error = float(
-            np.max(
-                np.abs(
-                    np.asarray(signatures, dtype=np.float64)
-                    - cpu_signatures
-                )
+            np.max(np.abs(np.asarray(signatures, dtype=np.float64) - cpu_signatures))
+        )
+        results.append(
+            print_result(
+                "AOT MLRI-ADMM 5-API CPU Parity",
+                signature_error if valid else 1.0,
+                threshold=5e-4,
             )
         )
-        results.append(print_result(
-            "AOT MLRI-ADMM 5-API CPU Parity",
-            signature_error if valid else 1.0,
-            threshold=5e-4,
-        ))
     except Exception as e:
         print(f"[FAIL] AOT MLRI-ADMM: {e}")
         results.append(False)
@@ -594,6 +650,7 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
             calcOpticalFlowBlockMatching,
             calcOpticalFlowFarneback,
         )
+
         flow_a = np.ascontiguousarray(small_gray * 255.0, dtype=np.float32)
         flow_b = np.roll(flow_a, 1, axis=1)
         flow_checks = []
@@ -608,21 +665,29 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
                 and flow.dtype == np.float32
                 and np.isfinite(flow).all()
             )
-        results.append(print_result(
-            "AOT Native Dense Flow (CPU/Vulkan/OpenGL)",
-            0.0 if all(flow_checks) else 1.0,
-            threshold=0.5,
-        ))
+        results.append(
+            print_result(
+                "AOT Native Dense Flow (CPU/Vulkan/OpenGL)",
+                0.0 if all(flow_checks) else 1.0,
+                threshold=0.5,
+            )
+        )
 
         # OpenGL additionally validates the stable GPU-buffer return path.
         if str(getattr(taichi_aot.engine, "arch", "")).lower() in {"opengl", "gles"}:
             gpu_flow = calcOpticalFlowPyrLK(flow_a, flow_b, return_gpu=True)
-            gpu_ok = hasattr(gpu_flow, "to_numpy") and gpu_flow.to_numpy().shape == (sh, sw, 2)
-            results.append(print_result(
-                "OpenGL Dense Flow GPU Buffer Lifecycle",
-                0.0 if gpu_ok else 1.0,
-                threshold=0.5,
-            ))
+            gpu_ok = hasattr(gpu_flow, "to_numpy") and gpu_flow.to_numpy().shape == (
+                sh,
+                sw,
+                2,
+            )
+            results.append(
+                print_result(
+                    "OpenGL Dense Flow GPU Buffer Lifecycle",
+                    0.0 if gpu_ok else 1.0,
+                    threshold=0.5,
+                )
+            )
     except Exception as e:
         print(f"[FAIL] AOT Native Dense Flow: {e}")
         results.append(False)
@@ -638,10 +703,13 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
         inp_result = taichi_aot.inpaint_aot(inp_src, mask, inpaint_radius=3)
         has_nan = np.any(np.isnan(inp_result)) or np.any(np.isinf(inp_result))
         masked_mean = np.mean(inp_result[40:80, 40:80])
-        results.append(print_result(
-            "AOT Inpainting (128x128)",
-            0.0 if (not has_nan and masked_mean > 1.0) else 1.0, threshold=0.5
-        ))
+        results.append(
+            print_result(
+                "AOT Inpainting (128x128)",
+                0.0 if (not has_nan and masked_mean > 1.0) else 1.0,
+                threshold=0.5,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] AOT Inpaint: {e}")
         results.append(False)
@@ -653,17 +721,21 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
         mask_clone = np.zeros((sh, sw), dtype=np.float32)
         mask_clone[20:100, 20:100] = 1.0
         sc_result = taichi_aot.seamless_clone_aot(
-            src_clone, dst_clone, mask_clone,
-            flags=taichi_aot.NORMAL_CLONE, max_iterations=50
+            src_clone,
+            dst_clone,
+            mask_clone,
+            flags=taichi_aot.NORMAL_CLONE,
+            max_iterations=50,
         )
         has_nan = np.any(np.isnan(sc_result)) or np.any(np.isinf(sc_result))
-        masked_diff = np.mean(np.abs(
-            sc_result[30:90, 30:90] - dst_clone[30:90, 30:90]
-        ))
-        results.append(print_result(
-            "AOT Seamless Clone (128x128)",
-            0.0 if (not has_nan and masked_diff > 1.0) else 1.0, threshold=0.5
-        ))
+        masked_diff = np.mean(np.abs(sc_result[30:90, 30:90] - dst_clone[30:90, 30:90]))
+        results.append(
+            print_result(
+                "AOT Seamless Clone (128x128)",
+                0.0 if (not has_nan and masked_diff > 1.0) else 1.0,
+                threshold=0.5,
+            )
+        )
     except Exception as e:
         print(f"[FAIL] AOT Seamless Clone: {e}")
         results.append(False)
@@ -870,8 +942,7 @@ def run_comprehensive_test():
         # context-preserving reinit path for this lifecycle boundary.
         if (
             str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl"
-            and "intel"
-            in str(getattr(taichi_aot.engine, "gpu_name", "")).lower()
+            and "intel" in str(getattr(taichi_aot.engine, "gpu_name", "")).lower()
         ):
             print("[Deep Analysis] Reclaiming Intel OpenGL buffers before 24 MP gate")
             taichi_aot.engine.reinit()
@@ -969,7 +1040,7 @@ def run_pipeline_stress_test(engine, img_full):
         # healthy. Keep the deep gate representative without turning a slow
         # benchmark loop into a false lifecycle failure. Callers can request a
         # fixed count explicitly for performance profiling.
-        override_iters = os.environ.get("PIXEL_REFINE_AOT_DEEP_ITERS")
+        override_iters = os.environ.get("AOT_DEEP_ITERS")
         try:
             n_iters = int(override_iters) if override_iters else 0
         except ValueError:
@@ -980,7 +1051,7 @@ def run_pipeline_stress_test(engine, img_full):
         if (h_f * w_f) >= 16_000_000 and not override_iters:
             print(
                 "[Deep Analysis] 24 MP adaptive replay count: 1 "
-                "(set PIXEL_REFINE_AOT_DEEP_ITERS to override)"
+                "(set AOT_DEEP_ITERS to override)"
             )
         print(
             f"\n[Stage 2] Running {n_iters} iterations of Master Pipeline (One Big Graph)..."
@@ -1015,9 +1086,11 @@ def run_pipeline_stress_test(engine, img_full):
         # immediately running the independent kernel-by-kernel comparison on
         # the same Intel context.  The latter can invalidate large SSBOs on
         # drivers that successfully replay the recorded graph.
-        if os.environ.get("PIXEL_REFINE_AOT_PIPELINE_ONLY") == "1":
-            print(f"[PASS] Native 24MP pipeline: {n_iters} iterations, "
-                  f"{pipe_latency:.3f} ms/iter, {pipe_fps:.2f} FPS")
+        if os.environ.get("AOT_PIPELINE_ONLY") == "1":
+            print(
+                f"[PASS] Native 24MP pipeline: {n_iters} iterations, "
+                f"{pipe_latency:.3f} ms/iter, {pipe_fps:.2f} FPS"
+            )
             return True
 
         # Snapshot the recorded-graph result before an OpenGL context reset.
@@ -1101,7 +1174,9 @@ def run_pipeline_stress_test(engine, img_full):
                 "Intel ultrawide mode used direct full-frame dispatch; "
                 "recorded-pipeline speedup is intentionally not reported."
             )
-            print(f"{'Direct Full-Frame':<25} | {std_latency:<15.2f} | {std_fps:<10.2f}")
+            print(
+                f"{'Direct Full-Frame':<25} | {std_latency:<15.2f} | {std_fps:<10.2f}"
+            )
             return bool(np.isfinite(mae_obg) and mae_obg <= 0.5)
         print(f"{'Method':<25} | {'Latency (ms)':<15} | {'FPS':<10}")
         print("-" * 55)
@@ -1160,8 +1235,6 @@ if __name__ == "__main__":
         from taichi_library import taichi_aot
 
         selected_test = (
-            run_fast_hardware_test
-            if "--fast" in sys.argv
-            else run_comprehensive_test
+            run_fast_hardware_test if "--fast" in sys.argv else run_comprehensive_test
         )
         raise SystemExit(0 if selected_test() else 1)

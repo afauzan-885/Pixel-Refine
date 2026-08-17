@@ -561,9 +561,11 @@ def upsample_flow_bicubic_kernel(
 
 
 # 🚀 SEKARANG PERBARUI FUNGSI GRAPH COMPILATION AGAR MENGENAL NDARRAY BARU
-def compile_compute_flow():
-    ti.init(arch=ti.vulkan)
-    module = ti.aot.Module(ti.vulkan)
+def compile_compute_flow(arch=None, suffix="vulkan"):
+    if arch is None:
+        arch = ti.vulkan
+    ti.init(arch=arch)
+    module = ti.aot.Module(arch)
 
     sym_ref_l0, sym_ref_l1, sym_ref_l2 = (
         ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref_l0", dtype=ti.f32, ndim=2),
@@ -646,7 +648,7 @@ def compile_compute_flow():
     out_dir = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "../../../../../ui/data/aot_assets")
     )
-    tcm_path = os.path.join(out_dir, "compute_flow_vulkan.tcm")
+    tcm_path = os.path.join(out_dir, f"compute_flow_{suffix}.tcm")
     with zipfile.ZipFile(tcm_path, "w", zipfile.ZIP_DEFLATED) as tcm_zip:
         for root, dirs, files in os.walk(tmp_dir):
             for file in files:

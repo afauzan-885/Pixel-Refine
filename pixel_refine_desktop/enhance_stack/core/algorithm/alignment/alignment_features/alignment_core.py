@@ -28,7 +28,7 @@ def get_taichi_worker():
     from taichi_library.taichi_algorithm.taichi_worker import _get_worker
 
     worker = _get_worker()
-    # Add compatibility method if needed inside Similarity.py
+    # Add compatibility method here only if the alignment contract requires it.
     if not hasattr(worker, "submit_and_wait"):
         worker.submit_and_wait = worker.submit
     return worker
@@ -579,7 +579,7 @@ def perform_alignment_gpu(
     proxy_scale = kwargs.get("proxy_scale", 1.0)
     search_dist = kwargs.get("search_dist", 2.0)
     flow_backend = kwargs.get("flow_backend", optical_flow_type)
-    active_arch = engine._active_arch if hasattr(engine, "_active_arch") else "vulkan"
+    active_arch = str(getattr(engine, "arch", "vulkan")).lower()
 
     if flow_backend == "horn_schunck":
         # Horn-Schunck: TCM ada di taichi_library/taichi_algorithm/aot_tcm/
@@ -592,16 +592,16 @@ def perform_alignment_gpu(
         flow_graph_name = "block_align_end_to_end_3layer"
         save_backend_name = "BLOCK_ALIGN"
     elif flow_backend in ("farneback_jit", "farneback_aot"):
-        # Farneback AOT: pre-compiled TCM module via engine.py
-        flow_module_name = "farneback_flow_vulkan.tcm"
+        # Farneback AOT: pre-compiled TCM module via engine.py (backend-aware)
+        flow_module_name = f"farneback_flow_{active_arch}.tcm"
         flow_graph_name = "farneback_multi_3"  # 3 iterations per pyramid level
         save_backend_name = "FARNEBACK_AOT"
     elif flow_backend == "alignment_tile":
-        flow_module_name = "compute_flow_vulkan.tcm"
+        flow_module_name = f"compute_flow_{active_arch}.tcm"
         flow_graph_name = "align_end_to_end_3layer"
         save_backend_name = "GPU_AOT"
     else:
-        flow_module_name = "compute_flow_vulkan.tcm"
+        flow_module_name = f"compute_flow_{active_arch}.tcm"
         flow_graph_name = "align_end_to_end_3layer"
         save_backend_name = "GPU_AOT"
     index_offset = kwargs.get("index_offset", 0)

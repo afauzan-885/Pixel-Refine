@@ -22,6 +22,7 @@ The script never overwrites the x86_64 artifacts.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -43,9 +44,11 @@ ARM_DATALAYOUT = (
     "i64:64-i128:128-n32:64-S128-Fn32"
 )
 TRIPLES = {
-    "cpu_arm64_android": "aarch64-unknown-linux-android21",
+    "cpu_arm64_android": "aarch64-unknown-linux-android26",
     "cpu_arm64_linux": "aarch64-unknown-linux-gnu",
 }
+
+DEFAULT_ANDROID_API = int(os.environ.get("PIXEL_REFINE_ANDROID_API", "26"))
 
 
 def _rewrite_ir(payload: bytes, triple: str) -> bytes:
@@ -187,7 +190,18 @@ def main() -> int:
     parser.add_argument(
         "--clang",
         type=Path,
-        default=ROOT
+        default=None,
+        help="AArch64 clang wrapper used for textual IR validation",
+    )
+    parser.add_argument("--api-level", type=int, default=DEFAULT_ANDROID_API)
+    parser.add_argument("--limit", type=int, default=0, help="validate only the first N archives")
+    args = parser.parse_args()
+
+    source = args.source.resolve()
+    output = (args.output or TCM_ROOT / args.target).resolve()
+    clang = (
+        args.clang
+        or ROOT
         / "test_algorithm"
         / "android_ndk_extract"
         / "android-ndk-r25c"
@@ -196,19 +210,36 @@ def main() -> int:
         / "prebuilt"
         / "windows-x86_64"
         / "bin"
-        / "aarch64-linux-android21-clang.cmd",
-        help="AArch64 clang wrapper used for textual IR validation",
-    )
-    parser.add_argument("--limit", type=int, default=0, help="validate only the first N archives")
-    args = parser.parse_args()
-
-    source = args.source.resolve()
-    output = (args.output or TCM_ROOT / args.target).resolve()
-    clang = args.clang.resolve()
+        / f"aarch64-linux-android{args.api_level}-clang.cmd"
+    ).resolve()
+    if args.target == "cpu_arm64_android" and args.api_level < 26:
+        raise SystemExit("ARM Android retargeting requires API26 or newer")
     if not source.is_dir():
         raise SystemExit(f"source directory does not exist: {source}")
     if not clang.exists():
         raise SystemExit(f"AArch64 clang wrapper does not exist: {clang}")
+    version_command = (
+        str(clang) + " --version"
+        if clang.suffix.lower() == ".cmd"
+        else [str(clang), "--version"]
+    )
+    version_result = subprocess.run(
+        version_command,
+        capture_output=True,
+        text=True,
+        check=False,
+        shell=clang.suffix.lower() == ".cmd",
+    )
+    version_match = re.search(
+        r"(?:clang version|clang)\s+(\d+)",
+        version_result.stdout + version_result.stderr,
+        re.IGNORECASE,
+    )
+    if version_match is None or int(version_match.group(1)) != 20:
+        raise SystemExit(
+            "ARM TCM retargeting requires LLVM/Clang 20; legacy NDK LLVM14 "
+            "must not be mixed with LLVM20 runtime bitcode"
+        )
     archives = sorted(source.glob("*.tcm"))
     if args.limit > 0:
         archives = archives[: args.limit]
@@ -216,7 +247,11 @@ def main() -> int:
         raise SystemExit(f"no .tcm archives found in {source}")
 
     output.mkdir(parents=True, exist_ok=True)
-    triple = TRIPLES[args.target]
+    triple = (
+        f"aarch64-unknown-linux-android{args.api_level}"
+        if args.target == "cpu_arm64_android"
+        else TRIPLES[args.target]
+    )
     total_ir = 0
     for index, archive in enumerate(archives, 1):
         destination = output / f"{archive.stem.rsplit('_cpu_x86_64_windows', 1)[0]}_{args.target}.tcm"

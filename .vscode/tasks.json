@@ -1,21 +1,17 @@
 {
     "tasks": [
         {
-            "type": "cppbuild",
-            "label": "C/C++: gcc.exe build active file",
-            "command": "C:/MinGW/bin/gcc.exe",
+            "type": "shell",
+            "label": "C/C++: MSVC 2022 build active file",
+            "command": "cmd.exe",
             "args": [
-                "-fdiagnostics-color=always",
-                "-g",
-                "${file}",
-                "-o",
-                "${fileDirname}\\${fileBasenameNoExtension}.exe"
+                "/d",
+                "/s",
+                "/c",
+                "call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\" -arch=x64 && cl /nologo /EHsc \"${file}\" /Fe:\"${fileDirname}\\${fileBasenameNoExtension}.exe\""
             ],
-            "options": {
-                "cwd": "C:/MinGW/bin"
-            },
             "problemMatcher": [
-                "$gcc"
+                "$msCompile"
             ],
             "group": {
                 "kind": "build",

@@ -201,14 +201,14 @@ class SpatialFusionProcessor:
             )
 
             try:
-                batch_size = int(os.environ.get("PIXEL_REFINE_SPATIAL_BATCH_SIZE", "2"))
+                batch_size = int(os.environ.get("SPATIAL_BATCH_SIZE", "2"))
             except (TypeError, ValueError):
                 batch_size = 2
             batch_size = max(1, min(batch_size, 8))
             try:
                 cleanup_interval = max(
                     1,
-                    int(os.environ.get("PIXEL_REFINE_SPATIAL_VRAM_CHECK_INTERVAL", "4")),
+                    int(os.environ.get("SPATIAL_VRAM_CHECK_INTERVAL", "4")),
                 )
             except (TypeError, ValueError):
                 cleanup_interval = 4
@@ -381,7 +381,7 @@ class SpatialFusionProcessor:
                         except:
                             pass
                 cleanup_idle_vram("final")
-                if os.environ.get("PIXEL_REFINE_AOT_CLEAR_AFTER_OP", "0") == "1":
+                if os.environ.get("AOT_CLEAR_AFTER_OP", "0") == "1":
                     taichi_aot.unload_all_modules()
                     engine.buffer_pool.clear()
 

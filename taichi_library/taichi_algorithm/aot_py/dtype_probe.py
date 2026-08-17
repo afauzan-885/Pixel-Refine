@@ -7,7 +7,7 @@ round-trip support from actual graph support.
 
 Example::
 
-    $env:PIXEL_REFINE_AOT_ARCH = "cpu"
+    $env:AOT_ARCH = "cpu"
     python taichi_library/taichi_algorithm/aot_py/dtype_probe.py --dtype uint16
 """
 
@@ -56,12 +56,12 @@ def _attempt(result, key, fn):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dtype", choices=sorted(DTYPES), required=True)
-    parser.add_argument("--backend", default=os.environ.get("PIXEL_REFINE_AOT_ARCH", "cpu"))
-    parser.add_argument("--device", default=os.environ.get("PIXEL_REFINE_AOT_DEVICE", "0"))
+    parser.add_argument("--backend", default=os.environ.get("AOT_ARCH", "cpu"))
+    parser.add_argument("--device", default=os.environ.get("AOT_DEVICE", "0"))
     args = parser.parse_args()
-    os.environ["PIXEL_REFINE_AOT_ARCH"] = args.backend
-    os.environ["PIXEL_REFINE_AOT_DEVICE"] = str(args.device)
-    os.environ.setdefault("PIXEL_REFINE_AOT_ALLOW_LEGACY_ARTIFACTS", "0")
+    os.environ["AOT_ARCH"] = args.backend
+    os.environ["AOT_DEVICE"] = str(args.device)
+    os.environ.setdefault("AOT_ALLOW_LEGACY_ARTIFACTS", "0")
 
     dtype = DTYPES[args.dtype]
     source = _sample(dtype)
@@ -104,9 +104,7 @@ def main():
         cast_src = engine.upload(cast_source)
         cast_i16 = cast_src.cast(np.int16, host_accessible=True)
         cast_back = cast_i16.cast(np.float32, host_accessible=True).to_numpy()
-        expected_i16 = np.array(
-            [-32768, -12, 0, 1, 32767, -32768], dtype=np.int16
-        )
+        expected_i16 = np.array([-32768, -12, 0, 1, 32767, -32768], dtype=np.int16)
         cast_equal = bool(np.array_equal(cast_i16.to_numpy(), expected_i16))
         cast_roundtrip_equal = bool(
             np.array_equal(cast_back, expected_i16.astype(np.float32))
@@ -138,7 +136,10 @@ def main():
 
     def gray_graph():
         output = np.asarray(ta.rgb2gray(source))
-        return {"output_dtype": np.dtype(output.dtype).name, "shape": list(output.shape)}
+        return {
+            "output_dtype": np.dtype(output.dtype).name,
+            "shape": list(output.shape),
+        }
 
     def channel_graphs():
         extracted = np.asarray(ta.extract_channel(source, 1))

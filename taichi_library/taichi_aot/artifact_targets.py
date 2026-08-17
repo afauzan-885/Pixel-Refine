@@ -133,7 +133,9 @@ class TargetSpec:
     def __post_init__(self) -> None:
         object.__setattr__(self, "arch", canonical_arch(self.arch))
         object.__setattr__(self, "os", canonical_os(self.os))
-        object.__setattr__(self, "backend", canonical_backend(self.backend, os_name=self.os))
+        object.__setattr__(
+            self, "backend", canonical_backend(self.backend, os_name=self.os)
+        )
         object.__setattr__(self, "vendor", canonical_vendor(self.vendor))
         if self.backend == "cuda" and self.vendor not in {"unknown", "nvidia"}:
             raise ValueError("CUDA artifacts require an NVIDIA vendor")
@@ -145,7 +147,12 @@ class TargetSpec:
         parts = [self.backend, self.arch]
         if self.os != "unknown":
             parts.append(self.os)
-        if self.vendor != "unknown" and self.backend in {"cuda", "vulkan", "gles", "opengl"}:
+        if self.vendor != "unknown" and self.backend in {
+            "cuda",
+            "vulkan",
+            "gles",
+            "opengl",
+        }:
             parts.append(self.vendor)
         if self.variant:
             parts.append(self.variant)
@@ -166,7 +173,11 @@ class TargetSpec:
         return f"{stem}_{self.target_id}.{extension.lstrip('.') }"
 
     def bridge_name(self, stem: str = "taichi_aot_engine") -> str:
-        suffix = ".dll" if self.os == "windows" else ".dylib" if self.os == "macos" else ".so"
+        suffix = (
+            ".dll"
+            if self.os == "windows"
+            else ".dylib" if self.os == "macos" else ".so"
+        )
         return f"{stem}_{self.target_id}{suffix}"
 
     def as_dict(self) -> dict[str, Any]:
@@ -181,16 +192,18 @@ def detect_target(
 ) -> TargetSpec:
     """Detect a host target, with environment overrides for CI/cross-builds."""
 
-    env_os = os.environ.get("PIXEL_REFINE_TARGET_OS")
-    env_arch = os.environ.get("PIXEL_REFINE_TARGET_ARCH")
-    env_backend = os.environ.get("PIXEL_REFINE_TARGET_BACKEND")
-    env_vendor = os.environ.get("PIXEL_REFINE_TARGET_VENDOR")
-    env_abi = os.environ.get("PIXEL_REFINE_TARGET_ABI", "")
-    env_variant = os.environ.get("PIXEL_REFINE_TARGET_VARIANT", "")
+    env_os = os.environ.get("TARGET_OS")
+    env_arch = os.environ.get("TARGET_ARCH")
+    env_backend = os.environ.get("TARGET_BACKEND")
+    env_vendor = os.environ.get("TARGET_VENDOR")
+    env_abi = os.environ.get("TARGET_ABI", "")
+    env_variant = os.environ.get("TARGET_VARIANT", "")
 
     os_name = canonical_os(env_os or ("android" if _is_android() else sys.platform))
     arch = canonical_arch(env_arch or _platform.machine())
-    selected_backend = canonical_backend(backend or env_backend or "cpu", os_name=os_name)
+    selected_backend = canonical_backend(
+        backend or env_backend or "cpu", os_name=os_name
+    )
     vendor = canonical_vendor(device or env_vendor)
     if selected_backend == "cpu":
         vendor = "unknown"
@@ -206,7 +219,7 @@ def detect_target(
         os=os_name,
         vendor=vendor,
         abi=abi,
-        driver=driver or os.environ.get("PIXEL_REFINE_TARGET_DRIVER", "unknown"),
+        driver=driver or os.environ.get("TARGET_DRIVER", "unknown"),
         variant=env_variant,
     )
 
@@ -275,9 +288,14 @@ def _artifact_matches_target(path: Path, target: TargetSpec) -> bool:
         with zipfile.ZipFile(path, "r") as archive:
             names = set(archive.namelist())
             if target.backend in {"vulkan", "opengl", "gles"}:
-                return "graphs.json" in names and any(
+                has_spv = "graphs.json" in names and any(
                     name.endswith(".spv") for name in names
                 )
+                has_llvm = "graphs.tcb" in names or any(
+                    name.endswith(".ll") or name.endswith(".tic") for name in names
+                )
+                if has_spv or has_llvm:
+                    return True
             llvm_files = [name for name in names if name.endswith(".ll")]
             if "graphs.tcb" not in names or not llvm_files:
                 return False

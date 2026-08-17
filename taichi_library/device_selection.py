@@ -12,6 +12,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from taichi_library.cuda_arch_matrix import architecture_name, normalize_compute_capability
+
 
 def normalize_device_name(value: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).split())
@@ -136,6 +138,64 @@ def make_device_selector(name) -> dict:
     }
 
 
+def parse_nvidia_smi_summary(output: str) -> list[dict]:
+    """Parse the compact CUDA device query used by backend diagnostics.
+
+    Both the historical five-column query (without ``compute_cap``) and the
+    current six-column query are accepted so persisted hardware-test logs stay
+    readable.  A missing compute capability is represented as ``None`` rather
+    than inferred from a product name; GT/GTX branding is not an architecture.
+    """
+
+    records: list[dict] = []
+    for raw_line in str(output or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        fields = [part.strip() for part in line.split(",")]
+        if len(fields) < 5:
+            continue
+        try:
+            ordinal = _parse_int(fields[0])
+        except Exception:
+            ordinal = None
+        if ordinal is None:
+            continue
+        # New query: index,name,uuid,driver_version,compute_cap,memory.total
+        has_cc = len(fields) >= 6
+        cc_raw = fields[4] if has_cc else ""
+        memory_raw = fields[5] if has_cc else fields[4]
+        cc = None
+        if cc_raw:
+            try:
+                cc = normalize_compute_capability(cc_raw)
+            except ValueError:
+                # Keep the device visible even when an older driver omits or
+                # formats the capability unexpectedly.
+                cc = None
+        record = {
+            "ordinal": ordinal,
+            "name": fields[1],
+            "device_name": fields[1],
+            "device_uuid": fields[2],
+            "driver_version": fields[3],
+            "vendor": "nvidia",
+            "backend": "cuda",
+            "native": True,
+            "translation": False,
+            "fingerprint": f"nvidia:{fields[2]}" if fields[2] else f"nvidia:{normalize_device_name(fields[1])}",
+            "compute_capability": cc,
+        }
+        if cc is not None:
+            record["architecture"] = architecture_name(cc)
+        try:
+            record["memory_total_mb"] = int(float(memory_raw))
+        except (TypeError, ValueError):
+            record["memory_total_mb"] = None
+        records.append(record)
+    return records
+
+
 def scan_vulkan_device_records(timeout=15.0) -> list[dict]:
     """Enumerate Vulkan adapters with stable identity and driver metadata."""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -157,6 +217,27 @@ def scan_vulkan_device_records(timeout=15.0) -> list[dict]:
             f"vulkaninfo did not report any devices (exit={result.returncode})"
         )
     return records
+
+
+def scan_cuda_device_records() -> list[dict]:
+    """Enumerate CUDA adapters using nvidia-smi with stable metadata."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,uuid,driver_version,compute_cap,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            creationflags=flags,
+            check=False,
+        )
+        return parse_nvidia_smi_summary(result.stdout or "")
+    except Exception:
+        return []
 
 
 def query_vulkan_device_limits(device_id: int, timeout=30.0) -> dict:

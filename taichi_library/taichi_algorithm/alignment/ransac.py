@@ -47,8 +47,8 @@ if TAICHI_AVAILABLE:
         for y, x in ti.ndrange((h + stride - 1) // stride, (w + stride - 1) // stride):
             iy, ix = y * stride, x * stride
             if iy < h and ix < w:
-                sum_x += flow[iy, ix][0]
-                sum_y += flow[iy, ix][1]
+                sum_x += flow[iy, ix, 0]
+                sum_y += flow[iy, ix, 1]
                 count += 1.0
         if count > 0:
             mean_out[0] = sum_x / count
@@ -78,13 +78,12 @@ if TAICHI_AVAILABLE:
         w: int,
         stride: int,
     ):
-        """Update inlier mask with stride support."""
         model_x, model_y = model[0], model[1]
         for y, x in ti.ndrange((h + stride - 1) // stride, (w + stride - 1) // stride):
             iy, ix = y * stride, x * stride
             if iy < h and ix < w:
-                dx = flow[iy, ix][0] - model_x
-                dy = flow[iy, ix][1] - model_y
+                dx = flow[iy, ix, 0] - model_x
+                dy = flow[iy, ix, 1] - model_y
                 if dx * dx + dy * dy < threshold * threshold:
                     inlier_mask[iy, ix] = 1
                 else:
@@ -107,8 +106,8 @@ if TAICHI_AVAILABLE:
             iy, ix = y * stride, x * stride
             if iy < h and ix < w:
                 if inlier_mask[iy, ix] == 1:
-                    sum_x += flow[iy, ix][0]
-                    sum_y += flow[iy, ix][1]
+                    sum_x += flow[iy, ix, 0]
+                    sum_y += flow[iy, ix, 1]
                     count += 1.0
         if count > 0:
             mean_out[0] = sum_x / count
@@ -128,12 +127,12 @@ if TAICHI_AVAILABLE:
         for y, x in ti.ndrange(h, w):
             if inlier_mask[y, x] == 1:
                 # Keep inlier values
-                output[y, x][0] = flow[y, x][0]
-                output[y, x][1] = flow[y, x][1]
+                output[y, x, 0] = flow[y, x, 0]
+                output[y, x, 1] = flow[y, x, 1]
             else:
                 # Replace outlier with model
-                output[y, x][0] = model_x
-                output[y, x][1] = model_y
+                output[y, x, 0] = model_x
+                output[y, x, 1] = model_y
 
     # ===== MOTION-AWARE RANSAC KERNELS =====
     @ti.kernel
@@ -832,10 +831,11 @@ def ransac_flow_cleanup(
     # Allocate buffers on GPU via pool
     inlier_mask = common.get_temp_buffer((h, w), ti.i32, buffer_provider)
     mean_out = common.get_temp_buffer((2,), ti.f32, buffer_provider)
+    model_buf = common.get_temp_buffer((2,), ti.f32, buffer_provider)
     output_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
 
     # Step 1: Initial model
-    _compute_mean_flow_kernel(flow_gpu, mean_out, h, w)
+    _compute_mean_flow_kernel(flow_gpu, mean_out, h, w, 1)
     mean_out_np = mean_out.to_numpy()
     model_x, model_y = float(mean_out_np[0]), float(mean_out_np[1])
 
@@ -844,29 +844,29 @@ def ransac_flow_cleanup(
     best_model_x, best_model_y = model_x, model_y
 
     for _ in range(n_iterations):
-        inlier_count = _count_inliers_kernel(
-            flow_gpu, model_x, model_y, threshold, inlier_mask, h, w
-        )
+        model_buf.from_numpy(np.asarray([model_x, model_y], dtype=np.float32))
+        _count_inliers_kernel(flow_gpu, model_buf, threshold, inlier_mask, h, w, 1)
+        inlier_count = int(np.sum(inlier_mask.to_numpy()))
 
         if inlier_count > best_inlier_count:
             best_inlier_count = inlier_count
             best_model_x, best_model_y = model_x, model_y
 
-        _compute_inlier_mean_kernel(flow_gpu, inlier_mask, mean_out, h, w)
+        _compute_inlier_mean_kernel(flow_gpu, inlier_mask, mean_out, h, w, 1)
         mean_out_np = mean_out.to_numpy()
         model_x, model_y = float(mean_out_np[0]), float(mean_out_np[1])
 
     # Step 3+4: Final pass and apply
-    _count_inliers_kernel(
-        flow_gpu, best_model_x, best_model_y, threshold, inlier_mask, h, w
-    )
+    model_buf.from_numpy(np.asarray([best_model_x, best_model_y], dtype=np.float32))
+    _count_inliers_kernel(flow_gpu, model_buf, threshold, inlier_mask, h, w, 1)
     _apply_ransac_result_kernel(
-        flow_gpu, inlier_mask, best_model_x, best_model_y, output_gpu, h, w
+        flow_gpu, inlier_mask, model_buf, output_gpu, h, w
     )
 
     # Release temporary buffers
     common.release_temp_buffer(inlier_mask)
     common.release_temp_buffer(mean_out)
+    common.release_temp_buffer(model_buf)
 
     if is_numpy:
         result = output_gpu.to_numpy()
@@ -914,11 +914,12 @@ def ransac_flow_cleanup_motion_aware(
     motion_mask = common.get_temp_buffer((h, w), ti.i32, buffer_provider)
     inlier_mask = common.get_temp_buffer((h, w), ti.i32, buffer_provider)
     mean_out = common.get_temp_buffer((2,), ti.f32, buffer_provider)
+    model_buf = common.get_temp_buffer((2,), ti.f32, buffer_provider)
     output_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
 
     # Step 1: Compute global motion (median - robust to outliers)
     # For GPU efficiency, we use mean as approximation to median
-    _compute_mean_flow_kernel(flow_gpu, mean_out, h, w)
+    _compute_mean_flow_kernel(flow_gpu, mean_out, h, w, 1)
     mean_out_np = mean_out.to_numpy()
     global_dx, global_dy = float(mean_out_np[0]), float(mean_out_np[1])
 
@@ -933,22 +934,21 @@ def ransac_flow_cleanup_motion_aware(
     best_model_x, best_model_y = model_x, model_y
 
     for _ in range(n_iterations):
-        inlier_count = _count_inliers_kernel(
-            flow_gpu, model_x, model_y, threshold, inlier_mask, h, w
-        )
+        model_buf.from_numpy(np.asarray([model_x, model_y], dtype=np.float32))
+        _count_inliers_kernel(flow_gpu, model_buf, threshold, inlier_mask, h, w, 1)
+        inlier_count = int(np.sum(inlier_mask.to_numpy()))
 
         if inlier_count > best_inlier_count:
             best_inlier_count = inlier_count
             best_model_x, best_model_y = model_x, model_y
 
-        _compute_inlier_mean_kernel(flow_gpu, inlier_mask, mean_out, h, w)
+        _compute_inlier_mean_kernel(flow_gpu, inlier_mask, mean_out, h, w, 1)
         mean_out_np = mean_out.to_numpy()
         model_x, model_y = float(mean_out_np[0]), float(mean_out_np[1])
 
     # Step 4: Final pass and selective apply
-    _count_inliers_kernel(
-        flow_gpu, best_model_x, best_model_y, threshold, inlier_mask, h, w
-    )
+    model_buf.from_numpy(np.asarray([best_model_x, best_model_y], dtype=np.float32))
+    _count_inliers_kernel(flow_gpu, model_buf, threshold, inlier_mask, h, w, 1)
     _selective_ransac_apply_kernel(
         flow_gpu, motion_mask, inlier_mask, best_model_x, best_model_y, output_gpu, h, w
     )
@@ -957,6 +957,7 @@ def ransac_flow_cleanup_motion_aware(
     common.release_temp_buffer(motion_mask)
     common.release_temp_buffer(inlier_mask)
     common.release_temp_buffer(mean_out)
+    common.release_temp_buffer(model_buf)
 
     if is_numpy:
         result = output_gpu.to_numpy()

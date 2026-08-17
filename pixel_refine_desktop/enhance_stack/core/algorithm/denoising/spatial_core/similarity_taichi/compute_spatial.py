@@ -273,13 +273,15 @@ def accumulate_spatial_merging_kernel(
         for c in range(num_channels):
             final_image_sum[i, j, c] += current_image_full[i, j, c] * w_val
 
-def compile_spatial_tcm():
+def compile_spatial_tcm(arch=None, suffix="vulkan"):
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi is not available")
-    print(f"\n>>> Compiling SPATIAL MERGING AOT for Vulkan")
-    ti.init(arch=ti.vulkan, offline_cache=False)
+    if arch is None:
+        arch = ti.vulkan
+    print(f"\n>>> Compiling SPATIAL MERGING AOT for {arch}")
+    ti.init(arch=arch, offline_cache=False)
 
-    module = ti.aot.Module(ti.vulkan)
+    module = ti.aot.Module(arch)
 
     # 0. Precompute Gradients Graph
     sym_img = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "img", dtype=ti.f32, ndim=2)
@@ -666,7 +668,7 @@ def compile_spatial_tcm():
         cur = os.path.dirname(cur)
     out_dir = os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
     os.makedirs(out_dir, exist_ok=True)
-    tcm_path = os.path.join(out_dir, "spatial_vulkan.tcm")
+    tcm_path = os.path.join(out_dir, f"spatial_{suffix}.tcm")
 
     with zipfile.ZipFile(tcm_path, 'w', zipfile.ZIP_DEFLATED) as tcm_zip:
         for root, dirs, files in os.walk(tmp_dir):
@@ -720,6 +722,26 @@ class SpatialScratchCache:
         self.reference_token = None
 
 
+def _resolve_spatial_tcm(engine):
+    """Resolve the spatial AOT TCM matching the active backend, with safe fallback.
+
+    The spatial artifact is compiled per-backend (spatial_cuda / spatial_vulkan /
+    spatial_cpu).  Prefer the arch-specific artifact, then fall back to the
+    existing vulkan/cpu variants so the graph binary always matches the runtime.
+    """
+    file_dir = os.path.dirname(os.path.abspath(__file__))
+    cur = os.path.abspath(file_dir)
+    while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
+        cur = os.path.dirname(cur)
+    assets = os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
+    arch = str(getattr(engine, "arch", "vulkan")).lower()
+    for cand in (arch, "vulkan", "cpu"):
+        candidate = os.path.join(assets, f"spatial_{cand}.tcm")
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    return os.path.abspath(os.path.join(assets, "spatial_vulkan.tcm"))
+
+
 def generate_spatial_weights_taichi(
     current_image,
     reference_image,
@@ -753,12 +775,8 @@ def generate_spatial_weights_taichi(
         if scratch is None and buf is not None:
             buf.destroy()
 
-    # Load Module
-    file_dir = os.path.dirname(os.path.abspath(__file__))
-    cur = os.path.abspath(file_dir)
-    while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
-        cur = os.path.dirname(cur)
-    tcm_path = os.path.abspath(os.path.join(cur, "ui/data/aot_assets/spatial_vulkan.tcm"))
+    # Load Module (backend-aware)
+    tcm_path = _resolve_spatial_tcm(engine)
     mod = engine.load(tcm_path)
 
     import time
@@ -1088,12 +1106,8 @@ def accumulate_spatial_merging_taichi(
     import taichi_library.taichi_aot as taichi_aot
     engine = taichi_aot.engine
 
-    # Load Module
-    file_dir = os.path.dirname(os.path.abspath(__file__))
-    cur = os.path.abspath(file_dir)
-    while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
-        cur = os.path.dirname(cur)
-    tcm_path = os.path.abspath(os.path.join(cur, "ui/data/aot_assets/spatial_vulkan.tcm"))
+    # Load Module (backend-aware)
+    tcm_path = _resolve_spatial_tcm(engine)
     mod = engine.load(tcm_path)
 
     h_full, w_full = final_image_sum.shape[0], final_image_sum.shape[1]

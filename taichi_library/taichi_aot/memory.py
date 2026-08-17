@@ -12,7 +12,7 @@ from enum import IntEnum
 from typing import Callable, Optional
 
 
-GIB = 1024 ** 3
+GIB = 1024**3
 
 
 class MemoryPressure(IntEnum):
@@ -53,6 +53,13 @@ class MemoryDecision:
     allow_prefetch: bool
     max_concurrency: int
     snapshot: MemorySnapshot
+    # Lifecycle allocations are deliberately separate from the reusable
+    # device-pool budget.  Staging buffers are host-visible and retired
+    # buffers are still owned by the native queue until a safe point; counting
+    # them explicitly keeps a transient upload/readback burst from turning
+    # into unbounded resident growth.
+    staging_pool_budget: int = 0
+    retired_buffer_budget: int = 0
 
 
 class CacheTelemetry:
@@ -109,9 +116,7 @@ def _choose_block_size(
     sample_bytes = max(1, int(sample_bytes))
     live_buffers = max(1, int(live_buffers))
     bytes_per_pixel = channels * sample_bytes * live_buffers
-    max_side = int(
-        (max(0, int(target_chunk_bytes)) / max(1, bytes_per_pixel)) ** 0.5
-    )
+    max_side = int((max(0, int(target_chunk_bytes)) / max(1, bytes_per_pixel)) ** 0.5)
     for candidate in (2048, 1536, 1024, 768, 512, 256):
         if candidate <= max_side:
             return candidate
@@ -121,6 +126,7 @@ def _choose_block_size(
 def system_memory_snapshot():
     """Read physical-memory availability without adding a psutil dependency."""
     if sys.platform == "win32":
+
         class MemoryStatusEx(ctypes.Structure):
             _fields_ = [
                 ("dwLength", ctypes.c_ulong),
@@ -138,7 +144,9 @@ def system_memory_snapshot():
         status.dwLength = ctypes.sizeof(status)
         if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
             raise OSError("GlobalMemoryStatusEx failed")
-        return MemorySnapshot(int(status.ullTotalPhys), int(status.ullAvailPhys), time.monotonic())
+        return MemorySnapshot(
+            int(status.ullTotalPhys), int(status.ullAvailPhys), time.monotonic()
+        )
 
     page_size = int(os.sysconf("SC_PAGE_SIZE"))
     total = page_size * int(os.sysconf("SC_PHYS_PAGES"))
@@ -195,14 +203,14 @@ class MemoryGovernor:
         ratio = snapshot.available_ratio
         absolute = snapshot.available_bytes
         current = self._pressure
-        if absolute < 512 * 1024 ** 2 or ratio < 0.05:
+        if absolute < 512 * 1024**2 or ratio < 0.05:
             return MemoryPressure.EMERGENCY
         if absolute < GIB or ratio < 0.08:
             return MemoryPressure.CRITICAL
         if current >= MemoryPressure.LOW:
             if ratio < 0.19 or absolute < 2 * GIB:
                 return MemoryPressure.LOW
-        elif ratio < 0.15 or absolute < 1536 * 1024 ** 2:
+        elif ratio < 0.15 or absolute < 1536 * 1024**2:
             return MemoryPressure.LOW
         if current >= MemoryPressure.CAUTIOUS:
             if ratio < 0.28:
@@ -223,12 +231,8 @@ class MemoryGovernor:
             snapshot = self.provider()
             pressure = self._classify(snapshot)
             device = self._read_device_budget(now)
-            device_heap_budget = int(
-                (device or {}).get("device_local_budget", 0) or 0
-            )
-            device_heap_usage = int(
-                (device or {}).get("device_local_usage", 0) or 0
-            )
+            device_heap_budget = int((device or {}).get("device_local_budget", 0) or 0)
+            device_heap_usage = int((device or {}).get("device_local_usage", 0) or 0)
             device_heap_available = int(
                 (device or {}).get("device_local_available", 0) or 0
             )
@@ -239,7 +243,7 @@ class MemoryGovernor:
             )
             if device:
                 ratio = device_heap_available / max(1, device_heap_budget)
-                if device_heap_available < 512 * 1024 ** 2 or ratio < 0.08:
+                if device_heap_available < 512 * 1024**2 or ratio < 0.08:
                     pressure = max(pressure, MemoryPressure.LOW)
                 elif device_heap_available < GIB or ratio < 0.15:
                     pressure = max(pressure, MemoryPressure.CAUTIOUS)
@@ -252,9 +256,13 @@ class MemoryGovernor:
             configured = self.configured_max_bytes
             if configured is None:
                 configured = int(snapshot.total_bytes * 0.15)
-            budget = min(int(configured), int(snapshot.total_bytes * 0.15), int(safe_available * 0.35))
+            budget = min(
+                int(configured),
+                int(snapshot.total_bytes * 0.15),
+                int(safe_available * 0.35),
+            )
 
-            configured_shared = os.environ.get("PIXEL_REFINE_AOT_SHARED_MEMORY_MAX")
+            configured_shared = os.environ.get("AOT_SHARED_MEMORY_MAX")
             try:
                 configured_shared = (
                     int(configured_shared) if configured_shared is not None else 6 * GIB
@@ -269,15 +277,13 @@ class MemoryGovernor:
             if device_heap_available:
                 # Keep 30% of the driver-reported available heap for display,
                 # command buffers, pipeline internals, and other applications.
-                shared_budget = min(
-                    shared_budget, int(device_heap_available * 0.70)
-                )
+                shared_budget = min(shared_budget, int(device_heap_available * 0.70))
             if pressure == MemoryPressure.CAUTIOUS:
                 budget //= 2
                 shared_budget //= 2
             elif pressure >= MemoryPressure.LOW:
                 budget = 0
-                shared_budget = min(shared_budget, 512 * 1024 ** 2)
+                shared_budget = min(shared_budget, 512 * 1024**2)
 
             if pressure >= MemoryPressure.CRITICAL:
                 shared_budget = 0
@@ -312,26 +318,49 @@ class MemoryGovernor:
                         int(device_heap_available * 0.65),
                     )
                     pipeline_limit = min(
-                        1536 * 1024 ** 2,
-                        max(256 * 1024 ** 2, measured_limit),
+                        1536 * 1024**2,
+                        max(256 * 1024**2, measured_limit),
                     )
                 else:
                     pipeline_limit = min(
-                        1024 * 1024 ** 2,
+                        1024 * 1024**2,
                         max(
-                            256 * 1024 ** 2,
+                            256 * 1024**2,
                             int(shared_budget * pipeline_fraction),
                         ),
                     )
-                pool_budget = min(512 * 1024 ** 2, int(shared_budget * 0.15))
+                pool_budget = min(512 * 1024**2, int(shared_budget * 0.15))
                 target_chunk = min(
                     int(pipeline_limit * 0.70),
                     int(shared_budget * 0.35),
                 )
             else:
-                pipeline_limit = 256 * 1024 ** 2
+                pipeline_limit = 256 * 1024**2
                 pool_budget = 0
-                target_chunk = 64 * 1024 ** 2
+                target_chunk = 64 * 1024**2
+
+            # Keep lifecycle storage bounded independently of the long-lived
+            # buffer pool.  A staging allocation may be larger than this
+            # budget while leased (it cannot be evicted safely), but once it
+            # is released the engine trims idle entries at the next safe
+            # point.  Retired allocations receive a separate queue budget so
+            # a frame burst cannot keep every old handle alive indefinitely.
+            # The lower bounds avoid making a healthy small workload churn
+            # one tiny staging slot, while a zero shared budget (critical
+            # pressure) remains fail-closed and trims all idle lifecycle data.
+            lifecycle_budget = int(max(0, shared_budget) * 0.20)
+            if lifecycle_budget:
+                staging_budget = min(
+                    256 * 1024**2,
+                    max(16 * 1024**2, int(lifecycle_budget * 0.40)),
+                )
+                retired_budget = min(
+                    256 * 1024**2,
+                    max(32 * 1024**2, int(lifecycle_budget * 0.60)),
+                )
+            else:
+                staging_budget = 0
+                retired_budget = 0
 
             # Preserve a conservative RGB-f32 default for telemetry.  The
             # operation planner can request a shape-aware recommendation via
@@ -361,8 +390,14 @@ class MemoryGovernor:
                 allow_cache=allow_cache,
                 allow_pinned_spill=pressure <= MemoryPressure.CAUTIOUS,
                 allow_prefetch=pressure == MemoryPressure.HEALTHY,
-                max_concurrency=4 if pressure == MemoryPressure.HEALTHY else (2 if pressure == MemoryPressure.CAUTIOUS else 1),
+                max_concurrency=(
+                    4
+                    if pressure == MemoryPressure.HEALTHY
+                    else (2 if pressure == MemoryPressure.CAUTIOUS else 1)
+                ),
                 snapshot=snapshot,
+                staging_pool_budget=max(0, int(staging_budget)),
+                retired_buffer_budget=max(0, int(retired_budget)),
             )
             return self._decision
 
@@ -396,4 +431,6 @@ class MemoryGovernor:
         decision = self.refresh(force=force)
         result = asdict(decision)
         result["pressure"] = decision.pressure.name.lower()
+        result["residency_depth"] = int(result.get("max_concurrency", 1) or 1)
+        result["concurrency_verified"] = False
         return result

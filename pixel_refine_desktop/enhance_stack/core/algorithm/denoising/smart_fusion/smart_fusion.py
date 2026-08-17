@@ -10,25 +10,14 @@ import numpy as np
 import onnxruntime as ort
 from pathlib import Path
 from taichi_library.backend_config import normalize_backend
+from ...shared_utils import (
+    resolve_batch_config,
+    restore_output_dtype as _restore_output_dtype,
+    sorted_image_keys as _sorted_image_keys,
+)
 
 
 _SESSION_CACHE = {}
-
-
-def _sorted_image_keys(h5f):
-    return sorted(
-        [key for key in h5f.keys() if key.startswith("image_")],
-        key=lambda item: int(item.split("_", 1)[1]),
-    )
-
-
-def _restore_output_dtype(image, dtype):
-    if np.issubdtype(dtype, np.integer):
-        info = np.iinfo(dtype)
-        if image.dtype.kind == "f" and float(np.nanmax(image)) <= 1.5:
-            image = image * float(info.max)
-        image = np.clip(image, info.min, info.max)
-    return image.astype(dtype, copy=False)
 
 
 def get_tile_window(h, w, overlap):
@@ -54,11 +43,14 @@ def resolve_smart_fusion_backend():
     """Resolves execution providers and target hardware mode (cpu or gpu) directly from app_setting.json."""
     arch = "cpu"
     try:
-        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import get_backend_arch
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import (
+            get_backend_arch,
+        )
+
         arch = str(get_backend_arch()).lower()
     except Exception:
         arch = normalize_backend(
-            os.environ.get("PIXEL_REFINE_AOT_ARCH", "cpu"),
+            os.environ.get("AOT_ARCH", "cpu"),
             allow_auto=True,
         )
         if arch == "auto":
@@ -67,6 +59,7 @@ def resolve_smart_fusion_backend():
     setting_path = ""
     try:
         from config import GENERAL_SETTINGS_FILE
+
         setting_path = GENERAL_SETTINGS_FILE
     except ImportError:
         pass
@@ -86,6 +79,7 @@ def resolve_smart_fusion_backend():
         try:
             with open(setting_path, "r", encoding="utf-8") as fh:
                 import json
+
                 data = json.load(fh)
             backend_key = str(data.get("device_backend_key", arch)).lower()
             backend_arch = str(data.get("device_backend_arch", arch)).lower()
@@ -103,11 +97,29 @@ def resolve_smart_fusion_backend():
         return ["CPUExecutionProvider"], "cpu"
 
     if "nvidia" in backend_key or "nvidia" in vendor or "cuda" in arch:
-        providers = [p for p in ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"] if p in available]
-        return (providers, "gpu") if len(providers) > 1 or providers[0] != "CPUExecutionProvider" else (providers, "cpu")
+        providers = [
+            p
+            for p in [
+                "CUDAExecutionProvider",
+                "DmlExecutionProvider",
+                "CPUExecutionProvider",
+            ]
+            if p in available
+        ]
+        return (
+            (providers, "gpu")
+            if len(providers) > 1 or providers[0] != "CPUExecutionProvider"
+            else (providers, "cpu")
+        )
 
-    providers = [p for p in ["DmlExecutionProvider", "CPUExecutionProvider"] if p in available]
-    return (providers, "gpu") if len(providers) > 1 or providers[0] != "CPUExecutionProvider" else (providers, "cpu")
+    providers = [
+        p for p in ["DmlExecutionProvider", "CPUExecutionProvider"] if p in available
+    ]
+    return (
+        (providers, "gpu")
+        if len(providers) > 1 or providers[0] != "CPUExecutionProvider"
+        else (providers, "cpu")
+    )
 
 
 class SmartFusionDenoisingAlgorithm:
@@ -121,6 +133,7 @@ class SmartFusionDenoisingAlgorithm:
             from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
                 load_similarity_config,
             )
+
             return load_similarity_config()
         except (ImportError, Exception):
             return {
@@ -132,11 +145,7 @@ class SmartFusionDenoisingAlgorithm:
             }
 
     def _resolve_config(self, ctx):
-        config = self.load_config()
-        batch_params = getattr(ctx, "params", {}).get("similarity_params")
-        if isinstance(batch_params, dict):
-            config.update(batch_params)
-        return config
+        return resolve_batch_config(ctx, self.load_config)
 
     def run(self, ctx, frames, batch_plan=None):
         config = self._resolve_config(ctx)
@@ -160,10 +169,14 @@ class SmartFusionDenoisingAlgorithm:
             model_subfolder = "nano"
             file_prefix = "nano_v2_hanning_weightmap"
 
-        model_dir = Path("database") / "Learning_Model" / "smart_fusion" / model_subfolder
+        model_dir = (
+            Path("database") / "Learning_Model" / "smart_fusion" / model_subfolder
+        )
 
         model_suffix = "cpu" if target_device == "cpu" else "gpu"
-        model_name = f"{file_prefix}_{tile_size}x{tile_size}_fp32_ort_{model_suffix}.onnx"
+        model_name = (
+            f"{file_prefix}_{tile_size}x{tile_size}_fp32_ort_{model_suffix}.onnx"
+        )
 
         onnx_path = model_dir / model_name
         if not onnx_path.exists():
@@ -171,17 +184,13 @@ class SmartFusionDenoisingAlgorithm:
                 f"[SmartFusion] Warning: {onnx_path} not found. Falling back to default CPU model."
             )
             onnx_path = (
-                model_dir
-                / f"{file_prefix}_{tile_size}x{tile_size}_fp32_ort_cpu.onnx"
+                model_dir / f"{file_prefix}_{tile_size}x{tile_size}_fp32_ort_cpu.onnx"
             )
             providers = ["CPUExecutionProvider"]
             if not onnx_path.exists():
                 # Fallback to 1024 if the requested block size model doesn't exist
                 tile_size = 1024
-                onnx_path = (
-                    model_dir
-                    / f"{file_prefix}_1024x1024_fp32_ort_cpu.onnx"
-                )
+                onnx_path = model_dir / f"{file_prefix}_1024x1024_fp32_ort_cpu.onnx"
                 providers = ["CPUExecutionProvider"]
 
         global _SESSION_CACHE
@@ -224,7 +233,9 @@ class SmartFusionDenoisingAlgorithm:
                 total_frames = len(image_keys)
         else:
             if not frames:
-                print("[SmartFusion] aligned HDF5 and in-memory frames are both unavailable.")
+                print(
+                    "[SmartFusion] aligned HDF5 and in-memory frames are both unavailable."
+                )
                 return None
             reference_raw = frames[0]
             orig_h, orig_w = reference_raw.shape[:2]
@@ -277,13 +288,21 @@ class SmartFusionDenoisingAlgorithm:
 
         # Dynamically detect ONNX model input node names and expected channel count
         inputs_meta = session.get_inputs()
-        ref_input_name = inputs_meta[0].name if len(inputs_meta) > 0 else "reference_luma"
-        curr_input_name = inputs_meta[1].name if len(inputs_meta) > 1 else "current_luma"
+        ref_input_name = (
+            inputs_meta[0].name if len(inputs_meta) > 0 else "reference_luma"
+        )
+        curr_input_name = (
+            inputs_meta[1].name if len(inputs_meta) > 1 else "current_luma"
+        )
 
         first_shape = inputs_meta[0].shape if len(inputs_meta) > 0 else []
         is_rgb_model = False
         if len(first_shape) == 4:
-            if first_shape[1] == 3 or first_shape[-1] == 3 or "rgb" in ref_input_name.lower():
+            if (
+                first_shape[1] == 3
+                or first_shape[-1] == 3
+                or "rgb" in ref_input_name.lower()
+            ):
                 is_rgb_model = True
         elif "rgb" in ref_input_name.lower():
             is_rgb_model = True
@@ -355,8 +374,11 @@ class SmartFusionDenoisingAlgorithm:
             # untouched for the final original-resolution fusion.
             try:
                 from config import CALCULATION_TONE_MAPPING_PARAMS
+
                 frame_weight_source = naturalTonemapping(
-                    frame_normalized, return_gpu=False, **CALCULATION_TONE_MAPPING_PARAMS
+                    frame_normalized,
+                    return_gpu=False,
+                    **CALCULATION_TONE_MAPPING_PARAMS,
                 )
             except Exception as exc:
                 print(
@@ -431,7 +453,9 @@ class SmartFusionDenoisingAlgorithm:
                             ref_tile_pad = ref_tile
                             curr_tile_pad = curr_tile
                         ref_tile_in = np.expand_dims(ref_tile_pad, axis=0)  # [1, H, W]
-                        curr_tile_in = np.expand_dims(curr_tile_pad, axis=0)  # [1, H, W]
+                        curr_tile_in = np.expand_dims(
+                            curr_tile_pad, axis=0
+                        )  # [1, H, W]
 
                     ref_batch.append(ref_tile_in)
                     curr_batch.append(curr_tile_in)
@@ -468,9 +492,7 @@ class SmartFusionDenoisingAlgorithm:
                         weight_map = weight_map_pad
 
                     win = get_tile_window(h_tile, w_tile, overlap)[:, :, 0]
-                    weight_work_sum[y : y + h_tile, x : x + w_tile] += (
-                        weight_map * win
-                    )
+                    weight_work_sum[y : y + h_tile, x : x + w_tile] += weight_map * win
                     weight_work_norm[y : y + h_tile, x : x + w_tile] += win
 
             weight_work_norm = np.maximum(weight_work_norm, 1e-12)

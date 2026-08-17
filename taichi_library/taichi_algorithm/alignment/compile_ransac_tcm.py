@@ -20,6 +20,9 @@ from taichi_library.taichi_algorithm.alignment.ransac import (
     _count_inliers_kernel,
     _compute_inlier_mean_kernel,
     _apply_ransac_result_kernel,
+    ransac_fundamental_kernel,
+    generate_fundamental_inlier_mask_kernel,
+    vsac_classify_independent_kernel,
 )
 
 def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
@@ -28,15 +31,22 @@ def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
 
     module = ti.aot.Module(arch)
 
-    if arch == ti.cpu:
+    # ``ti.cpu`` and ``ti.x64`` are distinct aliases in some Taichi 1.7.4
+    # builds.  Treat both as the CPU profile; otherwise the worker can enter
+    # the graphics graph path and report a misleading ndim error.
+    if arch == ti.cpu or arch == getattr(ti, "x64", None):
         # CPU consumers currently use only the flow-cleanup entry point.
         # Avoid compiling the large homography suite here: it is unrelated to
         # the public CPU graph and made regeneration unnecessarily fragile.
         g_flow = ti.graph.GraphBuilder()
-        fflow = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.types.vector(2, ti.f32), ndim=2)
+        # The kernels index the final x/y components explicitly
+        # (``flow[iy, ix, 0]``), so the graph ABI is a scalar f32 3-D array
+        # with shape HxWx2.  Describing it as a vector2 2-D ndarray makes
+        # Taichi 1.7.4 validate the access as rank-2 and fail at compile time.
+        fflow = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.f32, ndim=3)
         fmask = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "inlier_mask", ti.i32, ndim=2)
         fmodel = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "model", ti.f32, ndim=1)
-        foutput = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.types.vector(2, ti.f32), ndim=2)
+        foutput = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=3)
         fh = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
         fw = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
         fthreshold = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "threshold", ti.f32)
@@ -48,6 +58,14 @@ def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
         g_flow.dispatch(_count_inliers_kernel, fflow, fmodel, fthreshold, fmask, fh, fw, fstride_final)
         g_flow.dispatch(_apply_ransac_result_kernel, fflow, fmask, fmodel, foutput, fh, fw)
         module.add_graph("ransac_flow_cleanup_f32", g_flow.compile())
+
+        # Fundamental estimation is intentionally opt-in because the
+        # 8-point hypothesis kernel is substantially larger than the flow
+        # cleanup graph.  When enabled, keep the exact source kernels and
+        # graph ABI shared with graphics targets; old CPU artifacts remain
+        # valid and simply do not advertise these optional graphs.
+        if os.environ.get("PIXEL_REFINE_COMPILE_VSAC", "0") == "1":
+            _register_fundamental_graphs(module)
         module.archive(save_path)
         print(f"Successfully compiled CPU RANSAC flow AOT and archived to: {save_path}")
         ti.reset()
@@ -125,10 +143,14 @@ def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
     # buffers explicit; this avoids relying on a missing monolithic graph and
     # works identically for CPU and Vulkan AOT.
     g_flow = ti.graph.GraphBuilder()
-    fflow = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.types.vector(2, ti.f32), ndim=2)
+    # The flow kernels index ``flow[y, x, component]`` explicitly.  Describe
+    # the target graph as scalar f32 rank-3 (H x W x 2) instead of a vector2
+    # rank-2 ndarray; Taichi 1.7.4 otherwise validates the access as rank-2
+    # and rejects the graphics worker before any archive is produced.
+    fflow = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", ti.f32, ndim=3)
     fmask = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "inlier_mask", ti.i32, ndim=2)
     fmodel = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "model", ti.f32, ndim=1)
-    foutput = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.types.vector(2, ti.f32), ndim=2)
+    foutput = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=3)
     fh = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
     fw = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
     fthreshold = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "threshold", ti.f32)
@@ -141,9 +163,62 @@ def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
     g_flow.dispatch(_apply_ransac_result_kernel, fflow, fmask, fmodel, foutput, fh, fw)
     module.add_graph("ransac_flow_cleanup_f32", g_flow.compile())
 
+    if os.environ.get("PIXEL_REFINE_COMPILE_VSAC", "0") == "1":
+        _register_fundamental_graphs(module)
+
     module.archive(save_path)
     print(f"Successfully compiled RANSAC/MAGSAC++ AOT and archived to: {save_path}")
     ti.reset()
+
+
+def _register_fundamental_graphs(module):
+    """Register the VSAC fundamental leaves in a target-qualified module.
+
+    The public adapter composes these leaves with a bounded host selection
+    step.  Keeping candidate generation, Sampson masking, and independent
+    classification as separate graphs avoids a second implementation and
+    preserves the existing JIT kernel semantics.
+    """
+    f32, i32 = ti.f32, ti.i32
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        ransac_fundamental_kernel,
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts1", f32, ndim=2),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts2", f32, ndim=2),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "n_pts", i32),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "n_hypotheses", i32),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "threshold", f32),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "F_candidates", f32, ndim=2),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "scores", i32, ndim=1),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "seed_offset", i32),
+    )
+    module.add_graph("ransac_fundamental", builder.compile())
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        generate_fundamental_inlier_mask_kernel,
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts1", f32, ndim=2),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts2", f32, ndim=2),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "F_best", f32, ndim=1),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "n_pts", i32),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "threshold", f32),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mask_out", i32, ndim=1),
+    )
+    module.add_graph("generate_fundamental_inlier_mask", builder.compile())
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        vsac_classify_independent_kernel,
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts1", f32, ndim=2),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts2", f32, ndim=2),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "F_arr", f32, ndim=1),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "n_pts", i32),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "threshold", f32),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "epipole_thresh", f32),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "indep_count_out", i32, ndim=1),
+    )
+    module.add_graph("vsac_classify_independent", builder.compile())
 
 if __name__ == "__main__":
     script_dir = file_dir

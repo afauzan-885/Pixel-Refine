@@ -29,6 +29,7 @@ except ImportError:
 # Taichi AOT for GPU operations
 try:
     import taichi_library.taichi_aot as ta_aot
+
     TAICHI_AOT_AVAILABLE = True
 except Exception:
     ta_aot = None
@@ -179,7 +180,10 @@ def get_all_image_paths_for_batch_process(db_path, batch_id):
 
 
 def _prepare_image_array_from_raw_backup(
-    original_path, linear_mode=False, generate_ref_proxy=False, alignment_tonemapping_linear=False
+    original_path,
+    linear_mode=False,
+    generate_ref_proxy=False,
+    alignment_tonemapping_linear=False,
 ):
     """CPU Backup implementation using rawpy postprocessing.
 
@@ -294,29 +298,72 @@ def _prepare_image_array_from_raw_backup(
 
 
 def _prepare_image_array_from_raw(
-    original_path, linear_mode=False, generate_ref_proxy=False, alignment_tonemapping_linear=False
+    original_path,
+    linear_mode=False,
+    generate_ref_proxy=False,
+    alignment_tonemapping_linear=False,
 ):
-    """GPU-Accelerated RAW Demosaicing utilizing C++ AOT Hamilton-Adams pipeline."""
+    """GPU-Accelerated RAW Demosaicing using only Taichi for pixel processing.
+
+    rawpy is used only as a container reader for the Bayer plane and sensor
+    calibration values.  It never runs ``postprocess`` or performs demosaicing
+    in this path; the Bayer array is passed directly to ``ta_aot.demosaic``.
+    """
     try:
         if not RAWPY_AVAILABLE:
             return None
 
         import taichi_library.taichi_aot as ta_aot
 
-        # Call GPU-accelerated Demosaicing (Auto-extracts all metadata and runs on GPU)
+        # Read the Bayer plane/calibration only.  Calling demosaic(path) would
+        # make the API re-open rawpy internally and hide orientation handling.
+        with rawpy.imread(original_path) as raw:
+            bayer = raw.raw_image.astype(np.float32, copy=False)
+            wb = np.asarray(raw.camera_whitebalance, dtype=np.float32).copy()
+            if wb.size != 4:
+                wb = np.array([1.5, 1.0, 2.0, 1.0], dtype=np.float32)
+            if wb[3] <= 0.01:
+                wb[3] = wb[1]
+            wb /= max((wb[1] + wb[3]) / 2.0, 1e-6)
+            cmatrix = raw.color_matrix[:, :3].astype(np.float32)
+            black_level = float(raw.black_level_per_channel[0])
+            white_level = float(raw.white_level)
+            c00, c01 = int(raw.raw_colors[0, 0]), int(raw.raw_colors[0, 1])
+            c10, c11 = int(raw.raw_colors[1, 0]), int(raw.raw_colors[1, 1])
+
+        demosaic_kwargs = dict(
+            wb_r=float(wb[0]),
+            wb_g1=float(wb[1]),
+            wb_b=float(wb[2]),
+            wb_g2=float(wb[3]),
+            cmatrix=cmatrix,
+            black_level=black_level,
+            white_level=white_level,
+            c00=c00,
+            c01=c01,
+            c10=c10,
+            c11=c11,
+        )
+
         os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
 
         if alignment_tonemapping_linear:
             gray_full = ta_aot.demosaic(
-                original_path, method="hamilton-1channel", return_gpu=False
+                bayer,
+                method="hamilton-1channel",
+                return_gpu=False,
+                **demosaic_kwargs,
             )
             return gray_full
 
         # Active Version: Restored to JIT/AOT developed non-linear highlight logic from commit 56b751e
         bgr = ta_aot.demosaic(
-            original_path, method="hamilton", return_gpu=False, output_bgr_u16=True
+            bayer,
+            method="hamilton",
+            return_gpu=False,
+            output_bgr_u16=True,
+            **demosaic_kwargs,
         )
-
         # 5. GT Proxy Generation (if requested)
         if generate_ref_proxy:
             return (bgr, bgr.copy())
@@ -390,6 +437,22 @@ def load_images_from_paths(
     total_paths = len(image_paths)
     loaded_count = 0
 
+    # Desktop OpenGL contexts are thread-affine.  The native AOT bridge is
+    # initialized on the caller thread, while the historical RAW loader sent
+    # every demosaic job through a ThreadPoolExecutor.  That combination can
+    # make the ICD reject otherwise-valid tile allocations (and then trigger
+    # the CPU backup).  Keep standard-image and CPU/CUDA/Vulkan loading
+    # parallel, but execute OpenGL/GLES RAW demosaic on the caller thread.
+    serial_native_raw = False
+    if TAICHI_AOT_AVAILABLE and ta_aot is not None:
+        try:
+            serial_native_raw = str(ta_aot.get_engine().arch).strip().lower() in {
+                "opengl",
+                "gles",
+            }
+        except Exception:
+            serial_native_raw = False
+
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
         for idx_path, path in enumerate(image_paths):
             if stop_requested and stop_requested():
@@ -403,14 +466,45 @@ def load_images_from_paths(
 
             if ext in raw_extensions:
                 if os.path.exists(path):
-                    future = executor.submit(
-                        _prepare_image_array_from_raw,
-                        path,
-                        linear_mode,
-                        generate_ref_proxy=generate_proxy,
-                        alignment_tonemapping_linear=alignment_tonemapping_linear,
-                    )
-                    raw_futures.append(future)
+                    if serial_native_raw:
+                        try:
+                            res = _prepare_image_array_from_raw(
+                                path,
+                                linear_mode,
+                                generate_ref_proxy=generate_proxy,
+                                alignment_tonemapping_linear=alignment_tonemapping_linear,
+                            )
+                            if res is not None:
+                                if isinstance(res, tuple):
+                                    img, proxy = res
+                                    images.append(img)
+                                    if gt_proxy_result is None:
+                                        gt_proxy_result = proxy
+                                else:
+                                    images.append(res)
+                        except Exception as exc:
+                            print(f"Error loading RAW image: {exc}")
+                        finally:
+                            loaded_count += 1
+                            if update_progress:
+                                prog_val = int(
+                                    progress_start
+                                    + (loaded_count / total_paths)
+                                    * (progress_end - progress_start)
+                                )
+                                update_progress(
+                                    prog_val,
+                                    f"Loading RAW image {loaded_count}/{total_paths}...",
+                                )
+                    else:
+                        future = executor.submit(
+                            _prepare_image_array_from_raw,
+                            path,
+                            linear_mode,
+                            generate_ref_proxy=generate_proxy,
+                            alignment_tonemapping_linear=alignment_tonemapping_linear,
+                        )
+                        raw_futures.append(future)
             else:
                 if os.path.exists(path):
                     if alignment_tonemapping_linear:
@@ -641,15 +735,72 @@ def save_align_to_folder(
     return file_path
 
 
+def _reference_orientation(path):
+    """Read EXIF/LibRaw orientation without modifying image pixels."""
+    if not path or not os.path.exists(path):
+        return 1
+    raw_extensions = {".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2", ".pef", ".srw"}
+    # PIL/TIFF can expose a normalized DNG Orientation that differs from
+    # LibRaw's sensor flip.  For RAW inputs LibRaw is authoritative.
+    if RAWPY_AVAILABLE and os.path.splitext(path)[1].lower() in raw_extensions:
+        try:
+            with rawpy.imread(path) as raw:
+                flip = int(getattr(raw.sizes, "flip", 0))
+                return flip if flip in range(1, 9) else 1
+        except Exception:
+            pass
+    try:
+        with Image.open(path) as ref:
+            return int(ref.getexif().get(274, 1) or 1)
+    except Exception:
+        pass
+    if RAWPY_AVAILABLE:
+        try:
+            with rawpy.imread(path) as raw:
+                flip = int(getattr(raw.sizes, "flip", 0))
+                return flip if flip in range(1, 9) else 1
+        except Exception:
+            pass
+    return 1
+
+
+def _bake_orientation(image, orientation):
+    """Apply TIFF/EXIF orientation to pixels and return Orientation=1 data."""
+    orientation = int(orientation or 1)
+    if orientation == 2:
+        return np.fliplr(image)
+    if orientation == 3:
+        return np.rot90(image, 2)
+    if orientation == 4:
+        return np.flipud(image)
+    if orientation == 5:
+        return np.transpose(np.fliplr(image), (1, 0, 2)) if image.ndim == 3 else np.transpose(np.fliplr(image))
+    if orientation == 6:
+        return np.rot90(image, 3)
+    if orientation == 7:
+        return np.transpose(np.flipud(image), (1, 0, 2)) if image.ndim == 3 else np.transpose(np.flipud(image))
+    if orientation == 8:
+        return np.rot90(image, 1)
+    return image
+
+
 def save_image(image, output_path, reference_image_path=None):
     """
-    Menyimpan gambar dengan kontrol kompresi untuk file TIFF demi kompatibilitas.
-    Menyalin metadata orientasi dari gambar referensi menggunakan exiftool.
+    Menyimpan gambar dengan orientasi dibakar ke pixel.
+    Metadata output dinormalisasi ke ``Orientation=1`` agar kompatibel dengan
+    viewer TIFF yang tidak menerapkan EXIF Orientation.
     """
     try:
         image_to_save = image.copy() if hasattr(image, "copy") else image
         ext = os.path.splitext(output_path)[1].lower()
         success = False
+
+        # Normalize orientation before any tone mapping or encoding.  This is
+        # intentionally the viewer-compatible policy: output pixels are
+        # portrait/landscape already and Orientation=1 is written afterwards.
+        source_orientation = _reference_orientation(reference_image_path)
+        if source_orientation != 1:
+            image_to_save = _bake_orientation(image_to_save, source_orientation)
 
         # Apply end-to-end Natural Tone Mapping if the output array is linear float32/uint16
         try:
@@ -661,16 +812,24 @@ def save_image(image, output_path, reference_image_path=None):
                 max_v = float(np.max(img_f32))
                 if max_v > 1.0:
                     img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
-                img_tm = taichi_aot.naturalTonemapping(img_f32, **DEFAULT_TONE_MAPPING_PARAMS)
+                img_tm = taichi_aot.naturalTonemapping(
+                    img_f32, **DEFAULT_TONE_MAPPING_PARAMS
+                )
                 if max_v > 255.0:
-                    image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+                    image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(
+                        np.uint16
+                    )
                 elif max_v > 1.0:
                     image_to_save = np.clip(img_tm * 255.0, 0, 255).astype(np.uint8)
                 else:
-                    image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+                    image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(
+                        np.uint16
+                    )
             elif image_to_save.dtype == np.uint16:
                 img_f32 = image_to_save.astype(np.float32) / 65535.0
-                img_tm = taichi_aot.naturalTonemapping(img_f32, **DEFAULT_TONE_MAPPING_PARAMS)
+                img_tm = taichi_aot.naturalTonemapping(
+                    img_f32, **DEFAULT_TONE_MAPPING_PARAMS
+                )
                 image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
         except Exception as e_tm:
             print(f"[save_image] Tone mapping warning: {e_tm}")
@@ -688,7 +847,14 @@ def save_image(image, output_path, reference_image_path=None):
                     image_to_write_tifffile = image_to_save
 
                 # 2. Gunakan tifffile untuk menyimpan tanpa kompresi
-                tifffile.imwrite(output_path, image_to_write_tifffile, compression=None)
+                # Write a neutral orientation tag even when ExifTool is not
+                # installed; the pixel data has already been normalized.
+                tifffile.imwrite(
+                    output_path,
+                    image_to_write_tifffile,
+                    compression=None,
+                    extratags=[(274, "H", 1, 1, False)],
+                )
                 success = True
             except Exception as e:
                 print(f"Error: Failed to save TIFF to '{output_path}': {e}")
@@ -713,8 +879,16 @@ def save_image(image, output_path, reference_image_path=None):
                         "-overwrite_original",
                         "-TagsFromFile",
                         reference_image_path,
+                        "-IFD0:Orientation#=1",
                         output_path,
                     ],
+                    check=True,
+                    capture_output=True,
+                )
+                # ExifTool may copy the source Orientation after writing the
+                # output tags; normalize it again after the copy.
+                subprocess.run(
+                    ["exiftool", "-q", "-overwrite_original", "-IFD0:Orientation#=1", output_path],
                     check=True,
                     capture_output=True,
                 )
@@ -851,7 +1025,6 @@ def save_linear_dng(image, output_path, reference_image_path):
                 "-all:all",  # Copy all tags
                 "-SubfileType=0",  # Full resolution image
                 "-PhotometricInterpretation=LinearRaw",  # 34892
-                "-Orientation=1",  # Reset orientation
                 "-Compression=Deflate",  # [CRITICAL] Set metadata Compression=8 (Deflate)
                 "-DefaultScale=1.0",
                 "-BlackLevel=0",  # Data sudah bersih
@@ -882,24 +1055,8 @@ def save_special_jpg_and_png(
     if img_np is None:
         raise ValueError("Data gambar input (img_np) tidak boleh None.")
 
-    # Logika untuk menangani orientasi (tetap sama)
-    if reference_image_path and os.path.exists(reference_image_path):
-        try:
-            h, w = img_np.shape[:2]
-            if h > w:
-                img_np = cv2.rotate(img_np, cv2.ROTATE_180)
-            else:
-                with Image.open(reference_image_path) as ref_img:
-                    orientation = ref_img.getexif().get(274, 1)
-
-                if orientation == 3:
-                    img_np = cv2.rotate(img_np, cv2.ROTATE_180)
-                elif orientation == 6:
-                    img_np = cv2.rotate(img_np, cv2.ROTATE_90_CLOCKWISE)
-                elif orientation == 8:
-                    img_np = cv2.rotate(img_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        except Exception:
-            pass
+    # Pixel data is written unchanged; orientation is represented only by
+    # the EXIF tag copied below.
 
     # Konversi tipe data jika perlu (tetap sama)
     image_to_save = img_np
@@ -949,12 +1106,6 @@ def save_special_jpg_and_png(
                     reference_image_path,
                     dst_path,
                 ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                ["exiftool", "-overwrite_original", "-Orientation=1", dst_path],
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1364,8 +1515,16 @@ def estimate_noise_variance(
     # 1. Deteksi tepi untuk mengidentifikasi area non-datar (Taichi AOT atau OpenCV)
     if TAICHI_AOT_AVAILABLE and ta_aot is not None:
         try:
-            gray_f32 = gray_image.astype(np.float32) / 255.0 if gray_image.dtype == np.uint8 else gray_image.astype(np.float32)
-            edges_f32 = ta_aot.canny_aot(gray_f32, low_threshold=edge_threshold_low / 255.0, high_threshold=(edge_threshold_low * 2) / 255.0)
+            gray_f32 = (
+                gray_image.astype(np.float32) / 255.0
+                if gray_image.dtype == np.uint8
+                else gray_image.astype(np.float32)
+            )
+            edges_f32 = ta_aot.canny_aot(
+                gray_f32,
+                low_threshold=edge_threshold_low / 255.0,
+                high_threshold=(edge_threshold_low * 2) / 255.0,
+            )
             edges = (edges_f32 > 0.5).astype(np.uint8) * 255
         except Exception:
             edges = cv2.Canny(gray_image, edge_threshold_low, edge_threshold_low * 2)
@@ -1377,7 +1536,9 @@ def estimate_noise_variance(
     if TAICHI_AOT_AVAILABLE and ta_aot is not None:
         try:
             edges_f32 = edges.astype(np.float32)
-            dilated_f32 = ta_aot.dilate(edges_f32, kernel=kernel.astype(np.int32), ksize=dilate_kernel_size)
+            dilated_f32 = ta_aot.dilate(
+                edges_f32, kernel=kernel.astype(np.int32), ksize=dilate_kernel_size
+            )
             dilated_edges = (dilated_f32 > 127).astype(np.uint8) * 255
         except Exception:
             dilated_edges = cv2.dilate(edges, kernel, iterations=1)
@@ -2280,6 +2441,7 @@ def is_hdf5_cache_valid(
     """
     try:
         import h5py
+
         with h5py.File(hdf5_path, "r") as f:
             stored_ref = f.attrs.get("ref_image_path", "")
             if not stored_ref:
@@ -2342,9 +2504,7 @@ def build_alignment_cache_key(alignment_name: str, config: dict):
     import json as _json
 
     # Bersihkan config dari nilai None dan sort agar deterministic
-    clean_config = {
-        k: v for k, v in sorted((config or {}).items()) if v is not None
-    }
+    clean_config = {k: v for k, v in sorted((config or {}).items()) if v is not None}
     payload = {"alignment": alignment_name, "config": clean_config}
     payload_str = _json.dumps(payload, sort_keys=True)
     cache_key = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()[:16]
@@ -2382,4 +2542,3 @@ def write_alignment_cache_attrs(
         h5f.attrs["alignment_cache_payload"] = _json.dumps(cache_payload)
     except Exception:
         pass
-

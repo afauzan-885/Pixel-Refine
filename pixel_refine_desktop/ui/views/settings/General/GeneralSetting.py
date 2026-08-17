@@ -20,6 +20,7 @@ from .helpers import restart_application
 from taichi_library.device_selection import (
     make_device_selector,
     resolve_device_selector,
+    scan_cuda_device_records,
     scan_vulkan_device_records,
 )
 
@@ -155,27 +156,51 @@ class HardwareBackendTestWorker(QObject):
             renderer = ""
 
             environment = os.environ.copy()
+            # A parent process may have pinned an explicit bridge while
+            # running an earlier backend (for example the OpenGL NVIDIA
+            # renderer).  Keeping that override here defeats the requested
+            # backend and can make a Vulkan probe initialize the old bridge.
+            # Backend tests must resolve the bridge from the requested
+            # AOT_ARCH/target contract; production callers can still provide
+            # AOT_ENGINE_DLL outside this isolated test worker.
+            environment.pop("AOT_ENGINE_DLL", None)
             environment.update(
                 {
+                    # AOT_ARCH selects the native bridge DLL; PIXEL_REFINE_AOT_ARCH
+                    # selects the engine's runtime backend (canonical env from
+                    # backend_config.backend_env).  Both must match so a "Vulkan"
+                    # test does not silently run on an auto-selected CUDA device.
+                    "AOT_ARCH": backend,
                     "PIXEL_REFINE_AOT_ARCH": backend,
+                    "AOT_DEVICE": str(device_id),
                     "PIXEL_REFINE_AOT_DEVICE": str(device_id),
-                    "PIXEL_REFINE_AOT_STRICT_BACKEND": "1",
-                    "PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK": "0",
-                    "PIXEL_REFINE_AOT_SKIP_DOZEN": "1",
-                    "PIXEL_REFINE_INTEL_VULKAN_AUTO_QUALIFY": "0",
+                    "AOT_STRICT_BACKEND": "1",
+                    "AOT_ALLOW_CPU_FALLBACK": "0",
+                    "AOT_SKIP_DOZEN": "1",
+                    "INTEL_VULKAN_AUTO_QUALIFY": "0",
                     "VK_LOADER_DEBUG": "error",
                 }
             )
             if backend == "vulkan" and vendor == "intel":
                 # Compatibility testing is crash-isolated, so it may probe an
                 # unqualified Intel driver without changing production policy.
-                environment["PIXEL_REFINE_AOT_INTEL_PROBE"] = "1"
-                environment["PIXEL_REFINE_AOT_ALLOW_UNSAFE_INTEL"] = "1"
+                environment["AOT_INTEL_PROBE"] = "1"
+                environment["AOT_ALLOW_UNSAFE_INTEL"] = "1"
             else:
-                environment.pop("PIXEL_REFINE_AOT_INTEL_PROBE", None)
-                environment.pop("PIXEL_REFINE_AOT_ALLOW_UNSAFE_INTEL", None)
-                environment.pop("PIXEL_REFINE_AOT_INTEL_UNSAFE", None)
+                environment.pop("AOT_INTEL_PROBE", None)
+                environment.pop("AOT_ALLOW_UNSAFE_INTEL", None)
+                environment.pop("AOT_INTEL_UNSAFE", None)
+            if backend == "cuda":
+                environment["TARGET_VENDOR"] = "nvidia"
+                environment["CUDA_EXPECTED_NAME"] = str(option.get("raw_name", ""))
+            else:
+                environment.pop("CUDA_EXPECTED_NAME", None)
             if backend == "opengl":
+                environment["OPENGL_EXPECTED_VENDOR"] = vendor
+                environment["OPENGL_EXPECTED_NAME"] = str(option.get("raw_name", ""))
+                # The native bridge reads the PIXEL_REFINE-prefixed form;
+                # retain the historical unprefixed aliases for Python-side
+                # checks and older bridge builds.
                 environment["PIXEL_REFINE_OPENGL_EXPECTED_VENDOR"] = vendor
                 environment["PIXEL_REFINE_OPENGL_EXPECTED_NAME"] = str(
                     option.get("raw_name", "")
@@ -183,20 +208,22 @@ class HardwareBackendTestWorker(QObject):
                 # Qualification must exercise the vendor ICD directly.  This
                 # avoids WGL's adapter selection and also works on older
                 # Windows drivers that ship no EGL provider.
-                environment["PIXEL_REFINE_OPENGL_CONTEXT"] = "icd"
-                environment["PIXEL_REFINE_OPENGL_ICD_ONLY"] = "1"
-                environment.pop("PIXEL_REFINE_OPENGL_EGL_ONLY", None)
+                environment["OPENGL_CONTEXT"] = "icd"
+                environment["OPENGL_ICD_ONLY"] = "1"
+                environment.pop("OPENGL_EGL_ONLY", None)
             else:
+                environment.pop("OPENGL_EXPECTED_VENDOR", None)
+                environment.pop("OPENGL_EXPECTED_NAME", None)
                 environment.pop("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", None)
                 environment.pop("PIXEL_REFINE_OPENGL_EXPECTED_NAME", None)
-                environment.pop("PIXEL_REFINE_OPENGL_CONTEXT", None)
-                environment.pop("PIXEL_REFINE_OPENGL_EGL_ONLY", None)
+                environment.pop("OPENGL_CONTEXT", None)
+                environment.pop("OPENGL_EGL_ONLY", None)
 
             test_path = os.path.abspath(
                 os.path.join(
                     os.path.dirname(__file__),
                     "../../../../../taichi_library/taichi_algorithm/"
-                    "aot_py/test_comprehensif.py",
+                    "aot_py/tests/test_comprehensif.py",
                 )
             )
             command = [
@@ -236,7 +263,7 @@ class HardwareBackendTestWorker(QObject):
                 with tempfile.TemporaryDirectory(
                     prefix="pixel_refine_backend_test_"
                 ) as cache_dir:
-                    environment["PIXEL_REFINE_AOT_CACHE"] = cache_dir
+                    environment["AOT_CACHE"] = cache_dir
                     log_path = os.path.join(cache_dir, "backend_test.log")
                     with _temporary_windows_gpu_preference(
                         self.python_bin,
@@ -399,7 +426,9 @@ class HardwareProgressModal(modal_confirm):
     - Click-outside-to-cancel support
     """
 
-    def __init__(self, title="Hardware Backend Analysis", message="", parent=None, on_cancel=None):
+    def __init__(
+        self, title="Hardware Backend Analysis", message="", parent=None, on_cancel=None
+    ):
         super().__init__(
             message=message,
             parent=parent,
@@ -429,7 +458,8 @@ class HardwareProgressModal(modal_confirm):
         self.progress_bar.setValue(0)
         self.progress_bar.setFixedHeight(10)
         self.progress_bar.setTextVisible(False)
-        self.progress_bar.setStyleSheet("""
+        self.progress_bar.setStyleSheet(
+            """
             QProgressBar {
                 background-color: #E2E8F0;
                 border: 1px solid #CBD5E1;
@@ -439,14 +469,16 @@ class HardwareProgressModal(modal_confirm):
                 background-color: #2ECC71;
                 border-radius: 4px;
             }
-        """)
+        """
+        )
 
         # Live Scrollable Log Box
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setPlaceholderText("Live testing output logs...")
         self.log_box.setFixedHeight(130)
-        self.log_box.setStyleSheet("""
+        self.log_box.setStyleSheet(
+            """
             QTextEdit {
                 background-color: #0F172A;
                 border: 1px solid #334155;
@@ -456,7 +488,8 @@ class HardwareProgressModal(modal_confirm):
                 color: #38BDF8;
                 padding: 8px;
             }
-        """)
+        """
+        )
 
         if content_widget and content_widget.layout():
             content_widget.layout().addWidget(self.progress_bar)
@@ -546,7 +579,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         device_label = getattr(
             language_config,
             "DEVICE_ACCELERATION_LABEL",
-            "Accelerated Hardware Backend:",
+            language_config.BTN_TEST_BACKEND_HARDWARE,
         )
         self.device_group = FormGroup(
             label=device_label, input_type="select", auto_sync=False
@@ -561,8 +594,24 @@ class GeneralSettingsPage(Container, SyncMixin):
         form.add_row(self.device_group)
         self._apply_selected_backend_to_process()
 
+        # Auto Fallback checkbox: when enabled, fall back through
+        # CUDA -> Vulkan -> OpenGL -> CPU if the selected backend is unavailable.
+        auto_fb_label = getattr(language_config, "LBL_AUTO_FALLBACK", "Auto Fallback")
+        auto_fb_tip = getattr(
+            language_config,
+            "LBL_AUTO_FALLBACK_TIP",
+            "When enabled, automatically fall back through CUDA, Vulkan, OpenGL, "
+            "then CPU if the selected backend is unavailable.",
+        )
+        self.auto_fallback_cb = Checkbox(auto_fb_label, auto_sync=True)
+        self.auto_fallback_cb.checkbox.setToolTip(auto_fb_tip)
+        self.auto_fallback_cb.bind_store(self.store, "auto_fallback")
+        form.add_row(self.auto_fallback_cb)
+
         # Uji Backend Hardware Button
-        self.test_btn = Button("Uji Backend Hardware", variant="secondary")
+        self.test_btn = Button(
+            language_config.BTN_TEST_BACKEND_HARDWARE, variant="secondary"
+        )
         self.test_btn.setMinimumHeight(35)
         self.test_btn.clicked.connect(self._on_test_backends_clicked)
         form.add_row(self.test_btn)
@@ -578,6 +627,41 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.thumb_cb.bind_store(self.store, "create_thumbnail")
         self.thumb_cb.toggled.connect(self._on_thumbnail_toggled)
         form.add_row(self.thumb_cb)
+
+        # Inactivity shutdown is deliberately opt-in.  The timer is owned by
+        # main_desktop.py and observes these existing general settings.
+        auto_shutdown_label = getattr(
+            language_config, "AUTO_SHUTDOWN_LABEL", "Enable Auto Shutdown"
+        )
+        auto_shutdown_tip = getattr(
+            language_config,
+            "AUTO_SHUTDOWN_DESCRIPTION",
+            "Close the application after the configured period without user activity.",
+        )
+        self.auto_shutdown_cb = Checkbox(auto_shutdown_label, auto_sync=True)
+        self.auto_shutdown_cb.checkbox.setToolTip(auto_shutdown_tip)
+        self.auto_shutdown_cb.bind_store(self.store, "auto_shutdown_enabled")
+        self.auto_shutdown_cb.toggled.connect(self._on_auto_shutdown_toggled)
+        form.add_row(self.auto_shutdown_cb)
+
+        timeout_label = getattr(
+            language_config,
+            "AUTO_SHUTDOWN_TIMEOUT_LABEL",
+            "Idle timeout (minutes)",
+        )
+        self.auto_shutdown_minutes_group = FormGroup(
+            label=timeout_label,
+            input_type="number",
+            auto_sync=True,
+        )
+        self.auto_shutdown_minutes_group.input.setRange(1, 24 * 60)
+        self.auto_shutdown_minutes_group.bind_store(
+            self.store, "auto_shutdown_minutes"
+        )
+        form.add_row(self.auto_shutdown_minutes_group)
+        self._update_auto_shutdown_timeout_state(
+            self.auto_shutdown_cb.is_checked()
+        )
 
         self.add_widget(form)
         self.add_stretch()
@@ -631,22 +715,31 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.thumb_cb.checkbox.setText(thumb_label)
         self.thumb_cb.checkbox.setToolTip(thumb_tip)
 
+        auto_shutdown_label = getattr(
+            language_config, "AUTO_SHUTDOWN_LABEL", "Enable Auto Shutdown"
+        )
+        auto_shutdown_tip = getattr(
+            language_config,
+            "AUTO_SHUTDOWN_DESCRIPTION",
+            "Close the application after the configured period without user activity.",
+        )
+        self.auto_shutdown_cb.checkbox.setText(auto_shutdown_label)
+        self.auto_shutdown_cb.checkbox.setToolTip(auto_shutdown_tip)
+        self.auto_shutdown_minutes_group.label.setText(
+            getattr(
+                language_config,
+                "AUTO_SHUTDOWN_TIMEOUT_LABEL",
+                "Idle timeout (minutes)",
+            )
+        )
+
         apply_text = getattr(
             language_config, "APPLY_PARAMETER_BUTTON_TEXT", "Apply Settings"
         )
         self.apply_btn.setText(apply_text)
 
         # Translate Test Button
-        lang_str = getattr(language_config, "LANGUAGE", "english").lower()
-        if lang_str == "indonesian":
-            test_text = "Uji Backend Hardware"
-        elif lang_str == "melayu":
-            test_text = "Uji Backend Perkakasan"
-        elif lang_str == "china traditional":
-            test_text = "测试硬件后端"
-        else:
-            test_text = "Test Hardware Backend"
-        self.test_btn.setText(test_text)
+        self.test_btn.setText(language_config.BTN_TEST_BACKEND_HARDWARE)
 
         # Update window title if possible
         main_win = self.window()
@@ -666,7 +759,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         )
 
         style = create_checkbox_style()
-        for cb in [self.thumb_cb]:
+        for cb in [self.thumb_cb, self.auto_shutdown_cb]:
             if hasattr(cb, "checkbox"):
                 cb.checkbox.setStyleSheet(style)
 
@@ -688,6 +781,36 @@ class GeneralSettingsPage(Container, SyncMixin):
             }
         ]
         allowed_ids = self.store.get("allowed_backend_ids", [])
+
+        # CUDA discovery is independent from Vulkan enumeration.  Keep it in
+        # its own guarded probe so a missing/broken Vulkan loader cannot hide
+        # an otherwise usable NVIDIA CUDA device from General Settings.
+        try:
+            cuda_devices = scan_cuda_device_records()
+            for record in cuda_devices:
+                idx = int(record.get("ordinal", 0))
+                dev = str(record.get("name") or "")
+                if not dev:
+                    continue
+                selector = make_device_selector(record)
+                fingerprint = str(
+                    selector.get("fingerprint")
+                    or f"nvidia:{record.get('device_uuid', dev)}"
+                )
+                options.append(
+                    {
+                        "key": f"{fingerprint}|cuda",
+                        "text": f"{dev} — CUDA",
+                        "backend": "cuda",
+                        "device_id": idx,
+                        "vendor": "nvidia",
+                        "raw_name": dev,
+                        "device_record": record,
+                        "device_selector": selector,
+                    }
+                )
+        except Exception as e:
+            print(f"[CUDA Scan] Failed to scan CUDA hardware: {e}")
 
         try:
             devices = scan_vulkan_device_records()
@@ -738,6 +861,7 @@ class GeneralSettingsPage(Container, SyncMixin):
                                 "device_selector": selector,
                             }
                         )
+
         except Exception as e:
             print(f"[Hardware Scan] Failed to scan hardware: {e}")
 
@@ -766,9 +890,15 @@ class GeneralSettingsPage(Container, SyncMixin):
             return
         legacy = saved_text.lower()
         preferred_arch = saved_arch
-        if preferred_arch not in ("vulkan", "opengl"):
+        if preferred_arch not in ("vulkan", "opengl", "cuda"):
             preferred_arch = (
-                "vulkan" if ("nvidia" in legacy or "geforce" in legacy) else "opengl"
+                "cuda"
+                if saved_arch == "cuda" and ("nvidia" in legacy or "geforce" in legacy)
+                else (
+                    "vulkan"
+                    if ("nvidia" in legacy or "geforce" in legacy)
+                    else "opengl"
+                )
             )
         saved_selector = self.store.get("device_selector", {})
         resolved_id = None
@@ -777,6 +907,7 @@ class GeneralSettingsPage(Container, SyncMixin):
                 option.get("device_record")
                 for option in options
                 if isinstance(option.get("device_record"), dict)
+                and option.get("backend") == preferred_arch
             ]
             unique_records = {int(record["ordinal"]): record for record in records}
             resolved_id = resolve_device_selector(
@@ -811,7 +942,15 @@ class GeneralSettingsPage(Container, SyncMixin):
         text = self.device_group.input.currentText()
         return {
             "text": text,
-            "backend": "cpu" if text == "CPU (Universal)" else ("opengl" if "intel" in text.lower() else "vulkan"),
+            "backend": (
+                "cpu"
+                if text == "CPU (Universal)"
+                else (
+                    "cuda"
+                    if "cuda" in text.lower()
+                    else ("opengl" if "intel" in text.lower() else "vulkan")
+                )
+            ),
             "device_id": idx - 1,
         }
 
@@ -854,28 +993,33 @@ class GeneralSettingsPage(Container, SyncMixin):
             strict=True,
         )
         os.environ.update(backend_env(canonical_config))
-        os.environ["PIXEL_REFINE_AOT_STRICT_BACKEND"] = "1"
+        os.environ["AOT_STRICT_BACKEND"] = "1"
+        if backend == "cuda":
+            os.environ["TARGET_VENDOR"] = "nvidia"
+            os.environ["CUDA_EXPECTED_NAME"] = str(option.get("raw_name", ""))
+        else:
+            os.environ.pop("CUDA_EXPECTED_NAME", None)
+            if backend == "cpu":
+                os.environ.pop("TARGET_VENDOR", None)
+            else:
+                os.environ["TARGET_VENDOR"] = str(option.get("vendor", "")).lower()
         if backend == "opengl":
-            os.environ["PIXEL_REFINE_OPENGL_EXPECTED_VENDOR"] = str(
-                option.get("vendor", "")
-            ).lower()
-            os.environ["PIXEL_REFINE_OPENGL_EXPECTED_NAME"] = str(
-                option.get("raw_name", "")
-            )
+            os.environ["OPENGL_EXPECTED_VENDOR"] = str(option.get("vendor", "")).lower()
+            os.environ["OPENGL_EXPECTED_NAME"] = str(option.get("raw_name", ""))
             # The bridge prefers native ICD automatically.  Clear stale test
             # overrides so production selection cannot accidentally force a
             # WGL/EGL compatibility path from a previous hardware probe.
-            os.environ.pop("PIXEL_REFINE_OPENGL_CONTEXT", None)
-            os.environ.pop("PIXEL_REFINE_OPENGL_ICD_ONLY", None)
-            os.environ.pop("PIXEL_REFINE_OPENGL_EGL_ONLY", None)
+            os.environ.pop("OPENGL_CONTEXT", None)
+            os.environ.pop("OPENGL_ICD_ONLY", None)
+            os.environ.pop("OPENGL_EGL_ONLY", None)
         else:
-            os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", None)
-            os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_NAME", None)
+            os.environ.pop("OPENGL_EXPECTED_VENDOR", None)
+            os.environ.pop("OPENGL_EXPECTED_NAME", None)
         # This is a selection policy for the Vulkan loader/runtime; it does
         # not uninstall or modify any Windows display driver.  The native ICD
         # remains selectable while Dozen/D3D12 devices are excluded above.
-        os.environ["PIXEL_REFINE_AOT_NATIVE_VULKAN_ONLY"] = "1"
-        os.environ["PIXEL_REFINE_AOT_SKIP_DOZEN"] = "1"
+        os.environ["AOT_NATIVE_VULKAN_ONLY"] = "1"
+        os.environ["AOT_SKIP_DOZEN"] = "1"
 
     def _get_backend_test_options(self):
         if not hasattr(self, "device_group") or not isinstance(
@@ -892,7 +1036,15 @@ class GeneralSettingsPage(Container, SyncMixin):
                 options.append(
                     {
                         "text": text,
-                        "backend": "cpu" if text == "CPU (Universal)" else ("opengl" if "intel" in text.lower() else "vulkan"),
+                        "backend": (
+                            "cpu"
+                            if text == "CPU (Universal)"
+                            else (
+                                "cuda"
+                                if "cuda" in text.lower()
+                                else ("opengl" if "intel" in text.lower() else "vulkan")
+                            )
+                        ),
                         "device_id": i - 1,
                     }
                 )
@@ -903,7 +1055,18 @@ class GeneralSettingsPage(Container, SyncMixin):
         if hasattr(self.store, "save_to_file"):
             self.store.save_to_file()
         from resources.GenericUILibrary import trigger_live_update
+
         trigger_live_update()
+
+    def _update_auto_shutdown_timeout_state(self, checked):
+        if hasattr(self, "auto_shutdown_minutes_group"):
+            self.auto_shutdown_minutes_group.setEnabled(bool(checked))
+
+    def _on_auto_shutdown_toggled(self, checked):
+        self.store.set("auto_shutdown_enabled", bool(checked))
+        self._update_auto_shutdown_timeout_state(checked)
+        if hasattr(self.store, "save_to_file"):
+            self.store.save_to_file()
 
     def _on_apply_clicked(self):
         """
@@ -928,6 +1091,17 @@ class GeneralSettingsPage(Container, SyncMixin):
         if hasattr(self, "thumb_cb"):
             new_thumb = bool(self.thumb_cb.is_checked())
             self.store.set("create_thumbnail", new_thumb)
+
+        if hasattr(self, "auto_shutdown_cb"):
+            self.store.set(
+                "auto_shutdown_enabled",
+                bool(self.auto_shutdown_cb.is_checked()),
+            )
+        if hasattr(self, "auto_shutdown_minutes_group"):
+            self.store.set(
+                "auto_shutdown_minutes",
+                int(self.auto_shutdown_minutes_group.get_value()),
+            )
 
         if isinstance(self.device_group.input, QComboBox):
             self._apply_selected_backend_to_process()
@@ -966,20 +1140,12 @@ class GeneralSettingsPage(Container, SyncMixin):
         toast.show_toast(duration=3000)
 
         if backend_changed:
-            confirm_message = (
-                "Perubahan Accelerated Hardware Backend memerlukan restart aplikasi.\n\n"
-                "Restart sekarang?"
+            dialog = modal_confirm(
+                language_config.MSG_BACKEND_RESTART_REQUIRED, self.window()
             )
-            if getattr(language_config, "LANGUAGE", "english").lower() != "indonesian":
-                confirm_message = (
-                    "Changes to Accelerated Hardware Backend require an application restart.\n\n"
-                    "Restart now?"
-                )
-
-            dialog = modal_confirm(confirm_message, self.window())
-            dialog.title_text.setText("Restart Required")
-            dialog.yes_button.setText("Yes")
-            dialog.no_button.setText("No")
+            dialog.title_text.setText(language_config.RESTART_APPLICATION_REQUIRED)
+            dialog.yes_button.setText(language_config.BTN_YES)
+            dialog.no_button.setText(language_config.BTN_NO)
 
             if dialog.exec() == dialog.DialogCode.Accepted:
                 restart_application()
@@ -1084,35 +1250,32 @@ class GeneralSettingsPage(Container, SyncMixin):
         import sys
         import os
         from config import PYTHON_INTERPRETER
-
-        python_bin = (
-            PYTHON_INTERPRETER if os.path.exists(PYTHON_INTERPRETER) else sys.executable
-        )
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", ".."))
+        llvm20_python = os.path.join(project_root, "venv", "Scripts", "python.exe")
+        if os.path.isfile(llvm20_python):
+            # Hardware probes must use the same LLVM20 interpreter as the
+            # production runtime; otherwise a system/legacy venv can import
+            # Taichi LLVM15 before the target-qualified AOT bundle is tested.
+            python_bin = llvm20_python
+        else:
+            configured_python = os.path.abspath(str(PYTHON_INTERPRETER))
+            python_bin = (
+                configured_python if os.path.exists(configured_python) else sys.executable
+            )
         options = self._get_backend_test_options()
         if not options:
             return
 
-        lang_str = getattr(language_config, "LANGUAGE", "english").lower()
-        is_indonesian = lang_str == "indonesian"
-
         msg = (
-            "Pilih kedalaman pengujian backend hardware:\n\n"
-            "• Fast: pemeriksaan native inti (~1 menit).\n"
-            "• Deep: 29 pengujian & stress pipeline 24.1 MP."
-            if is_indonesian
-            else (
-                "Choose hardware-backend test depth:\n\n"
-                "• Fast: core native smoke checks (~1 min).\n"
-                "• Deep: 29 checks & 24.1 MP stress pipeline."
-            )
+            f"{language_config.MSG_HARDWARE_TEST_DEPTH}\n\n"
+            f"• {language_config.LBL_FAST}: {language_config.MSG_HARDWARE_TEST_FAST}\n"
+            f"• {language_config.LBL_DEEP}: {language_config.MSG_HARDWARE_TEST_DEEP}"
         )
         chooser = modal_confirm(msg, self.window())
-        chooser.title_text.setText(
-            "Pilih Mode Analisis" if is_indonesian else "Choose Analysis Mode"
-        )
-        chooser.yes_button.setText("Fast")
+        chooser.title_text.setText(language_config.LBL_ANALYSIS_MODE)
+        chooser.yes_button.setText(language_config.LBL_FAST)
         chooser.yes_button.setFixedWidth(60)
-        chooser.no_button.setText("Deep")
+        chooser.no_button.setText(language_config.LBL_DEEP)
         chooser.no_button.setFixedWidth(60)
 
         chosen_mode = [None]
@@ -1140,23 +1303,19 @@ class GeneralSettingsPage(Container, SyncMixin):
         self._backend_test_mode = analysis_mode
 
         self.test_btn.setEnabled(False)
-        self.test_btn.setText(
-            "Menguji... ETA menghitung"
-            if is_indonesian
-            else "Testing... calculating ETA"
+        mode_label = (
+            language_config.LBL_FAST
+            if analysis_mode == "fast"
+            else language_config.LBL_DEEP
         )
-        dialog_title = (
-            "Analisis Backend Hardware"
-            if is_indonesian
-            else "Hardware Backend Analysis"
-        )
+        eta_placeholder = language_config.LBL_ETA.format("--:--")
+        self.test_btn.setText(f"{language_config.LBL_TESTING}... {eta_placeholder}")
         initial_msg = (
-            f"{analysis_mode.title()} Analysis\nMenyiapkan...\n0% · ETA --:--"
-            if is_indonesian
-            else f"{analysis_mode.title()} Analysis\nPreparing...\n0% · ETA --:--"
+            f"{mode_label}\n{language_config.LBL_HARDWARE_PREPARING}\n"
+            f"0% · {eta_placeholder}"
         )
         self._backend_test_progress_dialog = HardwareProgressModal(
-            title=dialog_title,
+            title=language_config.LBL_HARDWARE_BACKEND_ANALYSIS,
             message=initial_msg,
             parent=self.window(),
             on_cancel=self._cancel_backend_testing,
@@ -1187,7 +1346,10 @@ class GeneralSettingsPage(Container, SyncMixin):
     def _cancel_backend_testing(self):
         if hasattr(self, "_backend_test_worker") and self._backend_test_worker:
             self._backend_test_worker.cancel()
-        if hasattr(self, "_backend_test_progress_dialog") and self._backend_test_progress_dialog:
+        if (
+            hasattr(self, "_backend_test_progress_dialog")
+            and self._backend_test_progress_dialog
+        ):
             try:
                 self._backend_test_progress_dialog.reject()
             except Exception:
@@ -1195,15 +1357,13 @@ class GeneralSettingsPage(Container, SyncMixin):
             self._backend_test_progress_dialog = None
 
         self.test_btn.setEnabled(True)
-        lang_str = getattr(language_config, "LANGUAGE", "english").lower()
-        self.test_btn.setText(
-            "Uji Backend Hardware" if lang_str == "indonesian" else "Test Hardware Backend"
-        )
+        self.test_btn.setText(language_config.BTN_TEST_BACKEND_HARDWARE)
         self.test_btn.setToolTip("")
 
         from resources.GenericUILibrary import Toast
+
         toast = Toast(
-            "Pengujian backend dibatalkan." if lang_str == "indonesian" else "Backend testing cancelled.",
+            language_config.MSG_BACKEND_TEST_CANCELLED,
             variant="secondary",
             parent=self.window(),
         )
@@ -1224,17 +1384,21 @@ class GeneralSettingsPage(Container, SyncMixin):
         return f"{minutes:02d}:{seconds:02d}"
 
     def _on_backend_test_progress(self, progress, backend_text, eta_seconds):
-        lang_str = getattr(language_config, "LANGUAGE", "english").lower()
-        prefix = "Menguji" if lang_str == "indonesian" else "Testing"
-        mode = str(getattr(self, "_backend_test_mode", "fast")).title()
+        mode = str(getattr(self, "_backend_test_mode", "fast")).lower()
+        mode_label = (
+            language_config.LBL_FAST if mode == "fast" else language_config.LBL_DEEP
+        )
         eta = self._format_backend_eta(eta_seconds)
-        self.test_btn.setText(f"{prefix} {mode}... {progress}% · ETA {eta}")
-        self.test_btn.setToolTip(f"{backend_text}\nETA {eta}")
+        eta_text = language_config.LBL_ETA.format(eta)
+        self.test_btn.setText(
+            f"{language_config.LBL_TESTING} {mode_label}... {progress}% · {eta_text}"
+        )
+        self.test_btn.setToolTip(f"{backend_text}\n{eta_text}")
         dialog = getattr(self, "_backend_test_progress_dialog", None)
         if dialog is not None:
             dialog.setValue(int(progress))
             dialog.setLabelText(
-                f"{mode} Analysis\n{backend_text}\n" f"{progress}% · ETA {eta}"
+                f"{mode_label}\n{backend_text}\n{progress}% · {eta_text}"
             )
 
     def _on_backend_test_finished(self, test_results):
@@ -1244,19 +1408,8 @@ class GeneralSettingsPage(Container, SyncMixin):
 
         self.update_device_dropdown_style()
 
-        # Restore button text
-        lang_str = getattr(language_config, "LANGUAGE", "english").lower()
-        if lang_str == "indonesian":
-            test_text = "Uji Backend Hardware"
-        elif lang_str == "melayu":
-            test_text = "Uji Backend Perkakasan"
-        elif lang_str == "china traditional":
-            test_text = "测试硬件后端"
-        else:
-            test_text = "Test Hardware Backend"
-
         self.test_btn.setEnabled(True)
-        self.test_btn.setText(test_text)
+        self.test_btn.setText(language_config.BTN_TEST_BACKEND_HARDWARE)
         self.test_btn.setToolTip("")
         progress_dialog = getattr(self, "_backend_test_progress_dialog", None)
         if progress_dialog is not None:
@@ -1268,36 +1421,36 @@ class GeneralSettingsPage(Container, SyncMixin):
         # Show a per-GPU/per-backend compatibility matrix.
         summary = []
         details = []
-        fully_compatible = True
         for result in test_results.values():
             if isinstance(result, dict):
                 supported = result.get("status") == "support"
-                fully_compatible = fully_compatible and supported
                 score = (
                     f"{result.get('passed', 0)}/{result.get('total', 0)}"
                     if result.get("total", 0)
-                    else "initialization failed"
+                    else language_config.LBL_INITIALIZATION_FAILED
                 )
-                renderer = result.get("renderer") or "renderer unavailable"
-                analysis_mode = str(result.get("analysis_mode", "deep")).upper()
+                renderer = (
+                    result.get("renderer") or language_config.LBL_RENDERER_UNAVAILABLE
+                )
+                analysis_mode = str(result.get("analysis_mode", "deep")).lower()
+                analysis_label = (
+                    language_config.LBL_FAST
+                    if analysis_mode == "fast"
+                    else language_config.LBL_DEEP
+                )
                 summary.append(
                     f"{'✓' if supported else '✗'} "
-                    f"{result.get('text', 'Unknown')}: "
-                    f"{analysis_mode} {score} "
+                    f"{result.get('text', language_config.LBL_UNKNOWN)}: "
+                    f"{analysis_label} {score} "
                     f"[{renderer}]"
                 )
                 if not supported and result.get("diagnostic"):
                     details.append(
-                        f"{result.get('text', 'Unknown')}:\n"
+                        f"{result.get('text', language_config.LBL_UNKNOWN)}:\n"
                         f"{result.get('diagnostic')}"
                     )
 
-        dialog_title = (
-            "Hasil Kompatibilitas Backend"
-            if lang_str == "indonesian"
-            else "Backend Compatibility Results"
-        )
-        summary_text = "\n".join(summary) or "No backend results."
+        summary_text = "\n".join(summary) or language_config.LBL_NO_BACKEND_RESULTS
 
         dialog = modal_confirm(
             summary_text,
@@ -1305,7 +1458,7 @@ class GeneralSettingsPage(Container, SyncMixin):
             width=620,
             height=350 if details else 240,
         )
-        dialog.title_text.setText(dialog_title)
+        dialog.title_text.setText(language_config.LBL_BACKEND_COMPATIBILITY_RESULTS)
 
         content_widget = dialog.message_label.parentWidget()
         if content_widget and content_widget.layout():
@@ -1318,9 +1471,12 @@ class GeneralSettingsPage(Container, SyncMixin):
 
             log_box = QTextEdit()
             log_box.setReadOnly(True)
-            log_box.setPlainText("Diagnostic Logs:\n\n" + "\n\n".join(details))
+            log_box.setPlainText(
+                f"{language_config.LBL_DIAGNOSTIC_LOGS}:\n\n" + "\n\n".join(details)
+            )
             log_box.setFixedHeight(125)
-            log_box.setStyleSheet("""
+            log_box.setStyleSheet(
+                """
                 QTextEdit {
                     background-color: #F8FAFC;
                     border: 1px solid #CBD5E1;
@@ -1330,11 +1486,12 @@ class GeneralSettingsPage(Container, SyncMixin):
                     color: #334155;
                     padding: 8px;
                 }
-            """)
+            """
+            )
             if content_widget and content_widget.layout():
                 content_widget.layout().addWidget(log_box)
 
-        dialog.yes_button.setText("OK")
+        dialog.yes_button.setText(language_config.BTN_OK)
         dialog.yes_button.setFixedWidth(60)
         dialog.no_button.hide()
         dialog.exec()
@@ -1342,12 +1499,11 @@ class GeneralSettingsPage(Container, SyncMixin):
         # Toast result
         from resources.GenericUILibrary import Toast
 
-        toast_msg = (
-            "Pengujian backend selesai! Hasil disimpan."
-            if lang_str == "indonesian"
-            else "Backend testing finished! Results saved."
+        toast = Toast(
+            language_config.MSG_BACKEND_TEST_FINISHED,
+            variant="success",
+            parent=self.window(),
         )
-        toast = Toast(toast_msg, variant="success", parent=self.window())
         toast.show_toast(duration=3000)
 
     def _cleanup_backend_test_worker(self):

@@ -90,7 +90,7 @@ taichi_library/
 │  ├─ demosaicing/                   # source + compile_*_tcm.py
 │  ├─ optical_flow/, alignment/, ... # source + family compiler scripts
 │  ├─ aot_tcm/                       # target-qualified TCM artifacts
-│  └─ README.md, ALGORITHM_GUIDE.md
+│  └─ source-only package files (documentation is under ../documentation/)
 ├─ taichi_aot/                       # runtime only: engine, memory, backends
 │  └─ __init__.py                    # backwards-compatible façade
 ├─ backend_config.py, device_selection.py, ... # platform/probe infrastructure

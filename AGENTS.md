@@ -1,25 +1,17 @@
 # Pixel Refine Agent Entry Point
 
-This file is the versioned entry point for every AI agent working in this
-repository. Platform/system instructions always take precedence.
+This file remains the versioned entry point for every AI agent. The complete
+project contract is consolidated in [`agen.md`](agen.md); normative governance
+remains under `ai_governance/`.
 
-Before changing code:
+Before changing code, read `ai_governance/README.md`, `agen.md`, `skill.md`,
+`blueprint_project.md`, and the relevant Taichi AOT skill. Inspect the target,
+callers, configuration, tests, and Git status. For multi-agent work, follow
+`ai_governance/MULTI_AGENT_PROTOCOL.md` and launch agents only with explicit
+approval and a user-provided limit.
 
-1. Read `ai_governance/README.md`.
-2. Read the relevant project documents in `agen.md`, `skill.md`, and
-   `blueprint_project.md`.
-3. For Taichi AOT, read
-   `ai_governance/skills/taichi-aot-dev/SKILL.md`.
-4. Inspect the target file, callers, and current Git status before editing.
-
-Non-negotiable project barriers:
-
-- Keep public Taichi APIs backward compatible unless the user explicitly
-  authorizes an API change.
-- Treat `taichi_library/taichi_aot/engine.py` as the runtime source of truth;
-  do not change it without explicit approval.
-- Preserve correctness over speed. An unvalidated block path must use its
-  established same-backend full-frame path, never silently substitute CPU.
-- Do not stage or commit unrelated dirty-worktree changes. Avoid `git add -A`.
-- Do not claim backend, performance, or accuracy support without a reproducible
-  command and observed result.
+The consolidated barriers are: preserve public API compatibility; treat
+`taichi_library/taichi_aot/engine.py` as runtime source of truth; recover an
+unvalidated block path through same-backend full-frame or report an error; and
+make no backend, accuracy, performance, or production claim without
+reproducible evidence. Do not stage unrelated changes or use `git add -A`.

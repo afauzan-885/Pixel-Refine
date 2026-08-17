@@ -25,9 +25,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
     running_similarity as running_mf_similarity,
     running_mf_denoiser,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity import (
-    running_similarity_fusion,
+    running_similarity as running_similarity_fusion,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.WeightedSR import (
     running_weighted_sr,

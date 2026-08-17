@@ -11,13 +11,72 @@ import atexit
 import signal
 import threading
 import json
+import subprocess
 
 # Suppress Vulkan loader registry warnings on Windows
 os.environ["VK_LOADER_DEBUG"] = "error"
 
+
+def _ensure_llvm20_interpreter():
+    """Re-exec the desktop entrypoint on the isolated LLVM20 interpreter.
+
+    A legacy system/venv Python can still expose Taichi LLVM15 through
+    ``sys.path`` even when the native AOT bridge later resolves the D: release.
+    Keep imports and tests untouched, but make direct desktop launches
+    deterministic by replacing the process before any application module is
+    initialized. ``PIXEL_REFINE_DISABLE_AUTO_REEXEC=1`` is reserved for
+    controlled diagnostics.
+    """
+    if (
+        os.name != "nt"
+        or os.environ.get("PIXEL_REFINE_DISABLE_AUTO_REEXEC", "0") == "1"
+        or getattr(sys, "frozen", False)
+    ):
+        return
+
+    runtime_root = os.environ.get(
+        "PIXEL_REFINE_RUNTIME_ROOT", r"D:\development_build\taichi_runtime_llvm20\release"
+    )
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.environ.get(
+        "PIXEL_REFINE_PYTHON_INTERPRETER",
+        os.path.join(project_root, "venv", "Scripts", "python.exe"),
+    )
+    if not os.path.isfile(candidate):
+        return
+
+    current = os.path.abspath(sys.executable)
+    target = os.path.abspath(candidate)
+    if os.path.normcase(current) == os.path.normcase(target):
+        return
+
+    os.environ["PIXEL_REFINE_LLVM20_REEXEC"] = "1"
+    os.environ["PIXEL_REFINE_RUNTIME_ROOT"] = os.path.abspath(runtime_root)
+    os.environ["PIXEL_REFINE_CANONICAL_LAUNCH"] = "1"
+    extra_python_path = os.environ.get("PIXEL_REFINE_EXTRA_PYTHONPATH", "").strip()
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        value for value in (project_root, extra_python_path) if value
+    )
+    print(
+        f"[PixelRefine] Re-executing desktop entrypoint on LLVM20 interpreter: {target}",
+        flush=True,
+    )
+    child = subprocess.run(
+        [target, *sys.argv],
+        cwd=project_root,
+        env=os.environ.copy(),
+        close_fds=True,
+    )
+    raise SystemExit(child.returncode)
+
+
+if __name__ == "__main__":
+    _ensure_llvm20_interpreter()
+
+
 def _bootstrap_aot_backend_from_settings():
     """Apply saved AOT backend before any module can import taichi_aot."""
-    if os.environ.get("PIXEL_REFINE_AOT_DEVICE") is not None:
+    if os.environ.get("AOT_DEVICE") is not None:
         return
 
     settings_path = os.path.join(
@@ -49,6 +108,7 @@ def _bootstrap_aot_backend_from_settings():
     if arch in ("vulkan", "opengl") and not isinstance(selector, dict):
         # One-time migration from settings written before stable selectors.
         from taichi_library.device_selection import make_device_selector
+
         legacy_name = str(settings.get("device_backend") or "")
         if legacy_name and "cpu" not in legacy_name.lower():
             selector = make_device_selector(legacy_name)
@@ -63,7 +123,9 @@ def _bootstrap_aot_backend_from_settings():
             devices = scan_vulkan_device_records()
             resolved_id = resolve_device_selector(selector, devices, device_id)
             if resolved_id is None:
-                print("[PixelRefine Backend] Saved GPU is unavailable; selecting CPU safely.")
+                print(
+                    "[PixelRefine Backend] Saved GPU is unavailable; selecting CPU safely."
+                )
                 arch, device_id = "cpu", -1
             else:
                 device_id = resolved_id
@@ -73,7 +135,9 @@ def _bootstrap_aot_backend_from_settings():
         except Exception as exc:
             # A failed scan must never reinterpret a stale ordinal as another
             # GPU. Keep startup available using CPU until a later rescan.
-            print(f"[PixelRefine Backend] GPU fingerprint scan failed; selecting CPU: {exc}")
+            print(
+                f"[PixelRefine Backend] GPU fingerprint scan failed; selecting CPU: {exc}"
+            )
             arch, device_id = "cpu", -1
 
     try:
@@ -87,23 +151,21 @@ def _bootstrap_aot_backend_from_settings():
         backend=arch or "cpu",
         device_id=device_id_int,
         vendor=(selector or {}).get("vendor", "") if isinstance(selector, dict) else "",
-        device_name=(selector or {}).get("name", "") if isinstance(selector, dict) else "",
+        device_name=(
+            (selector or {}).get("name", "") if isinstance(selector, dict) else ""
+        ),
         explicit=True,
         source="app_setting.json",
         strict=True,
     )
     os.environ.update(backend_env(canonical_config))
-    os.environ["PIXEL_REFINE_AOT_STRICT_BACKEND"] = "1"
+    os.environ["AOT_STRICT_BACKEND"] = "1"
     if arch == "opengl" and isinstance(selector, dict):
-        os.environ["PIXEL_REFINE_OPENGL_EXPECTED_VENDOR"] = str(
-            selector.get("vendor", "")
-        ).lower()
-        os.environ["PIXEL_REFINE_OPENGL_EXPECTED_NAME"] = str(
-            selector.get("name", "")
-        )
+        os.environ["OPENGL_EXPECTED_VENDOR"] = str(selector.get("vendor", "")).lower()
+        os.environ["OPENGL_EXPECTED_NAME"] = str(selector.get("name", ""))
     else:
-        os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", None)
-        os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_NAME", None)
+        os.environ.pop("OPENGL_EXPECTED_VENDOR", None)
+        os.environ.pop("OPENGL_EXPECTED_NAME", None)
     if arch == "vulkan" and device_id_int >= 0:
         try:
             cache_dir = os.path.join(os.environ.get("LOCALAPPDATA", ""), "PixelRefine")
@@ -153,17 +215,30 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtCore import Qt, QObject, QEvent
 
-# Project imports
-from pixel_refine_desktop.app_core import ApplicationManager, WindowConfig
-from pixel_refine_desktop.ui import (
-    EnhanceStackView,
-    SettingsView,
-    Sidebar,
-    SplashScreen,
-)
+# Project imports.  The source tree now keeps the desktop package under
+# ``pixel_refine_desktop``; retain the historical ``desktop`` import for
+# installed bundles that still expose that compatibility root.
+try:
+    from desktop.app_core import ApplicationManager, WindowConfig
+    from desktop.ui import (
+        EnhanceStackView,
+        SettingsView,
+        Sidebar,
+        SplashScreen,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "desktop":
+        raise
+    from pixel_refine_desktop.app_core import ApplicationManager, WindowConfig
+    from pixel_refine_desktop.ui import (
+        EnhanceStackView,
+        SettingsView,
+        Sidebar,
+        SplashScreen,
+    )
 from resources.animations.fade import fade_in
 
-# from pixel_refine_desktop.ui.views.panorama import PanoramaPage
+# from desktop.ui.views.panorama import PanoramaPage
 import config
 
 # import taichi as ti
@@ -364,9 +439,7 @@ class PixelRefineMain(QMainWindow):
         splash.update_status("Setting up main window...", 50)
 
         # Window icon and title
-        self.setWindowIcon(
-            QIcon("resources/assets/icons/enhance_stack.png")
-        )
+        self.setWindowIcon(QIcon("resources/assets/icons/enhance_stack.png"))
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
 
         # Window configuration
@@ -484,7 +557,6 @@ class PixelRefineMain(QMainWindow):
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
 
 
-
 # ============================================================================
 # APPLICATION ENTRY POINT
 # ============================================================================
@@ -498,9 +570,11 @@ def main():
     class VulkanWarningFilter:
         def __init__(self, target):
             self.target = target
+
         def write(self, message):
             if "windows_read_data_files_in_registry" not in message:
                 self.target.write(message)
+
         def flush(self):
             self.target.flush()
 
@@ -512,8 +586,16 @@ def main():
 
     # Load and apply theme from settings on startup
     try:
-        from pixel_refine_desktop.ui.views.settings.General.general_store import get_general_store
+        try:
+            from desktop.ui.views.settings.General.general_store import get_general_store
+        except ModuleNotFoundError as exc:
+            if exc.name != "desktop":
+                raise
+            from pixel_refine_desktop.ui.views.settings.General.general_store import (
+                get_general_store,
+            )
         from resources.GenericUILibrary.theme import set_theme, DarkTheme, LightTheme
+
         store = get_general_store()
         saved_theme = store.get("theme", "Light Theme")
         if saved_theme == "Dark Theme":
@@ -545,9 +627,7 @@ def main():
 
     # Setup splash screen
     screen_geometry = app.primaryScreen().geometry()
-    original_pixmap = QPixmap(
-        "resources/assets/images/Logo_Pixel_Refine.png"
-    )
+    original_pixmap = QPixmap("resources/assets/images/Logo_Pixel_Refine.png")
 
     splash_width = int(screen_geometry.width() * 0.25)
     scaled_pixmap = original_pixmap.scaledToWidth(
@@ -568,6 +648,7 @@ def main():
     try:
         from resources.styles.stylesheet import stylesheet_global_page
         from resources.GenericUILibrary import trigger_live_update
+
         window.setStyleSheet(stylesheet_global_page())
         trigger_live_update()
         trigger_live_update("update_theme")

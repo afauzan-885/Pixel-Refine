@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from typing import Any
+from typing import Any, Mapping
 import zipfile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -97,11 +97,39 @@ def _compiler_job_summary() -> dict[str, Any]:
         )
     )
     jobs = ast.literal_eval(assignment.value)
+    # Compiler modules are now colocated with their algorithm families.  The
+    # orchestrator keeps a declarative short-name -> package map so it can
+    # launch each compiler in a clean subprocess.  The audit must resolve the
+    # same map; checking only ``aot_py/<module>.py`` falsely reported every
+    # colocated compiler as missing.
+    package_assignment = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "COLOCATED_COMPILER_PACKAGES"
+                for target in node.targets
+            )
+        ),
+        None,
+    )
+    colocated_packages = (
+        ast.literal_eval(package_assignment.value)
+        if package_assignment is not None
+        else {}
+    )
     missing_modules: list[str] = []
     missing_callables: list[str] = []
     for name, value in jobs.items():
         module_name, function_name = value[0], value[1]
-        module_path = COMPILER_PATH.with_name(f"{module_name}.py")
+        package_name = colocated_packages.get(module_name)
+        if package_name:
+            package_parts = str(package_name).split(".")
+            module_path = PROJECT_ROOT.joinpath(*package_parts, f"{module_name}.py")
+        else:
+            module_path = COMPILER_PATH.with_name(f"{module_name}.py")
         if not module_path.is_file():
             missing_modules.append(f"{name}:{module_name}")
             continue
@@ -150,7 +178,10 @@ def _payload_summary(target_dir: Path, target: TargetSpec) -> dict[str, Any]:
                         "utf-8", errors="replace"
                     )
                     found = re.findall(r'target triple = "([^"]+)"', text)
-                    triples.update(found[:1])
+                    # CUDA TBCs may contain host and device LLVM modules;
+                    # retain every declared triple instead of depending on
+                    # archive/module ordering.
+                    triples.update(found)
                 else:
                     kinds.add("unknown")
                 valid = _TARGETS._artifact_matches_target(artifact, target)
@@ -209,6 +240,28 @@ def _target_entry(entry: dict[str, Any]) -> TargetSpec:
     )
 
 
+def _runtime_gate(target: TargetSpec, requirement: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return an auditable runtime qualification for one target.
+
+    Cross-compilation and static ELF checks are intentionally insufficient for
+    an ARM native claim.  The gate opens only when the manifest explicitly
+    carries ``native_runtime=true`` plus a runtime evidence identifier.
+    """
+
+    value = requirement if isinstance(requirement, Mapping) else {}
+    qualification = str(value.get("qualification", "") or "").strip().lower()
+    native_runtime = bool(
+        qualification == "native_runtime"
+        and value.get("native_runtime") is True
+        and str(value.get("runtime_evidence_id", "") or "").strip()
+    )
+    return {
+        "qualification": qualification or "unverified",
+        "native_runtime": native_runtime,
+        "fail_closed": bool(target.is_arm and not native_runtime),
+    }
+
+
 def inventory() -> dict[str, Any]:
     compiler_artifacts = _compiler_artifact_names()
     compiler_jobs = _compiler_job_summary()
@@ -235,8 +288,12 @@ def inventory() -> dict[str, Any]:
     compiler_ids = set(TARGET_BACKENDS)
 
     expected = []
+    runtime_requirements = manifest.get("runtime_requirements", {})
     for entry in manifest.get("target_matrix", []):
         target = _target_entry(entry)
+        runtime_gate = _runtime_gate(
+            target, runtime_requirements.get(target.target_id, {})
+        )
         direct = directories.get(target.target_id)
         generic_id = TargetSpec(
             backend=target.backend,
@@ -288,6 +345,9 @@ def inventory() -> dict[str, Any]:
                 "generic_fallback_artifacts": len(generic_names) if generic_only else 0,
                 "generic_only_algorithms": generic_only,
                 "effective_artifacts": len(effective_names),
+                "runtime_qualification": runtime_gate["qualification"],
+                "native_runtime": runtime_gate["native_runtime"],
+                "runtime_fail_closed": runtime_gate["fail_closed"],
                 **payload,
                 **bridge,
             }
@@ -399,6 +459,10 @@ def _print_text(report: dict[str, Any]) -> None:
             status += f" compiler-extra={len(item['direct_extra_artifacts'])}"
         if item.get("bridge_missing"):
             status += f" bridge-missing={','.join(item['bridge_missing'])}"
+        if item.get("runtime_fail_closed"):
+            status += " runtime=compile-only/fail-closed"
+        elif item.get("native_runtime"):
+            status += " runtime=native-qualified"
         print(f"  {item['target_id']:34s} {status}")
 
 

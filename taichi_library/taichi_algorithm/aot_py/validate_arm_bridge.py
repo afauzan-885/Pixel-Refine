@@ -35,14 +35,27 @@ NEON_MNEMONICS = re.compile(
     r"\b(?:fmla|fmls|fmul|fcvt(?:zs|zu|as)|sqxtun(?:2)?|uqxtn(?:2)?|ld1|st1)\b",
     re.IGNORECASE,
 )
+# This module performs ELF/ABI/codegen checks only.  Keep the qualification
+# explicit so callers cannot accidentally treat a static pass as device proof.
+STATIC_QUALIFICATION = "compile_only"
 
 
 def _tool(name: str) -> Path:
-    candidate = Path(r"C:\msys64\ucrt64\bin") / f"{name}.exe"
-    if candidate.is_file():
-        return candidate
     from shutil import which
 
+    # The repository-pinned LLVM20 utilities are sufficient for the ELF/ABI
+    # checks and are preferred over the historical MSYS2 installation.  This
+    # makes MSYS2 optional when the native build is driven by VS2022.
+    candidate = (
+        ROOT
+        / "test_algorithm"
+        / "llvm_msvc_dev_extract"
+        / "clang+llvm-20.1.5-x86_64-pc-windows-msvc"
+        / "bin"
+        / f"{name}.exe"
+    )
+    if candidate.is_file():
+        return candidate
     found = which(name)
     if not found:
         raise RuntimeError(f"required LLVM tool not found: {name}")
@@ -113,6 +126,12 @@ def validate(target: str) -> dict[str, object]:
         "symbols": sorted(REQUIRED_SYMBOLS),
         "neon_mnemonics": neon_hits,
         "c_api_linked": c_api_linked,
+        # This validator only inspects cross-compiled ELF/ABI properties.  A
+        # successful result must never be consumed as proof of execution on
+        # an ARM device or driver.
+        "qualification": STATIC_QUALIFICATION,
+        "native_runtime": False,
+        "runtime_evidence_required": True,
     }
 
 
@@ -127,7 +146,8 @@ def main() -> int:
             f"[PASS] {target}: ELF AArch64, {result['bytes']} bytes, "
             f"ABI={len(result['symbols'])}/{len(REQUIRED_SYMBOLS)}, "
             f"NEON={','.join(result['neon_mnemonics'])}, "
-            f"C_API={'linked' if result['c_api_linked'] else 'external'}"
+            f"C_API={'linked' if result['c_api_linked'] else 'external'}, "
+            f"qualification={result['qualification']}"
         )
     return 0
 

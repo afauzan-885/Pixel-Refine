@@ -130,6 +130,4 @@ libwebpdemux-2.dll
 libwebpmux-3.dll
 libwinpthread-1.dll
 libzstd.dll
-similarity_frequency_merging.dll
-similarity_spatial_merging.dll
 zlib1.dll

@@ -1005,6 +1005,28 @@ class BatchProcessDialog(ModalDialog):
                 self.processing_thread.wait()
                 self.reset_dialog_state()
 
+    def closeEvent(self, event):
+        """Stop an active batch before accepting any dialog-close request.
+
+        The custom title-bar close button and the native window close action
+        both call ``QDialog.close()`` directly, so they bypass
+        :meth:`cancel_processing` (and its confirmation prompt).  Leaving the
+        worker alive while the dialog is destroyed can let a batch continue to
+        write output and can retain GPU/runtime resources after the UI appears
+        closed.  Close is therefore treated as an unconditional cancellation
+        for an active worker, then waits for the worker's cooperative stop
+        callback before releasing the dialog.
+        """
+        processing_thread = getattr(self, "processing_thread", None)
+        if processing_thread is not None and processing_thread.isRunning():
+            self._was_cancelled = True
+            processing_thread.stop()
+            processing_thread.wait()
+            self.reset_dialog_state()
+
+        event.accept()
+        super().closeEvent(event)
+
     def reset_dialog_state(self):
         self._is_processing = False
         self._start_time = None

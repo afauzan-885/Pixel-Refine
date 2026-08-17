@@ -3,6 +3,7 @@
 This layer is intentionally side-effect free: compilation and runtime probes
 can call it repeatedly while the public algorithm API remains unchanged.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,11 +25,15 @@ class BackendDecision:
 class BackendManager:
     def __init__(self, device="unknown", validated=None):
         self.device = device
-        self.validated = dict(validated) if validated is not None else self._load_runtime_status()
+        self.validated = (
+            dict(validated) if validated is not None else self._load_runtime_status()
+        )
 
     @staticmethod
     def _load_runtime_status():
-        root = os.environ.get("PIXEL_REFINE_AOT_CACHE", os.path.join(tempfile.gettempdir(), "pixel_refine_aot_cache"))
+        root = os.environ.get(
+            "AOT_CACHE", os.path.join(tempfile.gettempdir(), "pixel_refine_aot_cache")
+        )
         result = {}
         # Keep the status cache aligned with the canonical backend registry.
         # Omitting CUDA/GLES here made a persisted qualification invisible to
@@ -36,7 +41,9 @@ class BackendManager:
         # present and the public selector could request them explicitly.
         for backend in ("cpu", "cuda", "vulkan", "opengl", "gles"):
             try:
-                with open(os.path.join(root, f"runtime_{backend}.json"), encoding="utf-8") as f:
+                with open(
+                    os.path.join(root, f"runtime_{backend}.json"), encoding="utf-8"
+                ) as f:
                     result[backend] = json.load(f).get("status", "unknown")
             except (OSError, ValueError, TypeError):
                 pass
@@ -44,7 +51,9 @@ class BackendManager:
 
     def decide(self, requested="auto"):
         requested = normalize_backend(requested, allow_auto=True)
-        candidates = [requested] if requested != "auto" else backend_candidates(self.device)
+        candidates = (
+            [requested] if requested != "auto" else backend_candidates(self.device)
+        )
         rejected = []
         for backend in candidates:
             status = self.validated.get(backend, "unknown")
@@ -59,15 +68,22 @@ class BackendManager:
             # driver, or artifact digest. An exact current Intel manifest is
             # stronger evidence and must supersede a stale generic quarantine.
             if (
-                status in ("quarantined", "unsupported")
-                and not exact_intel_manifest
+                status in ("quarantined", "unsupported") and not exact_intel_manifest
             ) or not caps.safe:
                 rejected.append(f"{backend}: {caps.reason or status}")
                 continue
-            return BackendDecision(backend, candidates, self.device,
-                                   "selected after capability/status filtering")
-        return BackendDecision("cpu", candidates, self.device,
-                               "all candidates rejected: " + "; ".join(rejected))
+            return BackendDecision(
+                backend,
+                candidates,
+                self.device,
+                "selected after capability/status filtering",
+            )
+        return BackendDecision(
+            "cpu",
+            candidates,
+            self.device,
+            "all candidates rejected: " + "; ".join(rejected),
+        )
 
     def run_with_fallback(self, operation, requested="auto"):
         """Run an operation against isolated backend contexts.

@@ -8,6 +8,8 @@ DEFAULTS = {
     "gpu_acceleration": False,
     "multi_core_cpu": True,
     "create_thumbnail": False,
+    "auto_shutdown_enabled": False,
+    "auto_shutdown_minutes": 60,
     "device_backend": "CPU (Universal)",
     "device_backend_key": "cpu",
     "device_backend_arch": "cpu",
@@ -15,6 +17,7 @@ DEFAULTS = {
     "device_selector": {"vendor": "cpu", "name": "cpu universal"},
     "backend_test_results": {},
     "allowed_backend_ids": [],
+    "auto_fallback": False,
 }
 
 _general_store = None

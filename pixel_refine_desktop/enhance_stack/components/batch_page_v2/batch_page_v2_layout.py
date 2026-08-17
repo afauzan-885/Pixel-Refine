@@ -51,9 +51,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
     running_mf_denoiser,
     running_similarity as running_mf_similarity,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Similarity import (
-    running_similarity_fusion,
+    running_similarity as running_similarity_fusion,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,

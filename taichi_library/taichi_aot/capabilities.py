@@ -4,6 +4,7 @@ The registry deliberately describes *validated* capabilities, not optimistic
 hardware marketing claims.  Runtime probes can refine these values later and
 the dispatcher can quarantine a backend without changing public APIs.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
@@ -36,15 +37,17 @@ class BackendCapabilities:
 
 def classify_device(device: str, backend: str, driver: str = "unknown"):
     name = (device or "unknown").lower()
-    vendor = "intel" if "intel" in name else "nvidia" if ("nvidia" in name or "geforce" in name) else "unknown"
+    vendor = (
+        "intel"
+        if "intel" in name
+        else "nvidia" if ("nvidia" in name or "geforce" in name) else "unknown"
+    )
     backend = backend.lower()
     if backend == "vulkan" and vendor == "intel":
         try:
             from taichi_library.vulkan_probe import intel_vulkan_is_validated
 
-            validated = intel_vulkan_is_validated(
-                int(os.environ.get("PIXEL_REFINE_AOT_DEVICE", 0))
-            )
+            validated = intel_vulkan_is_validated(int(os.environ.get("AOT_DEVICE", 0)))
         except Exception:
             validated = False
         if validated:
@@ -56,11 +59,23 @@ def classify_device(device: str, backend: str, driver: str = "unknown"):
                 safe=True,
                 reason="Intel Vulkan lifecycle, parity, and pipeline manifest validated",
             )
-        return BackendCapabilities(backend, vendor, device, driver, safe=False,
-                                   reason="Intel Vulkan AOT is quarantined after ABI/pipeline failures")
+        return BackendCapabilities(
+            backend,
+            vendor,
+            device,
+            driver,
+            safe=False,
+            reason="Intel Vulkan AOT is quarantined after ABI/pipeline failures",
+        )
     if backend == "opengl":
-        return BackendCapabilities(backend, vendor, device, driver, safe=True,
-                                   reason="OpenGL artifact/load smoke tests validated")
+        return BackendCapabilities(
+            backend,
+            vendor,
+            device,
+            driver,
+            safe=True,
+            reason="OpenGL artifact/load smoke tests validated",
+        )
     if backend == "gles":
         # GLES artifacts and the ARM64 bridge are statically validated, but a
         # real Android GLES context is required before automatic dispatch can
@@ -93,9 +108,7 @@ def backend_candidates(device: str = "unknown"):
         try:
             from taichi_library.vulkan_probe import intel_vulkan_is_validated
 
-            if intel_vulkan_is_validated(
-                int(os.environ.get("PIXEL_REFINE_AOT_DEVICE", 0))
-            ):
+            if intel_vulkan_is_validated(int(os.environ.get("AOT_DEVICE", 0))):
                 return ["vulkan", "opengl", "cpu"]
         except Exception:
             pass
@@ -115,15 +128,14 @@ def opengl_native_probe(operation: str, timeout: float = 8.0) -> bool:
     exception.  A failed probe therefore cannot corrupt the caller. Results
     are cached per Python/driver environment for the lifetime of the process.
     """
-    if os.environ.get("PIXEL_REFINE_AOT_GL_PROBE") == "1":
+    if os.environ.get("AOT_GL_PROBE") == "1":
         return True
     if operation not in {"guided", "inpaint", "seamless", "median"}:
         return False
     cache = getattr(opengl_native_probe, "_cache", None)
     if cache is None:
         cache = opengl_native_probe._cache = {}
-    cache_key = (operation, _requested_backend()[0],
-                 os.environ.get("PIXEL_REFINE_AOT_DEVICE", "0"))
+    cache_key = (operation, _requested_backend()[0], os.environ.get("AOT_DEVICE", "0"))
     if cache_key in cache:
         return cache[cache_key]
     snippets = {
@@ -132,18 +144,27 @@ def opengl_native_probe(operation: str, timeout: float = 8.0) -> bool:
         "seamless": "from taichi_library.taichi_aot import seamless_clone_aot; seamless_clone_aot(a,a,m,center=(4,4),max_iterations=2)",
         "median": "from taichi_library.taichi_aot import median_filter, engine; b=engine.upload(a); median_filter(b); engine.sync(); b.destroy()",
     }
-    shape_init = ("a=np.ones((8,8,3), np.float32); m=np.ones((8,8), np.float32); "
-                  if operation == "seamless" else
-                  "a=np.ones((8,8), np.float32); m=np.ones((8,8), np.float32); ")
+    shape_init = (
+        "a=np.ones((8,8,3), np.float32); m=np.ones((8,8), np.float32); "
+        if operation == "seamless"
+        else "a=np.ones((8,8), np.float32); m=np.ones((8,8), np.float32); "
+    )
     if operation == "median":
         shape_init = "a=np.ones((8,8,3), np.float32); m=np.ones((8,8), np.float32); "
-    code = ("import os, numpy as np; os.environ['PIXEL_REFINE_AOT_GL_PROBE']='1'; "
-            "os.environ['PIXEL_REFINE_AOT_NATIVE_%s']='1'; " % operation.upper() +
-            shape_init + snippets[operation])
+    code = (
+        "import os, numpy as np; os.environ['AOT_GL_PROBE']='1'; "
+        "os.environ['AOT_NATIVE_%s']='1'; " % operation.upper()
+        + shape_init
+        + snippets[operation]
+    )
     try:
         probe_timeout = 30.0 if operation == "seamless" else timeout
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                                timeout=probe_timeout, env=os.environ.copy())
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            timeout=probe_timeout,
+            env=os.environ.copy(),
+        )
         ok = result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         ok = False

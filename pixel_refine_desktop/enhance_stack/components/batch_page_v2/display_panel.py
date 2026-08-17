@@ -294,7 +294,7 @@ class BurstCacheWorker(QThread):
                 with raw_obj:
                     with taichi_lock:
                         rgb_f32 = taichi_aot.demosaic(
-                            raw_obj, method="hamilton-rgb-half-res"
+                            raw_obj, method="bilinear"
                         )
 
                     if rgb_f32 is not None:

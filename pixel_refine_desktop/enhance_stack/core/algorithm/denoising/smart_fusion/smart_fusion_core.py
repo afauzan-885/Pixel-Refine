@@ -311,7 +311,7 @@ class SmartFusionProcessor:
                 gc.collect()
 
         # 6. Final Outputs
-        # Kita mengembalikan akumulasi mentah dan weight map agar Similarity.py
+        # Kita mengembalikan akumulasi mentah dan weight map agar pipeline similarity
         # dapat melakukan normalisasi akhir secara global. Ini mencegah normalisasi ganda.
         if h_orig != h_padded or w_orig != w_padded:
             accum_final_img = accum_final_img[:h_orig, :w_orig]

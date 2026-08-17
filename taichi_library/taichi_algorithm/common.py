@@ -1056,6 +1056,59 @@ def cvtColor(src, code, dst=None):
         raise ImportError("Taichi not available")
 
     is_taichi_input = hasattr(src, "to_numpy")
+
+    # The color kernels index ``src[i, j][channel]`` and therefore require a
+    # 2-D vector ndarray, while a regular NumPy image is represented as a
+    # scalar 3-D ndarray.  Convert explicitly at this boundary instead of
+    # passing an incompatible ndim-3 buffer (which raises TaichiIndexError on
+    # the first kernel invocation).  The explicit ABI adapter remains a JIT
+    # Taichi path; no host color implementation is introduced.
+    source_shape = tuple(getattr(src, "shape", ()))
+    if len(source_shape) == 3 and code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
+        h, w, channels = source_shape
+        if int(channels) != 3:
+            raise ValueError("BGR/RGB grayscale conversion requires exactly 3 channels")
+        source_np = (
+            src.to_numpy()
+            if is_taichi_input
+            else np.asarray(src)
+        )
+        source_np = np.ascontiguousarray(source_np, dtype=np.float32)
+        # Do not use the scalar buffer pool here: its historical key is
+        # ``(shape, dtype)`` and vector/scalar f32 ndarrays can otherwise be
+        # aliased after a flow operation, producing a misleading from_numpy
+        # shape error.  These short-lived ABI adapters are owned directly by
+        # Taichi and are reclaimed with the operation's context.
+        src_vec = ti.Vector.ndarray(3, ti.f32, shape=(h, w))
+        src_vec.from_numpy(source_np)
+        dst_gpu = ti.ndarray(dtype=ti.f32, shape=(h, w))
+        if code == COLOR_BGR2GRAY:
+            _cvt_color_bgr_to_gray_kernel(src_vec, dst_gpu)
+        else:
+            _cvt_color_rgb_to_gray_kernel(src_vec, dst_gpu)
+        if is_taichi_input:
+            return dst_gpu
+        result = dst_gpu.to_numpy()
+        if dst is not None:
+            dst[...] = result
+            return dst
+        return result
+
+    if len(source_shape) == 2 and code in [COLOR_GRAY2BGR, COLOR_GRAY2RGB]:
+        h, w = source_shape
+        source_np = src.to_numpy() if is_taichi_input else np.asarray(src, dtype=np.float32)
+        src_scalar = ti.ndarray(dtype=ti.f32, shape=(h, w))
+        src_scalar.from_numpy(np.ascontiguousarray(source_np, dtype=np.float32))
+        dst_gpu = ti.Vector.ndarray(3, ti.f32, shape=(h, w))
+        _cvt_color_gray_to_rgb_kernel(src_scalar, dst_gpu)
+        if is_taichi_input:
+            return dst_gpu
+        result = dst_gpu.to_numpy()
+        if dst is not None:
+            dst[...] = result
+            return dst
+        return result
+
     src_gpu, src_is_temp = ensure_taichi_field(src, dtype=ti.f32)
     h, w = src_gpu.shape[:2]
 

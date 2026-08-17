@@ -1,45 +1,37 @@
 # Pixel Refine AI Governance
 
-This directory is the Git-tracked, tool-neutral contract for Codex, DeepSeek,
-and future AI agents. It complements the local `.qoder/` and `agen-docs/`
-directories, which may be ignored by Git and are therefore not sufficient as a
-portable source of instructions.
+Governance ini adalah sumber aturan portabel untuk Codex, DeepSeek, dan agent lain yang bekerja pada Pixel Refine. Area mobile Kotlin tidak termasuk scope Windows desktop kecuali diminta eksplisit.
 
-## Document order
+## Urutan aturan
 
-1. Instructions supplied by the AI platform or user.
-2. `AGENTS.md` in this repository.
-3. This directory.
-4. Project architecture references: `agen.md`, `skill.md`, and
-   `blueprint_project.md`.
-5. Task-specific source code, tests, and runtime evidence.
+1. Instruksi platform dan pengguna.
+2. AGENTS.md.
+3. Dokumen dalam ai_governance/.
+4. agen/arsitektur proyek yang relevan.
+5. Source code, konfigurasi, dan bukti pengujian.
 
-When instructions conflict, follow the higher item and state the conflict.
+## Dokumen aktif
 
-## Required working contract
+- GLOBAL_RULES.md: barrier teknis, evidence, penghapusan, dan Git.
+- OPERATING_PROTOCOL.md: alur kerja inspeksi dan validasi.
+- MULTI_AGENT_PROTOCOL.md: aturan delegasi agent.
+- CURRENT_IMPLEMENTATION.md: snapshot status aktual dan bukti backend.
+- LLVM20_MIGRATION.md: status migrasi desktop LLVM20.
+- TCM_ABI_ROADMAP.md: kontrak ABI dan validator TCM.
+- BLOCK_COMPUTE_95_ROADMAP.md: kontrak keselamatan block compute.
+- CUDA_ARCHITECTURE_COVERAGE.md: batas bukti arsitektur CUDA.
+- LEGACY_POLICY.md: kebijakan kompatibilitas dan artefak legacy.
+- skills/taichi-aot-dev/SKILL.md: workflow kompilasi dan validasi Taichi AOT.
 
-- Inspect before editing: current Git status, target source, its imports, and
-  its callers.
-- Keep each task scoped. Preserve unrelated changes in a dirty worktree.
-- Prefer existing helpers and one maintained implementation over duplicate
-  wrappers or parallel code paths.
-- Treat test output as evidence, not as proof of universal support. State the
-  backend, device, input shape, dtype, command, and observed result.
-- Never silently turn a requested GPU backend into CPU. If recovery is
-  necessary, use the same backend's full-frame/reference route or surface a
-  clear error according to the API contract.
-- Do not delete source, runtime artifacts, or target-qualified TCM files until
-  their references and packaging role have been checked. Caches and compiler
-  intermediates may be removed only after their exact paths are verified.
-- Before a commit, run the smallest relevant validation and `git diff --check`.
-  Stage only the intentional paths; commit messages must describe the scope.
+## Aturan kerja singkat
 
-## Taichi AOT work
-
-Use `skills/taichi-aot-dev/SKILL.md` for all AOT compilation, graph/API parity,
-backend capability, artifact, and runtime tasks.
+- Inspect Git status, target, import, caller, konfigurasi, dan artefak sebelum mengedit.
+- Jaga API publik; engine.py adalah sumber kebenaran runtime dan tidak diubah tanpa persetujuan eksplisit.
+- Jangan menyamakan keberadaan artefak dengan bukti eksekusi. Klaim wajib mencantumkan backend, device, shape, dtype, command, dan hasil.
+- Jalur block yang belum tervalidasi memakai full-frame backend yang sama atau error jelas; tidak ada fallback GPU-ke-CPU diam-diam.
+- Jangan menghapus TCM, DLL/SO, BC, source, atau cache runtime sebelum referensi dan peran packaging diverifikasi.
+- Gunakan venv proyek untuk pengujian Python.
 
 ## DeepSeek
 
-Use `DEEPSEEK_PROMPT.md` as the initial instruction message for a DeepSeek
-session that works on this repository.
+Mulai sesi DeepSeek dengan DEEPSEEK_PROMPT.md. Aturan ini menggantikan dokumen .qoder dan agen-docs yang sudah dipensiunkan.

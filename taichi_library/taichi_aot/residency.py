@@ -201,6 +201,17 @@ class DeviceResidencyCache:
                     self._evict(str(key), entry)
                 self._stats["misses"] += 1
                 return None
+            if entry.fence_ready is not None:
+                try:
+                    ready = bool(entry.fence_ready())
+                except Exception:
+                    ready = False
+                if not ready:
+                    # The producer has not signalled completion yet. Keep the
+                    # entry resident, but do not hand its native handle to a
+                    # consumer that could race the upload/dispatch.
+                    self._stats["misses"] += 1
+                    return None
             entry.hit_count += 1
             entry.last_access = time.monotonic()
             self._entries.move_to_end(str(key))

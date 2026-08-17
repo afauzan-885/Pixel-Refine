@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import psutil
-from .spatial_pipeline import process_in_cpu, process_in_gpu
+from .spatial_pipeline import process_in_gpu
 
 
 
@@ -13,7 +13,7 @@ def get_ram_usage():
 
 
 class SpatialFusionProcessor:
-    """Handles the Spatial Fusion merging logic using C++ or Taichi backends."""
+    """Handles Spatial Fusion exclusively through the Taichi AOT pipeline."""
 
     def __init__(self):
         pass
@@ -34,7 +34,7 @@ class SpatialFusionProcessor:
         stop_requested=None,
         total_overall_images=None,
         images_processed_so_far=0,
-        lib_path="pixel_refine_desktop/ui/data/similarity_spatial_merging.dll",
+        lib_path=None,
         num_workers=-1,
         weight_of_each_image=False,
         enable_alignment=True,
@@ -42,16 +42,18 @@ class SpatialFusionProcessor:
         return_raw=False,
         is_linear_mode=False,
         proxy_scale=1.0,
-        process_in="auto",
+        process_in="gpu",
         merging_backend="taichi",
         **unused_kwargs,
     ):
         """Executes the Spatial Fusion algorithm on a batch of images."""
         print(f"[RAM] Startup SpatialFusionProcessor: {get_ram_usage():.2f} MB")
 
-        from taichi_library.taichi_algorithm.taichi_worker import (
-            TAICHI_AVAILABLE as TAICHI_SPATIAL_AVAILABLE,
-        )
+        if os.environ.get("AOT_MODE", "1") != "1":
+            raise RuntimeError(
+                "SpatialFusionProcessor requires AOT_MODE=1; the legacy C++ "
+                "spatial-fusion path has been removed."
+            )
 
         # 1. Initialization and Work Resolution
         tile_h, tile_w = map(int, tile_size)
@@ -129,9 +131,9 @@ class SpatialFusionProcessor:
             col_starts = np.append(col_starts, work_res_w - tile_w)
         col_starts = np.ascontiguousarray(np.unique(col_starts).astype(np.int32))
 
-        is_aot = os.environ.get("AOT_MODE", "1") == "1"
-        if process_in is None or process_in == "auto":
-            process_in = "gpu" if (TAICHI_SPATIAL_AVAILABLE or is_aot) else "cpu"
+        # There is deliberately one execution lane now.  ``process_in`` is
+        # retained as a compatibility argument, but CPU/C++ dispatch is gone.
+        process_in = "gpu"
 
         # 2. Execute Backend
         backend_args = {
@@ -168,10 +170,7 @@ class SpatialFusionProcessor:
             **unused_kwargs,
         }
 
-        if process_in == "gpu" and (TAICHI_SPATIAL_AVAILABLE or is_aot):
-            res = process_in_gpu(**backend_args)
-        else:
-            res = process_in_cpu(**backend_args)
+        res = process_in_gpu(**backend_args)
 
         processed_frames, final_sum_img, sum_weight_full, _ = res
         if final_sum_img is None:
@@ -184,25 +183,8 @@ class SpatialFusionProcessor:
         if processed_frames > 0 and return_raw:
             return (final_sum_img, sum_weight_full, processed_frames)
 
-        if process_in == "gpu" and (TAICHI_SPATIAL_AVAILABLE or is_aot):
-            # Division already completed on GPU, final_sum_img contains the finalized image
-            final_image = final_sum_img
-        else:
-            if update_progress:
-                update_progress(
-                    pass_merge_range[1],
-                    "Finalizing with simple mean calculation on CPU...",
-                )
-
-            valid_mask = sum_weight_full > 1e-6
-            final_image = np.zeros_like(final_sum_img)
-            np.divide(
-                final_sum_img,
-                sum_weight_full[:, :, np.newaxis],
-                out=final_image,
-                where=valid_mask[:, :, np.newaxis],
-            )
-            final_image[~valid_mask] = reference_image_float[~valid_mask]
+        # AOT GPU lane finalizes the normalized image before returning.
+        final_image = final_sum_img
 
         if weight_of_each_image:
             return (final_image, sum_weight_full, processed_frames, [])

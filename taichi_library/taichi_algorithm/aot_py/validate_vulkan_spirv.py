@@ -25,31 +25,55 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_ROOT = ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "vulkan_x86_64_windows"
+DEFAULT_ROOT = (
+    ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "vulkan_x86_64_windows"
+)
+
+
+def default_target_env(root: Path) -> str:
+    """Select the portable SPIR-V environment from a target directory name.
+
+    OpenGL/GLES payloads in this project are emitted as SPIR-V 1.3; asking
+    ``spirv-val`` for ``opengl4.3`` would incorrectly require SPIR-V 1.0.
+    An explicit CLI value always overrides this inference.
+    """
+
+    name = root.name.lower()
+    if name.startswith(("opengl_", "gles_")):
+        return "spv1.3"
+    if name.startswith("vulkan_"):
+        return "vulkan1.1"
+    return "vulkan1.1"
 
 
 def _find_validator(explicit: Path | None) -> Path:
     candidates: list[Path] = []
     if explicit:
         candidates.append(explicit)
-    env_path = os.environ.get("PIXEL_REFINE_SPIRV_VAL")
-    if env_path:
-        candidates.append(Path(env_path))
+    # Keep the historical project variable as an alias while preferring the
+    # shorter generic name for new invocations.
+    for env_name in ("SPIRV_VAL", "PIXEL_REFINE_SPIRV_VAL"):
+        env_path = os.environ.get(env_name)
+        if env_path:
+            candidates.append(Path(env_path))
     found = shutil.which("spirv-val")
     if found:
         candidates.append(Path(found))
-    candidates.extend(
-        [
-            Path(r"C:\msys64\ucrt64\bin\spirv-val.exe"),
-            Path(r"C:\Users\BelutGoyang\AppData\Local\ti-build-cache\vulkan-1.3.296.0\Bin\spirv-val.exe"),
-        ]
+    # Vulkan SDK/cache is the supported Windows validator.  Do not fall back
+    # to MSYS2: release validation must be reproducible independently of a
+    # Unix compatibility environment.
+    candidates.append(
+        Path(
+            r"C:\Users\BelutGoyang\AppData\Local\ti-build-cache\vulkan-1.3.296.0\Bin\spirv-val.exe"
+        )
     )
     for candidate in candidates:
         candidate = candidate.expanduser().resolve()
         if candidate.exists():
             return candidate
     raise FileNotFoundError(
-        "spirv-val was not found; pass --spirv-val or set PIXEL_REFINE_SPIRV_VAL"
+        "spirv-val was not found; pass --spirv-val or set SPIRV_VAL "
+        "(PIXEL_REFINE_SPIRV_VAL is also supported)"
     )
 
 
@@ -58,7 +82,10 @@ def _collect(root: Path) -> list[tuple[str, str, bytes]]:
     for archive in sorted(root.glob("*.tcm")):
         with zipfile.ZipFile(archive) as z:
             for name in sorted(z.namelist()):
-                if name.endswith(".spv"):
+                # Match the resolver's case-insensitive graphics payload
+                # gate.  A TCM producer may preserve an upper-case extension;
+                # silently skipping it would under-report the validation set.
+                if name.lower().endswith(".spv"):
                     items.append((archive.name, name, z.read(name)))
     return items
 
@@ -92,7 +119,7 @@ def main() -> int:
     parser.add_argument("--spirv-val", type=Path, default=None)
     parser.add_argument(
         "--target-env",
-        default="vulkan1.1",
+        default=None,
         choices=(
             "vulkan1.0",
             "vulkan1.1",
@@ -111,6 +138,7 @@ def main() -> int:
     if not root.is_dir():
         raise SystemExit(f"TCM target directory does not exist: {root}")
     validator = _find_validator(args.spirv_val)
+    target_env = args.target_env or default_target_env(root)
     items = _collect(root)
     if args.limit > 0:
         items = items[: args.limit]
@@ -122,7 +150,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="vulkan-spirv-validate-") as temp:
         temp_root = Path(temp)
         jobs = [
-            (item, index + 1, temp_root, validator, args.target_env)
+            (item, index + 1, temp_root, validator, target_env)
             for index, item in enumerate(items)
         ]
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
@@ -132,7 +160,7 @@ def main() -> int:
 
     passed = len(items) - len(failures)
     print(
-        f"[SPIR-V] root={root} target_env={args.target_env} validator={validator} "
+        f"[SPIR-V] root={root} target_env={target_env} validator={validator} "
         f"shaders={len(items)} pass={passed} fail={len(failures)}"
     )
     for archive, name, detail in failures[:10]:

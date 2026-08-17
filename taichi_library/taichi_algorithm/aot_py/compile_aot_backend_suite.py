@@ -7,6 +7,7 @@ single long-lived compiler process is not reliable across this module suite.
 
 import argparse
 import importlib
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -20,18 +21,31 @@ except ImportError:  # Direct script execution.
     from aot_artifact import normalize_tcm
 
 try:
-    from .target_registry import TARGET_BACKENDS
+    from .target_registry import TARGET_BACKENDS, target_entry_for_id
 except ImportError:  # Direct script execution.
-    from target_registry import TARGET_BACKENDS
+    from target_registry import TARGET_BACKENDS, target_entry_for_id
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-ARTIFACT_DIR = PROJECT_ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm"
+# Keep production artifacts immutable while a toolchain migration is staged.
+# The default remains the historical repository directory for compatibility;
+# LLVM20 builds can point this suite at an isolated D: drive root.
+_artifact_override = os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT")
+ARTIFACT_DIR = (
+    Path(_artifact_override).expanduser().resolve()
+    if _artifact_override
+    else PROJECT_ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm"
+)
 PACKAGE = "taichi_library.taichi_algorithm.aot_py"
 # Family-local compiler modules live next to the algorithm source.  Keep the
 # short names in JOBS for readability and resolve them through this map so the
 # orchestration contract remains stable while the source tree is colocated.
 COLOCATED_COMPILER_PACKAGES = {
+    # Shared cross-family compilers live beside the algorithm package.  The
+    # aot_py modules remain compatibility shims for older direct commands.
+    "compile_cast_tcm": "taichi_library.taichi_algorithm",
+    "compile_common_tcm": "taichi_library.taichi_algorithm",
+    "compile_research_tcm": "taichi_library.taichi_algorithm",
     "compile_akaze_tcm": "taichi_library.taichi_algorithm.feature_matching",
     "compile_ofb_tcm": "taichi_library.taichi_algorithm.feature_matching",
     "compile_area_tcm": "taichi_library.taichi_algorithm.interpolation",
@@ -71,6 +85,7 @@ COLOCATED_COMPILER_PACKAGES = {
     "compile_inpaint_tcm": "taichi_library.taichi_algorithm.image_processing",
     "compile_seamless_clone_tcm": "taichi_library.taichi_algorithm.image_processing",
     "compile_compression_image_tcm": "taichi_library.taichi_algorithm.compression",
+    "compile_raw_pipeline_tcm": "taichi_library.taichi_algorithm.compression",
 }
 FORK_PYTHON = (
     PROJECT_ROOT
@@ -211,6 +226,18 @@ JOBS = {
         "path",
         (),
     ),
+    "sfm_registration": (
+        "compile_research_tcm",
+        "compile_sfm_registration_aot",
+        "path",
+        (),
+    ),
+    "panorama": (
+        "compile_research_tcm",
+        "compile_panorama_aot",
+        "path",
+        (),
+    ),
     # Keep the image families independently compilable.  The former
     # image_core/image_heavy/image_guidance aggregate jobs compiled a large
     # monolithic module and were prone to backend timeouts; the production
@@ -223,12 +250,31 @@ JOBS = {
     "copy_make_border": ("compile_extended_tcm", "compile_border_aot", "path", ()),
     "normalize": ("compile_extended_tcm", "compile_normalize_aot", "path", ()),
     "threshold": ("compile_extended_tcm", "compile_threshold_aot", "path", ()),
-    "gaussian_window": ("compile_extended_tcm", "compile_gaussian_window_aot", "path", ()),
-    "joint_bilateral_guidance": ("compile_extended_tcm", "compile_guidance_aot", "path", ()),
+    "gaussian_window": (
+        "compile_extended_tcm",
+        "compile_gaussian_window_aot",
+        "path",
+        (),
+    ),
+    "joint_bilateral_guidance": (
+        "compile_extended_tcm",
+        "compile_guidance_aot",
+        "path",
+        (),
+    ),
     "enhance_image": ("compile_extended_tcm", "compile_enhance_aot", "path", ()),
     "compression_image": (
         "compile_compression_image_tcm",
         "compile_compression_aot",
+        "path",
+        (),
+    ),
+    # Pre-demosaic RAW/DNG transport and fusion graphs.  The compiler uses an
+    # explicit i32 sample transport so 8--16 bit sensor values remain lossless
+    # on graphics targets whose native u16 ABI is not qualified yet.
+    "compression_raw": (
+        "compile_raw_pipeline_tcm",
+        "compile_raw_pipeline_aot",
         "path",
         (),
     ),
@@ -254,6 +300,7 @@ JOBS = {
     ),
 }
 
+
 def _artifact_path(name: str, backend: str) -> Path:
     return ARTIFACT_DIR / f"{name}_{backend}.tcm"
 
@@ -262,6 +309,49 @@ def _target_artifact_path(name: str, target_id: str) -> Path:
     directory = ARTIFACT_DIR / target_id
     directory.mkdir(parents=True, exist_ok=True)
     return directory / f"{name}_{target_id}.tcm"
+
+
+def _load_tcm_contract():
+    """Load contract helpers without importing the public AOT package."""
+
+    contract_path = PROJECT_ROOT / "taichi_library" / "taichi_aot" / "tcm_contract.py"
+    spec = importlib.util.spec_from_file_location("pixel_refine_tcm_contract_build", contract_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load TCM contract helper: {contract_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _attach_manifest_to_target_artifacts(
+    artifacts: list[Path], target_id: str, compiler_version: str
+) -> None:
+    """Attach ABI metadata only when the caller explicitly requests it."""
+
+    if not target_id:
+        raise RuntimeError("TCM manifest packaging requires an exact --target profile")
+    contract = _load_tcm_contract()
+    target = target_entry_for_id(target_id)
+    backend = str(target.get("backend", "cpu"))
+    required_features = ("COMPUTE", "SSBO") if backend in {"vulkan", "opengl", "gles"} else ()
+    for artifact in artifacts:
+        if not artifact.is_file():
+            raise RuntimeError(f"cannot attach TCM manifest; artifact is missing: {artifact}")
+        manifest = contract.build_manifest_from_archive(
+            artifact,
+            target=target,
+            compiler_version=compiler_version,
+            required_runtime_features=required_features,
+        )
+        contract.attach_manifest(artifact, manifest)
+        report = contract.validate_tcm(
+            artifact,
+            runtime_features=required_features,
+            requested_target=target,
+        )
+        if report.get("status") != "valid":
+            raise RuntimeError(f"TCM manifest validation did not produce a valid result: {artifact}")
+        print(f"[TCM ABI] manifest attached: {artifact.name}")
 
 
 def _require_backend_artifact(path: Path, backend: str) -> None:
@@ -276,6 +366,13 @@ def _require_backend_artifact(path: Path, backend: str) -> None:
 
     with zipfile.ZipFile(path, "r") as archive:
         names = set(archive.namelist())
+        llvm_text = ""
+        if backend == "cuda":
+            llvm_members = [name for name in names if name.endswith(".ll")]
+            llvm_text = "\n".join(
+                archive.read(name).decode("utf-8", errors="replace")
+                for name in llvm_members
+            ).lower()
     is_gfx = "graphs.json" in names and any(name.endswith(".spv") for name in names)
     # Taichi 1.7.4 serializes both CPU and CUDA AOT graphs as LLVM/TBC
     # archives (CUDA device code is lowered by the CUDA runtime later), while
@@ -286,12 +383,22 @@ def _require_backend_artifact(path: Path, backend: str) -> None:
     is_llvm_tcb = "graphs.tcb" in names and any(name.endswith(".ll") for name in names)
     if backend in {"cpu", "cuda"} and not is_llvm_tcb:
         raise RuntimeError(f"{path.name} is not a {backend} LLVM/TBC AOT artifact")
+    if backend == "cuda" and "nvptx64" not in llvm_text:
+        raise RuntimeError(
+            f"{path.name} has no NVPTX device LLVM triple; refusing CUDA promotion"
+        )
     if backend in {"vulkan", "opengl", "gles"} and not is_gfx:
         raise RuntimeError(f"{path.name} is not a {backend} GFX AOT artifact")
 
 
 def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
     module_name, function_name, convention, aliases = JOBS[name]
+    # OpenGL compilation normally stays context-free so a missing ICD cannot
+    # silently turn a graphics archive into CPU LLVM.  A native ICD context is
+    # an explicit opt-in for the staged Windows profile; the worker still
+    # validates the resulting payload before promotion.
+    if backend == "opengl" and os.environ.get("PIXEL_REFINE_AOT_NATIVE_CONTEXT") == "1":
+        from taichi_library import taichi_aot as _native_context  # noqa: F401
     import taichi as ti
 
     # Compile each target with its actual Taichi architecture.  The worker uses
@@ -310,7 +417,11 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
     module_package = COLOCATED_COMPILER_PACKAGES.get(module_name, PACKAGE)
     module = importlib.import_module(f"{module_package}.{module_name}")
     compiler = getattr(module, function_name)
-    target = _target_artifact_path(name, target_id) if target_id else _artifact_path(name, backend)
+    target = (
+        _target_artifact_path(name, target_id)
+        if target_id
+        else _artifact_path(name, backend)
+    )
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
     if convention == "path":
@@ -320,10 +431,17 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
         staging = target.with_name(target.stem + ".staging.tcm")
         if staging.exists():
             staging.unlink()
-        compiler(arch=arch, save_path=str(staging))
-        _require_backend_artifact(staging, backend)
-        normalize_tcm(staging)
-        os.replace(staging, target)
+        try:
+            compiler(arch=arch, save_path=str(staging))
+            _require_backend_artifact(staging, backend)
+            normalize_tcm(staging)
+            os.replace(staging, target)
+        finally:
+            # A failed/fallback compiler must not leave a misleading partial
+            # archive in the isolated bundle.  Promotion above is atomic, so
+            # this only removes an unpromoted temporary artifact.
+            if staging.exists():
+                staging.unlink()
     elif convention == "out_dir":
         # Some compilers emit several artifacts (including aliases). Compile
         # into an isolated directory first so an OpenGL->CPU fallback can
@@ -336,7 +454,8 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
             for candidate in (name, *aliases):
                 target_path = (
                     _target_artifact_path(candidate, target_id)
-                    if target_id else _artifact_path(candidate, backend)
+                    if target_id
+                    else _artifact_path(candidate, backend)
                 )
                 # out_dir compilers emit the historical ``*_cuda.tcm`` (or
                 # ``*_vulkan.tcm``) name. Accept that producer name, then
@@ -360,7 +479,7 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
     elif convention == "environment":
-        os.environ["PIXEL_REFINE_AOT_ARCH"] = backend
+        os.environ["AOT_ARCH"] = backend
         compiler()
         if target_id:
             # Environment-style producers save beside the suite by design.
@@ -379,37 +498,52 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
     missing = [
         candidate
         for candidate in expected
-        if not ( _target_artifact_path(candidate, target_id) if target_id else _artifact_path(candidate, backend) ).is_file()
+        if not (
+            _target_artifact_path(candidate, target_id)
+            if target_id
+            else _artifact_path(candidate, backend)
+        ).is_file()
     ]
     if missing:
         raise RuntimeError(f"compiler did not create: {', '.join(missing)}")
     for candidate in expected:
-        artifact = _target_artifact_path(candidate, target_id) if target_id else _artifact_path(candidate, backend)
+        artifact = (
+            _target_artifact_path(candidate, target_id)
+            if target_id
+            else _artifact_path(candidate, backend)
+        )
         _require_backend_artifact(artifact, backend)
         normalize_tcm(artifact)
 
 
-def _run_subprocess(backend: str, name: str, target_id: str | None = None, timeout: float = 900.0) -> tuple[bool, str]:
+def _run_subprocess(
+    backend: str, name: str, target_id: str | None = None, timeout: float = 900.0
+) -> tuple[bool, str]:
     env = os.environ.copy()
+    native_context = backend == "opengl" and os.environ.get("PIXEL_REFINE_AOT_NATIVE_CONTEXT") == "1"
     env.update(
         {
-            "PIXEL_REFINE_AOT_ARCH": backend,
+            "AOT_ARCH": backend,
             # Device 0 (Intel UHD) may not expose shaderFloat64; use the
             # configured Vulkan device for capability-sensitive AOT builds.
-            "PIXEL_REFINE_AOT_DEVICE": os.environ.get("PIXEL_REFINE_AOT_DEVICE", "1"),
-            "PIXEL_REFINE_AUTO_DESTROY": "0",
+            "AOT_DEVICE": os.environ.get("AOT_DEVICE", "1"),
+            "AUTO_DESTROY": "0",
             "AOT_MODE": "0",
             # Keep the AOT bridge out of compiler workers.  It can claim an
             # OpenGL context before Taichi initializes its compiler and cause
             # the requested graphics artifact to silently become CPU AOT.
-            "PIXEL_REFINE_AOT_COMPILE_ONLY": "1",
+            "AOT_COMPILE_ONLY": "0" if native_context else "1",
+            # The maintained algorithm wrapper checks the project-specific
+            # spelling.  Set both markers so every colocated compiler follows
+            # the same no-bridge-before-Taichi contract.
+            "PIXEL_REFINE_AOT_COMPILE_ONLY": "0" if native_context else "1",
         }
     )
     if target_id:
         env.update(
             {
-                "PIXEL_REFINE_TARGET_BACKEND": backend,
-                "PIXEL_REFINE_TARGET_VARIANT": target_id,
+                "TARGET_BACKEND": backend,
+                "TARGET_VARIANT": target_id,
             }
         )
     existing_pythonpath = env.get("PYTHONPATH", "")
@@ -419,9 +553,25 @@ def _run_subprocess(backend: str, name: str, target_id: str | None = None, timeo
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(PROJECT_ROOT), existing_pythonpath) if part
     )
+    # Allow an isolated LLVM20 Python profile to drive workers.  The default
+    # remains the current interpreter for backwards compatibility, while
+    # graphics/CUDA builds can opt into their matching TI_WITH_* extension
+    # without mutating the venv or accidentally compiling with the legacy
+    # LLVM15 wheel.
+    worker_python = os.environ.get("PIXEL_REFINE_AOT_PYTHON", "").strip()
+    python_executable = Path(worker_python) if worker_python else Path(sys.executable)
+    if not python_executable.is_file():
+        return False, f"configured worker interpreter does not exist: {python_executable}"
     try:
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()), "--backend", backend, "--worker", name]
+            [
+                str(python_executable),
+                str(Path(__file__).resolve()),
+                "--backend",
+                backend,
+                "--worker",
+                name,
+            ]
             + (["--target", target_id] if target_id else []),
             cwd=PROJECT_ROOT,
             text=True,
@@ -461,11 +611,7 @@ def _retarget_cpu_arm64(target_id: str, force: bool = False) -> None:
         )
         if retarget.returncode:
             raise RuntimeError(retarget.stdout + retarget.stderr)
-    runtime_path = (
-        ARTIFACT_DIR
-        / target_id
-        / f"runtime_{target_id[len('cpu_'):]}.bc"
-    )
+    runtime_path = ARTIFACT_DIR / target_id / f"runtime_{target_id[len('cpu_'):]}.bc"
     if force or not runtime_path.is_file():
         runtime = subprocess.run(
             [sys.executable, str(runtime_builder), "--target", target_id],
@@ -524,14 +670,33 @@ def _promote_vulkan_arm64_android() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", choices=("cpu", "vulkan", "opengl", "gles", "cuda"))
-    parser.add_argument("--target", choices=tuple(sorted(TARGET_BACKENDS)), help="exact architecture/OS/vendor artifact profile")
-    parser.add_argument("--only", help="comma-separated artifact names")
-    parser.add_argument("--force", action="store_true", help="recompile existing artifacts")
     parser.add_argument(
-        "--timeout", type=float,
-        default=float(os.environ.get("PIXEL_REFINE_AOT_COMPILE_TIMEOUT", "900")),
+        "--backend", choices=("cpu", "vulkan", "opengl", "gles", "cuda")
+    )
+    parser.add_argument(
+        "--target",
+        choices=tuple(sorted(TARGET_BACKENDS)),
+        help="exact architecture/OS/vendor artifact profile",
+    )
+    parser.add_argument("--only", help="comma-separated artifact names")
+    parser.add_argument(
+        "--force", action="store_true", help="recompile existing artifacts"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.environ.get("AOT_COMPILE_TIMEOUT", "900")),
         help="per-artifact worker timeout in seconds",
+    )
+    parser.add_argument(
+        "--with-tcm-manifest",
+        action="store_true",
+        help="opt-in: attach and validate a TCM ABI v1 manifest after compilation",
+    )
+    parser.add_argument(
+        "--tcm-compiler-version",
+        default=os.environ.get("PIXEL_REFINE_TCM_COMPILER_VERSION", "taichi-1.7.4-custom"),
+        help="compiler identity recorded in an opt-in TCM manifest",
     )
     parser.add_argument("--worker", choices=tuple(sorted(JOBS)), help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -543,17 +708,34 @@ def main() -> None:
         args.backend = target_backend
     if not args.backend:
         parser.error("--backend or --target is required")
+    if args.with_tcm_manifest and not args.target:
+        parser.error("--with-tcm-manifest requires an exact --target profile")
 
     # CPU/CUDA archives contain host-architecture code.  Never label an x86
     # compile as another OS/architecture merely because a filename was
     # requested. Cross-target builds must use an explicit toolchain helper;
     # ``ti.cpu`` on Windows produces a Windows LLVM triple.
-    cross_cpu_allowed = os.environ.get("PIXEL_REFINE_ALLOW_CROSS_CPU_AOT") == "1"
-    if args.target == "cpu_x86_64_linux" and os.name == "nt" and not cross_cpu_allowed:
+    cross_cpu_allowed = os.environ.get("ALLOW_CROSS_CPU_AOT") == "1"
+    if args.target == "cpu_x86_64_linux" and os.name == "nt":
+        # The normal Taichi CPU worker always lowers against the host triple.
+        # ALLOW_CROSS_CPU_AOT used to bypass this gate, but no worker in this
+        # script actually configures a Linux sysroot/compiler.  Continuing
+        # would therefore put Windows LLVM/CRT code in a Linux-qualified
+        # directory.  Keep the target fail-closed until a dedicated,
+        # target-aware cross worker is implemented.
+        if cross_cpu_allowed:
+            parser.error(
+                "cpu_x86_64_linux cross build is not implemented by this worker; "
+                "use a Linux/glibc worker (or a dedicated target-aware helper)"
+            )
         parser.error(
-            "cpu_x86_64_linux requires a Linux worker or an explicit cross-compiler profile"
+            "cpu_x86_64_linux requires a Linux worker or a dedicated target-aware cross-compiler helper"
         )
-    if args.target == "cpu_x86_64_windows" and os.name != "nt" and not cross_cpu_allowed:
+    if (
+        args.target == "cpu_x86_64_windows"
+        and os.name != "nt"
+        and not cross_cpu_allowed
+    ):
         parser.error(
             "cpu_x86_64_windows requires a Windows worker or an explicit cross-compiler profile"
         )
@@ -561,11 +743,27 @@ def main() -> None:
     # compile as ARM merely because a filename was requested.
     if args.target and args.target.startswith("cuda_arm64"):
         host = os.environ.get("PROCESSOR_ARCHITECTURE", "").lower()
-        if host not in {"arm64", "aarch64"} and not cross_cpu_allowed:
-            parser.error("ARM CPU/CUDA AOT requires an ARM64 worker or an explicit cross-compiler profile")
+        # Unlike the CPU ARM retargeter, this suite has no CUDA ARM64
+        # cross-compiler path.  ``ALLOW_CROSS_CPU_AOT`` must not bypass this
+        # gate: the normal Taichi CUDA worker would emit host-x86 payloads
+        # into a CUDA ARM directory, creating a mislabeled artifact.
+        if host not in {"arm64", "aarch64"}:
+            parser.error(
+                "CUDA ARM64 AOT requires an ARM64 worker; this worker has no CUDA ARM64 cross-compiler"
+            )
 
     if args.worker:
         _run_worker(args.backend, args.worker, args.target)
+        if args.with_tcm_manifest:
+            module_name, function_name, convention, aliases = JOBS[args.worker]
+            expected = (args.worker, *aliases)
+            artifacts = [
+                _target_artifact_path(candidate, args.target)
+                for candidate in expected
+            ]
+            _attach_manifest_to_target_artifacts(
+                artifacts, args.target, args.tcm_compiler_version
+            )
         return
 
     requested = tuple(args.only.split(",")) if args.only else tuple(sorted(JOBS))
@@ -581,13 +779,19 @@ def main() -> None:
         requested_paths = [
             target_dir / f"{name}_{args.target}.tcm" for name in requested
         ]
-        needs_generation = args.force or any(not path.is_file() for path in requested_paths)
+        needs_generation = args.force or any(
+            not path.is_file() for path in requested_paths
+        )
         _retarget_cpu_arm64(args.target, force=needs_generation)
         missing = [str(path.name) for path in requested_paths if not path.is_file()]
         if missing:
             raise RuntimeError(
                 "ARM64 retargeter did not produce requested archives: "
                 + ", ".join(missing)
+            )
+        if args.with_tcm_manifest:
+            _attach_manifest_to_target_artifacts(
+                requested_paths, args.target, args.tcm_compiler_version
             )
         for name in requested:
             print(f"[PASS] {name} ({args.target} cross-target)")
@@ -610,24 +814,50 @@ def main() -> None:
                 "Vulkan ARM64 promotion did not produce requested archives: "
                 + ", ".join(missing)
             )
+        if args.with_tcm_manifest:
+            _attach_manifest_to_target_artifacts(
+                [
+                    target_dir / f"{name}_{args.target}.tcm"
+                    for name in requested
+                ],
+                args.target,
+                args.tcm_compiler_version,
+            )
         for name in requested:
             print(f"[PASS] {name} (vulkan_arm64_android SPIR-V promotion)")
         return
 
     outcomes: list[tuple[str, str]] = []
     for name in requested:
-        artifact = _target_artifact_path(name, args.target) if args.target else _artifact_path(name, args.backend)
+        artifact = (
+            _target_artifact_path(name, args.target)
+            if args.target
+            else _artifact_path(name, args.backend)
+        )
         if artifact.is_file() and not args.force:
             outcomes.append((name, "SKIP existing"))
             continue
-        ok, output = _run_subprocess(args.backend, name, args.target, timeout=args.timeout)
+        ok, output = _run_subprocess(
+            args.backend, name, args.target, timeout=args.timeout
+        )
         outcomes.append((name, "PASS" if ok else f"FAIL\n{output}"))
 
     for name, outcome in outcomes:
         print(f"[{outcome.splitlines()[0]}] {name}")
-    failures = [f"{name}: {outcome}" for name, outcome in outcomes if outcome.startswith("FAIL")]
+    failures = [
+        f"{name}: {outcome}" for name, outcome in outcomes if outcome.startswith("FAIL")
+    ]
     if failures:
         raise RuntimeError("AOT backend compilation failed:\n" + "\n".join(failures))
+    if args.with_tcm_manifest:
+        artifacts = [
+            _target_artifact_path(candidate, args.target)
+            for name in requested
+            for candidate in (name, *JOBS[name][3])
+        ]
+        _attach_manifest_to_target_artifacts(
+            artifacts, args.target, args.tcm_compiler_version
+        )
 
 
 if __name__ == "__main__":
