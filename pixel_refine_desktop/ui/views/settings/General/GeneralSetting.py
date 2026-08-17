@@ -210,6 +210,11 @@ class HardwareBackendTestWorker(QObject):
                 # Windows drivers that ship no EGL provider.
                 environment["OPENGL_CONTEXT"] = "icd"
                 environment["OPENGL_ICD_ONLY"] = "1"
+                # Deep probes intentionally run in a disposable child.  A
+                # vendor CRT assertion must terminate that child quietly so
+                # Windows does not put a modal Visual C++ dialog over the
+                # settings window; the parent will still record the failure.
+                environment["AOT_SUPPRESS_NATIVE_DIALOGS"] = "1"
                 environment.pop("OPENGL_EGL_ONLY", None)
             else:
                 environment.pop("OPENGL_EXPECTED_VENDOR", None)
@@ -348,19 +353,43 @@ class HardwareBackendTestWorker(QObject):
                     int(sum(base_estimates[index:])),
                 )
                 if intel_vulkan_gate:
-                    json_text = output[output.find("{") :]
-                    payload = json.loads(json_text)
-                    passed = int(payload.get("passed", 0))
-                    total_tests = int(payload.get("total", 0))
-                    renderer = str(payload.get("device", {}).get("name", ""))
-                    success = bool(
-                        returncode == 0
-                        and payload.get("ok")
-                        and passed == total_tests
-                        and payload.get("pipeline_passed")
-                        and payload.get("artifact_loaded")
-                        == payload.get("artifact_total")
-                    )
+                    # The Vulkan probe writes human-readable diagnostics
+                    # around its final JSON object.  A native driver crash can
+                    # also truncate that object, so parse it defensively and
+                    # report an ordinary backend failure instead of aborting
+                    # the whole settings dialog with JSONDecodeError.
+                    payload = None
+                    decoder = json.JSONDecoder()
+                    for brace in (i for i, char in enumerate(output) if char == "{"):
+                        try:
+                            candidate, _ = decoder.raw_decode(output[brace:])
+                        except (ValueError, json.JSONDecodeError):
+                            continue
+                        if isinstance(candidate, dict):
+                            payload = candidate
+                    if payload is not None:
+                        passed = int(payload.get("passed", 0))
+                        total_tests = int(payload.get("total", 0))
+                        renderer = str(payload.get("device", {}).get("name", ""))
+                        success = bool(
+                            returncode == 0
+                            and payload.get("ok")
+                            and passed == total_tests
+                            and payload.get("pipeline_passed")
+                            and payload.get("artifact_loaded")
+                            == payload.get("artifact_total")
+                        )
+                    else:
+                        # Keep the raw tail in the diagnostic log; do not
+                        # fabricate a pass result for an incomplete probe.
+                        passed = total_tests = 0
+                        success = False
+                        if output:
+                            print(
+                                f"[Test Subprocess Backend] {text} produced "
+                                "no complete JSON result (likely native crash)\n"
+                                f"{output[-4000:]}"
+                            )
                 else:
                     match = re.search(r"Results:\s*(\d+)\s*/\s*(\d+)", output)
                     if match:
@@ -1234,6 +1263,13 @@ class GeneralSettingsPage(Container, SyncMixin):
         chooser.yes_button.setFixedWidth(60)
         chooser.no_button.setText(language_config.LBL_DEEP)
         chooser.no_button.setFixedWidth(60)
+        # Deep analysis is temporarily disabled while the native-driver
+        # qualification matrix is being repaired.  Keep the choice visible
+        # (rather than hiding it) so users understand that it is intentional.
+        chooser.no_button.setEnabled(False)
+        chooser.no_button.setToolTip(
+            "Deep analysis is temporarily disabled while backend stability is being improved."
+        )
 
         chosen_mode = [None]
 
@@ -1242,6 +1278,8 @@ class GeneralSettingsPage(Container, SyncMixin):
             chooser.accept()
 
         def choose_deep():
+            if not chooser.no_button.isEnabled():
+                return
             chosen_mode[0] = "deep"
             chooser.accept()
 

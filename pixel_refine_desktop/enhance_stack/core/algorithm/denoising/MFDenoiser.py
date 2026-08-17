@@ -455,8 +455,13 @@ class AlignmentBatchJob:
 class MFDenoiserAlgorithm:
     """Main orchestrator for future multi-frame denoising modes."""
 
-    def __init__(self, db_path="pixel_refine_database.db"):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        self.db_path = db_path or os.environ.get("PIXEL_REFINE_SESSION_DB")
+        if not self.db_path:
+            raise RuntimeError(
+                "A session database is required. Set PIXEL_REFINE_SESSION_DB "
+                "or pass db_path explicitly."
+            )
 
     @staticmethod
     def _configure_compute_runtime(ctx):
@@ -1728,8 +1733,20 @@ def running_mf_denoiser(
     h5_write_batch_size=None,
     alignment_backend=None,
     clear_raw=None,
+    db_path=None,
 ):
-    db_path = "pixel_refine_database.db"
+    # Desktop sessions use a private SQLite database (also when a .prf
+    # project is opened). Resolve it from the owning controller or session
+    # environment; never fall back to a shared public database.
+    if not db_path:
+        controller = getattr(parent, "controller", None)
+        db_path = getattr(controller, "db_path", None)
+    db_path = db_path or os.environ.get("PIXEL_REFINE_SESSION_DB")
+    if not db_path:
+        raise RuntimeError(
+            "A session database is required for MFDenoiser. "
+            "Set PIXEL_REFINE_SESSION_DB or pass db_path explicitly."
+        )
 
     if batch_id is not None and progress_callback is not None:
         return _run_pipeline_entry(
@@ -1821,4 +1838,9 @@ def running_similarity(
 
 
 if __name__ == "__main__":
-    _run_pipeline_entry("pixel_refine_database.db")
+    session_db = os.environ.get("PIXEL_REFINE_SESSION_DB")
+    if not session_db:
+        raise SystemExit(
+            "Set PIXEL_REFINE_SESSION_DB before running MFDenoiser directly."
+        )
+    _run_pipeline_entry(session_db)

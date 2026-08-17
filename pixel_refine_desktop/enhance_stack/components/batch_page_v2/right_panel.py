@@ -432,6 +432,18 @@ class RightPanel(QWidget, SyncMixin):
         for batch in batches:
             self.list_group.add_item(batch.name, value=batch.id)
 
+        # The header shortcut is only useful for an empty project.  Keep this
+        # synchronized here as well as in page_layout so project restores (and
+        # other refreshes that do not emit batch_created/batch_deleted) cannot
+        # leave a stale "New Batch" button visible.
+        header_button = getattr(
+            getattr(self.left_panel, "display_panel", None),
+            "new_batch_header_btn",
+            None,
+        )
+        if header_button is not None:
+            header_button.setVisible(not batches)
+
     def refresh_after_project_load(self):
         """Refresh project-backed batches and restore panel visibility."""
         self._load_batches()

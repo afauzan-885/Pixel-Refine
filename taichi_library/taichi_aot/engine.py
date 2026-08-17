@@ -3170,17 +3170,33 @@ class AOTEngine:
                 if not selected:
                     return
                 remaining = [item for item in self._retired_buffers if item[0] != key]
+            sync_failed = False
             if wait and not already_synchronized:
                 _op_begin("sync_runtime:retired_buffers")
                 try:
                     if _LIB is not None and getattr(self, "runtime", None):
                         _LIB.sync_runtime(self.runtime)
+                except (OSError, RuntimeError, ctypes.ArgumentError) as exc:
+                    # A backend can invalidate its native context while Python
+                    # still owns retired wrapper objects (most often during
+                    # driver reset/atexit).  Do not let cleanup turn that
+                    # recoverable lifecycle race into an access-violation
+                    # traceback.  Handles from a failed sync are deliberately
+                    # discarded: returning them to the pool could reuse a
+                    # buffer owned by a dead context.
+                    sync_failed = True
+                    if os.environ.get("AOT_VERBOSE_CLEANUP") == "1":
+                        print(
+                            "[AOTEngine] Retired-buffer sync failed; "
+                            f"discarding {len(selected)} stale handle(s): {exc}"
+                        )
                 finally:
                     _op_end()
             self._retired_buffers = remaining
             self._retired_bytes = sum(item[0].size_bytes for item in remaining)
-            for retired_key, handle in selected:
-                self.buffer_pool.store(retired_key, handle)
+            if not sync_failed:
+                for retired_key, handle in selected:
+                    self.buffer_pool.store(retired_key, handle)
 
     def _buffer_pool_key(self, size, dtype, *, host_accessible, is_vector, vector_dim):
         return BufferKey(

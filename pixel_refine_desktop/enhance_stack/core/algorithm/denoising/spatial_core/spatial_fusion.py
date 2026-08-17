@@ -2,6 +2,7 @@ import os
 import numpy as np
 import psutil
 from .spatial_pipeline import process_in_gpu
+from taichi_library.taichi_aot.compute_block import compute_block
 
 
 
@@ -170,7 +171,17 @@ class SpatialFusionProcessor:
             **unused_kwargs,
         }
 
-        res = process_in_gpu(**backend_args)
+        # Spatial fusion is already tile-based at the image level.  Declare a
+        # fixed 1024 compute-block scope for the backend dispatch as well, so
+        # the AOT planner/cache can associate every stage of this invocation
+        # with the same residency target without changing the public API.
+        with compute_block(
+            block_size=1024,
+            mode="force",
+            name="spatial_fusion",
+            detect_slicing=True,
+        ):
+            res = process_in_gpu(**backend_args)
 
         processed_frames, final_sum_img, sum_weight_full, _ = res
         if final_sum_img is None:

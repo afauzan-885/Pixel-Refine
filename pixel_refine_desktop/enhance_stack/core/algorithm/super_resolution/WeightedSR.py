@@ -352,9 +352,18 @@ def running_weighted_sr(
     progress_callback=None,
     stop_callback=None,
 ):
+    controller = getattr(parent, "controller", None)
+    db_path = getattr(controller, "db_path", None)
+    db_path = db_path or os.environ.get("PIXEL_REFINE_SESSION_DB")
+    if not db_path:
+        raise RuntimeError(
+            "A session database is required for WeightedSR. "
+            "Set PIXEL_REFINE_SESSION_DB or pass db_path explicitly."
+        )
+
     if batch_id is not None and progress_callback is not None:
         main(
-            db_path="pixel_refine_database.db",
+            db_path=db_path,
             update_progress=progress_callback,
             stop_requested=stop_callback,
             single_process=False,
@@ -381,7 +390,7 @@ def running_weighted_sr(
 
     worker = BaseAlgorithmWorker(
         main,
-        "pixel_refine_database.db",
+        db_path,
         single_process=single_process,
         batch_id=batch_id,
     )
@@ -403,5 +412,9 @@ def running_weighted_sr(
 
 
 if __name__ == "__main__":
-    db_path = "pixel_refine_database.db"
+    db_path = os.environ.get("PIXEL_REFINE_SESSION_DB")
+    if not db_path:
+        raise SystemExit(
+            "Set PIXEL_REFINE_SESSION_DB before running WeightedSR directly."
+        )
     main(db_path)

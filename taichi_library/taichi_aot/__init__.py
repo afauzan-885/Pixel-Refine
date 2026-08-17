@@ -12,27 +12,63 @@ The explicit runtime imports below also preserve ``ta.engine`` and the
 backend-management helpers used by the application.
 """
 
-from .engine import (
-    AOTEngine,
-    TaichiGPUBuffer,
-    InputArray,
-    OutputArray,
-    select_backend,
-    resolve_backend_config,
-    get_backend_config,
-    get_backend_name,
-    backend_info,
-    engine,
-    enable_experiment_mode,
-    is_experiment_mode,
-    INTER_CUBIC,
-    INTER_LINEAR,
-    INTER_NEAREST,
-    INTER_AREA,
-    COLOR_BGR2GRAY,
-    COLOR_RGB2GRAY,
-    COLOR_GRAY2BGR,
-)
+import os
+import sys
+
+# Jalur Dynamic Loading: Utamakan Binary Native DLL (.pyd/.so) di Mode Production,
+# dan fallback ke source code .py di Mode Development.
+_USE_NATIVE = os.getenv("PIXEL_REFINE_USE_NATIVE_ENGINE", "1") == "1"
+
+try:
+    if _USE_NATIVE:
+        # Coba import native binary engine terlebih dahulu
+        from .engine import (
+            AOTEngine,
+            TaichiGPUBuffer,
+            InputArray,
+            OutputArray,
+            select_backend,
+            resolve_backend_config,
+            get_backend_config,
+            get_backend_name,
+            backend_info,
+            engine,
+            enable_experiment_mode,
+            is_experiment_mode,
+            INTER_CUBIC,
+            INTER_LINEAR,
+            INTER_NEAREST,
+            INTER_AREA,
+            COLOR_BGR2GRAY,
+            COLOR_RGB2GRAY,
+            COLOR_GRAY2BGR,
+        )
+        print("[AOT Native] Production Engine Active (C++ Compiled)")
+    else:
+        raise ImportError("Development mode forced")
+except Exception:
+    # Jalur Development / Fallback
+    from .engine import (
+        AOTEngine,
+        TaichiGPUBuffer,
+        InputArray,
+        OutputArray,
+        select_backend,
+        resolve_backend_config,
+        get_backend_config,
+        get_backend_name,
+        backend_info,
+        engine,
+        enable_experiment_mode,
+        is_experiment_mode,
+        INTER_CUBIC,
+        INTER_LINEAR,
+        INTER_NEAREST,
+        INTER_AREA,
+        COLOR_BGR2GRAY,
+        COLOR_RGB2GRAY,
+        COLOR_GRAY2BGR,
+    )
 from .backend_config import (
     BackendConfig,
     CANONICAL_BACKENDS,

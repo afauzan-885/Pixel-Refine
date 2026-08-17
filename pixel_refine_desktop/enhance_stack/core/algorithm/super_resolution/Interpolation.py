@@ -641,6 +641,15 @@ def running_interpolation(parent=None, single_process=None, batch_id=None):
     """
     Menampilkan progress bar dengan gaya kustom dan memanfaatkan thread.
     """
+    controller = getattr(parent, "controller", None)
+    db_path = getattr(controller, "db_path", None)
+    db_path = db_path or os.environ.get("PIXEL_REFINE_SESSION_DB")
+    if not db_path:
+        raise RuntimeError(
+            "A session database is required for interpolation. "
+            "Set PIXEL_REFINE_SESSION_DB or pass db_path explicitly."
+        )
+
     # Membuat dialog progress
     dialog = QDialog(parent)
     dialog.setWindowTitle(language_config.WINDOW_TITLE_INTERPOLATION)
@@ -666,7 +675,7 @@ def running_interpolation(parent=None, single_process=None, batch_id=None):
 
     # Inisialisasi thread worker
     worker = ThreadWorker(
-        "pixel_refine_database.db", single_process=single_process, batch_id=batch_id
+        db_path, single_process=single_process, batch_id=batch_id
     )
 
     # Menghubungkan signal worker ke fungsi pembaruan UI
@@ -726,5 +735,9 @@ def running_interpolation(parent=None, single_process=None, batch_id=None):
 
 
 if __name__ == "__main__":
-    db_path = "pixel_refine_database.db"  # Path ke database Anda
+    db_path = os.environ.get("PIXEL_REFINE_SESSION_DB")
+    if not db_path:
+        raise SystemExit(
+            "Set PIXEL_REFINE_SESSION_DB before running interpolation directly."
+        )
     main(db_path)
