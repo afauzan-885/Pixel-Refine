@@ -569,56 +569,6 @@ class GeneralSettingsPage(Container, SyncMixin):
         # self.theme_group.bind_store(self.store, "theme")
         # form.add_row(self.theme_group)
 
-        hardware_backends = self._scan_hardware_backend_options()
-        self._migrate_saved_backend_option(hardware_backends)
-        self._initial_device_backend = self.store.get(
-            "device_backend", "CPU (Universal)"
-        )
-
-        # Device Selection Dropdown
-        device_label = getattr(
-            language_config,
-            "DEVICE_ACCELERATION_LABEL",
-            language_config.BTN_TEST_BACKEND_HARDWARE,
-        )
-        self.device_group = FormGroup(
-            label=device_label, input_type="select", auto_sync=False
-        )
-        if isinstance(self.device_group.input, QComboBox):
-            for option in hardware_backends:
-                self.device_group.input.addItem(option["text"], option)
-            self.device_group.input.currentTextChanged.connect(
-                self.update_device_dropdown_style
-            )
-        self.device_group.bind_store(self.store, "device_backend")
-        form.add_row(self.device_group)
-        self._apply_selected_backend_to_process()
-
-        # Auto Fallback checkbox: when enabled, fall back through
-        # CUDA -> Vulkan -> OpenGL -> CPU if the selected backend is unavailable.
-        auto_fb_label = getattr(language_config, "LBL_AUTO_FALLBACK", "Auto Fallback")
-        auto_fb_tip = getattr(
-            language_config,
-            "LBL_AUTO_FALLBACK_TIP",
-            "When enabled, automatically fall back through CUDA, Vulkan, OpenGL, "
-            "then CPU if the selected backend is unavailable.",
-        )
-        self.auto_fallback_cb = Checkbox(auto_fb_label, auto_sync=True)
-        self.auto_fallback_cb.checkbox.setToolTip(auto_fb_tip)
-        self.auto_fallback_cb.bind_store(self.store, "auto_fallback")
-        form.add_row(self.auto_fallback_cb)
-
-        # Uji Backend Hardware Button
-        self.test_btn = Button(
-            language_config.BTN_TEST_BACKEND_HARDWARE, variant="secondary"
-        )
-        self.test_btn.setMinimumHeight(35)
-        self.test_btn.clicked.connect(self._on_test_backends_clicked)
-        form.add_row(self.test_btn)
-
-        # Initial styling update
-        self.update_device_dropdown_style()
-
         # Thumbnails
         thumb_label = getattr(language_config, "THUMBNAIL_LABEL", "Enable Thumbnails")
         thumb_tip = getattr(language_config, "THUMBNAIL_DESCRIPTION", "")
@@ -738,8 +688,9 @@ class GeneralSettingsPage(Container, SyncMixin):
         )
         self.apply_btn.setText(apply_text)
 
-        # Translate Test Button
-        self.test_btn.setText(language_config.BTN_TEST_BACKEND_HARDWARE)
+        # Translate Test Button when this page owns backend controls.
+        if hasattr(self, "test_btn"):
+            self.test_btn.setText(language_config.BTN_TEST_BACKEND_HARDWARE)
 
         # Update window title if possible
         main_win = self.window()
@@ -759,7 +710,12 @@ class GeneralSettingsPage(Container, SyncMixin):
         )
 
         style = create_checkbox_style()
-        for cb in [self.thumb_cb, self.auto_shutdown_cb]:
+        for cb in [
+            getattr(self, "thumb_cb", None),
+            getattr(self, "auto_shutdown_cb", None),
+        ]:
+            if cb is None:
+                continue
             if hasattr(cb, "checkbox"):
                 cb.checkbox.setStyleSheet(style)
 
@@ -1081,7 +1037,8 @@ class GeneralSettingsPage(Container, SyncMixin):
         )
         selected_backend_text = (
             self.device_group.input.currentText()
-            if isinstance(self.device_group.input, QComboBox)
+            if hasattr(self, "device_group")
+            and isinstance(self.device_group.input, QComboBox)
             else self.store.get("device_backend", "CPU (Universal)")
         )
         backend_changed = selected_backend_text != self._initial_device_backend
@@ -1103,7 +1060,7 @@ class GeneralSettingsPage(Container, SyncMixin):
                 int(self.auto_shutdown_minutes_group.get_value()),
             )
 
-        if isinstance(self.device_group.input, QComboBox):
+        if hasattr(self, "device_group") and isinstance(self.device_group.input, QComboBox):
             self._apply_selected_backend_to_process()
 
         if hasattr(self.store, "save_to_file"):
@@ -1139,13 +1096,13 @@ class GeneralSettingsPage(Container, SyncMixin):
         )
         toast.show_toast(duration=3000)
 
-        if backend_changed:
+        if backend_changed and hasattr(self, "device_group"):
             dialog = modal_confirm(
-                language_config.MSG_BACKEND_RESTART_REQUIRED, self.window()
+                language_config.MSG_BACKEND_EXIT_REQUIRED, self.window()
             )
-            dialog.title_text.setText(language_config.RESTART_APPLICATION_REQUIRED)
-            dialog.yes_button.setText(language_config.BTN_YES)
-            dialog.no_button.setText(language_config.BTN_NO)
+            dialog.title_text.setText(language_config.EXIT_APPLICATION_APPLY_BACKEND_TITLE)
+            dialog.yes_button.setText(language_config.EXIT_APPLICATION_YES)
+            dialog.no_button.setText(language_config.EXIT_APPLICATION_NO)
 
             if dialog.exec() == dialog.DialogCode.Accepted:
                 restart_application()

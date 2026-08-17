@@ -37,6 +37,19 @@ RESTART_FAILED = "重启失败"
 COMMAND_TO_RESTART_MANUALLY = "无法自动重启应用程序。请手动重启。"
 
 # ==============================================================================
+# Application exit and backend-change prompts
+EXIT_APPLICATION_TITLE = "退出应用程序"
+EXIT_APPLICATION_MESSAGE = "确定要退出应用程序吗？"
+EXIT_APPLICATION_YES = "是"
+EXIT_APPLICATION_NO = "否"
+PROJECT_SAVE_CHANGES_TITLE = "保存项目"
+PROJECT_SAVE_CHANGES_MESSAGE = "此项目有未保存的更改。退出前要保存吗？"
+PROJECT_SAVE_CHANGES_SAVE = "保存"
+PROJECT_SAVE_CHANGES_DISCARD = "不保存"
+PROJECT_SAVE_CHANGES_CANCEL = "取消"
+EXIT_APPLICATION_APPLY_BACKEND_TITLE = "后端更改"
+MSG_BACKEND_EXIT_REQUIRED = "退出应用程序，然后再次打开以应用新的后端选择？"
+
 # Sidebar UI
 # ==============================================================================
 
@@ -538,6 +551,13 @@ SIMILARITY_MOTION_V2_DESCRIPTION = """Similarity V2 是 Similarity v1 算法的�
 # Application Settings UI
 # ==============================================================================
 SETTING_GENERAL_LABEL = "通用"
+SETTING_PERFORMANCE_LABEL = "性能"
+PROJECT_MENU_LABEL = "项目"
+PROJECT_SAVE = "保存项目"
+PROJECT_SAVE_AS = "项目另存为..."
+PROJECT_OPEN = "打开项目..."
+PROJECT_RECENT = "最近项目"
+PROJECT_ABOUT = "关于 Pixel Refine"
 LANGUAGE_LABEL = "语言"
 LANGUAGE_TYPE = "英语", "印尼语", "繁體中文", "马来语"
 GPU_ACCELERATION_LABEL = "GPU 加速"

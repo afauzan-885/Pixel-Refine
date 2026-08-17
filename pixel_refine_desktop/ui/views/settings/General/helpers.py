@@ -53,9 +53,23 @@ def restart_application():
 
         previous_runtime_root = os.environ.get("PIXEL_REFINE_RUNTIME_ROOT")
         previous_canonical_launch = os.environ.get("PIXEL_REFINE_CANONICAL_LAUNCH")
-        os.environ["PIXEL_REFINE_RUNTIME_ROOT"] = str(
-            LLVM20_STAGING_ROOT / "release"
-        )
+        # Resolve the canonical LLVM20 release root from the shared resolver.
+        # The previous code referenced LLVM20_STAGING_ROOT without importing
+        # it, so Apply Settings failed before QProcess could start.
+        try:
+            from taichi_library.llvm20_runtime_paths import runtime_root as resolve_runtime_root
+
+            runtime_root = (
+                Path(previous_runtime_root).expanduser()
+                if previous_runtime_root
+                else resolve_runtime_root()
+            )
+        except Exception:
+            runtime_root = Path(previous_runtime_root).expanduser() if previous_runtime_root else None
+        if runtime_root is not None:
+            os.environ["PIXEL_REFINE_RUNTIME_ROOT"] = str(runtime_root)
+        else:
+            os.environ.pop("PIXEL_REFINE_RUNTIME_ROOT", None)
         os.environ["PIXEL_REFINE_CANONICAL_LAUNCH"] = "1"
         try:
             started = QProcess.startDetached(program_to_run, arguments, working_dir)
@@ -72,6 +86,9 @@ def restart_application():
         if started:
             inst = QCoreApplication.instance()
             if inst:
+                # The replacement process is already starting; do not show
+                # the normal user close confirmation during this handoff.
+                inst.setProperty("_pixel_refine_skip_close_confirmation", True)
                 inst.quit()
         else:
             print(

@@ -432,6 +432,19 @@ class RightPanel(QWidget, SyncMixin):
         for batch in batches:
             self.list_group.add_item(batch.name, value=batch.id)
 
+    def refresh_after_project_load(self):
+        """Refresh project-backed batches and restore panel visibility."""
+        self._load_batches()
+        batches = self.controller.get_all_batches() if self.controller else []
+        if batches:
+            self.setMaximumWidth(16777215)
+            self.show()
+        else:
+            self.list_group.clear_selection()
+            self.hide()
+            self.setMaximumWidth(0)
+        self._update_process_all_btn_visibility()
+
     def _create_new_batch(self):
         if not self.controller:
             return

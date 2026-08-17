@@ -447,7 +447,9 @@ class ModalDialog(QDialog):
             self.setFixedSize(width, height)
         else:
             self.setMinimumWidth(width)
-            self.resize(width, 200)
+            # Keep confirmation dialogs compact while leaving enough room for
+            # a wrapped message and the action row.
+            self.resize(width, 160)
         
         # Setup Fade-in Animation
         self.fade_anim = QPropertyAnimation(self, b"windowOpacity")
@@ -458,7 +460,7 @@ class ModalDialog(QDialog):
         
         # Main layout
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)  # margin for drop shadow
+        main_layout.setContentsMargins(12, 12, 12, 12)  # margin for drop shadow
         
         # Card container widget for border, shadow and background
         self.container = QWidget(self)
@@ -537,14 +539,15 @@ class ModalDialog(QDialog):
             # 2. Content Layout (Side-by-side Icon and Text)
             content_widget = QWidget()
             content_layout = QHBoxLayout(content_widget)
-            content_layout.setContentsMargins(18, 16, 18, 10)
-            content_layout.setSpacing(14)
+            content_layout.setContentsMargins(14, 8, 14, 6)
+            content_layout.setSpacing(12)
 
             # Blue question icon
             self.query_icon = QLabel()
             icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxQuestion)
-            self.query_icon.setPixmap(icon.pixmap(30, 30))
-            self.query_icon.setAlignment(Qt.AlignmentFlag.AlignTop)
+            # 25 px is approximately 15% smaller than the previous 30 px icon.
+            self.query_icon.setPixmap(icon.pixmap(25, 25))
+            self.query_icon.setAlignment(Qt.AlignmentFlag.AlignVCenter)
             content_layout.addWidget(self.query_icon)
 
             # Confirmation message label
@@ -564,8 +567,8 @@ class ModalDialog(QDialog):
             # 3. Action Buttons (Yes/No)
             button_widget = QWidget()
             button_layout = QHBoxLayout(button_widget)
-            button_layout.setContentsMargins(18, 0, 18, 4)
-            button_layout.setSpacing(8)
+            button_layout.setContentsMargins(14, 0, 14, 2)
+            button_layout.setSpacing(6)
 
             self.checkbox = None
             if show_checkbox:

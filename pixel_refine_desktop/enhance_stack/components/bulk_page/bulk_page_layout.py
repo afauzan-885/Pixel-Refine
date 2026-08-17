@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     QFileSystemWatcher,
 )
 import weakref
+import tempfile
 from pixel_refine_desktop.enhance_stack.components.bulk_page.controllers.bulk_process_controller import (
     BatchProcessDialog,
 )
@@ -167,13 +168,18 @@ class BulkPageLayout(QWidget):
     show_toast_requested = Signal(str, object, bool)
     parameters_changed = Signal(dict)
 
-    def __init__(self):
+    def __init__(self, db_path=None):
         super().__init__()
         self.thumbnail_threads = []
         self.thumbnail_placeholders = weakref.WeakValueDictionary()
         self.active_skeletons = {}
         self.loading_queue = []
-        self.database_manager = DatabaseManager("pixel_refine_database.db")
+        session_path = db_path or os.environ.get("PIXEL_REFINE_SESSION_DB")
+        if not session_path:
+            session_path = os.path.join(
+                tempfile.gettempdir(), f"pixel_refine_session_{os.getpid()}.sqlite"
+            )
+        self.database_manager = DatabaseManager(session_path)
         self.json_path = os.path.join("database", "align", "batch_parameter.json")
         self.param_watcher = QFileSystemWatcher(self)
         self.param_watcher.fileChanged.connect(self._on_parameters_file_changed)
@@ -291,6 +297,29 @@ class BulkPageLayout(QWidget):
         if not hasattr(self, "_active_preloaders"):
             self._active_preloaders = []
         self._active_preloaders.append(preloader)
+
+    def refresh_after_project_load(self):
+        """Discard legacy UI caches and rebuild from the active session DB."""
+        self.stop_thumbnail()
+        for panel in list(self.active_batch_panels.values()):
+            try:
+                self.main_panel_container.removeWidget(panel)
+                panel.deleteLater()
+            except RuntimeError:
+                pass
+        for skeleton in list(self.active_skeletons.values()):
+            try:
+                self.main_panel_container.removeWidget(skeleton)
+                skeleton.deleteLater()
+            except RuntimeError:
+                pass
+        self.active_batch_panels.clear()
+        self.active_skeletons.clear()
+        self._panel_cache.clear()
+        self.batch_states.clear()
+        self.loading_queue.clear()
+        self.limit = 10
+        self.update_batch_view()
 
     def update_batch_view(self):
         """

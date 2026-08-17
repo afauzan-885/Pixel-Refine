@@ -29,6 +29,7 @@ from PySide6.QtCore import (
     Slot,
     Signal,
     Qt,
+    QEvent,
     QPoint,
     QSize,
     QThread,
@@ -90,6 +91,7 @@ from pixel_refine_desktop.enhance_stack.core.logic.drag_drop_handler import (
 from pixel_refine_desktop.enhance_stack.core.logic.context_menu_handler import (
     ContextMenuHandler,
 )
+from pixel_refine_desktop.enhance_stack.core.logic.project_archive import recent_projects
 
 # Zoomable preview
 from pixel_refine_desktop.enhance_stack.core.logic.Zoomable_Handler import Zoomable
@@ -553,7 +555,18 @@ class DisplayPanel(QWidget):
         # 0. Sidebar Toggle Button (New)
         self.toggle_btn = Button("☰", object_name="SidebarToggleBtn")
         self.toggle_btn.setFixedWidth(40)
+        self.toggle_btn.setStyleSheet(
+            "QPushButton { font-size: 13pt; padding: 0; }"
+        )
         self.toggle_btn.clicked.connect(self.toggle_sidebar)
+        self.toggle_btn.installEventFilter(self)
+        self.toggle_btn.setToolTip("")
+        self._hamburger_menu = QMenu(self)
+        self._hamburger_menu.aboutToShow.connect(self._populate_hamburger_menu)
+        self._hamburger_hover_timer = QTimer(self)
+        self._hamburger_hover_timer.setSingleShot(True)
+        self._hamburger_hover_timer.setInterval(300)
+        self._hamburger_hover_timer.timeout.connect(self._show_hamburger_menu)
         self.left_header_layout.addWidget(self.toggle_btn)
 
         # Title Label
@@ -1661,6 +1674,65 @@ class DisplayPanel(QWidget):
             for cid in self.selection_manager.selected_thumbnails
             if cid in self.logic.grid_items
         ]
+
+    def _project_owner(self):
+        parent = self.parentWidget()
+        while parent is not None:
+            if hasattr(parent, "_save_project") and hasattr(parent, "_open_project"):
+                return parent
+            parent = parent.parentWidget()
+        return None
+
+    def eventFilter(self, watched, event):
+        if watched is self.toggle_btn:
+            if event.type() == QEvent.Type.Enter:
+                self._hamburger_hover_timer.start()
+            elif event.type() == QEvent.Type.Leave:
+                self._hamburger_hover_timer.stop()
+        return super().eventFilter(watched, event)
+
+    def _show_hamburger_menu(self):
+        if self.toggle_btn.underMouse():
+            self._hamburger_menu.popup(
+                self.toggle_btn.mapToGlobal(QPoint(0, self.toggle_btn.height()))
+            )
+
+    def _populate_hamburger_menu(self):
+        owner = self._project_owner()
+        if owner is None:
+            return
+        self._hamburger_menu.clear()
+        save = self._hamburger_menu.addAction(
+            getattr(language_config, "PROJECT_SAVE", "Save Project")
+        )
+        save.triggered.connect(owner._save_project)
+        save_as = self._hamburger_menu.addAction(
+            getattr(language_config, "PROJECT_SAVE_AS", "Save Project As...")
+        )
+        save_as.triggered.connect(owner._save_project_as)
+        open_action = self._hamburger_menu.addAction(
+            getattr(language_config, "PROJECT_OPEN", "Open Project...")
+        )
+        open_action.triggered.connect(owner._open_project)
+        recent_menu = self._hamburger_menu.addMenu(
+            getattr(language_config, "PROJECT_RECENT", "Recent Projects")
+        )
+        paths = recent_projects()
+        if paths:
+            for path in paths:
+                action = recent_menu.addAction(os.path.basename(path))
+                action.setToolTip(path)
+                action.triggered.connect(
+                    lambda checked=False, value=path: owner._open_project(value)
+                )
+        else:
+            empty = recent_menu.addAction("(None)")
+            empty.setEnabled(False)
+        self._hamburger_menu.addSeparator()
+        about = self._hamburger_menu.addAction(
+            getattr(language_config, "PROJECT_ABOUT", "About Pixel Refine")
+        )
+        about.triggered.connect(owner._show_about_project)
 
     def set_header_title(self, text: str):
         """Sets the text of the header title."""

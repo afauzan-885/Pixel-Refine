@@ -12,6 +12,7 @@ import signal
 import threading
 import json
 import subprocess
+import tempfile
 
 # Suppress Vulkan loader registry warnings on Windows
 os.environ["VK_LOADER_DEBUG"] = "error"
@@ -57,10 +58,11 @@ def _ensure_llvm20_interpreter():
     os.environ["PYTHONPATH"] = os.pathsep.join(
         value for value in (project_root, extra_python_path) if value
     )
-    print(
-        f"[PixelRefine] Re-executing desktop entrypoint on LLVM20 interpreter: {target}",
-        flush=True,
-    )
+    if os.environ.get("PIXEL_REFINE_VERBOSE_BOOTSTRAP", "0") == "1":
+        print(
+            f"[PixelRefine] Re-executing desktop entrypoint on LLVM20 interpreter: {target}",
+            flush=True,
+        )
     child = subprocess.run(
         [target, *sys.argv],
         cwd=project_root,
@@ -211,9 +213,10 @@ from PySide6.QtWidgets import (
     QProxyStyle,
     QStyle,
     QToolTip,
+    QMessageBox,
 )
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtCore import Qt, QObject, QEvent
+from PySide6.QtCore import Qt, QObject, QEvent, QTimer
 
 # Project imports.  The source tree now keeps the desktop package under
 # ``pixel_refine_desktop``; retain the historical ``desktop`` import for
@@ -237,6 +240,12 @@ except ModuleNotFoundError as exc:
         SplashScreen,
     )
 from resources.animations.fade import fade_in
+from pixel_refine_desktop.app_core.project_file_association import (
+    register_project_file_association,
+)
+from pixel_refine_desktop.enhance_stack.core.logic.project_archive import (
+    restore_project_session,
+)
 
 # from desktop.ui.views.panorama import PanoramaPage
 import config
@@ -379,6 +388,7 @@ class ToolTipFilter(QObject):
 
 
 from resources.GenericUILibrary import live_update
+from resources.GenericUILibrary.modals import modal_confirm
 
 
 @live_update
@@ -392,10 +402,37 @@ class PixelRefineMain(QMainWindow):
         """
         super().__init__()
         self.main_content: QStackedWidget | None = None
+        self.enhance_stack_view: EnhanceStackView | None = None
         self.sidebar: Sidebar | None = None
         self.app_manager: ApplicationManager | None = None
         self.window_config: WindowConfig | None = None
         self.sidebar_buttons = []
+        self._close_confirmation_accepted = False
+        self.setAcceptDrops(True)
+
+    def _project_drop_path(self, event):
+        mime_data = event.mimeData() if hasattr(event, "mimeData") else None
+        if mime_data is None or not mime_data.hasUrls():
+            return None
+        for url in mime_data.urls():
+            if url.isLocalFile() and url.toLocalFile().lower().endswith(".prf"):
+                path = os.path.abspath(url.toLocalFile())
+                if os.path.isfile(path):
+                    return path
+        return None
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.DragEnter:
+            if self._project_drop_path(event):
+                event.acceptProposedAction()
+                return True
+        elif event.type() == QEvent.Type.Drop:
+            path = self._project_drop_path(event)
+            if path and self.enhance_stack_view:
+                self.enhance_stack_view._open_project(path)
+                event.acceptProposedAction()
+                return True
+        return super().eventFilter(watched, event)
 
     def setup_ui_and_logic(self, splash: SplashScreen):
         """Setup UI and application logic with progress updates."""
@@ -475,6 +512,7 @@ class PixelRefineMain(QMainWindow):
             db_path=self.app_manager.database_manager.db_path,
             parent=self.main_content,
         )
+        self.enhance_stack_view = enhance_stack_view
         self.main_content.addWidget(enhance_stack_view)
 
         # Connect navigation signal from EnhanceStackView
@@ -524,6 +562,83 @@ class PixelRefineMain(QMainWindow):
 
     def closeEvent(self, event):
         """Handle application close event."""
+        app = QApplication.instance()
+        skip_confirmation = bool(
+            app and app.property("_pixel_refine_skip_close_confirmation")
+        )
+        project_exit_decided = False
+        if not skip_confirmation and not self._close_confirmation_accepted:
+            from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+
+            project_view = self.enhance_stack_view
+            if project_view and project_view.project_has_unsaved_changes():
+                save_dialog = QMessageBox(self)
+                save_dialog.setIcon(QMessageBox.Icon.Warning)
+                save_dialog.setWindowTitle(
+                    getattr(language_config, "PROJECT_SAVE_CHANGES_TITLE", "Save Project")
+                )
+                save_dialog.setText(
+                    getattr(
+                        language_config,
+                        "PROJECT_SAVE_CHANGES_MESSAGE",
+                        "This project has unsaved changes. Save before exiting?",
+                    )
+                )
+                save_button = save_dialog.addButton(
+                    getattr(language_config, "PROJECT_SAVE_CHANGES_SAVE", "Save"),
+                    QMessageBox.ButtonRole.AcceptRole,
+                )
+                discard_button = save_dialog.addButton(
+                    getattr(language_config, "PROJECT_SAVE_CHANGES_DISCARD", "Don't Save"),
+                    QMessageBox.ButtonRole.DestructiveRole,
+                )
+                cancel_button = save_dialog.addButton(
+                    getattr(language_config, "PROJECT_SAVE_CHANGES_CANCEL", "Cancel"),
+                    QMessageBox.ButtonRole.RejectRole,
+                )
+                save_dialog.exec()
+                clicked = save_dialog.clickedButton()
+                if clicked is save_button:
+                    if not project_view._save_project(blocking=True):
+                        event.ignore()
+                        return
+                    project_exit_decided = True
+                elif clicked is cancel_button or clicked is None:
+                    event.ignore()
+                    return
+                elif clicked is not discard_button:
+                    event.ignore()
+                    return
+                else:
+                    project_exit_decided = True
+
+            if project_exit_decided:
+                # The Save/Don't Save decision already confirms the user's
+                # intent to exit; do not ask for a second confirmation.
+                self._close_confirmation_accepted = True
+            else:
+                dialog = modal_confirm(
+                getattr(
+                    language_config,
+                    "EXIT_APPLICATION_MESSAGE",
+                    "Do you want to exit the application?",
+                ),
+                self,
+            )
+                dialog.title_text.setText(
+                    getattr(language_config, "EXIT_APPLICATION_TITLE", "Exit Application")
+                )
+                dialog.yes_button.setText(
+                    getattr(language_config, "EXIT_APPLICATION_YES", "Yes")
+                )
+                dialog.no_button.setText(
+                    getattr(language_config, "EXIT_APPLICATION_NO", "No")
+                )
+                if dialog.exec() != dialog.DialogCode.Accepted:
+                    event.ignore()
+                    return
+                self._close_confirmation_accepted = True
+
         if self.app_manager:
             self.app_manager.cleanup_folders()
         _cleanup_aot_backend("window-close")
@@ -582,6 +697,36 @@ def main():
 
     # Create application
     app = QApplication(sys.argv)
+    register_project_file_association()
+
+    project_argument = next(
+        (
+            os.path.abspath(argument)
+            for argument in sys.argv[1:]
+            if argument.lower().endswith(".prf") and os.path.isfile(argument)
+        ),
+        None,
+    )
+    session_database = os.path.join(
+        tempfile.gettempdir(), f"pixel_refine_session_{os.getpid()}.sqlite"
+    )
+    try:
+        if project_argument:
+            restore_project_session(project_argument, session_database)
+        else:
+            # A new launch starts with an empty, private session.  Persistent
+            # batch data now lives only inside an explicit .prf archive.
+            for path in (session_database, session_database + "-wal", session_database + "-shm"):
+                if os.path.isfile(path):
+                    os.remove(path)
+            parameter_path = os.path.join("database", "align", "batch_parameter.json")
+            os.makedirs(os.path.dirname(parameter_path), exist_ok=True)
+            with open(parameter_path, "w", encoding="utf-8") as handle:
+                handle.write("{}\n")
+        os.environ["PIXEL_REFINE_SESSION_DB"] = session_database
+    except Exception as exc:
+        QMessageBox.critical(app, "Project Error", str(exc))
+        sys.exit(1)
     app.aboutToQuit.connect(lambda: _cleanup_aot_backend("about-to-quit"))
 
     # Load and apply theme from settings on startup
@@ -643,6 +788,7 @@ def main():
     # Create and setup main window
     window = PixelRefineMain()
     window.setup_ui_and_logic(splash)
+    app.installEventFilter(window)
 
     # Load and apply initial stylesheet & theme triggers at startup
     try:
@@ -659,11 +805,19 @@ def main():
     window.show()
     splash.finish(window)
 
+    # A .prf opened from Explorer is passed as a command-line argument.
+    if project_argument and window.enhance_stack_view:
+        QTimer.singleShot(
+            0, lambda path=project_argument: window.enhance_stack_view._open_project(path)
+        )
+
     # Run application
     exit_code = 0
     try:
         exit_code = app.exec()
     finally:
+        if window.app_manager:
+            window.app_manager.cleanup_session_database()
         _cleanup_aot_backend("event-loop-exit")
     sys.exit(exit_code)
 

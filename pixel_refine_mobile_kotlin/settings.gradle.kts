@@ -22,4 +22,4 @@ dependencyResolutionManagement {
 rootProject.name = "pixel_refine_mobile_kotlin"
 include(":composeApp")
 include(":generic-ui-kotlin")
-project(":generic-ui-kotlin").projectDir = file("../resources/GenericUILibraryKotlin")
+project(":generic-ui-kotlin").projectDir = file("../resources/LibraryKotlin")
