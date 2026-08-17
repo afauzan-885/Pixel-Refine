@@ -76,8 +76,11 @@ if TAICHI_AVAILABLE:
             iz = ti.cast(ti.floor(vz), ti.i32)
 
             fx = vx - ti.cast(ix, ti.f32)
-            fy = vy - ti.cast(ix, ti.f32)
-            fz = vz - ti.cast(ix, ti.f32)
+            # Fractions must use the index from their own voxel axis. Mixing
+            # axes leaks one coordinate into the trilinear weights and makes
+            # divergence rasterization depend on grid aspect/location.
+            fy = vy - ti.cast(iy, ti.f32)
+            fz = vz - ti.cast(iz, ti.f32)
 
             # Trilinear splat of divergence
             for di in ti.static(range(2)):
@@ -302,7 +305,7 @@ def poisson_reconstruct(
     normals = np.ascontiguousarray(normals.astype(np.float32))
 
     # Normalize normals
-    norms = np.linalg.norm(norms, axis=1, keepdims=True)
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
     norms = np.maximum(norms, 1e-10)
     normals = normals / norms
 

@@ -41,6 +41,35 @@ except ImportError:
     pass
 
 
+def _ensure_taichi_runtime() -> str:
+    """Initialise the explicit Taichi JIT backend without changing AOT mode."""
+    if not TAICHI_AVAILABLE:
+        raise RuntimeError(
+            "backend='taichi' requires AOT_MODE=0 and an installed Taichi runtime"
+        )
+    runtime = ti.lang.impl.get_runtime()
+    if getattr(runtime, "prog", None) is None:
+        ti.init(arch=ti.cpu)
+    try:
+        arch = str(ti.lang.impl.get_runtime().prog.config().arch).lower()
+    except Exception:
+        arch = "unknown"
+    return "taichi-cpu-jit" if "x64" in arch or "cpu" in arch else f"taichi-{arch}-jit"
+
+
+def _resolve_backend(value: str | None) -> tuple[str, bool]:
+    """Return the selected leaf and whether the JIT kernels should run."""
+    backend = "auto" if value is None else str(value).strip().lower()
+    if backend not in {"auto", "numpy", "taichi", "aot"}:
+        raise ValueError("backend must be one of 'auto', 'numpy', 'taichi', or 'aot'")
+    if backend == "auto":
+        return ("taichi", True) if TAICHI_AVAILABLE else ("numpy", False)
+    if backend == "taichi":
+        _ensure_taichi_runtime()
+        return "taichi", True
+    return backend, False
+
+
 # =============================================================================
 # TAICHI KERNELS
 # =============================================================================
@@ -313,6 +342,7 @@ def plane_sweep_stereo(
     n_depths=64,
     patch_radius=3,
     depth_spacing="linear",
+    backend="auto",
 ):
     """
     Plane Sweep Stereo untuk dense depth estimation.
@@ -354,7 +384,23 @@ def plane_sweep_stereo(
     else:
         depth_hypotheses = np.linspace(depth_min, depth_max, n_depths, dtype=np.float32)
 
-    if not TAICHI_AVAILABLE:
+    selected_backend, use_taichi = _resolve_backend(backend)
+
+    if selected_backend == "aot":
+        try:
+            from ..aot_api.research import sfm_sweep_depths_aot, sfm_winner_take_all_aot
+
+            cost_volume = sfm_sweep_depths_aot(
+                ref_img, target_img, K_ref, K_target, R_rel, t_rel,
+                depth_hypotheses, patch_radius=int(patch_radius),
+            )
+            return sfm_winner_take_all_aot(cost_volume, depth_hypotheses)
+        except (FileNotFoundError, ImportError, KeyError, OSError, RuntimeError) as exc:
+            raise NotImplementedError(
+                "plane-sweep AOT requires target-qualified sfm_stereo artifacts"
+            ) from exc
+
+    if not use_taichi:
         return _plane_sweep_numpy(
             ref_img, target_img, K_ref, K_target, R_rel, t_rel,
             depth_hypotheses, patch_radius,
@@ -395,6 +441,7 @@ def multi_view_plane_sweep(
     depth_max=100.0,
     n_depths=64,
     patch_radius=3,
+    backend="auto",
 ):
     """
     Multi-view plane sweep stereo.
@@ -414,6 +461,7 @@ def multi_view_plane_sweep(
         confidence: (H, W) float32
     """
     ref_img = np.ascontiguousarray(ref_img.astype(np.float32))
+    selected_backend, use_taichi = _resolve_backend(backend)
     h, w = ref_img.shape[:2]
 
     depth_hypotheses = np.linspace(depth_min, depth_max, n_depths, dtype=np.float32)
@@ -431,7 +479,18 @@ def multi_view_plane_sweep(
 
         cost_volume = np.zeros((n_depths, h, w), dtype=np.float32)
 
-        if TAICHI_AVAILABLE:
+        if selected_backend == "aot":
+            try:
+                from ..aot_api.research import sfm_sweep_depths_aot
+                cost_volume = sfm_sweep_depths_aot(
+                    ref_img, target_img, K_ref, K_target, R_rel, t_rel,
+                    depth_hypotheses, patch_radius=int(patch_radius),
+                )
+            except (FileNotFoundError, ImportError, KeyError, OSError, RuntimeError) as exc:
+                raise NotImplementedError(
+                    "multi-view plane-sweep AOT requires target-qualified sfm_stereo artifacts"
+                ) from exc
+        elif use_taichi:
             sweep_all_depths_kernel(
                 ref_img, target_img, K_ref, K_target, R_rel, t_rel,
                 depth_hypotheses, n_depths, h, w, patch_radius, cost_volume,

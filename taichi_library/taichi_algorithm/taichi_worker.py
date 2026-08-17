@@ -16,8 +16,10 @@ import time
 import ctypes
 import numpy as np
 
+from taichi_library.config import AOT_MODE
+
 # Check if we are running in AOT mode (default: yes)
-_IS_AOT_MODE = any("aot" in arg.lower() or "compiler" in arg.lower() for arg in sys.argv) or os.environ.get("AOT_MODE", "1") == "1"
+_IS_AOT_MODE = any("aot" in arg.lower() or "compiler" in arg.lower() for arg in sys.argv) or AOT_MODE == "1"
 
 if not _IS_AOT_MODE:
     # Force stable CUDA context settings globally before any Taichi import
@@ -25,7 +27,7 @@ if not _IS_AOT_MODE:
 
 TAICHI_AVAILABLE = False
 ti = None
-if os.environ.get("AOT_MODE", "1") == "0":
+if AOT_MODE == "0":
     try:
         import importlib
         ti = importlib.import_module("taichi")
@@ -125,7 +127,20 @@ class _TaichiWorker(threading.Thread):
             ti_cpu_threads = max(1, num_cores - reserved_cores)
 
             # Allow manual override via environment variable
-            forced_arch = os.environ.get("TAICHI_ARCH", "").lower()
+            from taichi_library.backend_config import normalize_backend
+
+            raw_arch = (
+                os.environ.get("TAICHI_ARCH")
+                or os.environ.get("PIXEL_REFINE_TAICHI_ARCH")
+                or os.environ.get("PIXEL_REFINE_AOT_ARCH")
+                or os.environ.get("PIXEL_REFINE_BACKEND")
+            )
+            forced_arch = normalize_backend(raw_arch, allow_auto=True)
+            if forced_arch == "auto":
+                # Legacy JIT's generic GPU means Vulkan on desktop.  AOT
+                # callers never reach this branch because _IS_AOT_MODE keeps
+                # the worker inert.
+                forced_arch = "vulkan"
             cache_path = _global_cache_path
 
             if forced_arch == "cpu":
@@ -134,6 +149,16 @@ class _TaichiWorker(threading.Thread):
                 ti.init(arch=ti.vulkan, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
             elif forced_arch == "cuda":
                 ti.init(arch=ti.cuda, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
+            elif forced_arch == "opengl":
+                opengl_arch = getattr(ti, "opengl", None)
+                if opengl_arch is None:
+                    raise RuntimeError("This Taichi build does not expose the OpenGL JIT arch")
+                ti.init(arch=opengl_arch, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
+            elif forced_arch == "gles":
+                gles_arch = getattr(ti, "gles", None)
+                if gles_arch is None:
+                    raise RuntimeError("This Taichi build does not expose the GLES JIT arch")
+                ti.init(arch=gles_arch, offline_cache=True, device_memory_GB=1.8, offline_cache_file_path=cache_path)
             else:
                 # Fallback chain: Vulkan -> GPU -> CPU
                 try:

@@ -100,6 +100,40 @@ if TAICHI_AVAILABLE:
             dst[r, c, 2] = res[2]
 
     @ti.kernel
+    def _downsample_2x_offset_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        offset_y: int, offset_x: int,
+    ):
+        weights = ti.static([1.0, 4.0, 6.0, 4.0, 1.0])
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            sy0, sx0 = (r + offset_y) * 2, (c + offset_x) * 2
+            val = 0.0
+            for j in ti.static(range(-2, 3)):
+                for i in ti.static(range(-2, 3)):
+                    sy = common.reflect_idx(sy0 + j, src.shape[0])
+                    sx = common.reflect_idx(sx0 + i, src.shape[1])
+                    val += src[sy, sx] * weights[j + 2] * weights[i + 2]
+            dst[r, c] = val / 256.0
+
+    @ti.kernel
+    def _downsample_2x_offset_kernel_3ch(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        offset_y: int, offset_x: int,
+    ):
+        weights = ti.static([1.0, 4.0, 6.0, 4.0, 1.0])
+        for r, c, ch in ti.ndrange(dst.shape[0], dst.shape[1], 3):
+            sy0, sx0 = (r + offset_y) * 2, (c + offset_x) * 2
+            val = 0.0
+            for j in ti.static(range(-2, 3)):
+                for i in ti.static(range(-2, 3)):
+                    sy = common.reflect_idx(sy0 + j, src.shape[0])
+                    sx = common.reflect_idx(sx0 + i, src.shape[1])
+                    val += src[sy, sx, ch] * weights[j + 2] * weights[i + 2]
+            dst[r, c, ch] = val / 256.0
+
+    @ti.kernel
     def _upsample_flow_kernel(
         src: ti.types.ndarray(dtype=ti.f32, ndim=3),
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
@@ -264,8 +298,8 @@ def upsample_flow(
 ) -> np.ndarray:
     """CPU interface: Upsample flow using NumPy input/output."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library.taichi_aot.engine import AOTEngine
-        engine = AOTEngine()
+        from taichi_library.taichi_aot import get_engine
+        engine = get_engine()
         src_gpu = engine.upload(flow)
         dst_gpu = engine.allocate((target_h, target_w, 2), dtype=np.float32)
         upsample_flow_gpu(src_gpu, dst_gpu, scale)

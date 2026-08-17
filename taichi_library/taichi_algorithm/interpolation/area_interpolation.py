@@ -101,3 +101,44 @@ if TAICHI_AVAILABLE:
                     sum_w += w
             
             dst[y, x] = acc / ti.max(sum_w, 1e-9)
+
+    @ti.kernel
+    def _inter_area_offset_1ch_kernel(
+        src: ti.types.ndarray(), dst: ti.types.ndarray(),
+        sh: int, sw: int, dh: int, dw: int, offset_y: int, offset_x: int,
+    ):
+        scale_x, scale_y = float(sw) / float(dw), float(sh) / float(dh)
+        for y, x in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gy, gx = y + offset_y, x + offset_x
+            xs, xe = float(gx) * scale_x, float(gx + 1) * scale_x
+            ys, ye = float(gy) * scale_y, float(gy + 1) * scale_y
+            acc, sum_w = 0.0, 0.0
+            for iy in range(int(ti.floor(ys)), int(ti.ceil(ye))):
+                for ix in range(int(ti.floor(xs)), int(ti.ceil(xe))):
+                    wx = ti.max(0.0, ti.min(float(ix + 1), xe) - ti.max(float(ix), xs))
+                    wy = ti.max(0.0, ti.min(float(iy + 1), ye) - ti.max(float(iy), ys))
+                    weight = wx * wy
+                    acc += float(src[tm.clamp(iy, 0, sh - 1), tm.clamp(ix, 0, sw - 1)]) * weight
+                    sum_w += weight
+            dst[y, x] = acc / ti.max(sum_w, 1e-9)
+
+    @ti.kernel
+    def _inter_area_offset_vec3_kernel(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        sh: int, sw: int, dh: int, dw: int, offset_y: int, offset_x: int,
+    ):
+        scale_x, scale_y = float(sw) / float(dw), float(sh) / float(dh)
+        for y, x in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gy, gx = y + offset_y, x + offset_x
+            xs, xe = float(gx) * scale_x, float(gx + 1) * scale_x
+            ys, ye = float(gy) * scale_y, float(gy + 1) * scale_y
+            acc, sum_w = ti.Vector([0.0, 0.0, 0.0]), 0.0
+            for iy in range(int(ti.floor(ys)), int(ti.ceil(ye))):
+                for ix in range(int(ti.floor(xs)), int(ti.ceil(xe))):
+                    wx = ti.max(0.0, ti.min(float(ix + 1), xe) - ti.max(float(ix), xs))
+                    wy = ti.max(0.0, ti.min(float(iy + 1), ye) - ti.max(float(iy), ys))
+                    weight = wx * wy
+                    acc += src[tm.clamp(iy, 0, sh - 1), tm.clamp(ix, 0, sw - 1)] * weight
+                    sum_w += weight
+            dst[y, x] = acc / ti.max(sum_w, 1e-9)

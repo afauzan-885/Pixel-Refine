@@ -1,0 +1,6 @@
+cgraph:bilinear_resize_f32_2d
+cgraph:bilinear_resize_f32_3d
+cgraph:bilinear_resize_offset_f32_2d
+cgraph:bilinear_resize_offset_f32_3d
+cgraph:bilinear_resize_batch_offset_f32_2d
+cgraph:bilinear_resize_batch_offset_f32_3d

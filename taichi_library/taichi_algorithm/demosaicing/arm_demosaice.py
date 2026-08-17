@@ -39,3 +39,6 @@ def arm_demosaic(
         dst=dst
     )
     return res_buf
+
+arm = arm_demosaic
+

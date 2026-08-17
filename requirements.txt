@@ -1,9 +1,0 @@
-PySide6
-opencv-python
-rawpy
-Pillow
-tifffile
-h5py
-exifread
-onnxruntime
-scipy

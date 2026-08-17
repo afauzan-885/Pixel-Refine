@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "target_matrix": [
+    {"os": "windows", "backend": "cpu", "arch": "x86_64", "vendor": "unknown"},
+    {"os": "windows", "backend": "cuda", "arch": "x86_64", "vendor": "nvidia"},
+    {"os": "windows", "backend": "opengl", "arch": "x86_64", "vendor": "unknown"},
+    {"os": "windows", "backend": "vulkan", "arch": "x86_64", "vendor": "unknown"}
+  ]
+}

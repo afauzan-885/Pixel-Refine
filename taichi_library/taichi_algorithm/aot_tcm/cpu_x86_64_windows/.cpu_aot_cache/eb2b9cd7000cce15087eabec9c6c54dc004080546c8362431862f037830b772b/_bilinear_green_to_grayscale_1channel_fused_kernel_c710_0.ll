@@ -1,0 +1,476 @@
+; ModuleID = 'kernel'
+source_filename = "kernel"
+target datalayout = "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+target triple = "x86_64-pc-windows-msvc19.44.35228"
+
+%struct.range_task_helper_context = type { ptr, ptr, ptr, ptr, i64, i32, i32, i32, i32 }
+%struct.RuntimeContext.3 = type { ptr, ptr, i32, ptr }
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(readwrite, inaccessiblemem: none)
+define void @_bilinear_green_to_grayscale_1channel_fused_kernel_c710_0_kernel_0_serial(ptr nocapture readonly %context) local_unnamed_addr #0 {
+entry:
+  %0 = load ptr, ptr %context, align 8
+  %1 = getelementptr i8, ptr %0, i64 52
+  %2 = load float, ptr %1, align 4
+  %3 = getelementptr i8, ptr %0, i64 48
+  %4 = load float, ptr %3, align 4
+  %5 = getelementptr inbounds nuw i8, ptr %context, i64 8
+  %6 = load ptr, ptr %5, align 8
+  %7 = getelementptr inbounds nuw i8, ptr %6, i64 32872
+  %8 = load ptr, ptr %7, align 8
+  %9 = getelementptr inbounds nuw i8, ptr %8, i64 8
+  store float %4, ptr %9, align 4
+  %10 = fsub reassoc ninf nsz float %2, %4
+  %11 = tail call reassoc ninf nsz float @llvm.maxnum.f32(float %10, float 1.000000e+00)
+  %12 = fdiv reassoc ninf nsz float 1.000000e+00, %11
+  %13 = load ptr, ptr %5, align 8
+  %14 = getelementptr inbounds nuw i8, ptr %13, i64 32872
+  %15 = load ptr, ptr %14, align 8
+  %16 = getelementptr inbounds nuw i8, ptr %15, i64 12
+  store float %12, ptr %16, align 4
+  %17 = load ptr, ptr %context, align 8
+  %18 = getelementptr i8, ptr %17, i64 56
+  %19 = load i32, ptr %18, align 4
+  %20 = load ptr, ptr %5, align 8
+  %21 = getelementptr inbounds nuw i8, ptr %20, i64 32872
+  %22 = load ptr, ptr %21, align 8
+  %23 = getelementptr inbounds nuw i8, ptr %22, i64 20
+  store i32 %19, ptr %23, align 4
+  %24 = tail call i32 @llvm.smax.i32(i32 %19, i32 0)
+  %25 = load ptr, ptr %context, align 8
+  %26 = getelementptr i8, ptr %25, i64 60
+  %27 = load i32, ptr %26, align 4
+  %28 = load ptr, ptr %5, align 8
+  %29 = getelementptr inbounds nuw i8, ptr %28, i64 32872
+  %30 = load ptr, ptr %29, align 8
+  %31 = getelementptr inbounds nuw i8, ptr %30, i64 16
+  store i32 %27, ptr %31, align 4
+  %32 = tail call i32 @llvm.smax.i32(i32 %27, i32 0)
+  %33 = load ptr, ptr %5, align 8
+  %34 = getelementptr inbounds nuw i8, ptr %33, i64 32872
+  %35 = load ptr, ptr %34, align 8
+  %36 = getelementptr inbounds nuw i8, ptr %35, i64 4
+  store i32 %32, ptr %36, align 4
+  %37 = mul i32 %32, %24
+  %38 = load ptr, ptr %5, align 8
+  %39 = getelementptr inbounds nuw i8, ptr %38, i64 32872
+  %40 = load ptr, ptr %39, align 8
+  store i32 %37, ptr %40, align 4
+  ret void
+}
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare float @llvm.maxnum.f32(float, float) #1
+
+define void @_bilinear_green_to_grayscale_1channel_fused_kernel_c710_0_kernel_1_range_for(ptr %context) local_unnamed_addr {
+cpu_parallel_range_for.exit:
+  %0 = alloca %struct.range_task_helper_context, align 8
+  call void @llvm.lifetime.start.p0(i64 56, ptr nonnull %0)
+  %1 = getelementptr inbounds nuw i8, ptr %0, i64 8
+  %2 = getelementptr inbounds nuw i8, ptr %0, i64 16
+  %3 = getelementptr inbounds nuw i8, ptr %0, i64 24
+  %4 = getelementptr inbounds nuw i8, ptr %0, i64 32
+  store ptr %context, ptr %0, align 8
+  store ptr null, ptr %1, align 8
+  store i64 1, ptr %4, align 8
+  store ptr @function_body, ptr %2, align 8
+  store ptr null, ptr %3, align 8
+  %5 = getelementptr inbounds nuw i8, ptr %0, i64 40
+  store i32 0, ptr %5, align 8
+  %6 = getelementptr inbounds nuw i8, ptr %0, i64 44
+  store i32 8, ptr %6, align 4
+  %7 = getelementptr inbounds nuw i8, ptr %0, i64 52
+  store i32 1, ptr %7, align 4
+  %8 = getelementptr inbounds nuw i8, ptr %0, i64 48
+  store i32 1, ptr %8, align 8
+  %9 = getelementptr inbounds nuw i8, ptr %context, i64 8
+  %10 = load ptr, ptr %9, align 8
+  %11 = getelementptr inbounds nuw i8, ptr %10, i64 8288
+  %12 = load ptr, ptr %11, align 8
+  %13 = getelementptr inbounds nuw i8, ptr %10, i64 8280
+  %14 = load ptr, ptr %13, align 8
+  call void %12(ptr noundef %14, i32 noundef 8, i32 noundef 8, ptr noundef nonnull %0, ptr noundef nonnull @cpu_parallel_range_for_task) #7
+  call void @llvm.lifetime.end.p0(i64 56, ptr nonnull %0)
+  ret void
+}
+
+; Function Attrs: nofree norecurse nosync nounwind memory(readwrite, inaccessiblemem: none)
+define internal void @function_body(ptr nocapture readonly %0, ptr nocapture readnone %1, i32 %2) #2 {
+allocs:
+  %3 = getelementptr inbounds nuw i8, ptr %0, i64 8
+  %4 = load ptr, ptr %3, align 8
+  %5 = getelementptr inbounds nuw i8, ptr %4, i64 32872
+  %6 = load ptr, ptr %5, align 8
+  %7 = load i32, ptr %6, align 4
+  %8 = add i32 %7, 7
+  %9 = sdiv i32 %8, 8
+  %10 = icmp slt i32 %8, 0
+  %11 = shl nsw i32 %9, 3
+  %12 = icmp ne i32 %11, %8
+  %13 = and i1 %10, %12
+  %.neg = sext i1 %13 to i32
+  %14 = add nsw i32 %9, %.neg
+  %15 = tail call i32 @llvm.smax.i32(i32 range(i32 -268435457, 268435456) %14, i32 512)
+  %16 = mul i32 %15, %2
+  %17 = add i32 %16, %15
+  %18 = tail call i32 @llvm.smin.i32(i32 %7, i32 %17)
+  %19 = icmp slt i32 %16, %18
+  br i1 %19, label %for_loop_body.preheader, label %after_for
+
+for_loop_body.preheader:                          ; preds = %allocs
+  br label %for_loop_body
+
+for_loop_body:                                    ; preds = %after_if12, %for_loop_body.preheader
+  %.04572 = phi i32 [ %178, %after_if12 ], [ %16, %for_loop_body.preheader ]
+  %20 = load ptr, ptr %3, align 8
+  %21 = getelementptr inbounds nuw i8, ptr %20, i64 32872
+  %22 = load ptr, ptr %21, align 8
+  %23 = getelementptr inbounds nuw i8, ptr %22, i64 4
+  %24 = load i32, ptr %23, align 4
+  %25 = sdiv i32 %.04572, %24
+  %26 = mul i32 %25, %24
+  %27 = xor i32 %24, %.04572
+  %28 = icmp slt i32 %27, 0
+  %29 = icmp ne i32 %.04572, %26
+  %30 = and i1 %28, %29
+  %.neg47 = sext i1 %30 to i32
+  %31 = add i32 %25, %.neg47
+  %32 = mul i32 %31, %24
+  %33 = mul i32 %24, -1
+  %34 = mul i32 %33, %31
+  %35 = add i32 %.04572, %34
+  %36 = sdiv i32 %31, 2
+  %37 = icmp slt i32 %31, 0
+  %38 = shl nsw i32 %36, 1
+  %39 = icmp ne i32 %38, %31
+  %40 = and i1 %37, %39
+  %.neg48 = sext i1 %40 to i32
+  %41 = add nsw i32 %36, %.neg48
+  %42 = shl i32 %41, 1
+  %43 = sdiv i32 %35, 2
+  %44 = icmp slt i32 %35, 0
+  %45 = shl nsw i32 %43, 1
+  %46 = icmp ne i32 %35, %45
+  %47 = and i1 %44, %46
+  %.neg49 = sext i1 %47 to i32
+  %48 = add nsw i32 %43, %.neg49
+  %49 = shl i32 %48, 1
+  %50 = icmp eq i32 %31, %42
+  %.not = icmp eq i32 %35, %49
+  %51 = load ptr, ptr %0, align 8
+  %spec.select = select i1 %.not, i64 64, i64 68
+  %spec.select82 = select i1 %.not, i64 72, i64 76
+  %.sink81 = select i1 %50, i64 %spec.select, i64 %spec.select82
+  %52 = getelementptr i8, ptr %51, i64 %.sink81
+  %.044 = load i32, ptr %52, align 4
+  switch i32 %.044, label %false_block11 [
+    i32 3, label %true_block10
+    i32 1, label %true_block10
+  ]
+
+after_for.loopexit:                               ; preds = %after_if12
+  br label %after_for
+
+after_for:                                        ; preds = %after_for.loopexit, %allocs
+  ret void
+
+true_block10:                                     ; preds = %for_loop_body, %for_loop_body
+  %.not60 = icmp eq i32 %.044, 1
+  %53 = getelementptr i8, ptr %51, i64 8
+  %54 = load ptr, ptr %53, align 8
+  %55 = getelementptr i8, ptr %51, i64 4
+  %56 = load i32, ptr %55, align 4
+  %57 = sub i32 %56, %24
+  %58 = mul i32 %57, %31
+  %59 = add i32 %.04572, %58
+  %60 = sext i32 %59 to i64
+  %61 = getelementptr float, ptr %54, i64 %60
+  %62 = load float, ptr %61, align 4
+  %63 = getelementptr inbounds nuw i8, ptr %22, i64 8
+  %64 = load float, ptr %63, align 4
+  %65 = fsub reassoc ninf nsz float %62, %64
+  %66 = getelementptr inbounds nuw i8, ptr %22, i64 12
+  %67 = load float, ptr %66, align 4
+  %68 = fmul reassoc ninf nsz float %65, %67
+  %69 = tail call reassoc ninf nsz float @llvm.maxnum.f32(float %68, float 0.000000e+00)
+  %70 = tail call reassoc ninf nsz float @llvm.minnum.f32(float %69, float 1.000000e+00)
+  %.040.in.v = select i1 %.not60, i64 36, i64 44
+  %.040.in = getelementptr i8, ptr %51, i64 %.040.in.v
+  %.040 = load float, ptr %.040.in, align 4
+  %71 = fmul reassoc ninf nsz float %70, %.040
+  br label %after_if12
+
+false_block11:                                    ; preds = %for_loop_body
+  %72 = add i32 %35, -1
+  %73 = tail call i32 @llvm.smax.i32(i32 %72, i32 0)
+  %74 = getelementptr inbounds nuw i8, ptr %22, i64 16
+  %75 = load i32, ptr %74, align 4
+  %76 = add i32 %75, -1
+  %77 = add i32 %35, 1
+  %78 = tail call i32 @llvm.smin.i32(i32 %76, i32 %77)
+  %79 = add i32 %31, -1
+  %80 = tail call i32 @llvm.smax.i32(i32 %79, i32 0)
+  %81 = getelementptr inbounds nuw i8, ptr %22, i64 20
+  %82 = load i32, ptr %81, align 4
+  %83 = add i32 %82, -1
+  %84 = add i32 %31, 1
+  %85 = tail call i32 @llvm.smin.i32(i32 %83, i32 %84)
+  %86 = getelementptr i8, ptr %51, i64 8
+  %87 = load ptr, ptr %86, align 8
+  %88 = getelementptr i8, ptr %51, i64 4
+  %89 = load i32, ptr %88, align 4
+  %90 = mul i32 %89, %31
+  %91 = add i32 %90, %73
+  %92 = sext i32 %91 to i64
+  %93 = getelementptr float, ptr %87, i64 %92
+  %94 = load float, ptr %93, align 4
+  %95 = getelementptr inbounds nuw i8, ptr %22, i64 8
+  %96 = load float, ptr %95, align 4
+  %97 = fsub reassoc ninf nsz float %94, %96
+  %98 = getelementptr inbounds nuw i8, ptr %22, i64 12
+  %99 = load float, ptr %98, align 4
+  %100 = fmul reassoc ninf nsz float %97, %99
+  %101 = tail call reassoc ninf nsz float @llvm.maxnum.f32(float %100, float 0.000000e+00)
+  %102 = tail call reassoc ninf nsz float @llvm.minnum.f32(float %101, float 1.000000e+00)
+  %103 = add i32 %90, %78
+  %104 = sext i32 %103 to i64
+  %105 = getelementptr float, ptr %87, i64 %104
+  %106 = load float, ptr %105, align 4
+  %107 = fsub reassoc ninf nsz float %106, %96
+  %108 = fmul reassoc ninf nsz float %107, %99
+  %109 = tail call reassoc ninf nsz float @llvm.maxnum.f32(float %108, float 0.000000e+00)
+  %110 = tail call reassoc ninf nsz float @llvm.minnum.f32(float %109, float 1.000000e+00)
+  %111 = mul i32 %89, %80
+  %112 = sub i32 %111, %32
+  %113 = add i32 %.04572, %112
+  %114 = sext i32 %113 to i64
+  %115 = getelementptr float, ptr %87, i64 %114
+  %116 = load float, ptr %115, align 4
+  %117 = fsub reassoc ninf nsz float %116, %96
+  %118 = fmul reassoc ninf nsz float %117, %99
+  %119 = tail call reassoc ninf nsz float @llvm.maxnum.f32(float %118, float 0.000000e+00)
+  %120 = tail call reassoc ninf nsz float @llvm.minnum.f32(float %119, float 1.000000e+00)
+  %121 = mul i32 %89, %85
+  %122 = sub i32 %121, %32
+  %123 = add i32 %.04572, %122
+  %124 = sext i32 %123 to i64
+  %125 = getelementptr float, ptr %87, i64 %124
+  %126 = load float, ptr %125, align 4
+  %127 = fsub reassoc ninf nsz float %126, %96
+  %128 = fmul reassoc ninf nsz float %127, %99
+  %129 = tail call reassoc ninf nsz float @llvm.maxnum.f32(float %128, float 0.000000e+00)
+  %130 = tail call reassoc ninf nsz float @llvm.minnum.f32(float %129, float 1.000000e+00)
+  %131 = getelementptr i8, ptr %51, i64 64
+  %132 = load i32, ptr %131, align 4
+  %133 = getelementptr i8, ptr %51, i64 68
+  %134 = load i32, ptr %133, align 4
+  %135 = getelementptr i8, ptr %51, i64 72
+  %136 = load i32, ptr %135, align 4
+  %137 = getelementptr i8, ptr %51, i64 76
+  %138 = load i32, ptr %137, align 4
+  %139 = getelementptr i8, ptr %51, i64 36
+  %140 = load float, ptr %139, align 4
+  %141 = getelementptr i8, ptr %51, i64 44
+  %142 = load float, ptr %141, align 4
+  %143 = and i32 %73, 1
+  %.not51 = icmp eq i32 %143, 0
+  %. = select i1 %.not51, i32 %132, i32 %134
+  %.61 = select i1 %.not51, i32 %136, i32 %138
+  %.039 = select i1 %50, i32 %., i32 %.61
+  %.not52 = icmp eq i32 %.039, 1
+  %.62 = select i1 %.not52, float %140, float %142
+  %144 = sdiv i32 %78, 2
+  %145 = icmp slt i32 %78, 0
+  %146 = shl nsw i32 %144, 1
+  %147 = icmp ne i32 %146, %78
+  %148 = and i1 %145, %147
+  %.neg53 = sext i1 %148 to i32
+  %149 = add nsw i32 %144, %.neg53
+  %150 = shl i32 %149, 1
+  %.not54 = icmp eq i32 %78, %150
+  %.63 = select i1 %.not54, i32 %132, i32 %134
+  %.64 = select i1 %.not54, i32 %136, i32 %138
+  %.035 = select i1 %50, i32 %.63, i32 %.64
+  %.not55 = icmp eq i32 %.035, 1
+  %.65 = select i1 %.not55, float %140, float %142
+  %151 = and i32 %80, 1
+  %152 = icmp eq i32 %151, 0
+  %.66 = select i1 %.not, i32 %132, i32 %134
+  %.67 = select i1 %.not, i32 %136, i32 %138
+  %.031 = select i1 %152, i32 %.66, i32 %.67
+  %.not57 = icmp eq i32 %.031, 1
+  %.68 = select i1 %.not57, float %140, float %142
+  %153 = sdiv i32 %85, 2
+  %154 = icmp slt i32 %85, 0
+  %155 = shl nsw i32 %153, 1
+  %156 = icmp ne i32 %155, %85
+  %157 = and i1 %154, %156
+  %.neg58 = sext i1 %157 to i32
+  %158 = add nsw i32 %153, %.neg58
+  %159 = shl i32 %158, 1
+  %160 = icmp eq i32 %85, %159
+  %.027 = select i1 %160, i32 %.66, i32 %.67
+  %.not59 = icmp eq i32 %.027, 1
+  %.71 = select i1 %.not59, float %140, float %142
+  %161 = fmul reassoc ninf nsz float %.62, %102
+  %162 = fmul reassoc ninf nsz float %.65, %110
+  %163 = fadd reassoc ninf nsz float %161, %162
+  %164 = fmul reassoc ninf nsz float %.68, %120
+  %165 = fadd reassoc ninf nsz float %163, %164
+  %166 = fmul reassoc ninf nsz float %.71, %130
+  %167 = fadd reassoc ninf nsz float %165, %166
+  %168 = fmul reassoc ninf nsz float %167, 2.500000e-01
+  br label %after_if12
+
+after_if12:                                       ; preds = %false_block11, %true_block10
+  %.sink = phi float [ %168, %false_block11 ], [ %71, %true_block10 ]
+  %169 = getelementptr i8, ptr %51, i64 24
+  %170 = load ptr, ptr %169, align 8
+  %171 = getelementptr i8, ptr %51, i64 20
+  %172 = load i32, ptr %171, align 4
+  %173 = sub i32 %172, %24
+  %174 = mul i32 %173, %31
+  %175 = add i32 %.04572, %174
+  %176 = sext i32 %175 to i64
+  %177 = getelementptr float, ptr %170, i64 %176
+  store float %.sink, ptr %177, align 4
+  %178 = add nsw i32 %.04572, 1
+  %exitcond.not = icmp eq i32 %18, %178
+  br i1 %exitcond.not, label %after_for.loopexit, label %for_loop_body
+}
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare float @llvm.minnum.f32(float, float) #1
+
+; Function Attrs: alwaysinline mustprogress nounwind uwtable
+define internal void @cpu_parallel_range_for_task(ptr nocapture noundef readonly %0, i32 noundef %1, i32 noundef %2) #3 {
+  %4 = alloca %struct.RuntimeContext.3, align 8
+  %.sroa.0.0.copyload = load ptr, ptr %0, align 8
+  %.sroa.4.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 8
+  %.sroa.4.0.copyload = load ptr, ptr %.sroa.4.0..sroa_idx, align 8
+  %.sroa.5.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 16
+  %.sroa.5.0.copyload = load ptr, ptr %.sroa.5.0..sroa_idx, align 8
+  %.sroa.7.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 24
+  %.sroa.7.0.copyload = load ptr, ptr %.sroa.7.0..sroa_idx, align 8
+  %.sroa.8.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 32
+  %.sroa.8.0.copyload = load i64, ptr %.sroa.8.0..sroa_idx, align 8
+  %.sroa.9.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 40
+  %.sroa.9.0.copyload = load i32, ptr %.sroa.9.0..sroa_idx, align 8
+  %.sroa.12.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 44
+  %.sroa.12.0.copyload = load i32, ptr %.sroa.12.0..sroa_idx, align 4
+  %.sroa.15.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 48
+  %.sroa.15.0.copyload = load i32, ptr %.sroa.15.0..sroa_idx, align 8
+  %.sroa.17.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 52
+  %.sroa.17.0.copyload = load i32, ptr %.sroa.17.0..sroa_idx, align 4
+  %5 = alloca i8, i64 %.sroa.8.0.copyload, align 8
+  %.not = icmp eq ptr %.sroa.4.0.copyload, null
+  br i1 %.not, label %7, label %6
+
+6:                                                ; preds = %3
+  call void %.sroa.4.0.copyload(ptr noundef %.sroa.0.0.copyload, ptr noundef nonnull %5) #7
+  br label %7
+
+7:                                                ; preds = %6, %3
+  call void @llvm.memcpy.p0.p0.i64(ptr noundef nonnull align 8 dereferenceable(32) %4, ptr noundef nonnull align 8 dereferenceable(32) %.sroa.0.0.copyload, i64 32, i1 false)
+  %8 = getelementptr inbounds nuw i8, ptr %4, i64 16
+  store i32 %1, ptr %8, align 8
+  switch i32 %.sroa.17.0.copyload, label %.loopexit [
+    i32 1, label %9
+    i32 -1, label %16
+  ]
+
+9:                                                ; preds = %7
+  %10 = mul nsw i32 %.sroa.15.0.copyload, %2
+  %11 = add nsw i32 %10, %.sroa.9.0.copyload
+  %12 = add nsw i32 %11, %.sroa.15.0.copyload
+  %.sroa.speculated28 = call i32 @llvm.smin.i32(i32 %.sroa.12.0.copyload, i32 %12)
+  %13 = icmp slt i32 %11, %.sroa.speculated28
+  br i1 %13, label %.lr.ph41.preheader, label %.loopexit
+
+.lr.ph41.preheader:                               ; preds = %9
+  br label %.lr.ph41
+
+.lr.ph41:                                         ; preds = %.lr.ph41, %.lr.ph41.preheader
+  %.02040 = phi i32 [ %14, %.lr.ph41 ], [ %11, %.lr.ph41.preheader ]
+  call void %.sroa.5.0.copyload(ptr noundef nonnull %4, ptr noundef nonnull %5, i32 noundef %.02040) #7
+  %14 = add i32 %.02040, 1
+  %15 = icmp slt i32 %14, %.sroa.speculated28
+  br i1 %15, label %.lr.ph41, label %.loopexit.loopexit, !llvm.loop !10
+
+16:                                               ; preds = %7
+  %17 = mul nsw i32 %.sroa.15.0.copyload, %2
+  %18 = sub nsw i32 %.sroa.12.0.copyload, %17
+  %19 = mul nsw i32 %18, %.sroa.15.0.copyload
+  %.sroa.speculated = call i32 @llvm.smax.i32(i32 %.sroa.9.0.copyload, i32 %19)
+  %.not24.not38 = icmp sgt i32 %18, %.sroa.speculated
+  br i1 %.not24.not38, label %.lr.ph.preheader, label %.loopexit
+
+.lr.ph.preheader:                                 ; preds = %16
+  br label %.lr.ph
+
+.lr.ph:                                           ; preds = %.lr.ph, %.lr.ph.preheader
+  %.0.in39 = phi i32 [ %.0, %.lr.ph ], [ %18, %.lr.ph.preheader ]
+  %.0 = add i32 %.0.in39, -1
+  call void %.sroa.5.0.copyload(ptr noundef nonnull %4, ptr noundef nonnull %5, i32 noundef %.0) #7
+  %.not24.not = icmp sgt i32 %.0, %.sroa.speculated
+  br i1 %.not24.not, label %.lr.ph, label %.loopexit.loopexit46, !llvm.loop !12
+
+.loopexit.loopexit:                               ; preds = %.lr.ph41
+  br label %.loopexit
+
+.loopexit.loopexit46:                             ; preds = %.lr.ph
+  br label %.loopexit
+
+.loopexit:                                        ; preds = %.loopexit.loopexit46, %.loopexit.loopexit, %16, %9, %7
+  %.not25 = icmp eq ptr %.sroa.7.0.copyload, null
+  br i1 %.not25, label %21, label %20
+
+20:                                               ; preds = %.loopexit
+  call void %.sroa.7.0.copyload(ptr noundef %.sroa.0.0.copyload, ptr noundef nonnull %5) #7
+  br label %21
+
+21:                                               ; preds = %20, %.loopexit
+  ret void
+}
+
+; Function Attrs: mustprogress nocallback nofree nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #4
+
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare i32 @llvm.smin.i32(i32, i32) #5
+
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare i32 @llvm.smax.i32(i32, i32) #5
+
+; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.lifetime.start.p0(i64 immarg, ptr nocapture) #6
+
+; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture) #6
+
+attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(readwrite, inaccessiblemem: none) }
+attributes #1 = { mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+attributes #2 = { nofree norecurse nosync nounwind memory(readwrite, inaccessiblemem: none) }
+attributes #3 = { alwaysinline mustprogress nounwind uwtable "frame-pointer"="none" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
+attributes #4 = { mustprogress nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+attributes #5 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+attributes #6 = { nocallback nofree nosync nounwind willreturn memory(argmem: readwrite) }
+attributes #7 = { nounwind }
+
+!llvm.linker.options = !{!0, !1, !2, !3, !4, !5}
+!llvm.ident = !{!6}
+!llvm.module.flags = !{!7, !8, !9}
+
+!0 = !{!"/FAILIFMISMATCH:\22_MSC_VER=1900\22"}
+!1 = !{!"/FAILIFMISMATCH:\22_ITERATOR_DEBUG_LEVEL=0\22"}
+!2 = !{!"/FAILIFMISMATCH:\22RuntimeLibrary=MT_StaticRelease\22"}
+!3 = !{!"/DEFAULTLIB:libcpmt.lib"}
+!4 = !{!"/FAILIFMISMATCH:\22_CRT_STDIO_ISO_WIDE_SPECIFIERS=0\22"}
+!5 = !{!"/alternatename:_Avx2WmemEnabled=_Avx2WmemEnabledWeakValue"}
+!6 = !{!"clang version 14.0.6"}
+!7 = !{i32 1, !"wchar_size", i32 2}
+!8 = !{i32 8, !"PIC Level", i32 2}
+!9 = !{i32 7, !"uwtable", i32 1}
+!10 = distinct !{!10, !11}
+!11 = !{!"llvm.loop.mustprogress"}
+!12 = distinct !{!12, !11}

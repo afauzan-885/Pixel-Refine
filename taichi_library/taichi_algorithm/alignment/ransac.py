@@ -78,7 +78,6 @@ if TAICHI_AVAILABLE:
         w: int,
         stride: int,
     ):
-        """Update inlier mask with stride support."""
         model_x, model_y = model[0], model[1]
         for y, x in ti.ndrange((h + stride - 1) // stride, (w + stride - 1) // stride):
             iy, ix = y * stride, x * stride
@@ -279,6 +278,25 @@ if TAICHI_AVAILABLE:
         H[2, 0] = h[6]; H[2, 1] = h[7]; H[2, 2] = 1.0
         return H
 
+    @ti.func
+    def _check_collinear(pts: ti.types.ndarray(ti.f32, ndim=2), i0: int, i1: int, i2: int, i3: int) -> bool:
+        eps = 10.0
+        collinear = False
+        
+        x0, y0 = pts[i0, 0], pts[i0, 1]
+        x1, y1 = pts[i1, 0], pts[i1, 1]
+        x2, y2 = pts[i2, 0], pts[i2, 1]
+        x3, y3 = pts[i3, 0], pts[i3, 1]
+        
+        a1 = ti.abs(x0*(y1 - y2) + x1*(y2 - y0) + x2*(y0 - y1))
+        a2 = ti.abs(x0*(y1 - y3) + x1*(y3 - y0) + x3*(y0 - y1))
+        a3 = ti.abs(x0*(y2 - y3) + x2*(y3 - y0) + x3*(y0 - y2))
+        a4 = ti.abs(x1*(y2 - y3) + x2*(y3 - y1) + x3*(y1 - y2))
+        
+        if a1 < eps or a2 < eps or a3 < eps or a4 < eps:
+            collinear = True
+        return collinear
+
     @ti.kernel
     def ransac_homography_kernel(
         pts1: ti.types.ndarray(ti.f32, ndim=2),
@@ -295,27 +313,32 @@ if TAICHI_AVAILABLE:
         for hyp_idx in range(n_hypotheses):
             seed = _lcg_rand(ti.u32(hyp_idx) + ti.u32(seed_offset) + ti.u32(2654435769))
 
-            # progressive/random sampling
-            seed = _lcg_rand(seed)
-            i0 = int(seed % ti.u32(n_pts))
-            seed = _lcg_rand(seed)
-            i1 = int(seed % ti.u32(n_pts))
-            for _ in range(8):
-                if i1 == i0:
-                    seed = _lcg_rand(seed)
-                    i1 = int(seed % ti.u32(n_pts))
-            seed = _lcg_rand(seed)
-            i2 = int(seed % ti.u32(n_pts))
-            for _ in range(8):
-                if i2 == i0 or i2 == i1:
-                    seed = _lcg_rand(seed)
-                    i2 = int(seed % ti.u32(n_pts))
-            seed = _lcg_rand(seed)
-            i3 = int(seed % ti.u32(n_pts))
-            for _ in range(8):
-                if i3 == i0 or i3 == i1 or i3 == i2:
-                    seed = _lcg_rand(seed)
-                    i3 = int(seed % ti.u32(n_pts))
+            # progressive/random sampling with collinearity check
+            i0 = 0; i1 = 0; i2 = 0; i3 = 0
+            for retry in range(5):
+                seed = _lcg_rand(seed)
+                i0 = int(seed % ti.u32(n_pts))
+                seed = _lcg_rand(seed)
+                i1 = int(seed % ti.u32(n_pts))
+                for _ in range(8):
+                    if i1 == i0:
+                        seed = _lcg_rand(seed)
+                        i1 = int(seed % ti.u32(n_pts))
+                seed = _lcg_rand(seed)
+                i2 = int(seed % ti.u32(n_pts))
+                for _ in range(8):
+                    if i2 == i0 or i2 == i1:
+                        seed = _lcg_rand(seed)
+                        i2 = int(seed % ti.u32(n_pts))
+                seed = _lcg_rand(seed)
+                i3 = int(seed % ti.u32(n_pts))
+                for _ in range(8):
+                    if i3 == i0 or i3 == i1 or i3 == i2:
+                        seed = _lcg_rand(seed)
+                        i3 = int(seed % ti.u32(n_pts))
+                
+                if not _check_collinear(pts1, i0, i1, i2, i3):
+                    break
 
             H = _build_and_solve_homography(pts1, pts2, i0, i1, i2, i3, n_pts)
 
@@ -348,6 +371,91 @@ if TAICHI_AVAILABLE:
             H_candidates[hyp_idx, 6] = H[2, 0]
             H_candidates[hyp_idx, 7] = H[2, 1]
             H_candidates[hyp_idx, 8] = H[2, 2]
+
+    @ti.kernel
+    def find_best_candidate_kernel(
+        H_candidates: ti.types.ndarray(ti.f32, ndim=2),
+        inlier_counts: ti.types.ndarray(ti.i32, ndim=1),
+        n_hypotheses: int,
+        H_best_out: ti.types.ndarray(ti.f32, ndim=1)
+    ):
+        for _ in range(1):
+            best_val = -1
+            best_idx = 0
+            for i in range(n_hypotheses):
+                if inlier_counts[i] > best_val:
+                    best_val = inlier_counts[i]
+                    best_idx = i
+            for j in ti.static(range(9)):
+                H_best_out[j] = H_candidates[best_idx, j]
+
+    @ti.kernel
+    def refine_homography_iterative_kernel(
+        pts1: ti.types.ndarray(ti.f32, ndim=2),
+        pts2: ti.types.ndarray(ti.f32, ndim=2),
+        H_best: ti.types.ndarray(ti.f32, ndim=1),
+        n_pts: int,
+        reproj_threshold: ti.f32,
+        max_ref_iters: int,
+        early_stop_thresh: ti.f32,
+        H_refined_out: ti.types.ndarray(ti.f32, ndim=1)
+    ):
+        H = ti.Matrix([[0.0] * 3 for _ in range(3)])
+        for j in ti.static(range(9)):
+            H[j // 3, j % 3] = H_best[j]
+            
+        thresh_sq = reproj_threshold * reproj_threshold
+        
+        for _ in range(1):
+            prev_mean_err = 1e9
+            
+            for iter_idx in range(max_ref_iters):
+                ATA = ti.Matrix([[0.0] * 8 for _ in range(8)])
+                ATb = ti.Vector([0.0] * 8)
+                
+                inliers_count = 0
+                sum_err = 0.0
+                
+                for i in range(n_pts):
+                    x1 = pts1[i, 0]; y1 = pts1[i, 1]
+                    x2 = pts2[i, 0]; y2 = pts2[i, 1]
+                    
+                    denom = H[2, 0] * x1 + H[2, 1] * y1 + H[2, 2]
+                    proj_x = (H[0, 0] * x1 + H[0, 1] * y1 + H[0, 2]) / (denom + 1e-9)
+                    proj_y = (H[1, 0] * x1 + H[1, 1] * y1 + H[1, 2]) / (denom + 1e-9)
+                    
+                    dx = proj_x - x2
+                    dy = proj_y - y2
+                    err_sq = dx * dx + dy * dy
+                    
+                    if err_sq < thresh_sq:
+                        inliers_count += 1
+                        sum_err += ti.sqrt(err_sq)
+                        
+                        row_x = ti.Vector([x1, y1, 1.0, 0.0, 0.0, 0.0, -x2*x1, -x2*y1])
+                        row_y = ti.Vector([0.0, 0.0, 0.0, x1, y1, 1.0, -y2*x1, -y2*y1])
+                        
+                        for r in ti.static(range(8)):
+                            for c in ti.static(range(8)):
+                                ATA[r, c] += row_x[r] * row_x[c] + row_y[r] * row_y[c]
+                            ATb[r] += row_x[r] * x2 + row_y[r] * y2
+                            
+                if inliers_count < 4:
+                    break
+                    
+                mean_err = sum_err / float(inliers_count)
+                
+                if mean_err < early_stop_thresh or ti.abs(mean_err - prev_mean_err) < 1e-4:
+                    break
+                prev_mean_err = mean_err
+                
+                h_new = _solve_8x8(ATA, ATb)
+                H[0, 0] = h_new[0]; H[0, 1] = h_new[1]; H[0, 2] = h_new[2]
+                H[1, 0] = h_new[3]; H[1, 1] = h_new[4]; H[1, 2] = h_new[5]
+                H[2, 0] = h_new[6]; H[2, 1] = h_new[7]; H[2, 2] = 1.0
+                
+            for j in ti.static(range(9)):
+                H_refined_out[j] = H[j // 3, j % 3]
 
     @ti.kernel
     def generate_inlier_mask_kernel(
@@ -723,10 +831,11 @@ def ransac_flow_cleanup(
     # Allocate buffers on GPU via pool
     inlier_mask = common.get_temp_buffer((h, w), ti.i32, buffer_provider)
     mean_out = common.get_temp_buffer((2,), ti.f32, buffer_provider)
+    model_buf = common.get_temp_buffer((2,), ti.f32, buffer_provider)
     output_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
 
     # Step 1: Initial model
-    _compute_mean_flow_kernel(flow_gpu, mean_out, h, w)
+    _compute_mean_flow_kernel(flow_gpu, mean_out, h, w, 1)
     mean_out_np = mean_out.to_numpy()
     model_x, model_y = float(mean_out_np[0]), float(mean_out_np[1])
 
@@ -735,29 +844,29 @@ def ransac_flow_cleanup(
     best_model_x, best_model_y = model_x, model_y
 
     for _ in range(n_iterations):
-        inlier_count = _count_inliers_kernel(
-            flow_gpu, model_x, model_y, threshold, inlier_mask, h, w
-        )
+        model_buf.from_numpy(np.asarray([model_x, model_y], dtype=np.float32))
+        _count_inliers_kernel(flow_gpu, model_buf, threshold, inlier_mask, h, w, 1)
+        inlier_count = int(np.sum(inlier_mask.to_numpy()))
 
         if inlier_count > best_inlier_count:
             best_inlier_count = inlier_count
             best_model_x, best_model_y = model_x, model_y
 
-        _compute_inlier_mean_kernel(flow_gpu, inlier_mask, mean_out, h, w)
+        _compute_inlier_mean_kernel(flow_gpu, inlier_mask, mean_out, h, w, 1)
         mean_out_np = mean_out.to_numpy()
         model_x, model_y = float(mean_out_np[0]), float(mean_out_np[1])
 
     # Step 3+4: Final pass and apply
-    _count_inliers_kernel(
-        flow_gpu, best_model_x, best_model_y, threshold, inlier_mask, h, w
-    )
+    model_buf.from_numpy(np.asarray([best_model_x, best_model_y], dtype=np.float32))
+    _count_inliers_kernel(flow_gpu, model_buf, threshold, inlier_mask, h, w, 1)
     _apply_ransac_result_kernel(
-        flow_gpu, inlier_mask, best_model_x, best_model_y, output_gpu, h, w
+        flow_gpu, inlier_mask, model_buf, output_gpu, h, w
     )
 
     # Release temporary buffers
     common.release_temp_buffer(inlier_mask)
     common.release_temp_buffer(mean_out)
+    common.release_temp_buffer(model_buf)
 
     if is_numpy:
         result = output_gpu.to_numpy()
@@ -805,11 +914,12 @@ def ransac_flow_cleanup_motion_aware(
     motion_mask = common.get_temp_buffer((h, w), ti.i32, buffer_provider)
     inlier_mask = common.get_temp_buffer((h, w), ti.i32, buffer_provider)
     mean_out = common.get_temp_buffer((2,), ti.f32, buffer_provider)
+    model_buf = common.get_temp_buffer((2,), ti.f32, buffer_provider)
     output_gpu = common.get_temp_buffer((h, w, 2), ti.f32, buffer_provider)
 
     # Step 1: Compute global motion (median - robust to outliers)
     # For GPU efficiency, we use mean as approximation to median
-    _compute_mean_flow_kernel(flow_gpu, mean_out, h, w)
+    _compute_mean_flow_kernel(flow_gpu, mean_out, h, w, 1)
     mean_out_np = mean_out.to_numpy()
     global_dx, global_dy = float(mean_out_np[0]), float(mean_out_np[1])
 
@@ -824,22 +934,21 @@ def ransac_flow_cleanup_motion_aware(
     best_model_x, best_model_y = model_x, model_y
 
     for _ in range(n_iterations):
-        inlier_count = _count_inliers_kernel(
-            flow_gpu, model_x, model_y, threshold, inlier_mask, h, w
-        )
+        model_buf.from_numpy(np.asarray([model_x, model_y], dtype=np.float32))
+        _count_inliers_kernel(flow_gpu, model_buf, threshold, inlier_mask, h, w, 1)
+        inlier_count = int(np.sum(inlier_mask.to_numpy()))
 
         if inlier_count > best_inlier_count:
             best_inlier_count = inlier_count
             best_model_x, best_model_y = model_x, model_y
 
-        _compute_inlier_mean_kernel(flow_gpu, inlier_mask, mean_out, h, w)
+        _compute_inlier_mean_kernel(flow_gpu, inlier_mask, mean_out, h, w, 1)
         mean_out_np = mean_out.to_numpy()
         model_x, model_y = float(mean_out_np[0]), float(mean_out_np[1])
 
     # Step 4: Final pass and selective apply
-    _count_inliers_kernel(
-        flow_gpu, best_model_x, best_model_y, threshold, inlier_mask, h, w
-    )
+    model_buf.from_numpy(np.asarray([best_model_x, best_model_y], dtype=np.float32))
+    _count_inliers_kernel(flow_gpu, model_buf, threshold, inlier_mask, h, w, 1)
     _selective_ransac_apply_kernel(
         flow_gpu, motion_mask, inlier_mask, best_model_x, best_model_y, output_gpu, h, w
     )
@@ -848,6 +957,7 @@ def ransac_flow_cleanup_motion_aware(
     common.release_temp_buffer(motion_mask)
     common.release_temp_buffer(inlier_mask)
     common.release_temp_buffer(mean_out)
+    common.release_temp_buffer(model_buf)
 
     if is_numpy:
         result = output_gpu.to_numpy()

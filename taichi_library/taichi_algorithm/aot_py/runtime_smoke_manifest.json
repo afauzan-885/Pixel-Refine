@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "description": "First bounded runtime gate for automatic backend selection",
+  "cases": [
+    {"name": "resize", "oracle": "opencv.resize", "tolerance": 0.002},
+    {"name": "gaussian", "oracle": "opencv.GaussianBlur", "tolerance": 0.002},
+    {"name": "rgb2gray", "oracle": "opencv.cvtColor", "tolerance": 0.002}
+  ],
+  "backends": ["cpu", "opengl", "vulkan"]
+}

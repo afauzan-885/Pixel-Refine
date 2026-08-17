@@ -1,0 +1,6 @@
+cgraph:bg_clear
+cgraph:bg_splat
+cgraph:bg_blur_x
+cgraph:bg_blur_y
+cgraph:bg_blur_z
+cgraph:bg_slice

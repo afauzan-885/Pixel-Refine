@@ -158,7 +158,9 @@ if TAICHI_AVAILABLE:
         w_dst: int,
     ):
         for r, c, ch in ti.ndrange(h_dst, w_dst, dst.shape[2]):
-            dst[r, c, ch] = bilinear_at_3ch(src, map_x[r, c], map_y[r, c], h_src, w_src, ch)
+            dst[r, c, ch] = bilinear_at_3ch(
+                src, map_x[r, c], map_y[r, c], h_src, w_src, ch
+            )
 
     @ti.kernel
     def _remap_kernel_vec3(
@@ -173,7 +175,6 @@ if TAICHI_AVAILABLE:
     ):
         for r, c in ti.ndrange(h_dst, w_dst):
             dst[r, c] = bilinear_at_vec3(src, map_x[r, c], map_y[r, c], h_src, w_src)
-
 
     @ti.kernel
     def _remap_with_flow_kernel(
@@ -221,6 +222,155 @@ if TAICHI_AVAILABLE:
             src_y = float(r) + sampled_dy * scale_y
             dst[r, c] = bilinear_at_vec3(src, src_x, src_y, h_src, w_src)
 
+    @ti.kernel
+    def _remap_with_flow_offset_kernel(
+        src: ti.types.ndarray(), flow: ti.types.ndarray(), dst: ti.types.ndarray(),
+        h_src: int, w_src: int, h_dst: int, w_dst: int,
+        h_flow: int, w_flow: int, scale_x: float, scale_y: float,
+        offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            fx = float(gc) * float(w_flow - 1) / float(w_dst - 1)
+            fy = float(gr) * float(h_flow - 1) / float(h_dst - 1)
+            dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
+            dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
+            dst[r, c] = bilinear_at(
+                src, float(gc) + dx * scale_x, float(gr) + dy * scale_y,
+                h_src, w_src,
+            )
+
+    @ti.kernel
+    def _remap_with_flow_offset_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        flow: ti.types.ndarray(),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        h_src: int, w_src: int, h_dst: int, w_dst: int,
+        h_flow: int, w_flow: int, scale_x: float, scale_y: float,
+        offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            fx = float(gc) * float(w_flow - 1) / float(w_dst - 1)
+            fy = float(gr) * float(h_flow - 1) / float(h_dst - 1)
+            dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
+            dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
+            dst[r, c] = bilinear_at_vec3(
+                src, float(gc) + dx * scale_x, float(gr) + dy * scale_y,
+                h_src, w_src,
+            )
+
+    @ti.kernel
+    def _remap_with_flow_batch_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=4),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        n_items: ti.i32,
+        h_src: ti.i32,
+        w_src: ti.i32,
+        h_dst: ti.i32,
+        w_dst: ti.i32,
+        h_flow: ti.i32,
+        w_flow: ti.i32,
+        scale_x: ti.f32,
+        scale_y: ti.f32,
+    ):
+        for n, r, c in ti.ndrange(n_items, h_dst, w_dst):
+            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
+            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+            x0 = int(ti.floor(fx))
+            y0 = int(ti.floor(fy))
+            x1 = ti.min(x0 + 1, w_flow - 1)
+            y1 = ti.min(y0 + 1, h_flow - 1)
+            wx = fx - float(x0)
+            wy = fy - float(y0)
+            dx00 = flow[n, y0, x0, 0]
+            dx01 = flow[n, y0, x1, 0]
+            dx10 = flow[n, y1, x0, 0]
+            dx11 = flow[n, y1, x1, 0]
+            dy00 = flow[n, y0, x0, 1]
+            dy01 = flow[n, y0, x1, 1]
+            dy10 = flow[n, y1, x0, 1]
+            dy11 = flow[n, y1, x1, 1]
+            sampled_dx = (dx00 * (1.0 - wx) + dx01 * wx) * (1.0 - wy) + (
+                dx10 * (1.0 - wx) + dx11 * wx
+            ) * wy
+            sampled_dy = (dy00 * (1.0 - wx) + dy01 * wx) * (1.0 - wy) + (
+                dy10 * (1.0 - wx) + dy11 * wx
+            ) * wy
+            src_x = float(c) + sampled_dx * scale_x
+            src_y = float(r) + sampled_dy * scale_y
+            sx0 = int(ti.floor(src_x))
+            sy0 = int(ti.floor(src_y))
+            frac_x = src_x - float(sx0)
+            frac_y = src_y - float(sy0)
+            sx0 = ti.min(ti.max(sx0, 0), w_src - 1)
+            sy0 = ti.min(ti.max(sy0, 0), h_src - 1)
+            sx1 = ti.min(sx0 + 1, w_src - 1)
+            sy1 = ti.min(sy0 + 1, h_src - 1)
+            v00 = src[n, sy0, sx0]
+            v01 = src[n, sy0, sx1]
+            v10 = src[n, sy1, sx0]
+            v11 = src[n, sy1, sx1]
+            dst[n, r, c] = (v00 * (1.0 - frac_x) + v01 * frac_x) * (1.0 - frac_y) + (
+                v10 * (1.0 - frac_x) + v11 * frac_x
+            ) * frac_y
+
+    @ti.kernel
+    def _remap_with_flow_batch_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=4),
+        flow: ti.types.ndarray(dtype=ti.f32, ndim=4),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=4),
+        n_items: ti.i32,
+        h_src: ti.i32,
+        w_src: ti.i32,
+        h_dst: ti.i32,
+        w_dst: ti.i32,
+        h_flow: ti.i32,
+        w_flow: ti.i32,
+        scale_x: ti.f32,
+        scale_y: ti.f32,
+    ):
+        for n, r, c, ch in ti.ndrange(n_items, h_dst, w_dst, 3):
+            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
+            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+            x0 = int(ti.floor(fx))
+            y0 = int(ti.floor(fy))
+            x1 = ti.min(x0 + 1, w_flow - 1)
+            y1 = ti.min(y0 + 1, h_flow - 1)
+            wx = fx - float(x0)
+            wy = fy - float(y0)
+            dx00 = flow[n, y0, x0, 0]
+            dx01 = flow[n, y0, x1, 0]
+            dx10 = flow[n, y1, x0, 0]
+            dx11 = flow[n, y1, x1, 0]
+            dy00 = flow[n, y0, x0, 1]
+            dy01 = flow[n, y0, x1, 1]
+            dy10 = flow[n, y1, x0, 1]
+            dy11 = flow[n, y1, x1, 1]
+            sampled_dx = (dx00 * (1.0 - wx) + dx01 * wx) * (1.0 - wy) + (
+                dx10 * (1.0 - wx) + dx11 * wx
+            ) * wy
+            sampled_dy = (dy00 * (1.0 - wx) + dy01 * wx) * (1.0 - wy) + (
+                dy10 * (1.0 - wx) + dy11 * wx
+            ) * wy
+            src_x = float(c) + sampled_dx * scale_x
+            src_y = float(r) + sampled_dy * scale_y
+            sx0 = int(ti.floor(src_x))
+            sy0 = int(ti.floor(src_y))
+            frac_x = src_x - float(sx0)
+            frac_y = src_y - float(sy0)
+            sx0 = ti.min(ti.max(sx0, 0), w_src - 1)
+            sy0 = ti.min(ti.max(sy0, 0), h_src - 1)
+            sx1 = ti.min(sx0 + 1, w_src - 1)
+            sy1 = ti.min(sy0 + 1, h_src - 1)
+            v00 = src[n, sy0, sx0, ch]
+            v01 = src[n, sy0, sx1, ch]
+            v10 = src[n, sy1, sx0, ch]
+            v11 = src[n, sy1, sx1, ch]
+            dst[n, r, c, ch] = (v00 * (1.0 - frac_x) + v01 * frac_x) * (
+                1.0 - frac_y
+            ) + (v10 * (1.0 - frac_x) + v11 * frac_x) * frac_y
 
     @ti.kernel
     def _warp_perspective_kernel(
@@ -286,6 +436,31 @@ if TAICHI_AVAILABLE:
 
             dst[r, c] = bilinear_at_vec3(src, src_x, src_y, h_src, w_src)
 
+    @ti.kernel
+    def _warp_perspective_offset_kernel(
+        src: ti.types.ndarray(), M_inv: ti.types.ndarray(), dst: ti.types.ndarray(),
+        h_src: int, w_src: int, offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            u = M_inv[0, 0] * float(gc) + M_inv[0, 1] * float(gr) + M_inv[0, 2]
+            v = M_inv[1, 0] * float(gc) + M_inv[1, 1] * float(gr) + M_inv[1, 2]
+            z = M_inv[2, 0] * float(gc) + M_inv[2, 1] * float(gr) + M_inv[2, 2]
+            dst[r, c] = bilinear_at(src, u / (z + 1e-9), v / (z + 1e-9), h_src, w_src)
+
+    @ti.kernel
+    def _warp_perspective_offset_kernel_vec3(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        M_inv: ti.types.ndarray(),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        h_src: int, w_src: int, offset_y: int, offset_x: int,
+    ):
+        for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
+            gr, gc = r + offset_y, c + offset_x
+            u = M_inv[0, 0] * float(gc) + M_inv[0, 1] * float(gr) + M_inv[0, 2]
+            v = M_inv[1, 0] * float(gc) + M_inv[1, 1] * float(gr) + M_inv[1, 2]
+            z = M_inv[2, 0] * float(gc) + M_inv[2, 1] * float(gr) + M_inv[2, 2]
+            dst[r, c] = bilinear_at_vec3(src, u / (z + 1e-9), v / (z + 1e-9), h_src, w_src)
 
 
 def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
@@ -306,15 +481,22 @@ def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
         Warped image in the same format as input (NumPy or Taichi).
     """
     import os
+
     if os.environ.get("AOT_MODE", "1") == "1":
         from ..common import _get_aot
+
         aot = _get_aot()
         if aot and hasattr(aot, "remap"):
-            is_taichi = hasattr(src, "to_numpy") or hasattr(map_x, "to_numpy") or hasattr(map_y, "to_numpy")
+            is_taichi = (
+                hasattr(src, "to_numpy")
+                or hasattr(map_x, "to_numpy")
+                or hasattr(map_y, "to_numpy")
+            )
             res_buf = aot.remap(src, map_x, map_y, return_gpu=is_taichi)
             if dst is not None:
                 if is_taichi:
                     from ..common import copy_field
+
                     copy_field(res_buf, dst)
                 else:
                     dst[:] = res_buf
@@ -326,13 +508,23 @@ def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
 
     from ..common import get_temp_buffer, release_temp_buffer, ensure_taichi_field
 
-    is_taichi_input = hasattr(src, "to_numpy") or hasattr(map_x, "to_numpy") or hasattr(map_y, "to_numpy")
+    is_taichi_input = (
+        hasattr(src, "to_numpy")
+        or hasattr(map_x, "to_numpy")
+        or hasattr(map_y, "to_numpy")
+    )
 
     @ti_thread
     def _run_gpu_remap(src_data, mx_data, my_data, dst_data=None):
-        src_gpu, src_is_temp = ensure_taichi_field(src_data, dtype=ti.f32, buffer_provider=buffer_provider)
-        mx_gpu, mx_is_temp = ensure_taichi_field(mx_data, dtype=ti.f32, buffer_provider=buffer_provider)
-        my_gpu, my_is_temp = ensure_taichi_field(my_data, dtype=ti.f32, buffer_provider=buffer_provider)
+        src_gpu, src_is_temp = ensure_taichi_field(
+            src_data, dtype=ti.f32, buffer_provider=buffer_provider
+        )
+        mx_gpu, mx_is_temp = ensure_taichi_field(
+            mx_data, dtype=ti.f32, buffer_provider=buffer_provider
+        )
+        my_gpu, my_is_temp = ensure_taichi_field(
+            my_data, dtype=ti.f32, buffer_provider=buffer_provider
+        )
 
         h_src, w_src = src_gpu.shape[:2]
         h_dst, w_dst = mx_gpu.shape[:2]
@@ -344,11 +536,15 @@ def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
             out_shape = (h_dst, w_dst, c_count) if is_3d else (h_dst, w_dst)
             dst_gpu = get_temp_buffer(out_shape, ti.f32, buffer_provider)
         else:
-            dst_gpu, _ = ensure_taichi_field(dst_data, dtype=ti.f32, buffer_provider=buffer_provider)
+            dst_gpu, _ = ensure_taichi_field(
+                dst_data, dtype=ti.f32, buffer_provider=buffer_provider
+            )
 
         # Run kernel
         if is_3d:
-            _remap_kernel_3d(src_gpu, mx_gpu, my_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
+            _remap_kernel_3d(
+                src_gpu, mx_gpu, my_gpu, dst_gpu, h_src, w_src, h_dst, w_dst
+            )
         else:
             _remap_kernel(src_gpu, mx_gpu, my_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
 
@@ -382,8 +578,10 @@ def remap_with_flow(src, flow, full_h, full_w, dst=None, buffer_provider="pool")
     All Taichi operations are synchronized via @ti_thread.
     """
     import os
+
     if os.environ.get("AOT_MODE", "1") == "1":
         from ..common import _get_aot
+
         aot = _get_aot()
         if aot and hasattr(aot, "remap_with_flow"):
             is_taichi = hasattr(src, "to_numpy") or hasattr(flow, "to_numpy")
@@ -401,8 +599,12 @@ def remap_with_flow(src, flow, full_h, full_w, dst=None, buffer_provider="pool")
 
     @ti_thread
     def _run_gpu_remap_with_flow(src_data, flow_data, dst_data=None):
-        src_gpu, src_is_temp = ensure_taichi_field(src_data, dtype=ti.f32, buffer_provider=buffer_provider)
-        flow_gpu, flow_is_temp = ensure_taichi_field(flow_data, dtype=ti.f32, buffer_provider=buffer_provider)
+        src_gpu, src_is_temp = ensure_taichi_field(
+            src_data, dtype=ti.f32, buffer_provider=buffer_provider
+        )
+        flow_gpu, flow_is_temp = ensure_taichi_field(
+            flow_data, dtype=ti.f32, buffer_provider=buffer_provider
+        )
 
         h_src, w_src = src_gpu.shape[:2]
         h_flow, w_flow = flow_gpu.shape[:2]
@@ -417,18 +619,38 @@ def remap_with_flow(src, flow, full_h, full_w, dst=None, buffer_provider="pool")
             out_shape = (full_h, full_w, c_count) if is_3d else (full_h, full_w)
             dst_gpu = get_temp_buffer(out_shape, ti.f32, buffer_provider)
         else:
-            dst_gpu, _ = ensure_taichi_field(dst_data, dtype=ti.f32, buffer_provider=buffer_provider)
+            dst_gpu, _ = ensure_taichi_field(
+                dst_data, dtype=ti.f32, buffer_provider=buffer_provider
+            )
 
         # Run kernel
         if is_3d:
             _remap_with_flow_kernel_vec3(
-                src_gpu, flow_gpu, dst_gpu,
-                h_src, w_src, full_h, full_w, h_flow, w_flow, scale_x, scale_y
+                src_gpu,
+                flow_gpu,
+                dst_gpu,
+                h_src,
+                w_src,
+                full_h,
+                full_w,
+                h_flow,
+                w_flow,
+                scale_x,
+                scale_y,
             )
         else:
             _remap_with_flow_kernel(
-                src_gpu, flow_gpu, dst_gpu,
-                h_src, w_src, full_h, full_w, h_flow, w_flow, scale_x, scale_y
+                src_gpu,
+                flow_gpu,
+                dst_gpu,
+                h_src,
+                w_src,
+                full_h,
+                full_w,
+                h_flow,
+                w_flow,
+                scale_x,
+                scale_y,
             )
 
         # Cleanup temps
@@ -455,7 +677,7 @@ def warp_perspective(src, M, dsize, dst=None, buffer_provider="pool"):
     """
     GPU-accelerated Warp Perspective API.
     API menyerupai cv2.warpPerspective(src, M, dsize).
-    
+
     Menghitung inversi matriks transformasi M di CPU, kemudian memproyeksikan
     setiap piksel output kembali ke koordinat input secara on-the-fly di GPU.
 
@@ -466,8 +688,10 @@ def warp_perspective(src, M, dsize, dst=None, buffer_provider="pool"):
         dst: Buffer output opsional.
     """
     import os
+
     if os.environ.get("AOT_MODE", "1") == "1":
         from ..common import _get_aot
+
         aot = _get_aot()
         if aot and hasattr(aot, "warp_perspective"):
             is_taichi = hasattr(src, "to_numpy") or hasattr(M, "to_numpy")
@@ -491,9 +715,13 @@ def warp_perspective(src, M, dsize, dst=None, buffer_provider="pool"):
 
     @ti_thread
     def _run_gpu_warp(src_data, m_inv_data, dst_data=None):
-        src_gpu, src_is_temp = ensure_taichi_field(src_data, dtype=ti.f32, buffer_provider=buffer_provider)
+        src_gpu, src_is_temp = ensure_taichi_field(
+            src_data, dtype=ti.f32, buffer_provider=buffer_provider
+        )
         # Upload matriks invers 3x3 ke GPU
-        minv_gpu, minv_is_temp = ensure_taichi_field(m_inv_data, dtype=ti.f32, buffer_provider=buffer_provider)
+        minv_gpu, minv_is_temp = ensure_taichi_field(
+            m_inv_data, dtype=ti.f32, buffer_provider=buffer_provider
+        )
 
         h_src, w_src = src_gpu.shape[:2]
         is_3d = len(src_gpu.shape) == 3
@@ -503,13 +731,19 @@ def warp_perspective(src, M, dsize, dst=None, buffer_provider="pool"):
             out_shape = (h_dst, w_dst, c_count) if is_3d else (h_dst, w_dst)
             dst_gpu = get_temp_buffer(out_shape, ti.f32, buffer_provider)
         else:
-            dst_gpu, _ = ensure_taichi_field(dst_data, dtype=ti.f32, buffer_provider=buffer_provider)
+            dst_gpu, _ = ensure_taichi_field(
+                dst_data, dtype=ti.f32, buffer_provider=buffer_provider
+            )
 
         # Dispatch kernel yang sesuai
         if is_3d:
-            _warp_perspective_kernel_3d(src_gpu, minv_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
+            _warp_perspective_kernel_3d(
+                src_gpu, minv_gpu, dst_gpu, h_src, w_src, h_dst, w_dst
+            )
         else:
-            _warp_perspective_kernel(src_gpu, minv_gpu, dst_gpu, h_src, w_src, h_dst, w_dst)
+            _warp_perspective_kernel(
+                src_gpu, minv_gpu, dst_gpu, h_src, w_src, h_dst, w_dst
+            )
 
         if src_is_temp:
             release_temp_buffer(src_gpu)
@@ -527,5 +761,3 @@ def warp_perspective(src, M, dsize, dst=None, buffer_provider="pool"):
         return dst_gpu
 
     return _run_gpu_warp(src, M_inv_np, dst)
-
-

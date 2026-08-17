@@ -6,7 +6,6 @@ Shared functions for buffer management, type checking, and common operations.
 
 import numpy as np
 import threading
-import math
 
 import os
 import importlib
@@ -31,35 +30,30 @@ else:
 AOT_MODE = os.environ.get("AOT_MODE", "1") == "1"
 _AOT_ENGINE = None
 
-
 def _get_aot():
     global _AOT_ENGINE
     if _AOT_ENGINE is None:
         try:
             from . import taichi_aot
-
             _AOT_ENGINE = taichi_aot
         except (ImportError, ValueError):
             try:
                 import taichi_library.taichi_aot as taichi_aot
-
                 _AOT_ENGINE = taichi_aot
             except ImportError:
                 pass
     return _AOT_ENGINE
-
 
 if TAICHI_AVAILABLE:
 
     # --- Interpolation Utilities ---
     @ti.func
     def reflect_idx(idx: int, size: int) -> int:
-        """OpenCV BORDER_REFLECT_101 implementation."""
-        res = idx
-        if res < 0:
-            res = -res
-        if res >= size:
-            res = 2 * (size - 1) - res
+        """OpenCV BORDER_REFLECT_101 implementation (branchless)."""
+        val = ti.abs(idx)
+        diff = val - (size - 1)
+        clamp_diff = ti.max(0, diff)
+        res = val - 2 * clamp_diff
         return tm.clamp(res, 0, size - 1)
 
     @ti.func
@@ -69,48 +63,40 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def cubic_hermite_weights(t: float) -> ti.types.vector(4, ti.f32):
-        """OpenCV-compatible Bicubic Weights (Catmull-Rom with a=-0.75 for f32)."""
-        # t is assumed to be in [0, 1)
+        """OpenCV-compatible Bicubic Weights using Horner's method (a=-0.75)."""
         w = ti.Vector([0.0, 0.0, 0.0, 0.0])
         a = -0.75
-
-        # d = distance to neighbor
-        # Neighbors are at index: -1, 0, 1, 2
-        # Distances: t+1, t, 1-t, 2-t
-
         d = t
+
         # d0 = t+1 (range [1, 2])
         x = d + 1.0
-        w[0] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
+        w[0] = x * (x * (a * x - 5.0 * a) + 8.0 * a) - 4.0 * a
+
         # d1 = t (range [0, 1])
         x = d
-        w[1] = (a + 2.0) * x**3 - (a + 3.0) * x**2 + 1.0
+        w[1] = x * (x * ((a + 2.0) * x - (a + 3.0))) + 1.0
+
         # d2 = 1-t (range [0, 1])
         x = 1.0 - d
-        w[2] = (a + 2.0) * x**3 - (a + 3.0) * x**2 + 1.0
+        w[2] = x * (x * ((a + 2.0) * x - (a + 3.0))) + 1.0
+
         # d3 = 2-t (range [1, 2])
         x = 2.0 - d
-        w[3] = a * x**3 - 5.0 * a * x**2 + 8.0 * a * x - 4.0 * a
+        w[3] = x * (x * (a * x - 5.0 * a) + 8.0 * a) - 4.0 * a
 
-        # Explicit normalization to reach 1e-7+ precision
-        # Even though mathematically they sum to 1, float precision can introduce tiny drifts.
         s = w[0] + w[1] + w[2] + w[3]
         return w / s
 
     @ti.func
     def reflect_idx_raw(idx: int, size: int) -> int:
-        """OpenCV BORDER_REFLECT implementation (fedcba|abcdefgh|hgfedcb)."""
-        res = idx
-        if res < 0:
-            res = -res - 1
-        if res >= size:
-            res = 2 * size - 1 - res
-        return tm.clamp(res, 0, size - 1)
+        """OpenCV BORDER_REFLECT implementation (branchless)."""
+        val = idx
+        val = ti.select(val < 0, -val - 1, val)
+        val = ti.select(val >= size, 2 * size - 1 - val, val)
+        return tm.clamp(val, 0, size - 1)
 
     @ti.func
-    def bilinear_at(
-        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1
-    ) -> float:
+    def bilinear_at(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> float:
         """Bilinear interpolation with BORDER_REFLECT_101."""
         hh, ww = h, w
         if ti.static(isinstance(h, int) and h == -1):
@@ -135,9 +121,7 @@ if TAICHI_AVAILABLE:
         return top * (1.0 - fy) + bottom * fy
 
     @ti.func
-    def bilinear_at_vec3(
-        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1
-    ) -> ti.types.vector(3, ti.f32):
+    def bilinear_at_vec3(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> ti.types.vector(3, ti.f32):
         """Bilinear interpolation for vector(3, f32) fields with BORDER_REFLECT_101."""
         hh, ww = h, w
         if ti.static(isinstance(h, int) and h == -1):
@@ -162,9 +146,7 @@ if TAICHI_AVAILABLE:
         return top * (1.0 - fy) + bottom * fy
 
     @ti.func
-    def bicubic_at(
-        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1
-    ) -> float:
+    def bicubic_at(img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1) -> float:
         """Bicubic interpolation with BORDER_REFLECT_101 and a=-0.75."""
         hh, ww = h, w
         if ti.static(isinstance(h, int) and h == -1):
@@ -202,12 +184,7 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def bilinear_at_3ch(
-        img: ti.types.ndarray(),
-        x: float,
-        y: float,
-        h: int = -1,
-        w: int = -1,
-        c: int = 0,
+        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1, c: int = 0
     ) -> float:
         """Bilinear interpolation for 3ch with BORDER_REFLECT_101."""
         hh, ww = h, w
@@ -234,12 +211,7 @@ if TAICHI_AVAILABLE:
 
     @ti.func
     def bicubic_at_channel(
-        img: ti.types.ndarray(),
-        x: float,
-        y: float,
-        h: int = -1,
-        w: int = -1,
-        c: int = 0,
+        img: ti.types.ndarray(), x: float, y: float, h: int = -1, w: int = -1, c: int = 0
     ) -> float:
         """Bicubic interpolation for 3ch with BORDER_REFLECT_101 and a=-0.75."""
         hh, ww = h, w
@@ -266,6 +238,46 @@ if TAICHI_AVAILABLE:
     def _copy_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
         for I in ti.grouped(src):
             dst[I] = src[I]
+
+    @ti.kernel
+    def _copy_f32_2d_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        """ABI-explicit f32 copy used by graphics AOT backends."""
+        for I in ti.grouped(src):
+            dst[I] = src[I]
+
+    @ti.kernel
+    def _scatter_core_f32_3d_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        src_y: ti.i32,
+        src_x: ti.i32,
+        dst_y: ti.i32,
+        dst_x: ti.i32,
+        core_h: ti.i32,
+        core_w: ti.i32,
+    ):
+        """Publish a tile core into a resident frame without host traffic."""
+        channels = src.shape[2]
+        for y, x, channel in ti.ndrange(src.shape[0], src.shape[1], channels):
+            if y < core_h and x < core_w:
+                sy = src_y + y
+                sx = src_x + x
+                dy = dst_y + y
+                dx = dst_x + x
+                if (
+                    sy >= 0
+                    and sy < src.shape[0]
+                    and sx >= 0
+                    and sx < src.shape[1]
+                    and dy >= 0
+                    and dy < dst.shape[0]
+                    and dx >= 0
+                    and dx < dst.shape[1]
+                ):
+                    dst[dy, dx, channel] = src[sy, sx, channel]
 
     @ti.kernel
     def _extract_channel_kernel(
@@ -295,12 +307,14 @@ if TAICHI_AVAILABLE:
             g = ti.cast(src[i, j][1], ti.f32)
             b = ti.cast(src[i, j][2], ti.f32)
             # OpenCV formula: Y = 0.299*R + 0.587*G + 0.114*B
-            dst[i, j] = 0.299 * r + 0.587 * g + 0.114 * b
+            dst[i, j] = (
+                ti.cast(0.299, ti.f32) * r
+                + ti.cast(0.587, ti.f32) * g
+                + ti.cast(0.114, ti.f32) * b
+            )
 
     @ti.kernel
-    def _cvt_color_rgb_to_gray_i32_kernel(
-        src: ti.types.ndarray(), dst: ti.types.ndarray()
-    ):
+    def _cvt_color_rgb_to_gray_i32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray()):
         for i, j in dst:
             r = ti.cast(src[i, j][0], ti.i32)
             g = ti.cast(src[i, j][1], ti.i32)
@@ -327,39 +341,51 @@ if TAICHI_AVAILABLE:
             dst[i, j][2] = val
 
     @ti.kernel
-    def _generate_hanning_window_2d_kernel(
-        dst: ti.types.ndarray(), H: int, W: int, exclude_boundary: int
+    def _rgb_to_gray_f32_scaled_i32_kernel(
+        src: ti.types.ndarray(), dst: ti.types.ndarray(), inv_scale: float
     ):
+        for i, j in dst:
+            r = ti.cast(src[i, j][0], ti.f32)
+            g = ti.cast(src[i, j][1], ti.f32)
+            b = ti.cast(src[i, j][2], ti.f32)
+            dst[i, j] = (0.299 * r + 0.587 * g + 0.114 * b) * inv_scale
+
+    @ti.kernel
+    def _bgr_to_gray_f32_scaled_i32_kernel(
+        src: ti.types.ndarray(), dst: ti.types.ndarray(), inv_scale: float
+    ):
+        for i, j in dst:
+            b = ti.cast(src[i, j][0], ti.f32)
+            g = ti.cast(src[i, j][1], ti.f32)
+            r = ti.cast(src[i, j][2], ti.f32)
+            dst[i, j] = (0.299 * r + 0.587 * g + 0.114 * b) * inv_scale
+
+    @ti.kernel
+    def _gray_f32_scaled_i32_kernel(
+        src: ti.types.ndarray(), dst: ti.types.ndarray(), inv_scale: float
+    ):
+        for i, j in dst:
+            dst[i, j] = ti.cast(src[i, j], ti.f32) * inv_scale
+
+    @ti.kernel
+    def _generate_hanning_window_2d_kernel(dst: ti.types.ndarray(), H: int, W: int, exclude_boundary: int):
         for i, j in dst:
             wy = 1.0
             if H > 1:
                 if exclude_boundary == 1:
-                    wy = 0.5 - 0.5 * ti.cos(
-                        2.0 * 3.141592653589793 * float(i + 1) / float(H + 1)
-                    )
+                    wy = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(i + 1) / float(H + 1))
                 else:
-                    wy = 0.5 - 0.5 * ti.cos(
-                        2.0 * 3.141592653589793 * float(i) / float(H - 1)
-                    )
+                    wy = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(i) / float(H - 1))
             wx = 1.0
             if W > 1:
                 if exclude_boundary == 1:
-                    wx = 0.5 - 0.5 * ti.cos(
-                        2.0 * 3.141592653589793 * float(j + 1) / float(W + 1)
-                    )
+                    wx = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(j + 1) / float(W + 1))
                 else:
-                    wx = 0.5 - 0.5 * ti.cos(
-                        2.0 * 3.141592653589793 * float(j) / float(W - 1)
-                    )
-            dst[i, j] = wy * wx
+                    wx = 0.5 - 0.5 * ti.cos(2.0 * 3.141592653589793 * float(j) / float(W - 1))
+            dst[i, j] = ti.max(wy, 1e-4) * ti.max(wx, 1e-4)
 
     @ti.kernel
-    def _mean_division_kernel(
-        sum_img: ti.types.ndarray(),
-        sum_weight: ti.types.ndarray(),
-        ref_img: ti.types.ndarray(),
-        dst: ti.types.ndarray(),
-    ):
+    def _mean_division_kernel(sum_img: ti.types.ndarray(), sum_weight: ti.types.ndarray(), ref_img: ti.types.ndarray(), dst: ti.types.ndarray()):
         for i, j in sum_weight:
             w = sum_weight[i, j]
             if w > 1e-6:
@@ -367,222 +393,142 @@ if TAICHI_AVAILABLE:
             else:
                 dst[i, j] = ref_img[i, j]
 
-    # =========================================================================
-    # SfM MATH: Analytical 3x3 SVD, Essential Constraint, Hartley Normalization
-    # =========================================================================
-
-    @ti.func
-    def _sym3_eigenvalues(
-        S: ti.types.matrix(3, 3, ti.f32),
-    ) -> ti.types.vector(3, ti.f32):
-        """Analytical eigenvalues of 3x3 symmetric matrix (sorted descending)."""
-        p1 = S[0, 1] * S[0, 1] + S[0, 2] * S[0, 2] + S[1, 2] * S[1, 2]
-        e0 = S[0, 0]
-        e1 = S[1, 1]
-        e2 = S[2, 2]
-
-        if p1 < 1e-14:
-            ev0 = e0
-            ev1 = e1
-            ev2 = e2
-            if ev0 < ev1:
-                tmp = ev0
-                ev0 = ev1
-                ev1 = tmp
-            if ev0 < ev2:
-                tmp = ev0
-                ev0 = ev2
-                ev2 = tmp
-            if ev1 < ev2:
-                tmp = ev1
-                ev1 = ev2
-                ev2 = tmp
-            return ti.Vector([ev0, ev1, ev2])
-
-        q = (e0 + e1 + e2) / 3.0
-        p2 = (e0 - q) * (e0 - q) + (e1 - q) * (e1 - q) + (e2 - q) * (e2 - q) + 2.0 * p1
-        p = ti.sqrt(p2 / 6.0)
-
-        b00 = (e0 - q) / p
-        b11 = (e1 - q) / p
-        b22 = (e2 - q) / p
-        b01 = S[0, 1] / p
-        b02 = S[0, 2] / p
-        b12 = S[1, 2] / p
-
-        det_B = (
-            b00 * (b11 * b22 - b12 * b12)
-            - b01 * (b01 * b22 - b02 * b12)
-            + b02 * (b01 * b12 - b11 * b02)
-        )
-        r = det_B / 2.0
-        r = ti.max(-1.0, ti.min(1.0, r))
-
-        phi = ti.acos(r) / 3.0
-        PI = 3.14159265358979323846
-        eig0 = q + 2.0 * p * ti.cos(phi)
-        eig2 = q + 2.0 * p * ti.cos(phi + (2.0 * PI / 3.0))
-        eig1 = 3.0 * q - eig0 - eig2
-        return ti.Vector([eig0, eig1, eig2])
-
-    @ti.func
-    def _sym3_eigenvector(
-        S: ti.types.matrix(3, 3, ti.f32), eigenvalue: ti.f32
-    ) -> ti.types.vector(3, ti.f32):
-        """Compute eigenvector for given eigenvalue of 3x3 symmetric matrix via cross product."""
-        r0 = ti.Vector([S[0, 0] - eigenvalue, S[0, 1], S[0, 2]])
-        r1 = ti.Vector([S[0, 1], S[1, 1] - eigenvalue, S[1, 2]])
-        r2 = ti.Vector([S[0, 2], S[1, 2], S[2, 2] - eigenvalue])
-
-        c01 = r0.cross(r1)
-        c02 = r0.cross(r2)
-        c12 = r1.cross(r2)
-
-        l01 = c01.norm_sqr()
-        l02 = c02.norm_sqr()
-        l12 = c12.norm_sqr()
-
-        result = ti.Vector([0.0, 0.0, 1.0])
-        max_l = l01
-        if l02 > max_l:
-            max_l = l02
-        if l12 > max_l:
-            max_l = l12
-
-        if max_l > 1e-20:
-            if max_l == l01:
-                result = c01 / ti.sqrt(l01)
-            elif max_l == l02:
-                result = c02 / ti.sqrt(l02)
-            else:
-                result = c12 / ti.sqrt(l12)
-        return result
-
-    @ti.func
-    def svd_3x3(A: ti.types.matrix(3, 3, ti.f32)):
-        """
-        Analytical SVD for 3x3 matrix via eigenvalue decomposition of A^T*A.
-        Returns: (U, sigma, Vt) where A = U @ diag(sigma) @ Vt.
-        """
-        ATA = A.transpose() @ A
-
-        eigenvalues = _sym3_eigenvalues(ATA)
-        ev0 = ti.max(eigenvalues[0], 0.0)
-        ev1 = ti.max(eigenvalues[1], 0.0)
-        ev2 = ti.max(eigenvalues[2], 0.0)
-
-        sigma0 = ti.sqrt(ev0)
-        sigma1 = ti.sqrt(ev1)
-        sigma2 = ti.sqrt(ev2)
-
-        v0 = _sym3_eigenvector(ATA, eigenvalues[0])
-        v1 = _sym3_eigenvector(ATA, eigenvalues[1])
-        v2 = v0.cross(v1)
-        v2_len = v2.norm()
-        if v2_len > 1e-10:
-            v2 = v2 / v2_len
-        v1 = v2.cross(v0)
-        v1_len = v1.norm()
-        if v1_len > 1e-10:
-            v1 = v1 / v1_len
-
-        V = ti.Matrix.cols([v0, v1, v2])
-
-        u0 = ti.Vector([1.0, 0.0, 0.0])
-        u1 = ti.Vector([0.0, 1.0, 0.0])
-        u2 = ti.Vector([0.0, 0.0, 1.0])
-        if sigma0 > 1e-10:
-            u0 = A @ v0 / sigma0
-            u0_len = u0.norm()
-            if u0_len > 1e-10:
-                u0 = u0 / u0_len
-        if sigma1 > 1e-10:
-            u1 = A @ v1 / sigma1
-            u1_len = u1.norm()
-            if u1_len > 1e-10:
-                u1 = u1 / u1_len
-            u1 = u1 - (u0.dot(u1)) * u0
-            u1_len = u1.norm()
-            if u1_len > 1e-10:
-                u1 = u1 / u1_len
-        u2 = u0.cross(u1)
-        u2_len = u2.norm()
-        if u2_len > 1e-10:
-            u2 = u2 / u2_len
-
-        det_U = u0.dot(u1.cross(u2))
-        if det_U < 0.0:
-            u2 = -u2
-            sigma2 = -sigma2
-
-        U = ti.Matrix.cols([u0, u1, u2])
-        sigma = ti.Vector([sigma0, sigma1, sigma2])
-        Vt = V.transpose()
-        return U, sigma, Vt
-
-    @ti.func
-    def enforce_essential(
-        E: ti.types.matrix(3, 3, ti.f32),
-    ) -> ti.types.matrix(3, 3, ti.f32):
-        """Enforce essential matrix constraint: SVD -> force sigma = diag(1,1,0)."""
-        U, sigma, Vt = svd_3x3(E)
-        s_avg = (sigma[0] + sigma[1]) / 2.0
-        S_new = ti.Matrix([[s_avg, 0.0, 0.0], [0.0, s_avg, 0.0], [0.0, 0.0, 0.0]])
-        return U @ S_new @ Vt
+    @ti.kernel
+    def _normalize_accum_kernel(sum_img: ti.types.ndarray(), sum_weight: ti.types.ndarray(), dst: ti.types.ndarray()):
+        for i, j in sum_weight:
+            w = ti.max(sum_weight[i, j], 1e-6)
+            dst[i, j] = sum_img[i, j] / w
 
     @ti.kernel
-    def _hartley_normalize_kernel(
-        pts: ti.types.ndarray(ti.f32, ndim=2),
-        n_pts: int,
-        T_out: ti.types.ndarray(ti.f32, ndim=2),
-        pts_norm: ti.types.ndarray(ti.f32, ndim=2),
-    ):
-        """Hartley isotropic normalization: translate centroid to origin, scale avg distance to sqrt(2)."""
-        cx = 0.0
-        cy = 0.0
-        for i in range(n_pts):
-            cx += pts[i, 0]
-            cy += pts[i, 1]
-        cx /= float(n_pts)
-        cy /= float(n_pts)
-
-        avg_dist = 0.0
-        for i in range(n_pts):
-            dx = pts[i, 0] - cx
-            dy = pts[i, 1] - cy
-            avg_dist += ti.sqrt(dx * dx + dy * dy)
-        avg_dist /= float(n_pts)
-        s = 1.41421356 / (avg_dist + 1e-10)
-
-        T_out[0, 0] = s
-        T_out[0, 1] = 0.0
-        T_out[0, 2] = -s * cx
-        T_out[1, 0] = 0.0
-        T_out[1, 1] = s
-        T_out[1, 2] = -s * cy
-        T_out[2, 0] = 0.0
-        T_out[2, 1] = 0.0
-        T_out[2, 2] = 1.0
-
-        for i in range(n_pts):
-            pts_norm[i, 0] = s * (pts[i, 0] - cx)
-            pts_norm[i, 1] = s * (pts[i, 1] - cy)
+    def _normalize_accum_vec3_kernel(sum_img: ti.types.ndarray(), sum_weight: ti.types.ndarray(), dst: ti.types.ndarray()):
+        for i, j in sum_weight:
+            w = ti.max(sum_weight[i, j], 1e-6)
+            inv_w = 1.0 / w
+            dst[i, j] = sum_img[i, j] * inv_w
 
     @ti.kernel
-    def _denormalize_fundamental_kernel(
-        F_norm: ti.types.ndarray(ti.f32, ndim=2),
-        T1: ti.types.ndarray(ti.f32, ndim=2),
-        T2: ti.types.ndarray(ti.f32, ndim=2),
-        F_out: ti.types.ndarray(ti.f32, ndim=2),
+    def _scale_f32_2d_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), scale: float):
+        for i, j in dst:
+            dst[i, j] = src[i, j] * scale
+
+    @ti.kernel
+    def _scale_f32_vec3_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), scale: float):
+        for i, j in dst:
+            dst[i, j] = src[i, j] * scale
+
+    @ti.kernel
+    def _stitch_tile_f32_kernel(
+        tile: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0: ti.i32, x0: ti.i32, h: ti.i32, w: ti.i32
     ):
-        """Denormalize fundamental matrix: F = T2^T @ F_norm @ T1."""
-        for i in range(3):
-            for j in range(3):
-                val = 0.0
-                for k in ti.static(range(3)):
-                    for l in ti.static(range(3)):
-                        val += T2[k, i] * F_norm[k, l] * T1[l, j]
-                F_out[i, j] = val
+        for ty, tx in ti.ndrange(h, w):
+            y = y0 + ty
+            x = x0 + tx
+            w_val = hanning[ty, tx] * tile_weight[ty, tx]
+            accum[y, x] += tile[ty, tx] * w_val
+            weight_accum[y, x] += w_val
+
+    @ti.kernel
+    def _stitch_tile_vec3_kernel(
+        tile: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0: ti.i32, x0: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for ty, tx in ti.ndrange(h, w):
+            y = y0 + ty
+            x = x0 + tx
+            w_val = hanning[ty, tx] * tile_weight[ty, tx]
+            accum[y, x] += tile[ty, tx] * w_val
+            weight_accum[y, x] += w_val
+
+    @ti.kernel
+    def _stitch_tile_normalized_f32_kernel(
+        tile: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0: ti.i32, x0: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for ty, tx in ti.ndrange(h, w):
+            y = y0 + ty
+            x = x0 + tx
+            add_w = hanning[ty, tx] * tile_weight[ty, tx]
+            old_w = weight_accum[y, x]
+            new_w = old_w + add_w
+            if new_w > 1e-6:
+                accum[y, x] = (accum[y, x] * old_w + tile[ty, tx] * add_w) / new_w
+                weight_accum[y, x] = new_w
+
+    @ti.kernel
+    def _stitch_tile_normalized_vec3_kernel(
+        tile: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0: ti.i32, x0: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for ty, tx in ti.ndrange(h, w):
+            y = y0 + ty
+            x = x0 + tx
+            add_w = hanning[ty, tx] * tile_weight[ty, tx]
+            old_w = weight_accum[y, x]
+            new_w = old_w + add_w
+            if new_w > 1e-6:
+                blend = add_w / new_w
+                accum[y, x] = accum[y, x] * (1.0 - blend) + tile[ty, tx] * blend
+                weight_accum[y, x] = new_w
+
+    @ti.kernel
+    def _stitch_tile_batch_f32_kernel(
+        tiles: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0s: ti.types.ndarray(),
+        x0s: ti.types.ndarray(),
+        n_tiles: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for t_idx in range(n_tiles):
+            y0 = y0s[t_idx]
+            x0 = x0s[t_idx]
+            for ty, tx in ti.ndrange(h, w):
+                y = y0 + ty
+                x = x0 + tx
+                w_val = hanning[ty, tx] * tile_weight[ty, tx]
+                accum[y, x] += tiles[t_idx, ty, tx] * w_val
+                weight_accum[y, x] += w_val
+
+    @ti.kernel
+    def _stitch_tile_batch_vec3_kernel(
+        tiles: ti.types.ndarray(),
+        tile_weight: ti.types.ndarray(),
+        hanning: ti.types.ndarray(),
+        accum: ti.types.ndarray(),
+        weight_accum: ti.types.ndarray(),
+        y0s: ti.types.ndarray(),
+        x0s: ti.types.ndarray(),
+        n_tiles: ti.i32, h: ti.i32, w: ti.i32
+    ):
+        for t_idx in range(n_tiles):
+            y0 = y0s[t_idx]
+            x0 = x0s[t_idx]
+            for ty, tx in ti.ndrange(h, w):
+                y = y0 + ty
+                x = x0 + tx
+                w_val = hanning[ty, tx] * tile_weight[ty, tx]
+                for c in ti.static(range(3)):
+                    accum[y, x, c] += tiles[t_idx, ty, tx, c] * w_val
+                weight_accum[y, x] += w_val
 
 
 class BufferCache:
@@ -707,7 +653,7 @@ def ensure_taichi_field(arr, dtype=None, shape=None, buffer_provider=None):
             dst_field = get_temp_buffer(shape_dst, dtype, buffer_provider)
             # Use copy/cast kernel
             _copy_kernel(arr, dst_field)
-            return dst_field, True  # It's a temporary casted buffer
+            return dst_field, True # It's a temporary casted buffer
         return arr, False  # Already GPU and correct type (or no type requested)
 
     # Upload numpy to GPU
@@ -808,10 +754,9 @@ def split(img):
         aot = _get_aot()
         if aot:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-
             is_gpu = isinstance(img, TaichiGPUBuffer)
             img_v = img if is_gpu else aot.upload(img)
-
+            
             if len(img_v.shape) == 3 and img_v.shape[2] == 3:
                 res_list = aot.split_3ch(img_v)
             else:
@@ -819,9 +764,8 @@ def split(img):
                 res_list = []
                 for i in range(c):
                     res_list.append(aot.extract_channel(img_v, i))
-
-            if is_gpu:
-                return tuple(res_list)
+            
+            if is_gpu: return tuple(res_list)
             return tuple([r.to_numpy() for r in res_list])
 
     if not TAICHI_AVAILABLE:
@@ -877,7 +821,6 @@ def merge(channels):
         aot = _get_aot()
         if aot:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-
             is_gpu = isinstance(channels[0], TaichiGPUBuffer)
             h, w = channels[0].shape[0], channels[0].shape[1]
             c = len(channels)
@@ -888,15 +831,12 @@ def merge(channels):
                 dst_buf = aot.merge_3ch(c0, c1, c2)
             else:
                 # Fallback for other channel counts
-                dst_buf = aot.engine.allocate(
-                    (h, w, c), dtype=channels[0].dtype, is_vector=(c == 3)
-                )
+                dst_buf = aot.engine.allocate((h, w, c), dtype=channels[0].dtype, is_vector=(c==3))
                 for i, ch in enumerate(channels):
                     ch_v = ch if is_gpu else aot.upload(ch)
                     aot.insert_channel(ch_v, dst_buf, i)
-
-            if is_gpu:
-                return dst_buf
+            
+            if is_gpu: return dst_buf
             return dst_buf.to_numpy()
 
     if not TAICHI_AVAILABLE:
@@ -955,12 +895,10 @@ def extract_channel(img, ch):
         aot = _get_aot()
         if aot:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-
             is_gpu = isinstance(img, TaichiGPUBuffer)
             img_v = img if is_gpu else aot.upload(img)
             res_gpu = aot.extract_channel(img_v, ch)
-            if is_gpu:
-                return res_gpu
+            if is_gpu: return res_gpu
             res_np = res_gpu.to_numpy()
             return res_np
 
@@ -1072,20 +1010,8 @@ def copy(img):
         aot = _get_aot()
         if aot:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-
             is_gpu = isinstance(img, TaichiGPUBuffer)
-            img_v = img if is_gpu else aot.upload(img)
-
-            h, w = img_v.shape[0], img_v.shape[1]
-            is_3d = len(img_v.shape) == 3
-            dst_shape = (h, w, img_v.shape[2]) if is_3d else (h, w)
-            dst_buf = aot.engine.allocate(dst_shape, dtype=img_v.dtype, is_vector=is_3d)
-            aot.copy_field(img_v, dst_buf)
-
-            if is_gpu:
-                return dst_buf
-            res_np = dst_buf.to_numpy()
-            return res_np
+            return aot.copy(img, return_gpu=is_gpu)
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -1120,18 +1046,69 @@ def cvtColor(src, code, dst=None):
         aot = _get_aot()
         if aot and code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
             from taichi_library.taichi_aot.engine import TaichiGPUBuffer
-
             is_gpu = isinstance(src, TaichiGPUBuffer)
             src_v = src if is_gpu else aot.upload(src)
             res_gpu = aot.rgb2gray(src_v)
-            if is_gpu:
-                return res_gpu
+            if is_gpu: return res_gpu
             return res_gpu.to_numpy()
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
     is_taichi_input = hasattr(src, "to_numpy")
+
+    # The color kernels index ``src[i, j][channel]`` and therefore require a
+    # 2-D vector ndarray, while a regular NumPy image is represented as a
+    # scalar 3-D ndarray.  Convert explicitly at this boundary instead of
+    # passing an incompatible ndim-3 buffer (which raises TaichiIndexError on
+    # the first kernel invocation).  The explicit ABI adapter remains a JIT
+    # Taichi path; no host color implementation is introduced.
+    source_shape = tuple(getattr(src, "shape", ()))
+    if len(source_shape) == 3 and code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
+        h, w, channels = source_shape
+        if int(channels) != 3:
+            raise ValueError("BGR/RGB grayscale conversion requires exactly 3 channels")
+        source_np = (
+            src.to_numpy()
+            if is_taichi_input
+            else np.asarray(src)
+        )
+        source_np = np.ascontiguousarray(source_np, dtype=np.float32)
+        # Do not use the scalar buffer pool here: its historical key is
+        # ``(shape, dtype)`` and vector/scalar f32 ndarrays can otherwise be
+        # aliased after a flow operation, producing a misleading from_numpy
+        # shape error.  These short-lived ABI adapters are owned directly by
+        # Taichi and are reclaimed with the operation's context.
+        src_vec = ti.Vector.ndarray(3, ti.f32, shape=(h, w))
+        src_vec.from_numpy(source_np)
+        dst_gpu = ti.ndarray(dtype=ti.f32, shape=(h, w))
+        if code == COLOR_BGR2GRAY:
+            _cvt_color_bgr_to_gray_kernel(src_vec, dst_gpu)
+        else:
+            _cvt_color_rgb_to_gray_kernel(src_vec, dst_gpu)
+        if is_taichi_input:
+            return dst_gpu
+        result = dst_gpu.to_numpy()
+        if dst is not None:
+            dst[...] = result
+            return dst
+        return result
+
+    if len(source_shape) == 2 and code in [COLOR_GRAY2BGR, COLOR_GRAY2RGB]:
+        h, w = source_shape
+        source_np = src.to_numpy() if is_taichi_input else np.asarray(src, dtype=np.float32)
+        src_scalar = ti.ndarray(dtype=ti.f32, shape=(h, w))
+        src_scalar.from_numpy(np.ascontiguousarray(source_np, dtype=np.float32))
+        dst_gpu = ti.Vector.ndarray(3, ti.f32, shape=(h, w))
+        _cvt_color_gray_to_rgb_kernel(src_scalar, dst_gpu)
+        if is_taichi_input:
+            return dst_gpu
+        result = dst_gpu.to_numpy()
+        if dst is not None:
+            dst[...] = result
+            return dst
+        return result
+
     src_gpu, src_is_temp = ensure_taichi_field(src, dtype=ti.f32)
     h, w = src_gpu.shape[:2]
 
@@ -1209,7 +1186,7 @@ def absdiff(src1, src2, dst=None):
 
 
 @ti_thread
-def hanning(shape, exclude_boundary=False, dtype=np.float32):
+def generate_hanning_window_2d(shape, exclude_boundary=False, dtype=np.float32):
     """
     Generate 2D Hanning window directly on GPU.
     exclude_boundary: If True, behaves like np.hanning(M + 2)[1:-1]
@@ -1217,7 +1194,7 @@ def hanning(shape, exclude_boundary=False, dtype=np.float32):
     if AOT_MODE:
         aot = _get_aot()
         if aot:
-            return aot.hanning(shape, exclude_boundary, dtype)
+            return aot.generate_hanning_window_2d(shape, exclude_boundary, dtype)
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -1273,14 +1250,11 @@ def mean_division(sum_img, sum_weight, ref_img, dst=None):
 
 
 # NumPy-like aliases for JIT/AOT consistency
-hanning = hanning
+hanning = generate_hanning_window_2d
 divide = mean_division
 
 
-# =========================================================================
-# SfM Host Wrappers (NumPy fallbacks for algebraic solvers)
-# =========================================================================
-
+import math
 
 def svd_3x3_np(A):
     """SVD 3x3 via NumPy (Float64 precision). Returns (U, sigma, Vt)."""
@@ -1567,4 +1541,5 @@ def safe_sfm_call(func, *args, **kwargs):
         raise SfMDataError(
             f"Unexpected error: {type(e).__name__}: {e}",
             hint="Check input data validity and try again",
-        ) from e
+        )
+

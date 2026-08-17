@@ -71,6 +71,26 @@ if TAICHI_AVAILABLE:
             cov_Ip[y, x] = mean_Ip[y, x] - mI * mp
 
     @ti.kernel
+    def _gf_compute_var_kernel(mean_I: ti.types.ndarray(),
+                               mean_II: ti.types.ndarray(),
+                               var_I: ti.types.ndarray(), h: int, w: int):
+        """Portable variance pass with reduced descriptor pressure."""
+        for y, x in ti.ndrange(h, w):
+            mI = mean_I[y, x]
+            var_I[y, x] = mean_II[y, x] - mI * mI
+
+    @ti.kernel
+    def _gf_compute_cov_kernel(mean_I: ti.types.ndarray(),
+                               mean_p: ti.types.ndarray(),
+                               mean_Ip: ti.types.ndarray(),
+                               cov_Ip: ti.types.ndarray(), h: int, w: int):
+        """Portable covariance pass with reduced descriptor pressure."""
+        for y, x in ti.ndrange(h, w):
+            cov_Ip[y, x] = (
+                mean_Ip[y, x] - mean_I[y, x] * mean_p[y, x]
+            )
+
+    @ti.kernel
     def _gf_compute_ab_kernel(var_I: ti.types.ndarray(), cov_Ip: ti.types.ndarray(),
                                 mean_I: ti.types.ndarray(), mean_p: ti.types.ndarray(),
                                 a: ti.types.ndarray(), b: ti.types.ndarray(),
@@ -80,6 +100,24 @@ if TAICHI_AVAILABLE:
             a_val = cov_Ip[y, x] / (var_I[y, x] + epsilon)
             a[y, x] = a_val
             b[y, x] = mean_p[y, x] - a_val * mean_I[y, x]
+
+    @ti.kernel
+    def _gf_compute_a_kernel(var_I: ti.types.ndarray(),
+                             cov_Ip: ti.types.ndarray(),
+                             a: ti.types.ndarray(), epsilon: float,
+                             h: int, w: int):
+        """Portable linear-slope pass with reduced descriptor pressure."""
+        for y, x in ti.ndrange(h, w):
+            a[y, x] = cov_Ip[y, x] / (var_I[y, x] + epsilon)
+
+    @ti.kernel
+    def _gf_compute_b_kernel(mean_I: ti.types.ndarray(),
+                             mean_p: ti.types.ndarray(),
+                             a: ti.types.ndarray(), b: ti.types.ndarray(),
+                             h: int, w: int):
+        """Portable linear-intercept pass with reduced descriptor pressure."""
+        for y, x in ti.ndrange(h, w):
+            b[y, x] = mean_p[y, x] - a[y, x] * mean_I[y, x]
 
     @ti.kernel
     def _gf_output_kernel(mean_a: ti.types.ndarray(), mean_b: ti.types.ndarray(),

@@ -1,0 +1,274 @@
+{
+  "kind": "synthetic_compute_block_benchmark",
+  "backend": "synthetic_cpu_reference",
+  "sizes": [
+    {
+      "shape": [
+        3000,
+        4000
+      ],
+      "operations": [
+        {
+          "operation": "copy_add",
+          "shape": [
+            3000,
+            4000
+          ],
+          "pixels": 12000000,
+          "block_size": 2048,
+          "iterations": 4,
+          "full_seconds": 1.010710200000176,
+          "block_seconds": 3.610747700000502,
+          "warm_block_seconds": 0.62199210000108,
+          "full_throughput_mpix_s": 47.49135805693031,
+          "block_throughput_mpix_s": 13.293645523887843,
+          "warm_cache_hit_rate": 1.0,
+          "block_count": 4,
+          "computed_cold": 4,
+          "bytes_copied": 0,
+          "cache_copy_bytes": 48000000,
+          "checksum_seconds": 0.7436968999973033,
+          "reader_seconds": 0.05697629999485798,
+          "dispatch_seconds": 0.24647509999704198,
+          "merge_seconds": 0.1671909999968193,
+          "output_bytes": 48000000,
+          "max_abs_error": 0.0,
+          "full_reference_error": 0.0,
+          "rss_delta_mb": 183.1796875,
+          "rss_full_delta_mb": 45.78125
+        },
+        {
+          "operation": "stencil3x3",
+          "shape": [
+            3000,
+            4000
+          ],
+          "pixels": 12000000,
+          "block_size": 2048,
+          "iterations": 4,
+          "full_seconds": 3.960600300000806,
+          "block_seconds": 3.7779179999997723,
+          "warm_block_seconds": 1.0113553999981377,
+          "full_throughput_mpix_s": 12.119374934145775,
+          "block_throughput_mpix_s": 12.70541075798969,
+          "warm_cache_hit_rate": 1.0,
+          "block_count": 4,
+          "computed_cold": 4,
+          "bytes_copied": 0,
+          "cache_copy_bytes": 48056016,
+          "checksum_seconds": 0.20930000000225846,
+          "reader_seconds": 0.059384799998952076,
+          "dispatch_seconds": 1.0074243000017304,
+          "merge_seconds": 0.13655970000399975,
+          "output_bytes": 48000000,
+          "max_abs_error": 0.0,
+          "full_reference_error": 0.0,
+          "rss_delta_mb": 0.06640625,
+          "rss_full_delta_mb": 0.00390625
+        }
+      ],
+      "label": "12mp"
+    },
+    {
+      "shape": [
+        4000,
+        6000
+      ],
+      "operations": [
+        {
+          "operation": "copy_add",
+          "shape": [
+            4000,
+            6000
+          ],
+          "pixels": 24000000,
+          "block_size": 2048,
+          "iterations": 4,
+          "full_seconds": 1.6146179999996093,
+          "block_seconds": 6.134130099999311,
+          "warm_block_seconds": 1.1466256999992765,
+          "full_throughput_mpix_s": 59.45678792136792,
+          "block_throughput_mpix_s": 15.650140840672874,
+          "warm_cache_hit_rate": 1.0,
+          "block_count": 6,
+          "computed_cold": 6,
+          "bytes_copied": 0,
+          "cache_copy_bytes": 96000000,
+          "checksum_seconds": 0.9911418000010599,
+          "reader_seconds": 0.2433684000025096,
+          "dispatch_seconds": 0.5583278999984032,
+          "merge_seconds": 0.33905260000392445,
+          "output_bytes": 96000000,
+          "max_abs_error": 0.0,
+          "full_reference_error": 0.0,
+          "rss_delta_mb": 366.2421875,
+          "rss_full_delta_mb": 91.5546875
+        },
+        {
+          "operation": "stencil3x3",
+          "shape": [
+            4000,
+            6000
+          ],
+          "pixels": 24000000,
+          "block_size": 2048,
+          "iterations": 4,
+          "full_seconds": 8.48237909999807,
+          "block_seconds": 6.603846500001964,
+          "warm_block_seconds": 1.052975200000219,
+          "full_throughput_mpix_s": 11.317579522002482,
+          "block_throughput_mpix_s": 14.536982348086292,
+          "warm_cache_hit_rate": 1.0,
+          "block_count": 6,
+          "computed_cold": 6,
+          "bytes_copied": 0,
+          "cache_copy_bytes": 96112032,
+          "checksum_seconds": 0.4051242999994429,
+          "reader_seconds": 0.10412129999895114,
+          "dispatch_seconds": 1.7656356999978016,
+          "merge_seconds": 0.2586226999956125,
+          "output_bytes": 96000000,
+          "max_abs_error": 0.0,
+          "full_reference_error": 0.0,
+          "rss_delta_mb": 0.109375,
+          "rss_full_delta_mb": 0.0
+        }
+      ],
+      "label": "24mp"
+    },
+    {
+      "shape": [
+        5000,
+        10000
+      ],
+      "operations": [
+        {
+          "operation": "copy_add",
+          "shape": [
+            5000,
+            10000
+          ],
+          "pixels": 50000000,
+          "block_size": 2048,
+          "iterations": 4,
+          "full_seconds": 2.963161300001957,
+          "block_seconds": 12.08604059999925,
+          "warm_block_seconds": 2.6823607000005723,
+          "full_throughput_mpix_s": 67.49548193676392,
+          "block_throughput_mpix_s": 16.548016560527888,
+          "warm_cache_hit_rate": 1.0,
+          "block_count": 15,
+          "computed_cold": 15,
+          "bytes_copied": 0,
+          "cache_copy_bytes": 200000000,
+          "checksum_seconds": 0.7781795000009879,
+          "reader_seconds": 0.26677379999819095,
+          "dispatch_seconds": 0.6455950999989,
+          "merge_seconds": 0.5642591000068933,
+          "output_bytes": 200000000,
+          "max_abs_error": 0.0,
+          "full_reference_error": 0.0,
+          "rss_delta_mb": 763.015625,
+          "rss_full_delta_mb": 190.73828125
+        },
+        {
+          "operation": "stencil3x3",
+          "shape": [
+            5000,
+            10000
+          ],
+          "pixels": 50000000,
+          "block_size": 2048,
+          "iterations": 4,
+          "full_seconds": 19.103494700000738,
+          "block_seconds": 18.018810400000802,
+          "warm_block_seconds": 3.1031694000012067,
+          "full_throughput_mpix_s": 10.469288637538778,
+          "block_throughput_mpix_s": 11.099511874545897,
+          "warm_cache_hit_rate": 1.0,
+          "block_count": 15,
+          "computed_cold": 15,
+          "bytes_copied": 0,
+          "cache_copy_bytes": 200320128,
+          "checksum_seconds": 1.0120852999971248,
+          "reader_seconds": 0.3525270999962231,
+          "dispatch_seconds": 4.153480599998147,
+          "merge_seconds": 0.5346933999971952,
+          "output_bytes": 200000000,
+          "max_abs_error": 0.0,
+          "full_reference_error": 0.0,
+          "rss_delta_mb": 0.29296875,
+          "rss_full_delta_mb": 0.0
+        }
+      ],
+      "label": "50mp"
+    },
+    {
+      "shape": [
+        8000,
+        12500
+      ],
+      "operations": [
+        {
+          "operation": "copy_add",
+          "shape": [
+            8000,
+            12500
+          ],
+          "pixels": 100000000,
+          "block_size": 2048,
+          "iterations": 4,
+          "full_seconds": 5.590655799998785,
+          "block_seconds": 22.901361299998825,
+          "warm_block_seconds": 6.22124050000275,
+          "full_throughput_mpix_s": 71.54795686046114,
+          "block_throughput_mpix_s": 17.466210622161597,
+          "warm_cache_hit_rate": 1.0,
+          "block_count": 28,
+          "computed_cold": 28,
+          "bytes_copied": 0,
+          "cache_copy_bytes": 400000000,
+          "checksum_seconds": 1.6801601000006485,
+          "reader_seconds": 0.5377027000067756,
+          "dispatch_seconds": 1.0769699000120454,
+          "merge_seconds": 1.0714289999923494,
+          "output_bytes": 400000000,
+          "max_abs_error": 0.0,
+          "full_reference_error": 0.0,
+          "rss_delta_mb": 1526.0234375,
+          "rss_full_delta_mb": 381.47265625
+        },
+        {
+          "operation": "stencil3x3",
+          "shape": [
+            8000,
+            12500
+          ],
+          "pixels": 100000000,
+          "block_size": 2048,
+          "iterations": 4,
+          "full_seconds": 33.206825400000525,
+          "block_seconds": 28.820251500001177,
+          "warm_block_seconds": 5.298425900000439,
+          "full_throughput_mpix_s": 12.045716360468282,
+          "block_throughput_mpix_s": 13.879129403155405,
+          "warm_cache_hit_rate": 1.0,
+          "block_count": 28,
+          "computed_cold": 28,
+          "bytes_copied": 0,
+          "cache_copy_bytes": 400684288,
+          "checksum_seconds": 1.7993033999991894,
+          "reader_seconds": 0.6051014000004216,
+          "dispatch_seconds": 8.373339099995064,
+          "merge_seconds": 1.135112100004335,
+          "output_bytes": 400000000,
+          "max_abs_error": 0.0,
+          "full_reference_error": 0.0,
+          "rss_delta_mb": -0.10546875,
+          "rss_full_delta_mb": 0.0
+        }
+      ],
+      "label": "100mp"
+    }
+  ]
+}

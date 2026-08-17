@@ -1,0 +1,385 @@
+; ModuleID = 'kernel'
+source_filename = "kernel"
+target datalayout = "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+target triple = "x86_64-pc-windows-msvc19.44.35228"
+
+%struct.range_task_helper_context = type { ptr, ptr, ptr, ptr, i64, i32, i32, i32, i32 }
+%struct.RuntimeContext.0 = type { ptr, ptr, i32, ptr }
+
+; Function Attrs: mustprogress nofree norecurse nosync nounwind willreturn memory(readwrite, inaccessiblemem: none)
+define void @_hough_vote_kernel_c406_0_kernel_0_serial(ptr nocapture readonly %context) local_unnamed_addr #0 {
+entry:
+  %0 = load ptr, ptr %context, align 8
+  %1 = getelementptr i8, ptr %0, i64 64
+  %2 = load i32, ptr %1, align 4
+  %3 = tail call i32 @llvm.smax.i32(i32 %2, i32 0)
+  %4 = getelementptr i8, ptr %0, i64 68
+  %5 = load i32, ptr %4, align 4
+  %6 = tail call i32 @llvm.smax.i32(i32 %5, i32 0)
+  %7 = getelementptr inbounds nuw i8, ptr %context, i64 8
+  %8 = load ptr, ptr %7, align 8
+  %9 = getelementptr inbounds nuw i8, ptr %8, i64 32872
+  %10 = load ptr, ptr %9, align 8
+  %11 = getelementptr inbounds nuw i8, ptr %10, i64 4
+  store i32 %6, ptr %11, align 4
+  %12 = mul i32 %6, %3
+  %13 = load ptr, ptr %7, align 8
+  %14 = getelementptr inbounds nuw i8, ptr %13, i64 32872
+  %15 = load ptr, ptr %14, align 8
+  store i32 %12, ptr %15, align 4
+  ret void
+}
+
+define void @_hough_vote_kernel_c406_0_kernel_1_range_for(ptr %context) local_unnamed_addr {
+cpu_parallel_range_for.exit:
+  %0 = alloca %struct.range_task_helper_context, align 8
+  call void @llvm.lifetime.start.p0(i64 56, ptr nonnull %0)
+  %1 = getelementptr inbounds nuw i8, ptr %0, i64 8
+  %2 = getelementptr inbounds nuw i8, ptr %0, i64 16
+  %3 = getelementptr inbounds nuw i8, ptr %0, i64 24
+  %4 = getelementptr inbounds nuw i8, ptr %0, i64 32
+  store ptr %context, ptr %0, align 8
+  store ptr null, ptr %1, align 8
+  store i64 1, ptr %4, align 8
+  store ptr @function_body, ptr %2, align 8
+  store ptr null, ptr %3, align 8
+  %5 = getelementptr inbounds nuw i8, ptr %0, i64 40
+  store i32 0, ptr %5, align 8
+  %6 = getelementptr inbounds nuw i8, ptr %0, i64 44
+  store i32 8, ptr %6, align 4
+  %7 = getelementptr inbounds nuw i8, ptr %0, i64 52
+  store i32 1, ptr %7, align 4
+  %8 = getelementptr inbounds nuw i8, ptr %0, i64 48
+  store i32 1, ptr %8, align 8
+  %9 = getelementptr inbounds nuw i8, ptr %context, i64 8
+  %10 = load ptr, ptr %9, align 8
+  %11 = getelementptr inbounds nuw i8, ptr %10, i64 8288
+  %12 = load ptr, ptr %11, align 8
+  %13 = getelementptr inbounds nuw i8, ptr %10, i64 8280
+  %14 = load ptr, ptr %13, align 8
+  call void %12(ptr noundef %14, i32 noundef 8, i32 noundef 8, ptr noundef nonnull %0, ptr noundef nonnull @cpu_parallel_range_for_task) #7
+  call void @llvm.lifetime.end.p0(i64 56, ptr nonnull %0)
+  ret void
+}
+
+; Function Attrs: nofree norecurse nounwind memory(readwrite, inaccessiblemem: none)
+define internal void @function_body(ptr nocapture readonly %0, ptr nocapture readnone %1, i32 %2) #1 {
+allocs:
+  %3 = getelementptr inbounds nuw i8, ptr %0, i64 8
+  %4 = load ptr, ptr %3, align 8
+  %5 = getelementptr inbounds nuw i8, ptr %4, i64 32872
+  %6 = load ptr, ptr %5, align 8
+  %7 = load i32, ptr %6, align 4
+  %8 = add i32 %7, 7
+  %9 = sdiv i32 %8, 8
+  %10 = icmp slt i32 %8, 0
+  %11 = shl nsw i32 %9, 3
+  %12 = icmp ne i32 %11, %8
+  %13 = and i1 %10, %12
+  %.neg = sext i1 %13 to i32
+  %14 = add nsw i32 %9, %.neg
+  %15 = tail call i32 @llvm.smax.i32(i32 range(i32 -268435457, 268435456) %14, i32 512)
+  %16 = mul i32 %15, %2
+  %17 = add i32 %16, %15
+  %18 = tail call i32 @llvm.smin.i32(i32 %7, i32 %17)
+  %19 = load ptr, ptr %0, align 8
+  %20 = getelementptr i8, ptr %19, i64 80
+  %21 = load float, ptr %20, align 4
+  %22 = icmp slt i32 %16, %18
+  br i1 %22, label %for_loop_body.lr.ph, label %after_for
+
+for_loop_body.lr.ph:                              ; preds = %allocs
+  %23 = getelementptr i8, ptr %19, i64 8
+  %24 = getelementptr i8, ptr %19, i64 4
+  br label %for_loop_body
+
+for_loop_body:                                    ; preds = %after_if, %for_loop_body.lr.ph
+  %.0710 = phi i32 [ %16, %for_loop_body.lr.ph ], [ %84, %after_if ]
+  %25 = load ptr, ptr %3, align 8
+  %26 = getelementptr inbounds nuw i8, ptr %25, i64 32872
+  %27 = load ptr, ptr %26, align 8
+  %28 = getelementptr inbounds nuw i8, ptr %27, i64 4
+  %29 = load i32, ptr %28, align 4
+  %30 = sdiv i32 %.0710, %29
+  %31 = mul i32 %30, %29
+  %32 = xor i32 %29, %.0710
+  %33 = icmp slt i32 %32, 0
+  %34 = icmp ne i32 %31, %.0710
+  %35 = and i1 %33, %34
+  %.neg8 = sext i1 %35 to i32
+  %36 = add i32 %30, %.neg8
+  %37 = mul i32 %36, %29
+  %38 = sub i32 %.0710, %37
+  %39 = load ptr, ptr %23, align 8
+  %40 = load i32, ptr %24, align 4
+  %41 = mul i32 %36, %40
+  %42 = add i32 %38, %41
+  %43 = sext i32 %42 to i64
+  %44 = getelementptr float, ptr %39, i64 %43
+  %45 = load float, ptr %44, align 4
+  %46 = fcmp reassoc ninf nsz ult float %45, %21
+  br i1 %46, label %after_if, label %true_block
+
+after_for.loopexit:                               ; preds = %after_if
+  br label %after_for
+
+after_for:                                        ; preds = %after_for.loopexit, %allocs
+  ret void
+
+true_block:                                       ; preds = %for_loop_body
+  %47 = load ptr, ptr %0, align 8
+  %48 = getelementptr i8, ptr %47, i64 72
+  %49 = load i32, ptr %48, align 4
+  %50 = sitofp i32 %38 to float
+  %51 = sitofp i32 %36 to float
+  %52 = getelementptr i8, ptr %47, i64 76
+  %53 = load i32, ptr %52, align 4
+  %54 = sitofp i32 %53 to float
+  %55 = shl i32 %53, 1
+  %56 = icmp sgt i32 %49, 0
+  br i1 %56, label %for_loop_body1.lr.ph, label %after_if
+
+for_loop_body1.lr.ph:                             ; preds = %true_block
+  %57 = getelementptr i8, ptr %47, i64 40
+  %58 = getelementptr i8, ptr %47, i64 56
+  %59 = getelementptr i8, ptr %47, i64 24
+  %60 = getelementptr i8, ptr %47, i64 20
+  %wide.trip.count = zext nneg i32 %49 to i64
+  %xtraiter = and i64 %wide.trip.count, 1
+  %61 = icmp eq i32 %49, 1
+  br i1 %61, label %after_if.loopexit.unr-lcssa, label %for_loop_body1.lr.ph.new
+
+for_loop_body1.lr.ph.new:                         ; preds = %for_loop_body1.lr.ph
+  %unroll_iter = and i64 %wide.trip.count, 2147483646
+  br label %for_loop_body1
+
+after_if.loopexit.unr-lcssa.loopexit:             ; preds = %for_loop_body1
+  br label %after_if.loopexit.unr-lcssa
+
+after_if.loopexit.unr-lcssa:                      ; preds = %after_if.loopexit.unr-lcssa.loopexit, %for_loop_body1.lr.ph
+  %indvars.iv.unr = phi i64 [ 0, %for_loop_body1.lr.ph ], [ %indvars.iv.next.1, %after_if.loopexit.unr-lcssa.loopexit ]
+  %lcmp.mod.not = icmp eq i64 %xtraiter, 0
+  br i1 %lcmp.mod.not, label %after_if, label %for_loop_body1.epil
+
+for_loop_body1.epil:                              ; preds = %after_if.loopexit.unr-lcssa
+  %62 = load ptr, ptr %57, align 8
+  %63 = getelementptr float, ptr %62, i64 %indvars.iv.unr
+  %64 = load float, ptr %63, align 4
+  %65 = fmul reassoc ninf nsz float %64, %50
+  %66 = load ptr, ptr %58, align 8
+  %67 = getelementptr float, ptr %66, i64 %indvars.iv.unr
+  %68 = load float, ptr %67, align 4
+  %69 = fmul reassoc ninf nsz float %68, %51
+  %70 = fadd reassoc ninf nsz float %69, %65
+  %71 = tail call reassoc ninf nsz float @llvm.round.f32(float %70)
+  %72 = fadd reassoc ninf nsz float %71, %54
+  %73 = fptosi float %72 to i32
+  %74 = tail call i32 @llvm.smax.i32(i32 %73, i32 0)
+  %75 = tail call i32 @llvm.smin.i32(i32 %55, i32 %74)
+  %76 = load ptr, ptr %59, align 8
+  %77 = load i32, ptr %60, align 4
+  %78 = mul i32 %75, %77
+  %79 = trunc nuw nsw i64 %indvars.iv.unr to i32
+  %80 = add i32 %78, %79
+  %81 = sext i32 %80 to i64
+  %82 = getelementptr i32, ptr %76, i64 %81
+  %83 = atomicrmw add ptr %82, i32 1 seq_cst, align 4
+  br label %after_if
+
+after_if:                                         ; preds = %for_loop_body1.epil, %after_if.loopexit.unr-lcssa, %true_block, %for_loop_body
+  %84 = add nsw i32 %.0710, 1
+  %exitcond12.not = icmp eq i32 %84, %18
+  br i1 %exitcond12.not, label %after_for.loopexit, label %for_loop_body
+
+for_loop_body1:                                   ; preds = %for_loop_body1, %for_loop_body1.lr.ph.new
+  %indvars.iv = phi i64 [ 0, %for_loop_body1.lr.ph.new ], [ %indvars.iv.next.1, %for_loop_body1 ]
+  %85 = load ptr, ptr %57, align 8
+  %86 = shl i64 %indvars.iv, 2
+  %scevgep18 = getelementptr i8, ptr %85, i64 %86
+  %87 = load float, ptr %scevgep18, align 4
+  %88 = fmul reassoc ninf nsz float %87, %50
+  %89 = load ptr, ptr %58, align 8
+  %scevgep17 = getelementptr i8, ptr %89, i64 %86
+  %90 = load float, ptr %scevgep17, align 4
+  %91 = fmul reassoc ninf nsz float %90, %51
+  %92 = fadd reassoc ninf nsz float %91, %88
+  %93 = tail call reassoc ninf nsz float @llvm.round.f32(float %92)
+  %94 = fadd reassoc ninf nsz float %93, %54
+  %95 = fptosi float %94 to i32
+  %96 = tail call i32 @llvm.smax.i32(i32 %95, i32 0)
+  %97 = tail call i32 @llvm.smin.i32(i32 %55, i32 %96)
+  %98 = load ptr, ptr %59, align 8
+  %99 = load i32, ptr %60, align 4
+  %100 = mul i32 %97, %99
+  %101 = zext i32 %100 to i64
+  %102 = add i64 %indvars.iv, %101
+  %tmp16 = trunc i64 %102 to i32
+  %103 = sext i32 %tmp16 to i64
+  %104 = getelementptr i32, ptr %98, i64 %103
+  %105 = atomicrmw add ptr %104, i32 1 seq_cst, align 4
+  %106 = load ptr, ptr %57, align 8
+  %107 = getelementptr i8, ptr %106, i64 %86
+  %108 = getelementptr i8, ptr %107, i64 4
+  %109 = load float, ptr %108, align 4
+  %110 = fmul reassoc ninf nsz float %109, %50
+  %111 = load ptr, ptr %58, align 8
+  %112 = getelementptr i8, ptr %111, i64 %86
+  %113 = getelementptr i8, ptr %112, i64 4
+  %114 = load float, ptr %113, align 4
+  %115 = fmul reassoc ninf nsz float %114, %51
+  %116 = fadd reassoc ninf nsz float %115, %110
+  %117 = tail call reassoc ninf nsz float @llvm.round.f32(float %116)
+  %118 = fadd reassoc ninf nsz float %117, %54
+  %119 = fptosi float %118 to i32
+  %120 = tail call i32 @llvm.smax.i32(i32 %119, i32 0)
+  %121 = tail call i32 @llvm.smin.i32(i32 %55, i32 %120)
+  %122 = load ptr, ptr %59, align 8
+  %123 = load i32, ptr %60, align 4
+  %124 = mul i32 %121, %123
+  %125 = zext i32 %124 to i64
+  %126 = add i64 %indvars.iv, %125
+  %127 = add i64 %126, 1
+  %tmp = trunc i64 %127 to i32
+  %128 = sext i32 %tmp to i64
+  %129 = getelementptr i32, ptr %122, i64 %128
+  %130 = atomicrmw add ptr %129, i32 1 seq_cst, align 4
+  %indvars.iv.next.1 = add nuw i64 %indvars.iv, 2
+  %niter.ncmp.1 = icmp eq i64 %unroll_iter, %indvars.iv.next.1
+  br i1 %niter.ncmp.1, label %after_if.loopexit.unr-lcssa.loopexit, label %for_loop_body1
+}
+
+; Function Attrs: mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare float @llvm.round.f32(float) #2
+
+; Function Attrs: alwaysinline mustprogress nounwind uwtable
+define internal void @cpu_parallel_range_for_task(ptr nocapture noundef readonly %0, i32 noundef %1, i32 noundef %2) #3 {
+  %4 = alloca %struct.RuntimeContext.0, align 8
+  %.sroa.0.0.copyload = load ptr, ptr %0, align 8
+  %.sroa.4.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 8
+  %.sroa.4.0.copyload = load ptr, ptr %.sroa.4.0..sroa_idx, align 8
+  %.sroa.5.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 16
+  %.sroa.5.0.copyload = load ptr, ptr %.sroa.5.0..sroa_idx, align 8
+  %.sroa.7.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 24
+  %.sroa.7.0.copyload = load ptr, ptr %.sroa.7.0..sroa_idx, align 8
+  %.sroa.8.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 32
+  %.sroa.8.0.copyload = load i64, ptr %.sroa.8.0..sroa_idx, align 8
+  %.sroa.9.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 40
+  %.sroa.9.0.copyload = load i32, ptr %.sroa.9.0..sroa_idx, align 8
+  %.sroa.12.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 44
+  %.sroa.12.0.copyload = load i32, ptr %.sroa.12.0..sroa_idx, align 4
+  %.sroa.15.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 48
+  %.sroa.15.0.copyload = load i32, ptr %.sroa.15.0..sroa_idx, align 8
+  %.sroa.17.0..sroa_idx = getelementptr inbounds nuw i8, ptr %0, i64 52
+  %.sroa.17.0.copyload = load i32, ptr %.sroa.17.0..sroa_idx, align 4
+  %5 = alloca i8, i64 %.sroa.8.0.copyload, align 8
+  %.not = icmp eq ptr %.sroa.4.0.copyload, null
+  br i1 %.not, label %7, label %6
+
+6:                                                ; preds = %3
+  call void %.sroa.4.0.copyload(ptr noundef %.sroa.0.0.copyload, ptr noundef nonnull %5) #7
+  br label %7
+
+7:                                                ; preds = %6, %3
+  call void @llvm.memcpy.p0.p0.i64(ptr noundef nonnull align 8 dereferenceable(32) %4, ptr noundef nonnull align 8 dereferenceable(32) %.sroa.0.0.copyload, i64 32, i1 false)
+  %8 = getelementptr inbounds nuw i8, ptr %4, i64 16
+  store i32 %1, ptr %8, align 8
+  switch i32 %.sroa.17.0.copyload, label %.loopexit [
+    i32 1, label %9
+    i32 -1, label %16
+  ]
+
+9:                                                ; preds = %7
+  %10 = mul nsw i32 %.sroa.15.0.copyload, %2
+  %11 = add nsw i32 %10, %.sroa.9.0.copyload
+  %12 = add nsw i32 %11, %.sroa.15.0.copyload
+  %.sroa.speculated28 = call i32 @llvm.smin.i32(i32 %.sroa.12.0.copyload, i32 %12)
+  %13 = icmp slt i32 %11, %.sroa.speculated28
+  br i1 %13, label %.lr.ph41.preheader, label %.loopexit
+
+.lr.ph41.preheader:                               ; preds = %9
+  br label %.lr.ph41
+
+.lr.ph41:                                         ; preds = %.lr.ph41, %.lr.ph41.preheader
+  %.02040 = phi i32 [ %14, %.lr.ph41 ], [ %11, %.lr.ph41.preheader ]
+  call void %.sroa.5.0.copyload(ptr noundef nonnull %4, ptr noundef nonnull %5, i32 noundef %.02040) #7
+  %14 = add i32 %.02040, 1
+  %15 = icmp slt i32 %14, %.sroa.speculated28
+  br i1 %15, label %.lr.ph41, label %.loopexit.loopexit, !llvm.loop !10
+
+16:                                               ; preds = %7
+  %17 = mul nsw i32 %.sroa.15.0.copyload, %2
+  %18 = sub nsw i32 %.sroa.12.0.copyload, %17
+  %19 = mul nsw i32 %18, %.sroa.15.0.copyload
+  %.sroa.speculated = call i32 @llvm.smax.i32(i32 %.sroa.9.0.copyload, i32 %19)
+  %.not24.not38 = icmp sgt i32 %18, %.sroa.speculated
+  br i1 %.not24.not38, label %.lr.ph.preheader, label %.loopexit
+
+.lr.ph.preheader:                                 ; preds = %16
+  br label %.lr.ph
+
+.lr.ph:                                           ; preds = %.lr.ph, %.lr.ph.preheader
+  %.0.in39 = phi i32 [ %.0, %.lr.ph ], [ %18, %.lr.ph.preheader ]
+  %.0 = add i32 %.0.in39, -1
+  call void %.sroa.5.0.copyload(ptr noundef nonnull %4, ptr noundef nonnull %5, i32 noundef %.0) #7
+  %.not24.not = icmp sgt i32 %.0, %.sroa.speculated
+  br i1 %.not24.not, label %.lr.ph, label %.loopexit.loopexit46, !llvm.loop !12
+
+.loopexit.loopexit:                               ; preds = %.lr.ph41
+  br label %.loopexit
+
+.loopexit.loopexit46:                             ; preds = %.lr.ph
+  br label %.loopexit
+
+.loopexit:                                        ; preds = %.loopexit.loopexit46, %.loopexit.loopexit, %16, %9, %7
+  %.not25 = icmp eq ptr %.sroa.7.0.copyload, null
+  br i1 %.not25, label %21, label %20
+
+20:                                               ; preds = %.loopexit
+  call void %.sroa.7.0.copyload(ptr noundef %.sroa.0.0.copyload, ptr noundef nonnull %5) #7
+  br label %21
+
+21:                                               ; preds = %20, %.loopexit
+  ret void
+}
+
+; Function Attrs: mustprogress nocallback nofree nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg) #4
+
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare i32 @llvm.smin.i32(i32, i32) #5
+
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare i32 @llvm.smax.i32(i32, i32) #5
+
+; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.lifetime.start.p0(i64 immarg, ptr nocapture) #6
+
+; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.lifetime.end.p0(i64 immarg, ptr nocapture) #6
+
+attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(readwrite, inaccessiblemem: none) }
+attributes #1 = { nofree norecurse nounwind memory(readwrite, inaccessiblemem: none) }
+attributes #2 = { mustprogress nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+attributes #3 = { alwaysinline mustprogress nounwind uwtable "frame-pointer"="none" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }
+attributes #4 = { mustprogress nocallback nofree nounwind willreturn memory(argmem: readwrite) }
+attributes #5 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+attributes #6 = { nocallback nofree nosync nounwind willreturn memory(argmem: readwrite) }
+attributes #7 = { nounwind }
+
+!llvm.linker.options = !{!0, !1, !2, !3, !4, !5}
+!llvm.ident = !{!6}
+!llvm.module.flags = !{!7, !8, !9}
+
+!0 = !{!"/FAILIFMISMATCH:\22_MSC_VER=1900\22"}
+!1 = !{!"/FAILIFMISMATCH:\22_ITERATOR_DEBUG_LEVEL=0\22"}
+!2 = !{!"/FAILIFMISMATCH:\22RuntimeLibrary=MT_StaticRelease\22"}
+!3 = !{!"/DEFAULTLIB:libcpmt.lib"}
+!4 = !{!"/FAILIFMISMATCH:\22_CRT_STDIO_ISO_WIDE_SPECIFIERS=0\22"}
+!5 = !{!"/alternatename:_Avx2WmemEnabled=_Avx2WmemEnabledWeakValue"}
+!6 = !{!"clang version 14.0.6"}
+!7 = !{i32 1, !"wchar_size", i32 2}
+!8 = !{i32 8, !"PIC Level", i32 2}
+!9 = !{i32 7, !"uwtable", i32 1}
+!10 = distinct !{!10, !11}
+!11 = !{!"llvm.loop.mustprogress"}
+!12 = distinct !{!12, !11}

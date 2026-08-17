@@ -1,0 +1,11 @@
+cgraph:gf_mul_f32
+cgraph:gf_var_cov_f32
+cgraph:gf_var_portable_f32
+cgraph:gf_cov_portable_f32
+cgraph:gf_ab_f32
+cgraph:gf_a_portable_f32
+cgraph:gf_b_portable_f32
+cgraph:gf_output_f32
+cgraph:gf_mul_3ch_f32
+cgraph:gf_ab_3ch_f32
+cgraph:gf_output_3ch_f32

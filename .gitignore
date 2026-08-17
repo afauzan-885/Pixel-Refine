@@ -70,3 +70,8 @@ venv/
 database/
 
 __pycache__/
+
+# Local governance and experimental archives
+/ai_governance/
+/taichi_library copy.rar
+/taichi_library_experimental_20260628_150822.zip

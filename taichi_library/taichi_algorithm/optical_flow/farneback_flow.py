@@ -171,9 +171,7 @@ if TAICHI_AVAILABLE:
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: ti.i32,
         w: ti.i32,
-        g: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        xg: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        xxg: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        poly_weights: ti.types.ndarray(dtype=ti.f32, ndim=2),
         radius: ti.i32,
     ):
         """Vertical separable pass.
@@ -183,19 +181,18 @@ if TAICHI_AVAILABLE:
         Uses CLAMP boundary (matching OpenCV optflowgf.cpp lines 151-152).
         """
         for y, x in ti.ndrange(h, w):
-            s0 = src[y, x] * g[0]   # sum
+            s0 = src[y, x] * poly_weights[0, 0]   # sum
             s1 = 0.0                 # odd (y-deriv)
-            s2 = src[y, x] * xxg[0]  # even (y²)
+            s2 = src[y, x] * poly_weights[0, 2]  # even (y²)
             for k in ti.static(range(1, 12)):
                 if k <= radius:
-                    # Use CLAMP boundary like OpenCV
                     ty = ti.max(0, ti.min(y - k, h - 1))
                     by = ti.max(0, ti.min(y + k, h - 1))
                     top = src[ty, x]
                     bot = src[by, x]
-                    s0 += g[k] * (top + bot)
-                    s1 += xg[k] * (bot - top)
-                    s2 += xxg[k] * (top + bot)
+                    s0 += poly_weights[k, 0] * (top + bot)
+                    s1 += poly_weights[k, 1] * (bot - top)
+                    s2 += poly_weights[k, 2] * (top + bot)
             dst[y, x, 0] = s0
             dst[y, x, 1] = s1
             dst[y, x, 2] = s2
@@ -206,9 +203,7 @@ if TAICHI_AVAILABLE:
         dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
         h: ti.i32,
         w: ti.i32,
-        g: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        xg: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        xxg: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        poly_weights: ti.types.ndarray(dtype=ti.f32, ndim=2),
         ig11: ti.f32,
         ig03: ti.f32,
         ig33: ti.f32,
@@ -218,18 +213,17 @@ if TAICHI_AVAILABLE:
         """Horizontal pass + inverse Gram projection.
         Input : src from vertical pass (H,W,3)
         Output: dst[y,x,:] = [b_y, b_x, A_yy, A_xx, A_xy]
-        Uses CLAMP boundary (matching OpenCV optflowgf.cpp lines 168-172).
+        Uses CLAMP boundary.
         """
         for y, x in ti.ndrange(h, w):
-            b1 = src[y, x, 0] * g[0]
+            b1 = src[y, x, 0] * poly_weights[0, 0]
             b2 = 0.0
-            b3 = src[y, x, 1] * g[0]
+            b3 = src[y, x, 1] * poly_weights[0, 0]
             b4 = 0.0
-            b5 = src[y, x, 2] * g[0]
+            b5 = src[y, x, 2] * poly_weights[0, 0]
             b6 = 0.0
             for k in ti.static(range(1, 12)):
                 if k <= radius:
-                    # Use CLAMP boundary like OpenCV
                     lx = ti.max(0, ti.min(x - k, w - 1))
                     rx = ti.max(0, ti.min(x + k, w - 1))
                     l0 = src[y, lx, 0]
@@ -239,12 +233,12 @@ if TAICHI_AVAILABLE:
                     l2 = src[y, lx, 2]
                     r2 = src[y, rx, 2]
                     tg = r0 + l0
-                    b1 += tg * g[k]
-                    b4 += tg * xxg[k]
-                    b2 += (r0 - l0) * xg[k]
-                    b3 += (r1 + l1) * g[k]
-                    b6 += (r1 - l1) * xg[k]
-                    b5 += (r2 + l2) * g[k]
+                    b1 += tg * poly_weights[k, 0]
+                    b4 += tg * poly_weights[k, 2]
+                    b2 += (r0 - l0) * poly_weights[k, 1]
+                    b3 += (r1 + l1) * poly_weights[k, 0]
+                    b6 += (r1 - l1) * poly_weights[k, 1]
+                    b5 += (r2 + l2) * poly_weights[k, 0]
 
             # Apply inverse Gram matrix constants
             dst[y, x, 0] = b3 * ig11          # b_y
@@ -287,50 +281,34 @@ if TAICHI_AVAILABLE:
             frac_x = fx - float(ix)
             frac_y = fy - float(iy)
 
-            # Check if within bounds (OpenCV-style)
-            in_bounds = (ix >= 0) and (ix < w - 1) and (iy >= 0) and (iy < h - 1)
-            
-            r2 = 0.0
-            r3 = 0.0
-            r4 = 0.0
-            r5 = 0.0
-            r6 = 0.0
-            
-            if in_bounds:
-                # Bilinear interpolation (CLAMP boundary like OpenCV)
-                w00 = (1.0 - frac_x) * (1.0 - frac_y)
-                w01 = frac_x * (1.0 - frac_y)
-                w10 = (1.0 - frac_x) * frac_y
-                w11 = frac_x * frac_y
+            # Bilinear with REFLECT_101 boundary
+            ix0 = common.reflect_idx(ix, w)
+            iy0 = common.reflect_idx(iy, h)
+            ix1 = common.reflect_idx(ix + 1, w)
+            iy1 = common.reflect_idx(iy + 1, h)
 
-                # Interpolate all 5 channels of R1
-                r2 = R1[iy, ix, 0] * w00 + R1[iy, ix+1, 0] * w01 + R1[iy+1, ix, 0] * w10 + R1[iy+1, ix+1, 0] * w11
-                r3 = R1[iy, ix, 1] * w00 + R1[iy, ix+1, 1] * w01 + R1[iy+1, ix, 1] * w10 + R1[iy+1, ix+1, 1] * w11
-                r4 = R1[iy, ix, 2] * w00 + R1[iy, ix+1, 2] * w01 + R1[iy+1, ix, 2] * w10 + R1[iy+1, ix+1, 2] * w11
-                r5 = R1[iy, ix, 3] * w00 + R1[iy, ix+1, 3] * w01 + R1[iy+1, ix, 3] * w10 + R1[iy+1, ix+1, 3] * w11
-                r6 = R1[iy, ix, 4] * w00 + R1[iy, ix+1, 4] * w01 + R1[iy+1, ix, 4] * w10 + R1[iy+1, ix+1, 4] * w11
-                
-                # Average A matrices (OpenCV convention)
-                r4 = (R0[y, x, 2] + r4) * 0.5    # A_yy
-                r5 = (R0[y, x, 3] + r5) * 0.5    # A_xx
-                r6 = (R0[y, x, 4] + r6) * 0.25   # A_xy
-                
-                # Delta b + A * d_0
-                r2 = (R0[y, x, 0] - r2) * 0.5    # delta_b_y
-                r3 = (R0[y, x, 1] - r3) * 0.5    # delta_b_x
-                r2 += r4 * dy + r6 * dx
-                r3 += r6 * dy + r5 * dx
-            else:
-                # Out of bounds: use only R0 values (OpenCV behavior)
-                r4 = R0[y, x, 2]
-                r5 = R0[y, x, 3]
-                r6 = R0[y, x, 4] * 0.5    # Note: 0.5, not 0.25 for out-of-bounds!
-                # r2 and r3 need to be computed from R0 (OpenCV line 286-287)
-                r2 = (R0[y, x, 0] - 0.0) * 0.5    # delta_b_y
-                r3 = (R0[y, x, 1] - 0.0) * 0.5    # delta_b_x
-                # Add flow prior
-                r2 += r4 * dy + r6 * dx
-                r3 += r6 * dy + r5 * dx
+            w00 = (1.0 - frac_x) * (1.0 - frac_y)
+            w01 = frac_x * (1.0 - frac_y)
+            w10 = (1.0 - frac_x) * frac_y
+            w11 = frac_x * frac_y
+
+            # Interpolate all 5 channels of R1
+            r2_w = R1[iy0, ix0, 0] * w00 + R1[iy0, ix1, 0] * w01 + R1[iy1, ix0, 0] * w10 + R1[iy1, ix1, 0] * w11
+            r3_w = R1[iy0, ix0, 1] * w00 + R1[iy0, ix1, 1] * w01 + R1[iy1, ix0, 1] * w10 + R1[iy1, ix1, 1] * w11
+            r4_w = R1[iy0, ix0, 2] * w00 + R1[iy0, ix1, 2] * w01 + R1[iy1, ix0, 2] * w10 + R1[iy1, ix1, 2] * w11
+            r5_w = R1[iy0, ix0, 3] * w00 + R1[iy0, ix1, 3] * w01 + R1[iy1, ix0, 3] * w10 + R1[iy1, ix1, 3] * w11
+            r6_w = R1[iy0, ix0, 4] * w00 + R1[iy0, ix1, 4] * w01 + R1[iy1, ix0, 4] * w10 + R1[iy1, ix1, 4] * w11
+
+            # Average A matrices
+            r4 = (R0[y, x, 2] + r4_w) * 0.5    # A_yy
+            r5 = (R0[y, x, 3] + r5_w) * 0.5    # A_xx
+            r6 = (R0[y, x, 4] + r6_w) * 0.25   # A_xy (0.25 factor!)
+
+            # Delta b + A * d_0
+            r2 = (R0[y, x, 0] - r2_w) * 0.5    # delta_b_y
+            r3 = (R0[y, x, 1] - r3_w) * 0.5    # delta_b_x
+            r2 += r4 * dy + r6 * dx
+            r3 += r6 * dy + r5 * dx
 
             # Border suppression
             scale = _border_scale(y, x, h, w)
@@ -350,9 +328,6 @@ if TAICHI_AVAILABLE:
     # -----------------------------------------------------------------
     # 3. Gaussian Smoothing of 5-channel Tensors (separable)
     # -----------------------------------------------------------------
-    # Note: OpenCV Farneback uses Gaussian blur when OPTFLOW_FARNEBACK_GAUSSIAN flag is set
-    # This matches FarnebackUpdateFlow_GaussianBlur in optflowgf.cpp.
-    # sigma = m * 0.3 where m = winSize/2
 
     @ti.kernel
     def _gaussian_blur_x_5ch_kernel(
@@ -363,15 +338,14 @@ if TAICHI_AVAILABLE:
         weights: ti.types.ndarray(dtype=ti.f32, ndim=1),
         radius: ti.i32,
     ):
-        """Horizontal Gaussian blur on 5-channel tensor.
-        Uses Gaussian weights for smoothing, matching OpenCV's default behavior.
-        """
+        """Horizontal Gaussian blur on 5-channel tensor."""
         for y, x in ti.ndrange(h, w):
             a0 = src[y, x, 0] * weights[0]
             a1 = src[y, x, 1] * weights[0]
             a2 = src[y, x, 2] * weights[0]
             a3 = src[y, x, 3] * weights[0]
             a4 = src[y, x, 4] * weights[0]
+            tw = weights[0]
             for k in ti.static(range(1, 21)):
                 if k <= radius:
                     wk = weights[k]
@@ -382,12 +356,13 @@ if TAICHI_AVAILABLE:
                     a2 += (src[y, lx, 2] + src[y, rx, 2]) * wk
                     a3 += (src[y, lx, 3] + src[y, rx, 3]) * wk
                     a4 += (src[y, lx, 4] + src[y, rx, 4]) * wk
-            # Weights pre-normalized by compute_smoothing_weights() — no division needed
-            dst[y, x, 0] = a0
-            dst[y, x, 1] = a1
-            dst[y, x, 2] = a2
-            dst[y, x, 3] = a3
-            dst[y, x, 4] = a4
+                    tw += 2.0 * wk
+            inv = 1.0 / tw
+            dst[y, x, 0] = a0 * inv
+            dst[y, x, 1] = a1 * inv
+            dst[y, x, 2] = a2 * inv
+            dst[y, x, 3] = a3 * inv
+            dst[y, x, 4] = a4 * inv
 
     @ti.kernel
     def _gaussian_blur_y_5ch_kernel(
@@ -398,15 +373,14 @@ if TAICHI_AVAILABLE:
         weights: ti.types.ndarray(dtype=ti.f32, ndim=1),
         radius: ti.i32,
     ):
-        """Vertical Gaussian blur on 5-channel tensor.
-        Uses Gaussian weights for smoothing, matching OpenCV's default behavior.
-        """
+        """Vertical Gaussian blur on 5-channel tensor."""
         for y, x in ti.ndrange(h, w):
             a0 = src[y, x, 0] * weights[0]
             a1 = src[y, x, 1] * weights[0]
             a2 = src[y, x, 2] * weights[0]
             a3 = src[y, x, 3] * weights[0]
             a4 = src[y, x, 4] * weights[0]
+            tw = weights[0]
             for k in ti.static(range(1, 21)):
                 if k <= radius:
                     wk = weights[k]
@@ -417,12 +391,13 @@ if TAICHI_AVAILABLE:
                     a2 += (src[ty, x, 2] + src[by, x, 2]) * wk
                     a3 += (src[ty, x, 3] + src[by, x, 3]) * wk
                     a4 += (src[ty, x, 4] + src[by, x, 4]) * wk
-            # Weights pre-normalized by compute_smoothing_weights() — no division needed
-            dst[y, x, 0] = a0
-            dst[y, x, 1] = a1
-            dst[y, x, 2] = a2
-            dst[y, x, 3] = a3
-            dst[y, x, 4] = a4
+                    tw += 2.0 * wk
+            inv = 1.0 / tw
+            dst[y, x, 0] = a0 * inv
+            dst[y, x, 1] = a1 * inv
+            dst[y, x, 2] = a2 * inv
+            dst[y, x, 3] = a3 * inv
+            dst[y, x, 4] = a4 * inv
 
     # -----------------------------------------------------------------
     # 4. Flow Update — Solve 2x2 system per pixel
@@ -448,12 +423,8 @@ if TAICHI_AVAILABLE:
             det = g11 * g22 - g12 * g12
             idet = 1.0 / (det + 1e-3)
 
-            # Solve for flow update
-            # The system solves for [d_y, d_x] where d_y is y-component and d_x is x-component
-            # Using Cramer's rule: d_y = (g22*hh1 - g12*hh2)/det, d_x = (g11*hh2 - g12*hh1)/det
-            # We store: flow[0] = d_x (horizontal), flow[1] = d_y (vertical) - OpenCV convention
-            flow[y, x, 0] = (g11 * hh2 - g12 * hh1) * idet  # dx
-            flow[y, x, 1] = (g22 * hh1 - g12 * hh2) * idet  # dy
+            flow[y, x, 0] = (g11 * hh2 - g12 * hh1) * idet
+            flow[y, x, 1] = (g22 * hh1 - g12 * hh2) * idet
 
     # -----------------------------------------------------------------
     # 5. Utility Kernels
@@ -465,6 +436,47 @@ if TAICHI_AVAILABLE:
         for y, x in ti.ndrange(h, w):
             flow[y, x, 0] = 0.0
             flow[y, x, 1] = 0.0
+
+    @ti.kernel
+    def _median_filter_flow_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        h: ti.i32,
+        w: ti.i32,
+    ):
+        """3x3 Median Filter on flow field to suppress noise and outliers."""
+        for y, x in ti.ndrange(h, w):
+            for c in ti.static(range(2)):
+                v00 = src[ti.max(0, ti.min(y-1, h-1)), ti.max(0, ti.min(x-1, w-1)), c]
+                v01 = src[ti.max(0, ti.min(y-1, h-1)), x, c]
+                v02 = src[ti.max(0, ti.min(y-1, h-1)), ti.max(0, ti.min(x+1, w-1)), c]
+                v10 = src[y, ti.max(0, ti.min(x-1, w-1)), c]
+                v11 = src[y, x, c]
+                v12 = src[y, ti.max(0, ti.min(x+1, w-1)), c]
+                v20 = src[ti.max(0, ti.min(y+1, h-1)), ti.max(0, ti.min(x-1, w-1)), c]
+                v21 = src[ti.max(0, ti.min(y+1, h-1)), x, c]
+                v22 = src[ti.max(0, ti.min(y+1, h-1)), ti.max(0, ti.min(x+1, w-1)), c]
+
+                arr = ti.Vector([v00, v01, v02, v10, v11, v12, v20, v21, v22])
+                for i in range(8):
+                    for j in range(8 - i):
+                        if arr[j] > arr[j+1]:
+                            tmp = arr[j]
+                            arr[j] = arr[j+1]
+                            arr[j+1] = tmp
+                dst[y, x, c] = arr[4]
+
+    @ti.kernel
+    def _copy_flow_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        h: ti.i32,
+        w: ti.i32,
+    ):
+        """Copy flow field from src to dst."""
+        for y, x in ti.ndrange(h, w):
+            dst[y, x, 0] = src[y, x, 0]
+            dst[y, x, 1] = src[y, x, 1]
 
 
 # =============================================================================
@@ -514,7 +526,7 @@ def farneback_flow(
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available for JIT Farneback flow")
 
-    from ..pyramid import pyramid as pyr_mod
+    from . import pyramid as pyr_mod
 
     # --- Prepare inputs ---
     ref_np = np.ascontiguousarray(ref_gray, dtype=np.float32)
@@ -542,19 +554,12 @@ def farneback_flow(
     poly_radius = poly_n // 2
 
     # Upload constants
-    g_gpu = ti.ndarray(dtype=ti.f32, shape=(poly_radius + 1,))
-    g_gpu.from_numpy(g_w)
-    xg_gpu = ti.ndarray(dtype=ti.f32, shape=(poly_radius + 1,))
-    xg_gpu.from_numpy(xg_w)
-    xxg_gpu = ti.ndarray(dtype=ti.f32, shape=(poly_radius + 1,))
-    xxg_gpu.from_numpy(xxg_w)
+    poly_weights_gpu = ti.ndarray(dtype=ti.f32, shape=(poly_radius + 1, 3))
+    poly_weights_gpu.from_numpy(
+        np.ascontiguousarray(np.stack((g_w, xg_w, xxg_w), axis=1), dtype=np.float32)
+    )
     smooth_gpu = ti.ndarray(dtype=ti.f32, shape=(smooth_radius + 1,))
-    _smooth_slice = smooth_w[: smooth_radius + 1].copy()
-    # Renormalize after slicing (smooth_w is padded to 21 elements with zeros)
-    _smooth_total = _smooth_slice[0] + 2.0 * float(np.sum(_smooth_slice[1:]))
-    if _smooth_total > 1e-10:
-        _smooth_slice = _smooth_slice / _smooth_total
-    smooth_gpu.from_numpy(_smooth_slice)
+    smooth_gpu.from_numpy(smooth_w[: smooth_radius + 1])
 
     # --- Coarse-to-fine ---
     prev_flow = None
@@ -585,11 +590,11 @@ def farneback_flow(
         R0 = common.get_temp_buffer((hl, wl, 5), ti.f32, buffer_provider)
         R1 = common.get_temp_buffer((hl, wl, 5), ti.f32, buffer_provider)
 
-        _poly_exp_vertical_kernel(ref_lvl, vert_buf, hl, wl, g_gpu, xg_gpu, xxg_gpu, poly_radius)
-        _poly_exp_horizontal_kernel(vert_buf, R0, hl, wl, g_gpu, xg_gpu, xxg_gpu,
+        _poly_exp_vertical_kernel(ref_lvl, vert_buf, hl, wl, poly_weights_gpu, poly_radius)
+        _poly_exp_horizontal_kernel(vert_buf, R0, hl, wl, poly_weights_gpu,
                                      ig11, ig03, ig33, ig55, poly_radius)
-        _poly_exp_vertical_kernel(comp_lvl, vert_buf, hl, wl, g_gpu, xg_gpu, xxg_gpu, poly_radius)
-        _poly_exp_horizontal_kernel(vert_buf, R1, hl, wl, g_gpu, xg_gpu, xxg_gpu,
+        _poly_exp_vertical_kernel(comp_lvl, vert_buf, hl, wl, poly_weights_gpu, poly_radius)
+        _poly_exp_horizontal_kernel(vert_buf, R1, hl, wl, poly_weights_gpu,
                                      ig11, ig03, ig33, ig55, poly_radius)
         common.release_temp_buffer(vert_buf)
 
