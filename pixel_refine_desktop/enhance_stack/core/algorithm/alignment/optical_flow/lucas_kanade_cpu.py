@@ -113,7 +113,7 @@ class LucasKanadeCPU:
 
     def calculate_flow(self, reference_gray, target_gray, config, point_executor=None):
         """Run the full-frame Taichi AOT Lucas-Kanade implementation."""
-        from taichi_library.taichi_algorithm import calcOpticalFlowPyrLK
+        from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
         win_size = max(5, int(config.get("win_size", 17)))
         if win_size % 2 == 0:
             win_size += 1
@@ -480,7 +480,7 @@ class LucasKanadeCPU:
 
         # Clear Vulkan buffer pool at the end of the batch process
         try:
-            from taichi_library import taichi_aot
+            from taichi_vision import taichi_aot
             if hasattr(taichi_aot, "engine") and hasattr(taichi_aot.engine, "buffer_pool") and taichi_aot.engine.buffer_pool:
                 taichi_aot.engine.buffer_pool.clear()
         except Exception:

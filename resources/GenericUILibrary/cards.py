@@ -381,10 +381,11 @@ class FeatureCard(QFrame, RealtimeMixin):
             adaptive_directions = ["bottom"]
         self.adaptive_directions = adaptive_directions
 
-        # Setup debouncing timer (200ms) to prevent rapid signal spamming
+        # Keep selector-to-UI propagation below the 100ms interaction budget;
+        # persistence has its own independent debounce in RightPanel.
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
-        self._debounce_timer.setInterval(200)
+        self._debounce_timer.setInterval(50)
         self._debounce_timer.timeout.connect(self._emit_debounced_value)
 
         # Apply adaptive size policies based on direction

@@ -10,14 +10,14 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from taichi_library.taichi_aot.engine import AOTEngine
+from taichi_vision.taichi_aot.engine import AOTEngine
 
 def test_pure_aot_direct():
     print("--- Verifikasi DIRECT Taichi AOT (Pure VRAM) ---")
     engine = AOTEngine()
     
     # Path TCM
-    aot_dir = os.path.join(project_root, "taichi_library", "taichi_algorithm", "aot_tcm")
+    aot_dir = os.path.join(project_root, "taichi_vision", "taichi_algorithm", "aot_tcm")
     io_mod = engine.load(os.path.join(aot_dir, "common_vulkan.tcm"))
     res_mod = engine.load(os.path.join(aot_dir, "interpolation_vulkan.tcm"))
     flow_mod = engine.load(os.path.join(aot_dir, "optical_flow_vulkan.tcm"))

@@ -11,7 +11,7 @@ callers, configuration, tests, and Git status. For multi-agent work, follow
 approval and a user-provided limit.
 
 The consolidated barriers are: preserve public API compatibility; treat
-`taichi_library/taichi_aot/engine.py` as runtime source of truth; recover an
+`taichi_vision/taichi_aot/engine.py` as runtime source of truth; recover an
 unvalidated block path through same-backend full-frame or report an error; and
 make no backend, accuracy, performance, or production claim without
 reproducible evidence. Do not stage unrelated changes or use `git add -A`.

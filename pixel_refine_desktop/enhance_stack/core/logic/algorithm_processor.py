@@ -27,8 +27,8 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser impo
     running_mf_denoiser,
     running_similarity as running_similarity_fusion,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.WeightedSR import (
-    running_weighted_sr,
+from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.SplatSR import (
+    running_splatting_sr,
 )
 
 
@@ -114,6 +114,11 @@ class AlgorithmProcessorThread(QThread):
                 "Similarity",
                 "Similarity Fusion",
             )
+            # SplattingSR performs its own internal Block Matching pass to
+            # generate sub-pixel flow/confidence maps.  Never run the
+            # user-selected alignment stage before it; that would apply an
+            # external alignment twice and would also force an HDF5 roundtrip.
+            super_resolution_owns_alignment = super_resolution_choice == "splattingSR"
             print(
                 f"[AlgorithmProcessorThread] settings={self.settings} "
                 f"alignment_choice={alignment_choice} "
@@ -189,7 +194,7 @@ class AlgorithmProcessorThread(QThread):
                     "None": lambda: None,
                 },
                 "super_resolution": {
-                    "WSR": lambda: running_weighted_sr(
+                    "splattingSR": lambda: running_splatting_sr(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
@@ -267,13 +272,15 @@ class AlgorithmProcessorThread(QThread):
                         f"[WARN] Algorithm '{selected_algo_name}' for category '{category}' not found in actions."
                     )
 
-            if denoising_owns_alignment:
+            if denoising_owns_alignment or super_resolution_owns_alignment:
                 if alignment_choice not in ("", "None", "No Alignment"):
                     print(
                         f"[AlgorithmProcessorThread] Alignment '{alignment_choice}' "
-                        f"will be executed inside denoising pipeline '{denoising_choice}'."
+                        "is owned by the selected internal pipeline; external "
+                        "alignment is bypassed."
                     )
-                execute("denoising", denoising_choice)
+                if denoising_owns_alignment:
+                    execute("denoising", denoising_choice)
                 execute("super_resolution", super_resolution_choice)
             else:
                 execute("alignment", alignment_choice)

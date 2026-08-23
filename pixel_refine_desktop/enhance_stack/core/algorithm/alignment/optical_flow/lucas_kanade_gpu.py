@@ -88,7 +88,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
     _gpu_remap_disabled = False
 
     def _calculate_flow_host_native(self, reference_gray, target_gray, config):
-        from taichi_library.taichi_algorithm import calcOpticalFlowPyrLK
+        from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
         # Intel OpenGL drivers reject the large SSBO binding set used by the
         # high-iteration/auto diagnostic path. Keep the native graph, but use
         # the validated bounded configuration so the call is deterministic.
@@ -117,7 +117,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
     def _align_frame_opengl_native(self, reference, target, config,
                                    matching_reference=None, matching_target=None):
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         matching_reference = reference if matching_reference is None else matching_reference
         matching_target = target if matching_target is None else matching_target
         reference_gray = to_flow_gray_u8(matching_reference).astype(np.float32, copy=False)
@@ -183,7 +183,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
     @staticmethod
     def _vram_cleanup(reason=""):
         try:
-            from taichi_library import taichi_aot
+            from taichi_vision import taichi_aot
 
             engine = getattr(taichi_aot, "engine", None)
             if engine is not None:
@@ -202,8 +202,8 @@ class LucasKanadeGPU(LucasKanadeCPU):
         }
 
     def _init_tile_buffer(self, reference, tile):
-        from taichi_library import taichi_aot
-        from taichi_library.taichi_aot import get_engine
+        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_aot import get_engine
 
         engine = get_engine()
         rx0, ry0, rx1, ry1 = tile["roi"]
@@ -327,7 +327,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         }
 
     def calculate_flow(self, reference_gray, target_gray, config, point_executor=None):
-        from taichi_library.taichi_algorithm import calcOpticalFlowPyrLK
+        from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
 
         lk_params = self._build_lk_params(config)
 
@@ -354,7 +354,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         )
 
     def _calculate_flow_gpu_buffer(self, reference_gray, target_gray, config):
-        from taichi_library.taichi_algorithm import calcOpticalFlowPyrLK
+        from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
 
         flow = calcOpticalFlowPyrLK(
             reference_gray,
@@ -389,7 +389,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         # buffer/remap pipeline relies on Vulkan-style storage bindings and
         # triggers GL_INVALID_OPERATION on Intel drivers.
         try:
-            from taichi_library import taichi_aot
+            from taichi_vision import taichi_aot
             if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
                 return self._align_frame_opengl_native(
                     reference, target, config,
@@ -416,7 +416,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
             )
 
         try:
-            from taichi_library import taichi_aot
+            from taichi_vision import taichi_aot
 
             with taichi_aot.engine.reserve_device_execution(self.DEVICE_RESERVATION):
                 # Load graph modules before image buffers claim the device budget.
@@ -515,7 +515,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         matching_reference=None,
         matching_target=None,
     ):
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
 
         t_total = time.perf_counter()
         profile = {
@@ -687,8 +687,8 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
     @staticmethod
     def _build_tiles(width, height, config):
-        from taichi_library import taichi_aot
-        from taichi_library.taichi_aot.block import BlockGrid
+        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_aot.block import BlockGrid
 
         runtime_config = taichi_aot.get_block_config()
         if not runtime_config.enabled:
@@ -716,7 +716,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
     @staticmethod
     def _create_gpu_accumulators(target):
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
 
         is_color = target.ndim == 3
         accumulator = taichi_aot.upload(
@@ -768,7 +768,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         tile_idx=None,
         target_gray_full=None,
     ):
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
 
         rx0, ry0, rx1, ry1 = tile["roi"]
         ref_roi = reference[ry0:ry1, rx0:rx1]
@@ -784,7 +784,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
             target_host = bufs["target_host"]
             target_gray_host = bufs["target_gray_host"]
 
-            from taichi_library.taichi_aot.engine import _LIB, _RUNTIME
+            from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
 
             # 1. CPU preprocess (target gray only - ref is static and pre-uploaded)
             t0 = time.perf_counter()
@@ -957,7 +957,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
     def _calculate_flow_grid_fallback(
         self, reference_gray, target_gray, config, lk_params
     ):
-        from taichi_library.taichi_algorithm import calcOpticalFlowPyrLKGrid
+        from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLKGrid
 
         grid_result = calcOpticalFlowPyrLKGrid(
             reference_gray,

@@ -36,9 +36,17 @@ class TransformState(
     }
 
     fun onTransform(panDelta: Offset, zoomDelta: Float) {
-        scale = (scale * zoomDelta).coerceIn(minScale, maxScale)
-        offsetX += panDelta.x
-        offsetY += panDelta.y
+        val newScale = (scale * zoomDelta).coerceIn(minScale, maxScale)
+        scale = newScale
+
+        if (newScale <= 1.0f) {
+            // Auto recenter saat zoom <= 1.0x untuk mencegah glitch drift keluar viewport
+            offsetX = 0f
+            offsetY = 0f
+        } else {
+            offsetX += panDelta.x
+            offsetY += panDelta.y
+        }
     }
 
     fun reset() {

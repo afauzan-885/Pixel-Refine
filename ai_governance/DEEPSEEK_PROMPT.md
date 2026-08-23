@@ -23,7 +23,7 @@ Before every code change:
 
 Hard barriers:
 - Keep public Taichi APIs unchanged unless I explicitly request an API change.
-- Do not modify taichi_library/taichi_aot/engine.py without my explicit
+- Do not modify taichi_vision/taichi_aot/engine.py without my explicit
   approval.
 - Preserve correctness over speed. Do not silently fall back from a requested
   GPU backend to CPU. Use the established same-backend full-frame recovery or

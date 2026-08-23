@@ -162,6 +162,12 @@ def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
     layout_instance.batch_panel.algorithm_settings_changed.connect(
         layout_instance.workspace_panel.display_panel.param_panel.update_settings_state
     )
+    # Keep display controls (including Start) synchronized directly from the
+    # in-memory settings signal.  JSON persistence remains asynchronous in
+    # RightPanel and must not block this UI path.
+    layout_instance.batch_panel.algorithm_settings_changed.connect(
+        layout_instance.workspace_panel.display_panel.apply_algorithm_settings_fast
+    )
 
     # Setup Layout
     # Workspace (LeftPanel logic) di KIRI (Stretch 4)

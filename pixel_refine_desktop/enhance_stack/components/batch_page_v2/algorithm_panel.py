@@ -78,6 +78,9 @@ class AlgorithmPanel(QWidget, SyncMixin):
         # Debounce timer for rapid setting changes
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
+        # Keep adaptive controls responsive when the denoising selector
+        # changes.  Persistence remains debounced separately in RightPanel.
+        self._update_timer.setInterval(40)
         self._update_timer.timeout.connect(self._do_update_adaptive_ui)
         self._pending_settings = None
         self._is_processing = False
@@ -530,14 +533,17 @@ class AlgorithmPanel(QWidget, SyncMixin):
         denoising = str(settings.get("denoising", "")).strip()
         super_res = str(settings.get("super_resolution", "")).strip()
 
-        # Relocate start button if denoising is Average, Median, or Similarity
-        # (These modes have no algorithm parameters to configure)
+        # Relocate the Start button when the selected stage can be launched
+        # directly.  Average/Median/Similarity have no parameter page, and
+        # splattingSR follows the same contract: alignment is owned by its
+        # internal block-matching stage and therefore does not require an
+        # external parameter panel before starting.
         is_no_algo_panel = denoising in [
             "Average",
             "Median",
             "Similarity",
             "Similarity Fusion",
-        ]
+        ] or super_res not in ["", "None", "No Super Resolution"]
         for btn in self._all_process_buttons:
             if hasattr(self, "display_panel") and self.display_panel and btn == self.display_panel.start_btn_ref:
                 continue
@@ -610,7 +616,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
                 self.param_stack,
                 self.param_stack.widget(target_idx),
                 direction,
-                duration=400,
+                duration=100,
             )
 
         # The visible parameter surface has moved to SwitchableParameterPanel.

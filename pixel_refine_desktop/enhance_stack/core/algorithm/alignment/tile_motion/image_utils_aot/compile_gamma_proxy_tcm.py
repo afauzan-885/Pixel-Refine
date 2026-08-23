@@ -1,6 +1,11 @@
 import taichi as ti
 import os
 import sys
+
+try:
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
 import importlib
 
 file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -43,7 +48,9 @@ def compile_gamma_proxy_aot(arch=ti.vulkan, save_path="gamma_proxy_vulkan.tcm"):
                            src_single, dst_single, scale, gamma_pow, slope, cutoff)
     module.add_graph("gamma_proxy_single", builder_single.compile())
 
-    module.archive(save_path)
+    # Preserve the LLVM/GFX compatibility metadata required by the current
+    # runtime instead of emitting the legacy incomplete archive layout.
+    archive_module(module, save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 

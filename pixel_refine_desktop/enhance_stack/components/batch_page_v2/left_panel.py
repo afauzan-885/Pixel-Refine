@@ -246,6 +246,10 @@ class LeftPanel(QWidget):
         # which will be triggered if the RightPanel emits settings or if we manually refresh.
         # Check initial state:
         current_settings = self.algorithm_panel.get_settings()
+        # Re-apply the authoritative settings after the batch id/grid is ready;
+        # this prevents the debounced AlgorithmPanel from briefly restoring a
+        # stale mode and hiding the Start control.
+        self.display_panel.apply_algorithm_settings_fast(current_settings)
         self.algorithm_panel._update_adaptive_ui(current_settings)
 
     def _forward_process_requested(self, settings):

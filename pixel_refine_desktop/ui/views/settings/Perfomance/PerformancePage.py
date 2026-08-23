@@ -1,6 +1,7 @@
 """Performance settings, including target backend selection and validation."""
 
-from PySide6.QtWidgets import QComboBox
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QComboBox, QSizePolicy
 
 from resources.GenericUILibrary import Button, Checkbox, FormGroup, FormRow, Stack
 from pixel_refine_desktop.ui.views.settings.General.GeneralSetting import (
@@ -62,9 +63,67 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.test_btn.setMinimumHeight(35)
         self.test_btn.clicked.connect(self._on_test_backends_clicked)
         form.add_row(self.test_btn)
+
+        # Large-image residency policy.  Keep these controls directly below
+        # the backend test: they are live performance controls and do not
+        # require a backend restart or an Apply action.
+        self.compute_block_cb = Checkbox("Enable Compute Blocks", auto_sync=True)
+        self.compute_block_cb.checkbox.setToolTip(
+            "Process large images in bounded blocks to reduce VRAM/RAM pressure."
+        )
+        self.compute_block_cb.bind_store(self.store, "compute_block_enabled")
+        form.add_row(self.compute_block_cb)
+
+        self.compute_block_size_group = FormGroup(
+            label="Compute Block Size", input_type="select", auto_sync=True
+        )
+        self.compute_block_size_group.input.addItems(["512", "768", "1024", "2048"])
+        self.compute_block_size_group.bind_store(self.store, "compute_block_size")
+        form.add_row(self.compute_block_size_group)
+
+        # FormGroup's decimal editor is the GenericUILibrary component as
+        # well; auto_sync makes threshold edits immediately available to the
+        # runtime without restarting the application.
+        self.compute_block_threshold_group = FormGroup(
+            label="Enable Above Megapixels", input_type="decimal", auto_sync=True
+        )
+        self.compute_block_threshold_group.input.setRange(0.1, 1000.0)
+        self.compute_block_threshold_group.input.setSingleStep(0.5)
+        self.compute_block_threshold_group.input.setDecimals(1)
+        self.compute_block_threshold_group.bind_store(
+            self.store, "compute_block_threshold_mp"
+        )
+        form.add_row(self.compute_block_threshold_group)
+
+        self.compute_block_mode_group = FormGroup(
+            label="Block Processing Rule", input_type="select", auto_sync=True
+        )
+        self.compute_block_mode_group.input.addItems(
+            ["Automatic (by megapixels)", "Always", "Disabled"]
+        )
+        # Persist a compact canonical value while displaying friendly labels.
+        mode_value = str(self.store.get("compute_block_mode", "auto")).lower()
+        mode_text = {
+            "block": "Always",
+            "auto": "Automatic (by megapixels)",
+            "full": "Disabled",
+        }.get(mode_value, "Automatic (by megapixels)")
+        self.compute_block_mode_group.input.setCurrentText(mode_text)
+        self.compute_block_mode_group.input.currentTextChanged.connect(
+            lambda text: self.store.set(
+                "compute_block_mode",
+                {
+                    "Always": "block",
+                    "Automatic (by megapixels)": "auto",
+                    "Disabled": "full",
+                }.get(text, "auto"),
+            )
+        )
+        form.add_row(self.compute_block_mode_group)
         self.update_device_dropdown_style()
 
         self.add_widget(form)
+        QTimer.singleShot(0, self._compact_performance_inputs)
         self.add_stretch()
 
         actions = Stack(orientation="horizontal")
@@ -78,6 +137,30 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.apply_btn.clicked.connect(self._on_apply_clicked)
         actions.add_item(self.apply_btn)
         self.add_widget(actions)
+
+    def _compact_performance_inputs(self):
+        """Keep settings editors compact while allowing long options to fit."""
+        inputs = (
+            getattr(getattr(self, "device_group", None), "input", None),
+            getattr(getattr(self, "compute_block_size_group", None), "input", None),
+            getattr(getattr(self, "compute_block_threshold_group", None), "input", None),
+            getattr(getattr(self, "compute_block_mode_group", None), "input", None),
+        )
+        compact_width = max(180, int(max(1, self.width()) * 0.5))
+        for editor in inputs:
+            if editor is None:
+                continue
+            required_width = editor.sizeHint().width() + 24
+            width = max(compact_width, required_width)
+            editor.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            editor.setMinimumWidth(width)
+            editor.setFixedWidth(width)
+            if isinstance(editor, QComboBox):
+                editor.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._compact_performance_inputs()
 
     def _restore_saved_backend_selection(self, options):
         """Select the persisted backend by key, identity, or architecture.
@@ -136,6 +219,8 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.device_group.label.setText(
             getattr(language_config, "DEVICE_ACCELERATION_LABEL", "GPU Acceleration")
         )
+        if hasattr(self, "compute_block_cb"):
+            self.compute_block_cb.checkbox.setText("Enable Compute Blocks")
         self.auto_fallback_cb.checkbox.setText(
             getattr(language_config, "LBL_AUTO_FALLBACK", "Auto Fallback")
         )

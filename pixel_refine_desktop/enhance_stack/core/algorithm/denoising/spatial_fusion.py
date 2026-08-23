@@ -13,13 +13,13 @@ import numpy as np
 
 def _active_backend():
     """Resolve the backend selected by General Settings at call time."""
-    from taichi_library.backend_config import requested_backend
+    from taichi_vision.backend_config import requested_backend
 
     requested, _explicit, _source = requested_backend()
     if requested != "auto":
         return requested
     try:
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
 
         return str(getattr(taichi_aot.engine, "arch", "cpu")).strip().lower()
     except Exception:
@@ -86,7 +86,7 @@ class SpatialFusionDenoisingAlgorithm:
         # The backend is selected by General Settings.  Do not route to a
         # second CPU/GPU adapter or silently fall back when the selected GPU
         # engine is unavailable.
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
 
         engine_arch = str(getattr(taichi_aot.engine, "arch", backend)).strip().lower()
         if gpu_backend and engine_arch == "cpu":

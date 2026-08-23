@@ -74,6 +74,11 @@ if TAICHI_AVAILABLE:
         # Adaptive Vision Boost: increase sensitivity dynamically on low-contrast tiles
         adaptive_grad_sensitivity = grad_sensitivity * (1.0 + 3.0 * flat_weight)
         structure_min_threshold_sq = 150.0
+        # These values are constant for the complete tile.  Hoisting them
+        # avoids repeating the same max/multiply and branch predicate for
+        # every sampled pixel while preserving the original arithmetic.
+        adaptive_diff_threshold = ti.max(0.005, noise_level * 0.2)
+        noise_enabled = noise_level > stab_epsilon
 
         # 1-pixel border skip to prevent out of bounds and match C++
         for y in range((curr_h - 1) // 2):
@@ -84,8 +89,6 @@ if TAICHI_AVAILABLE:
                 p1_val = current_img[img_y, img_x]
                 p2_val = reference_img[img_y, img_x]
                 pixel_diff = ti.abs(p1_val - p2_val)
-                
-                adaptive_diff_threshold = ti.max(0.005, noise_level * 0.2)
                 
                 # --- Read Precomputed Gradients directly ---
                 gx1 = curr_grad_x[img_y, img_x]
@@ -104,7 +107,7 @@ if TAICHI_AVAILABLE:
 
                 # --- continuous noise weight ---
                 noise_weight = 1.0
-                if noise_level > stab_epsilon:
+                if noise_enabled:
                     if min_mag_sq < structure_min_threshold_sq:
                         # Flat area
                         local_thr = local_adaptive_diff_threshold * 1.5

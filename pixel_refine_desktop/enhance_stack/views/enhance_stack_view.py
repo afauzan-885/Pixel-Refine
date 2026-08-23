@@ -5,7 +5,7 @@ Subclass of WorkspaceView from workplace framework.
 """
 
 from PySide6.QtCore import QThread, QTimer, Signal, QObject, Slot, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut, QIcon, QPixmap
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget, QMenu, QProgressDialog
 from resources.GenericUILibrary import Button
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
@@ -285,7 +285,7 @@ class EnhanceStackView(WorkspaceView):
         return session_state_token(self.db_path) != self._project_baseline_token
 
     def _show_about_project(self):
-        QMessageBox.about(
+        self._show_about_with_logo(
             self,
             getattr(language_config, "PROJECT_ABOUT", "About Pixel Refine"),
             f"Pixel Refine\nVersion {getattr(config, 'APP_VERSION', 'unknown')}\n\n"
@@ -296,6 +296,32 @@ class EnhanceStackView(WorkspaceView):
     def retranslate_ui(self):
         # Project actions are hosted by the active page's hamburger control.
         return None
+
+    def _show_about_with_logo(self, parent, title, message):
+        """Show About using the canonical Pixel Refine logo asset."""
+        dialog = QMessageBox(parent)
+        dialog.setWindowTitle(title)
+        logo_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..", "..", "..",
+                "resources", "assets", "images", "Logo_Pixel_Refine.png",
+            )
+        )
+        if os.path.isfile(logo_path):
+            pixmap = QPixmap(logo_path)
+            if not pixmap.isNull():
+                dialog.setIconPixmap(
+                    pixmap.scaled(
+                        72, 72,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                dialog.setWindowIcon(QIcon(logo_path))
+        dialog.setText(message)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.exec()
 
     def _create_pages(self):
         """Buat halaman-halaman enhance_stack dan tambahkan ke stacked_widget."""

@@ -1,7 +1,7 @@
 # Pixel Refine Project Blueprint
 
 This is the maintained architecture and file-map blueprint. User-facing API
-details belong in `taichi_library/documentation/`; normative agent rules belong
+details belong in `taichi_vision/documentation/`; normative agent rules belong
 in `ai_governance/` and the operating contract in `agen.md`.
 
 ## Top-level structure
@@ -10,7 +10,7 @@ in `ai_governance/` and the operating contract in `agen.md`.
 Pixel Refine/
 ├─ main_desktop.py                    desktop entry point
 ├─ pixel_refine_desktop/              Qt desktop application layer
-├─ taichi_library/                    native/AOT algorithm library
+├─ taichi_vision/                    native/AOT algorithm library
 │  ├─ taichi_aot/                     runtime, lifecycle, memory, backend facade
 │  ├─ taichi_algorithm/               single source for kernels and dispatch
 │  ├─ AOT_BACKEND_MATRIX.md           canonical backend/ABI contract
@@ -28,7 +28,7 @@ production baseline unless explicitly requested.
 
 ```text
 application
-  -> taichi_library.taichi_aot
+  -> taichi_vision.taichi_aot
   -> taichi_algorithm.aot_api
   -> taichi_aot.engine
   -> target bridge + taichi_c_api + target-qualified TCM
@@ -101,7 +101,7 @@ Independent block concurrency is not implied by `auto_pipeline`.
 ## Desktop application boundary
 
 `pixel_refine_desktop/` orchestrates UI, batch processing, denoising, alignment,
-and persistence. It calls the Taichi Library and must not duplicate Taichi
+and persistence. It calls `taichi_vision` and must not duplicate Taichi
 kernels or backend selection. Retired C++ spatial-similarity implementations
 and `denoising/Similarity.py` are not valid paths.
 
@@ -111,7 +111,7 @@ shared renderers own controls.
 
 ## Documentation and evidence
 
-Start at `taichi_library/documentation/README.md`. The API catalog covers all
+Start at `taichi_vision/documentation/README.md`. The API catalog covers all
 115 public `aot_api` function entry points. Algorithm labels are conservative:
 qualified, experimental, pending, or quarantined. Every qualification record
 must include backend, device, shape, dtype, command, observed result, lifecycle,

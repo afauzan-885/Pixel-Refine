@@ -34,7 +34,7 @@ def run_jit():
 
 def run_aot():
     os.environ["AOT_MODE"] = "1"
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_tile.compute_block_correlation import compute_block_correlation
     
     # Synthetic inputs

@@ -2,8 +2,243 @@ import os
 import numpy as np
 import psutil
 from .spatial_pipeline import process_in_gpu
-from taichi_library.taichi_aot.compute_block import compute_block
 
+
+# The outer crop/stitch implementation below is intentionally not enabled by
+# the production dispatcher yet.  It normalizes each crop before blending,
+# while the native full-frame graph accumulates unnormalised sums and divides
+# once at the end.  Those two operations are not mathematically equivalent at
+# tile boundaries, so enabling the crop path without a same-backend oracle
+# would silently change the denoising result.
+SPATIAL_BLOCK_PARITY_CERTIFIED = False
+SPATIAL_BLOCK_SIZES = (512, 768, 1024, 2048)
+# A block result is only eligible for promotion when both the image and raw
+# weight planes agree with the same-backend full-frame result.  Native paths
+# accumulate float32 values in a different tile order, so a small one-ulp-scale
+# envelope is needed for a useful gate.  This is a numerical validation
+# tolerance, not a visual-quality target; ``loss_score`` ranks candidates.
+SPATIAL_BLOCK_PARITY_ATOL = 1.5e-6
+SPATIAL_BLOCK_PARITY_RTOL = 0.0
+# Relative-L1 qualification lets us rank and accept numerically equivalent
+# float32 candidates even when tile-order accumulation creates a few extra
+# ulps.  This does not promote the block path by itself.
+SPATIAL_BLOCK_MAX_RELATIVE_LOSS = 2.0e-6
+
+
+def _normalize_spatial_block_size(value, default=1024):
+    """Return a bounded, aligned block size for diagnostics and telemetry."""
+
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        size = int(default)
+    size = max(64, size)
+    # Keep the same 16-pixel alignment used by the shared runtime policy.
+    return max(64, (size // 16) * 16)
+
+
+def _select_spatial_execution_mode(block_requested, block_size=1024):
+    """Select a safe spatial execution mode without pretending parity.
+
+    The helper is deliberately pure so tests can cover the policy without
+    initializing Taichi or a native backend.  The tile/halo implementation is
+    only eligible after a measured same-backend parity gate is added; until
+    then an explicit full-frame fallback is returned.
+    """
+
+    normalized_size = _normalize_spatial_block_size(block_size)
+    if bool(block_requested) and not SPATIAL_BLOCK_PARITY_CERTIFIED:
+        return {
+            "requested": True,
+            "enabled": False,
+            "mode": "full_frame",
+            "block_size": normalized_size,
+            "reason": "spatial tile/halo stitch parity is not certified",
+        }
+    return {
+        "requested": bool(block_requested),
+        "enabled": bool(block_requested),
+        "mode": "block" if bool(block_requested) else "full_frame",
+        "block_size": normalized_size,
+        "reason": "parity-certified" if bool(block_requested) else "not requested",
+    }
+
+
+def _spatial_parity_report(
+    full_result,
+    block_result,
+    *,
+    atol=SPATIAL_BLOCK_PARITY_ATOL,
+    rtol=SPATIAL_BLOCK_PARITY_RTOL,
+):
+    """Compare full-frame and block results without changing either result.
+
+    ``SpatialFusionProcessor.process`` returns either ``(image, weight,
+    count)`` or ``(image, weight, count, per_image_weights)`` depending on
+    the caller.  The helper accepts either that tuple or a mapping containing
+    ``image``/``weight``/``count``.  It is deliberately side-effect free so
+    an integration harness can run the two candidates on one backend and
+    decide whether a block profile is eligible for promotion.
+
+    A report is always returned, including shape/type/non-finite failures.
+    ``passed`` is the strict numerical promotion gate; ``quality_passed`` is
+    the relative-loss qualification used to rank an otherwise equivalent
+    candidate.  Callers must not infer success from finite output alone.
+    """
+
+    def _unpack(result):
+        if isinstance(result, dict):
+            return result.get("image"), result.get("weight"), result.get("count")
+        if isinstance(result, (tuple, list)) and len(result) >= 3:
+            return result[0], result[1], result[2]
+        return None, None, None
+
+    full_image, full_weight, full_count = _unpack(full_result)
+    block_image, block_weight, block_count = _unpack(block_result)
+    report = {
+        "passed": False,
+        "reason": None,
+        "atol": float(atol),
+        "rtol": float(rtol),
+        "image": {
+            "shape": None,
+            "dtype": None,
+            "max_abs": None,
+            "mean_abs": None,
+            "rmse": None,
+            "relative_l1": None,
+        },
+        "weight": {
+            "shape": None,
+            "dtype": None,
+            "max_abs": None,
+            "mean_abs": None,
+            "rmse": None,
+            "relative_l1": None,
+        },
+        # Worst-plane relative L1 is a useful ranking metric when a candidate
+        # does not meet the strict promotion tolerance.  It is deliberately
+        # informational for ranking; strict ``passed`` still reports the
+        # np.allclose result for both planes, while ``quality_passed`` applies
+        # the relative-loss budget plus structural/count checks.
+        "loss_score": None,
+        "quality_passed": False,
+        "count": {
+            "full": full_count,
+            "block": block_count,
+            "equal": False,
+            "positive": False,
+        },
+    }
+
+    if full_image is None or block_image is None:
+        report["reason"] = "missing image result"
+        return report
+    if full_weight is None or block_weight is None:
+        report["reason"] = "missing weight result"
+        return report
+
+    def _compare(name, left, right):
+        lhs = np.asarray(left)
+        rhs = np.asarray(right)
+        item = report[name]
+        item["shape"] = {
+            "full": tuple(lhs.shape),
+            "block": tuple(rhs.shape),
+            "equal": lhs.shape == rhs.shape,
+        }
+        item["dtype"] = {
+            "full": str(lhs.dtype),
+            "block": str(rhs.dtype),
+            "equal": lhs.dtype == rhs.dtype,
+        }
+        if lhs.shape != rhs.shape:
+            return False
+        if lhs.dtype != rhs.dtype:
+            return False
+        if not (np.all(np.isfinite(lhs)) and np.all(np.isfinite(rhs))):
+            item["finite"] = False
+            return False
+        item["finite"] = True
+        diff = np.abs(lhs.astype(np.float64, copy=False) - rhs.astype(np.float64, copy=False))
+        item["max_abs"] = float(np.max(diff)) if diff.size else 0.0
+        item["mean_abs"] = float(np.mean(diff)) if diff.size else 0.0
+        item["rmse"] = float(np.sqrt(np.mean(np.square(diff)))) if diff.size else 0.0
+        reference_l1 = float(np.mean(np.abs(lhs.astype(np.float64, copy=False)))) if lhs.size else 0.0
+        item["relative_l1"] = float(item["mean_abs"] / max(reference_l1, 1.0e-12))
+        item["passed"] = bool(np.allclose(lhs, rhs, atol=atol, rtol=rtol))
+        return item["passed"]
+
+    image_ok = _compare("image", full_image, block_image)
+    weight_ok = _compare("weight", full_weight, block_weight)
+    count_ok = full_count == block_count
+    report["count"]["equal"] = count_ok
+    if report["image"]["relative_l1"] is not None and report["weight"]["relative_l1"] is not None:
+        report["loss_score"] = max(
+            float(report["image"]["relative_l1"]),
+            float(report["weight"]["relative_l1"]),
+        )
+    # ``process_in_gpu`` intentionally catches native exceptions and returns
+    # an empty raw result with ``count == 0`` so the application can keep its
+    # same-backend recovery path alive.  A parity harness must not mistake two
+    # identical empty fallbacks for successful native execution.  Require at
+    # least one processed frame from both runners before accepting parity.
+    try:
+        count_positive = int(full_count) > 0 and int(block_count) > 0
+    except (TypeError, ValueError, OverflowError):
+        count_positive = False
+    report["count"]["positive"] = count_positive
+    report["quality_passed"] = bool(
+        count_ok
+        and count_positive
+        and report["loss_score"] is not None
+        and float(report["loss_score"]) <= SPATIAL_BLOCK_MAX_RELATIVE_LOSS
+    )
+    if not image_ok or not weight_ok:
+        report["reason"] = "image or weight mismatch"
+    elif not count_ok:
+        report["reason"] = "processed frame count mismatch"
+    elif not count_positive:
+        report["reason"] = "no processed frames; native runner likely failed"
+    else:
+        report["reason"] = "parity passed"
+        report["passed"] = True
+    return report
+
+
+def run_spatial_block_parity_probe(
+    full_frame_runner,
+    block_runner,
+    *,
+    backend="unknown",
+    device="unknown",
+    block_size=None,
+    atol=SPATIAL_BLOCK_PARITY_ATOL,
+    rtol=SPATIAL_BLOCK_PARITY_RTOL,
+):
+    """Run a same-backend full/block comparison for an integration harness.
+
+    The runners are supplied by the caller so this helper never initializes a
+    second Taichi context or silently changes backend.  The caller should bind
+    both runners to the same engine/device, shape, dtype, and parameters.  A
+    successful report is evidence for that exact configuration only; it does
+    not mutate :data:`SPATIAL_BLOCK_PARITY_CERTIFIED`.
+    """
+
+    report = _spatial_parity_report(
+        full_frame_runner(),
+        block_runner(),
+        atol=atol,
+        rtol=rtol,
+    )
+    report.update(
+        {
+            "backend": str(backend),
+            "device": str(device),
+            "block_size": None if block_size is None else int(block_size),
+        }
+    )
+    return report
 
 
 def get_ram_usage():
@@ -18,6 +253,113 @@ class SpatialFusionProcessor:
 
     def __init__(self):
         pass
+
+    @staticmethod
+    def _process_image_blocks(
+        images,
+        reference_image_float,
+        ref_image_h,
+        ref_image_w,
+        backend_args,
+        block_size,
+        halo,
+        update_progress=None,
+        stop_requested=None,
+        return_raw=False,
+    ):
+        """Run AOT on bounded crops and stitch unnormalised sums.
+
+        Each crop requests raw ``sum`` and ``weight`` planes from
+        :func:`process_in_gpu`; only its disjoint core is copied into the
+        global accumulator.  This avoids blending already-normalised crop
+        results.  The dispatcher keeps this helper behind the parity gate.
+        """
+        if not SPATIAL_BLOCK_PARITY_CERTIFIED:
+            raise RuntimeError(
+                "[SpatialFusion][Block] crop/stitch execution is disabled: "
+                "same-backend parity has not been certified"
+            )
+        block_size = max(64, int(block_size))
+        halo = max(0, int(halo))
+        channels = int(reference_image_float.shape[2]) if reference_image_float.ndim == 3 else 1
+        full_sum = np.zeros((ref_image_h, ref_image_w, channels), dtype=np.float32)
+        full_weight = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
+        processed_total = 0
+        blocks = [
+            (y0, min(y0 + block_size, ref_image_h), x0, min(x0 + block_size, ref_image_w))
+            for y0 in range(0, ref_image_h, block_size)
+            for x0 in range(0, ref_image_w, block_size)
+        ]
+
+        for block_index, (y0, y1, x0, x1) in enumerate(blocks):
+            if stop_requested and stop_requested():
+                break
+            cy0, cy1 = max(0, y0 - halo), min(ref_image_h, y1 + halo)
+            cx0, cx1 = max(0, x0 - halo), min(ref_image_w, x1 + halo)
+            crop_h, crop_w = cy1 - cy0, cx1 - cx0
+            crop_images = [
+                np.ascontiguousarray(frame[cy0:cy1, cx0:cx1])
+                for frame in images
+            ]
+            crop_reference = np.ascontiguousarray(
+                reference_image_float[cy0:cy1, cx0:cx1]
+            )
+            local_args = dict(backend_args)
+            tile_h = max(2, min(int(backend_args["tile_h"]), crop_h))
+            tile_w = max(2, min(int(backend_args["tile_w"]), crop_w))
+            local_args.update(
+                images=crop_images,
+                reference_image_float=crop_reference,
+                ref_image_h=crop_h,
+                ref_image_w=crop_w,
+                work_res_h=crop_h,
+                work_res_w=crop_w,
+                tile_h=tile_h,
+                tile_w=tile_w,
+                update_progress=None,
+                return_raw=True,
+            )
+            global_rows = np.asarray(backend_args.get("row_starts", []), dtype=np.int64)
+            global_cols = np.asarray(backend_args.get("col_starts", []), dtype=np.int64)
+
+            def _crop_starts(global_starts, origin, extent, tile):
+                if global_starts.size:
+                    selected = global_starts[
+                        (global_starts >= origin)
+                        & (global_starts + tile <= origin + extent)
+                    ]
+                    if selected.size:
+                        return np.ascontiguousarray(selected - origin, dtype=np.int32)
+                return np.asarray([0], dtype=np.int32)
+
+            local_args["row_starts"] = _crop_starts(global_rows, cy0, crop_h, tile_h)
+            local_args["col_starts"] = _crop_starts(global_cols, cx0, crop_w, tile_w)
+            local_args["base_window"] = None
+
+            count, crop_sum, crop_weight, _ = process_in_gpu(**local_args)
+            if crop_sum is None or crop_weight is None:
+                continue
+            # Halo pixels provide context only.  Stitch each block's disjoint
+            # core exactly once to avoid double counting at overlaps.
+            core_y0, core_y1 = y0 - cy0, y1 - cy0
+            core_x0, core_x1 = x0 - cx0, x1 - cx0
+            full_sum[y0:y1, x0:x1] += crop_sum[core_y0:core_y1, core_x0:core_x1]
+            full_weight[y0:y1, x0:x1] += crop_weight[core_y0:core_y1, core_x0:core_x1]
+            processed_total = max(processed_total, int(count))
+            if update_progress:
+                update_progress(
+                    int((block_index + 1) * 100 / max(1, len(blocks))),
+                    f"Spatial block {block_index + 1}/{len(blocks)}",
+                )
+            del crop_images, crop_reference, crop_sum, crop_weight
+
+        if not return_raw:
+            np.divide(
+                full_sum,
+                np.maximum(full_weight[..., None], np.float32(1e-6)),
+                out=full_sum,
+            )
+        return processed_total, full_sum, full_weight, 0.0
 
     def process(
         self,
@@ -54,6 +396,25 @@ class SpatialFusionProcessor:
             raise RuntimeError(
                 "SpatialFusionProcessor requires AOT_MODE=1; the legacy C++ "
                 "spatial-fusion path has been removed."
+            )
+
+        # MFDenoiser's shared governor may request 1024-tile processing for
+        # this batch.  Keep that request visible, but do not route into the
+        # experimental crop/stitch helper: it blends already-normalized crop
+        # results and therefore has no proven parity with the native graph.
+        # This explicit fallback prevents a log line claiming ``mode=block``
+        # from being mistaken for an actually active spatial block kernel.
+        spatial_block_policy = _select_spatial_execution_mode(
+            unused_kwargs.get("spatial_block_requested", False),
+            unused_kwargs.get("spatial_block_size", 1024),
+        )
+        if spatial_block_policy["requested"]:
+            print(
+                "[SpatialFusion][Block] requested="
+                f"{spatial_block_policy['block_size']}px "
+                f"enabled={spatial_block_policy['enabled']} "
+                f"fallback={spatial_block_policy['mode']} "
+                f"reason={spatial_block_policy['reason']}"
             )
 
         # 1. Initialization and Work Resolution
@@ -107,13 +468,12 @@ class SpatialFusionProcessor:
 
         work_res_h, work_res_w = (work_res_h // 2) * 2, (work_res_w // 2) * 2
 
-        # Tiling. A standard Hanning window is exactly zero at tile edges; when
-        # the first/last tile touches the image border, that creates black
-        # borders in the final normalization. Keep the feathered shape but clamp
-        # it to a small positive floor so every frame edge remains covered.
-        win_y = np.maximum(np.hanning(tile_h).astype(np.float32), 1e-4)
-        win_x = np.maximum(np.hanning(tile_w).astype(np.float32), 1e-4)
-        base_window = np.outer(win_y, win_x).astype(np.float32)
+        # ``phase2_fine_analysis`` retains ``base_window`` in its historical
+        # graph signature, but the maintained AOT kernel derives the window
+        # from ``tile_h/tile_w``.  Avoid constructing a redundant host Hanning
+        # matrix here; the active pipeline passes ``None`` for this compatibility
+        # argument and uses the scalar ABI value internally.
+        base_window = None
         step_y, step_x = max(int(tile_h * (1 - overlap)), 1), max(
             int(tile_w * (1 - overlap)), 1
         )
@@ -148,6 +508,7 @@ class SpatialFusionProcessor:
             "work_res_w": work_res_w,
             "tile_h": tile_h,
             "tile_w": tile_w,
+            "overlap": overlap,
             "row_starts": row_starts,
             "col_starts": col_starts,
             "base_window": base_window,
@@ -171,16 +532,29 @@ class SpatialFusionProcessor:
             **unused_kwargs,
         }
 
-        # Spatial fusion is already tile-based at the image level.  Declare a
-        # fixed 1024 compute-block scope for the backend dispatch as well, so
-        # the AOT planner/cache can associate every stage of this invocation
-        # with the same residency target without changing the public API.
-        with compute_block(
-            block_size=1024,
-            mode="force",
-            name="spatial_fusion",
-            detect_slicing=True,
-        ):
+        if spatial_block_policy["enabled"]:
+            halo = max(
+                int(tile_h),
+                int(tile_w),
+                int(unused_kwargs.get("spatial_block_halo", 16)),
+            )
+            print(
+                "[SpatialFusion][Block] native raw-sum path enabled: "
+                f"size={spatial_block_policy['block_size']}px halo={halo}px"
+            )
+            res = self._process_image_blocks(
+                images=images,
+                reference_image_float=reference_image_float,
+                ref_image_h=ref_image_h,
+                ref_image_w=ref_image_w,
+                backend_args=backend_args,
+                block_size=spatial_block_policy["block_size"],
+                halo=halo,
+                update_progress=update_progress,
+                stop_requested=stop_requested,
+                return_raw=return_raw,
+            )
+        else:
             res = process_in_gpu(**backend_args)
 
         processed_frames, final_sum_img, sum_weight_full, _ = res

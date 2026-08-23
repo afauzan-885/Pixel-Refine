@@ -77,7 +77,7 @@ class SpatialFusionProcessor:
         Raises:
             RuntimeError: If GPU AOT engine is not available.
         """
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
             taichi_bridge,
         )

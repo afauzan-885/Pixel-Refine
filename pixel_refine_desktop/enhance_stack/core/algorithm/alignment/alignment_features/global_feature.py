@@ -28,7 +28,7 @@ except ImportError:
 
 # Taichi AOT for GPU operations
 try:
-    import taichi_library.taichi_aot as ta_aot
+    import taichi_vision.taichi_aot as ta_aot
 
     TAICHI_AOT_AVAILABLE = True
 except Exception:
@@ -313,7 +313,8 @@ def _prepare_image_array_from_raw(
         if not RAWPY_AVAILABLE:
             return None
 
-        import taichi_library.taichi_aot as ta_aot
+        import taichi_vision.taichi_aot as ta_aot
+        import config as app_config
 
         # Read the Bayer plane/calibration only.  Calling demosaic(path) would
         # make the API re-open rawpy internally and hide orientation handling.
@@ -346,6 +347,36 @@ def _prepare_image_array_from_raw(
         )
 
         os.environ["PIXEL_REFINE_AOT_MODE"] = "1"
+
+        # RAW demosaic is often the first native stage executed, before the
+        # denoiser has a chance to configure its runtime policy.  Establish
+        # the shared block policy here so the existing native tiled demosaic
+        # executor is selected for large frames instead of allocating a full
+        # resident graph first.
+        try:
+            block_settings = app_config.get_compute_block_settings()
+            block_size = max(64, int(block_settings.get("block_size", 1024)))
+            frame_mp = float(bayer.shape[0] * bayer.shape[1]) / 1_000_000.0
+            mode = str(block_settings.get("mode", "block")).lower()
+            block_enabled = bool(block_settings.get("enabled", True)) and (
+                mode in {"block", "always"}
+                or (mode == "auto" and frame_mp > float(block_settings.get("threshold_mp", 12.0)))
+            )
+            active_blocks = ta_aot.get_block_config()
+            if (
+                bool(getattr(active_blocks, "enabled", False)) != block_enabled
+                or active_blocks.normalized_size()[0] != block_size
+            ):
+                ta_aot.set_block_mode(
+                    enabled=block_enabled,
+                    size=block_size,
+                    threshold_bytes=0,
+                    adaptive_memory=True,
+                )
+        except Exception as block_exc:
+            # Demosaic remains functional on runtimes that do not expose the
+            # optional block policy; the native full-frame path is preserved.
+            print(f"[RAW Demosaic] block policy unavailable: {block_exc}")
 
         if alignment_tonemapping_linear:
             gray_full = ta_aot.demosaic(
@@ -804,7 +835,7 @@ def save_image(image, output_path, reference_image_path=None):
 
         # Apply end-to-end Natural Tone Mapping if the output array is linear float32/uint16
         try:
-            from taichi_library import taichi_aot
+            from taichi_vision import taichi_aot
             from config import DEFAULT_TONE_MAPPING_PARAMS
 
             if image_to_save.dtype in (np.float32, np.float64):
@@ -1471,7 +1502,7 @@ def apply_s_curve_float32(img: np.ndarray, strength: float = 4.0, pivot: float =
 
 
 # preprocess_in_python has been moved to:
-# taichi_library.taichi_algorithm.preprocess
+# taichi_vision.taichi_algorithm.preprocess
 # Use: preprocess.preprocess_in_python_gpu() instead
 # This provides automatic GPU/CPU fallback with identical API
 

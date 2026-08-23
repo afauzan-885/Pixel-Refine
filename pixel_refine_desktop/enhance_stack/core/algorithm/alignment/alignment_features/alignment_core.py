@@ -13,7 +13,7 @@ import onnxruntime as ort
 
 # Taichi AOT for GPU Farneback
 try:
-    import taichi_library.taichi_aot as ta_aot
+    import taichi_vision.taichi_aot as ta_aot
 
     TAICHI_AOT_AVAILABLE = True
 except Exception:
@@ -25,7 +25,7 @@ except Exception:
 
 def get_taichi_worker():
     """Compatibility wrapper for centralized Taichi worker."""
-    from taichi_library.taichi_algorithm.taichi_worker import _get_worker
+    from taichi_vision.taichi_algorithm.taichi_worker import _get_worker
 
     worker = _get_worker()
     # Add compatibility method here only if the alignment contract requires it.
@@ -558,6 +558,7 @@ def perform_alignment_gpu(
     progress_end=40,
     return_format: str = "numpy_u16",
     optical_flow_type="alignment_tile",
+    return_flow: bool = False,
     **kwargs,
 ):
     """
@@ -565,7 +566,7 @@ def perform_alignment_gpu(
     Berkomunikasi langsung dengan compute_flow (AOT) via AOTEngine dengan
     suntikan matriks parameter radius_map dinamis per frame.
     """
-    from taichi_library.taichi_aot import get_engine
+    from taichi_vision.taichi_aot import get_engine
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
         taichi_bridge,
     )
@@ -582,7 +583,7 @@ def perform_alignment_gpu(
     active_arch = str(getattr(engine, "arch", "vulkan")).lower()
 
     if flow_backend == "horn_schunck":
-        # Horn-Schunck: TCM ada di taichi_library/taichi_algorithm/aot_tcm/
+        # Horn-Schunck: TCM ada di taichi_vision/taichi_algorithm/aot_tcm/
         hs_iters = kwargs.get("hs_iters", 20)
         flow_module_name = f"horn_schunck_{active_arch}.tcm"
         flow_graph_name = f"hs_align_3layer_{hs_iters}"
@@ -628,21 +629,23 @@ def perform_alignment_gpu(
 
     print(f"[GPU Alignment] Processing {num_images - 1} images with Taichi GPU...")
     print(f"[GPU Alignment] Return format: {return_format}")
+    if return_flow:
+        print("[GPU Alignment] Capturing dense flow for downstream consumer.")
 
     try:
         # Definisikan GPU alignment task loop
         def _run_gpu_alignment_loop():
-            import taichi_library.taichi_aot as taichi_aot
+            import taichi_vision.taichi_aot as taichi_aot
 
             file_dir = os.path.dirname(os.path.abspath(__file__))
             mod = None
             if flow_module_name is not None:
                 if flow_backend in ("horn_schunck", "farneback_jit", "farneback_aot"):
-                    # Horn-Schunck & Farneback AOT TCM ada di taichi_library/taichi_algorithm/aot_tcm/
+                    # Horn-Schunck & Farneback AOT TCM ada di taichi_vision/taichi_algorithm/aot_tcm/
                     tcm_path = os.path.abspath(
                         os.path.join(
                             file_dir,
-                            "../../../../../../taichi_library/taichi_algorithm/aot_tcm",
+                            "../../../../../../taichi_vision/taichi_algorithm/aot_tcm",
                             flow_module_name,
                         )
                     )
@@ -761,6 +764,7 @@ def perform_alignment_gpu(
                         gc.collect()
 
             writer_thread = None
+            flow_results = {}
             if h5_file_handle is not None:
                 writer_thread = threading.Thread(target=bg_writer_worker, daemon=True)
                 writer_thread.start()
@@ -789,7 +793,7 @@ def perform_alignment_gpu(
                     if flow_backend in ("farneback_jit", "farneback_aot"):
                         # Farneback AOT: multi-step pipeline using pre-compiled TCM graphs
                         # 1. Pre-compute Gaussian constants for polynomial expansion
-                        from taichi_library.taichi_algorithm.optical_flow.farneback_flow import (
+                        from taichi_vision.taichi_algorithm.optical_flow.farneback_flow import (
                             prepare_gaussian_constants,
                             compute_smoothing_weights,
                         )
@@ -965,6 +969,46 @@ def perform_alignment_gpu(
                     smooth_flow_buf = taichi_aot.smooth_flow_gpu(
                         flow_l0, sigma=1.0, kernel_size=5, dst=smooth_flow_buf
                     )
+
+                    if return_flow:
+                        # The alignment graph operates at work resolution;
+                        # expose a full-resolution dense LR flow so consumers
+                        # such as SplattingSR can reuse the exact dispatch
+                        # instead of estimating motion a second time.
+                        flow_work = np.asarray(smooth_flow_buf.to_numpy(), dtype=np.float32)
+                        full_h_ref = int(kwargs.get("full_h_ref", images[i].shape[0]))
+                        full_w_ref = int(kwargs.get("full_w_ref", images[i].shape[1]))
+                        if flow_work.shape[:2] != (full_h_ref, full_w_ref):
+                            sx = float(full_w_ref) / float(max(1, flow_work.shape[1]))
+                            sy = float(full_h_ref) / float(max(1, flow_work.shape[0]))
+                            flow_full = np.stack(
+                                [
+                                    cv2.resize(flow_work[..., 0], (full_w_ref, full_h_ref), interpolation=cv2.INTER_LINEAR) * np.float32(sx),
+                                    cv2.resize(flow_work[..., 1], (full_w_ref, full_h_ref), interpolation=cv2.INTER_LINEAR) * np.float32(sy),
+                                ],
+                                axis=-1,
+                            )
+                        else:
+                            flow_full = flow_work
+                        flow_results[i] = np.ascontiguousarray(flow_full, dtype=np.float32)
+
+                    # Downstream confidence/splat pipelines may request only
+                    # the shared flow.  Avoid constructing a second full
+                    # aligned image and its remap buffers in that mode.
+                    if return_flow and return_format == "flow_only":
+                        if update_progress:
+                            prog_fraction = i / (num_images - 1)
+                            update_progress(
+                                int(
+                                    progress_start
+                                    + prog_fraction * (progress_end - progress_start)
+                                ),
+                                f"Alignment flow {i}/{num_images - 1} (GPU)...",
+                            )
+                        engine.sync()
+                        for buf in comp_pyramid:
+                            buf.release()
+                        continue
 
                     if not use_flow_remap:
                         map_x_gpu, map_y_gpu = taichi_aot.build_flow_maps(
@@ -1174,7 +1218,7 @@ def perform_alignment_gpu(
                         pass
                 gc.collect()
 
-            return True
+            return (True, flow_results) if return_flow else True
 
         is_aot = os.environ.get("PIXEL_REFINE_AOT_MODE") == "1"
         if is_aot:
@@ -1264,7 +1308,7 @@ def perform_image_alignment(
     # --- Preprocessing referensi (CPU MURNI tanpa Taichi) ---
     # Note: Farneback & Tile alignment use grayscale. Raft uses color.
     if optical_flow_type == "raft":
-        from taichi_library.taichi_algorithm import (
+        from taichi_vision.taichi_algorithm import (
             preprocess,
         )
 

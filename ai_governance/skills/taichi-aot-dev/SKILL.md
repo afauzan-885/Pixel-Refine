@@ -7,10 +7,10 @@ description: Tool-neutral Taichi AOT workflow for Pixel Refine. Use for TCM comp
 
 ## Scope and safety barriers
 
-- Public APIs in `taichi_library.taichi_aot` and
-  `taichi_library.taichi_algorithm.aot_api` must remain backward compatible
+- Public APIs in `taichi_vision.taichi_aot` and
+  `taichi_vision.taichi_algorithm.aot_api` must remain backward compatible
   unless the user explicitly requests an API change.
-- `taichi_library/taichi_aot/engine.py` owns backend selection, runtime
+- `taichi_vision/taichi_aot/engine.py` owns backend selection, runtime
   lifecycle, artifact loading, memory policy, cache residency, and block
   planning. Do not change it without explicit approval.
 - Correctness and backend consistency take priority over throughput. An

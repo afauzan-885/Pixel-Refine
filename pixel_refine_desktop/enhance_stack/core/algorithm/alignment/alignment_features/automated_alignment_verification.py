@@ -10,9 +10,9 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from taichi_library.taichi_aot.engine import AOTEngine
+from taichi_vision.taichi_aot.engine import AOTEngine
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import taichi_bridge
-from taichi_library import taichi_aot
+from taichi_vision import taichi_aot
 
 def calculate_ssim(img1, img2):
     """Menghitung SSIM (Structural Similarity Index) secara manual untuk kontrol yang ketat"""
@@ -47,7 +47,7 @@ def run_strict_verification():
     print("="*70)
     
     engine = AOTEngine()
-    tcm_path = os.path.join(project_root, "taichi_library", "taichi_algorithm", "aot_tcm", "optical_flow_vulkan.tcm")
+    tcm_path = os.path.join(project_root, "taichi_vision", "taichi_algorithm", "aot_tcm", "optical_flow_vulkan.tcm")
     mod = engine.load(tcm_path)
     
     img_path = os.path.join(project_root, "test_algorithm", "IMG_20250401_182043_B002.dng")

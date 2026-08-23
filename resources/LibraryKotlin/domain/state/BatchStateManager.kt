@@ -14,29 +14,32 @@ import org.pixelrefine.genericui.domain.validation.ImageValidator
  * State Manager untuk pengelolaan Batch & Gambar — Reaktif, Ringan, Zero-Boilerplate.
  */
 class BatchStateManager(initialBatches: List<BatchItem> = emptyList()) {
+    private val lock = Any()
     val batches = mutableStateListOf<BatchItem>().apply { addAll(initialBatches) }
     var activeBatchIndex by mutableStateOf(if (initialBatches.isNotEmpty()) 0 else -1)
 
     val activeBatch: BatchItem?
-        get() = if (activeBatchIndex in batches.indices) batches[activeBatchIndex] else null
+        get() = synchronized(lock) {
+            if (activeBatchIndex in batches.indices) batches[activeBatchIndex] else null
+        }
 
-    fun selectBatch(index: Int) {
+    fun selectBatch(index: Int) = synchronized(lock) {
         if (index in batches.indices) {
             activeBatchIndex = index
         }
     }
 
-    fun addBatch(name: String, imagePaths: List<String> = emptyList()): BatchItem {
+    fun addBatch(name: String, imagePaths: List<String> = emptyList()): BatchItem = synchronized(lock) {
         val validated = ImageValidator.validatePaths(imagePaths).accepted
         val newBatch = BatchItem(name = name, images = validated)
         batches.add(newBatch)
         if (activeBatchIndex == -1) {
             activeBatchIndex = batches.lastIndex
         }
-        return newBatch
+        newBatch
     }
 
-    fun removeBatch(index: Int) {
+    fun removeBatch(index: Int) = synchronized(lock) {
         if (index in batches.indices) {
             batches.removeAt(index)
             if (batches.isEmpty()) {
@@ -47,7 +50,7 @@ class BatchStateManager(initialBatches: List<BatchItem> = emptyList()) {
         }
     }
 
-    fun addImagesToActiveBatch(paths: List<String>) {
+    fun addImagesToActiveBatch(paths: List<String>) = synchronized(lock) {
         val current = activeBatch ?: return
         val existingPaths = current.images.map { it.path }.toSet()
         val result = ImageValidator.validatePaths(paths, existingPaths)

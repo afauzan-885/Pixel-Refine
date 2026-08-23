@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import onnxruntime as ort
 from pathlib import Path
-from taichi_library.backend_config import normalize_backend
+from taichi_vision.backend_config import normalize_backend
 from ...shared_utils import (
     resolve_batch_config,
     restore_output_dtype as _restore_output_dtype,
@@ -249,7 +249,7 @@ class SmartFusionDenoisingAlgorithm:
         # the AI weight-map model. The original normalized frame remains the
         # only source used by the final fusion accumulator below.
         try:
-            from taichi_library.taichi_aot import naturalTonemapping
+            from taichi_vision.taichi_aot import naturalTonemapping
             from config import CALCULATION_TONE_MAPPING_PARAMS
 
             reference_weight_source = naturalTonemapping(

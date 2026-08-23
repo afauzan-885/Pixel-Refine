@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+build/
+dist/
+
+# Local bridge build sandboxes; runtime loads only aot_py/aot_dll/<backend>.
+taichi_algorithm/aot_py/issue*_bridge/
+taichi_algorithm/aot_py/**/*.obj
+taichi_algorithm/aot_py/**/*.exp
+taichi_algorithm/aot_py/**/*.lib
+
+# Runtime expansion of packed CPU AOT archives.
+taichi_algorithm/aot_tcm/**/.cpu_aot_cache/

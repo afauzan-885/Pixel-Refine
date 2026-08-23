@@ -6,6 +6,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.produce
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 
@@ -50,7 +51,8 @@ class ImageStreamer<T>(
             }
             emit(StreamedImage(index = index, total = total, path = path, data = data))
         }
-    }.flowOn(Dispatchers.Default)
+    }.buffer(capacity = maxQueueSize, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.SUSPEND)
+    .flowOn(Dispatchers.Default)
 
     /**
      * Producer-Consumer Channel stream untuk konsumsi paralel dengan backpressure.

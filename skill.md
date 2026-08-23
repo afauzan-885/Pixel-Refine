@@ -6,9 +6,9 @@ contract in `agen.md`.
 
 ## Scope and barriers
 
-- Preserve public APIs in `taichi_library.taichi_aot` and
-  `taichi_library.taichi_algorithm.aot_api`.
-- Treat `taichi_library/taichi_aot/engine.py` as the lifecycle/backend source
+- Preserve public APIs in `taichi_vision.taichi_aot` and
+  `taichi_vision.taichi_algorithm.aot_api`.
+- Treat `taichi_vision/taichi_aot/engine.py` as the lifecycle/backend source
   of truth. Do not change it without explicit approval.
 - Never mix target-qualified TCM, bridge, C API, OS, architecture, vendor, or
   ABI profiles.
@@ -52,7 +52,7 @@ are `taichi_algorithm/compile_common_tcm.py`, `compile_cast_tcm.py`, and
 ## Public API and backend selection
 
 ```python
-from taichi_library import taichi_aot as aot
+from taichi_vision import taichi_aot as aot
 ```
 
 Set `PIXEL_REFINE_AOT_ARCH` to `cpu`, `cuda`, `vulkan`, `opengl`, or `gles`
@@ -123,9 +123,9 @@ telemetry. ARM/GLES static artifacts are not mobile runtime qualification.
 Useful commands from the project venv:
 
 ```powershell
-python -m taichi_library.taichi_algorithm.aot_py.compile_aot_backend_suite --help
-python -m taichi_library.taichi_algorithm.aot_py.tests.test_comprehensif --fast
-python -m taichi_library.taichi_algorithm.aot_py.validate_tcm_abi --help
+python -m taichi_vision.taichi_algorithm.aot_py.compile_aot_backend_suite --help
+python -m taichi_vision.taichi_algorithm.aot_py.tests.test_comprehensif --fast
+python -m taichi_vision.taichi_algorithm.aot_py.validate_tcm_abi --help
 ```
 
 ## UI and application integration
@@ -142,5 +142,5 @@ similarity path or deleted `denoising/Similarity.py`.
 - Keep comments/docstrings focused on non-obvious contracts.
 - Remove only artifacts proven unreferenced by manifests, resolver, packaging,
   and tests.
-- Keep documentation under `taichi_library/documentation/`; retain only the
+- Keep documentation under `taichi_vision/documentation/`; retain only the
   root canonical `AOT_BACKEND_MATRIX.md` outside that hub.

@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from taichi_library.release_bundle import (
+from taichi_vision.release_bundle import (
     cleanup_aot_bundle,
     plan_aot_bundle,
     plan_runtime_payload,
@@ -26,14 +26,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 MAIN_SCRIPT = PROJECT_ROOT / "main_desktop.py"
 OUTPUT_NAME = os.environ.get("PIXEL_REFINE_PYINSTALLER_NAME", "Pixel Refine")
 ICON_PATH = PROJECT_ROOT / "resources" / "assets" / "images" / "Logo_Pixel_Refine.ico"
-AOT_TCM_ROOT = PROJECT_ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm"
-AOT_DLL_ROOT = PROJECT_ROOT / "taichi_library" / "taichi_algorithm" / "aot_py" / "aot_dll"
+AOT_TCM_ROOT = PROJECT_ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
+AOT_DLL_ROOT = PROJECT_ROOT / "taichi_vision" / "taichi_algorithm" / "aot_py" / "aot_dll"
 MANIFEST_PATH = AOT_TCM_ROOT / "target_manifest.json"
 LLVM20_RELEASE_ROOT = Path(
-    os.environ.get(
-        "PIXEL_REFINE_RUNTIME_ROOT",
-        r"D:\development_build\taichi_runtime_llvm20\release",
-    )
+    os.environ.get("PIXEL_REFINE_RUNTIME_ROOT", "")
+    or (PROJECT_ROOT / "runtime")
 )
 _release_candidate = LLVM20_RELEASE_ROOT / "release"
 if (_release_candidate / "RELEASE_MANIFEST.json").is_file() and (

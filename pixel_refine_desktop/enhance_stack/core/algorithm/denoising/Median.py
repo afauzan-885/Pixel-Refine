@@ -4,7 +4,7 @@ class MedianMerge:
     """Median merging backend."""
     
     def merge_tiles(self, aligned_tiles):
-        from taichi_library.taichi_aot.engine import TaichiGPUBuffer
+        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
         aligned_tiles_np = [
             t.to_numpy() if isinstance(t, TaichiGPUBuffer) else t
             for t in aligned_tiles

@@ -50,12 +50,10 @@ cd pixel_refine_mobile_kotlin
 .\run_dev.bat        # atau: powershell -File run_dev.ps1
 ```
 
-Atau manual (toolchain di `D:\development_build`):
+Atau manual dengan toolchain yang disediakan oleh environment:
 ```powershell
-$env:JAVA_HOME="D:\development_build\jdk17\jdk-17.0.20+8"
-$env:ANDROID_HOME="D:\development_build\android-sdk"
-$env:GRADLE_USER_HOME="D:\development_build\.gradle"
-$env:Path="$env:JAVA_HOME\bin;D:\development_build\gradle-8.10.2\bin;$env:Path"
+$env:PIXEL_REFINE_MOBILE_TOOLCHAIN_ROOT="<toolchain-root>"
+# Atau set JAVA_HOME, ANDROID_HOME, GRADLE_USER_HOME dan gradle pada PATH.
 cd pixel_refine_mobile_kotlin
 gradle :composeApp:run          # ← task dev run (bukan :composeApp:desktopRun)
 ```
@@ -75,9 +73,10 @@ gradle :composeApp:assembleDebug
 
 Atau buka folder ini di **Android Studio** → biarkan sinkronisasi → **Run ▶**.
 Catatan: build APK memerlukan SDK Android lengkap (sudah disiapkan di
-`D:\development_build\android-sdk` dengan platform android-35 + build-tools 35.0.0).
+toolchain yang dikonfigurasi dengan platform android-35 + build-tools 35.0.0).
 Toolchain build (JDK 17, Gradle, Android SDK, cache) tersentralisasi di
-`D:\development_build` — lihat `ai_governance/knowledge/build-config/build-toolchain.md`.
+`PIXEL_REFINE_MOBILE_TOOLCHAIN_ROOT`; lihat
+`ai_governance/knowledge/build-config/build-toolchain.md`.
 
 ## Konsistensi gaya (1:1)
 

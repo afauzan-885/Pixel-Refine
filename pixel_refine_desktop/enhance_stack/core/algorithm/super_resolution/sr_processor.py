@@ -1,12 +1,12 @@
 """
-SuperResolutionProcessor — Per-tile weighted super-resolution.
+SuperResolutionProcessor — Per-tile splatting super-resolution.
 
 Implements TileProcessor for MFDenoiser's universal tiling orchestrator.
-Each tile: create TaichiWSR solver, run iterative optimization, return HR result.
+Each tile: create the SplatSR AOT solver, run iterative optimization, return HR result.
 
 Algorithm (per tile):
   1. Extract LR tiles from all frames
-  2. Create TaichiWSR solver with LR data, weight maps, shifts
+  2. Create SplatSR solver with LR data, weight maps, shifts
   3. Run iterative optimization (120 steps by default)
   4. Return HR tile (scale × input size)
 """
@@ -22,7 +22,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser impo
 
 
 class SuperResolutionProcessor(TileProcessor):
-    """Weighted Super-Resolution processor (per-tile).
+    """splattingSR processor (per-tile).
 
     Uses AOT engine for GPU-accelerated iterative SR.
     Output scale: configurable (default 2:1).
@@ -41,7 +41,7 @@ class SuperResolutionProcessor(TileProcessor):
 
     def preprocess_batch(self, batch_float, shared_data):
         """Compute sub-pixel shifts and weight maps from the loaded batch."""
-        from taichi_library.taichi_aot import phase_correlation
+        from taichi_vision.taichi_aot import phase_correlation
 
         if len(batch_float) < 2:
             shared_data["error"] = "Need at least 2 images for SR"
@@ -98,8 +98,8 @@ class SuperResolutionProcessor(TileProcessor):
         if "error" in shared_data:
             return None
 
-        from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.weighted_sr import (
-            TaichiWSR,
+        from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.splat_sr import (
+            TaichiSplatSR,
         )
 
         lr_frames = shared_data["lr_frames"]
@@ -119,7 +119,7 @@ class SuperResolutionProcessor(TileProcessor):
         num_frames = tile_lr.shape[0]
 
         # Create SR solver (AOT engine handles GPU allocation)
-        solver = TaichiWSR(
+        solver = TaichiSplatSR(
             lr_shape=(tile_h, tile_w),
             hr_shape=(hr_h, hr_w),
             num_frames=num_frames,

@@ -75,7 +75,10 @@ object AlgorithmRegistry {
 
     val SuperResolutionOptions = listOf(
         AlgorithmOption("No Super Resolution", "Process without resolution upscaling"),
-        AlgorithmOption("WSR", "Weighted-Spatial Multi-Frame Super-Resolution 2x/4x"),
+        AlgorithmOption(
+            "splattingSR",
+            "Confidence-guided subpixel splatting multi-frame super-resolution 2x/4x",
+        ),
     )
 
     fun getOptions(category: AlgorithmCategory): List<AlgorithmOption> = when (category) {

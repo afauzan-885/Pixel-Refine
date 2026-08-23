@@ -64,7 +64,7 @@ class BlockMatchingGPU(LucasKanadeGPU):
     DEVICE_RESERVATION = "block_matching_frame"
 
     def _calculate_flow_host_native(self, reference_gray, target_gray, config):
-        from taichi_library.taichi_algorithm import calcOpticalFlowBlockMatching
+        from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
         flow = calcOpticalFlowBlockMatching(
             np.ascontiguousarray(reference_gray, dtype=np.float32),
             np.ascontiguousarray(target_gray, dtype=np.float32),
@@ -76,7 +76,7 @@ class BlockMatchingGPU(LucasKanadeGPU):
 
     def _build_opengl_safe_params(self, reference_gray, config):
         params = self._build_lk_params(config)
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
             # Keep Block Matching at level-zero on Intel OpenGL. Its graph
             # shares SSBO bindings with the Lucas pyramid and some drivers
@@ -98,7 +98,7 @@ class BlockMatchingGPU(LucasKanadeGPU):
         if reference is None or target is None:
             return super().align_frame(*args, **kwargs)
         try:
-            from taichi_library.taichi_aot import naturalTonemapping
+            from taichi_vision.taichi_aot import naturalTonemapping
             from config import CALCULATION_TONE_MAPPING_PARAMS
             matching_reference = naturalTonemapping(
                 reference, return_gpu=False, **CALCULATION_TONE_MAPPING_PARAMS
@@ -169,7 +169,7 @@ class BlockMatchingGPU(LucasKanadeGPU):
         return BlockMatchingGPU.load_config(config_filename=config_filename)
 
     def calculate_flow(self, reference_gray, target_gray, config, point_executor=None):
-        from taichi_library.taichi_algorithm import calcOpticalFlowBlockMatching
+        from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
 
         lk_params = self._build_lk_params(config)
 
@@ -190,7 +190,7 @@ class BlockMatchingGPU(LucasKanadeGPU):
         return np.zeros((reference_gray.shape[0], reference_gray.shape[1], 2), dtype=np.float32)
 
     def _calculate_flow_gpu_buffer(self, reference_gray, target_gray, config):
-        from taichi_library.taichi_algorithm import calcOpticalFlowBlockMatching
+        from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
 
         flow = calcOpticalFlowBlockMatching(
             reference_gray,

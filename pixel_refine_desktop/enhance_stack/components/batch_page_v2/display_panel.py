@@ -251,7 +251,7 @@ class BurstCacheWorker(QThread):
         # secara paralel (maksimal 2 paralel agar tidak overload VRAM).
         # Kita memanfaatkan dynamic reuse buffer: GC/clear VRAM pool hanya dipicu
         # jika terdeteksi perbedaan ukuran gambar (size mismatch) pada gambar berikutnya.
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
             taichi_lock,
         )
@@ -896,6 +896,10 @@ class DisplayPanel(QWidget):
         self.start_btn_ref.setFixedSize(110, 32)
         self.start_btn_ref.setVisible(False)
         self.is_start_button_mode = False
+        # Last algorithm state received from the in-memory settings signal.
+        # This is deliberately separate from persistence so UI updates never
+        # wait for JSON/database I/O.
+        self._algorithm_ui_settings = {}
 
         self.controls_bar_layout.addWidget(self.start_btn_ref)
         self.controls_bar_layout.addWidget(self.save_btn_ref)
@@ -2269,12 +2273,38 @@ class DisplayPanel(QWidget):
 
     def set_start_button_mode(self, active: bool):
         self.is_start_button_mode = active
-        self.update_controls_visibility_and_states()
+        # This path is called directly from the denoising selector.  Do not
+        # synchronously scan the filesystem for result images before showing
+        # the A/D and Start controls; that scan can make a simple UI change
+        # appear blocked on large batches.
+        self.update_controls_visibility_and_states(fast=True)
+
+    @Slot(dict)
+    def apply_algorithm_settings_fast(self, settings):
+        """Apply algorithm-dependent controls without debounce or disk I/O.
+
+        RightPanel emits the authoritative in-memory settings immediately;
+        this slot keeps the Start button in lockstep with the A/D controls.
+        Persistence remains handled by RightPanel's background sync timer.
+        """
+        if not isinstance(settings, dict):
+            return
+        self._algorithm_ui_settings = dict(settings)
+        denoising = str(settings.get("denoising", "")).strip()
+        super_resolution = str(settings.get("super_resolution", "")).strip()
+        self.set_start_button_mode(
+            denoising in {"Average", "Median", "Similarity", "Similarity Fusion"}
+            or super_resolution not in {
+                "",
+                "None",
+                "No Super Resolution",
+            }
+        )
 
     def update_save_button_state(self):
         self.update_controls_visibility_and_states()
 
-    def update_controls_visibility_and_states(self):
+    def update_controls_visibility_and_states(self, fast=False):
         if not hasattr(self, "start_btn_ref"):
             return
 
@@ -2303,7 +2333,14 @@ class DisplayPanel(QWidget):
                 )
 
         # 1. Start button visibility and enabled state
-        if self.is_start_button_mode and self.current_batch_id is not None:
+        # The right panel is the source of truth during the short window while
+        # a batch is being restored.  Falling back to it avoids hiding Start
+        # while DisplayPanel is still receiving the batch id.
+        active_batch_id = self.current_batch_id
+        if active_batch_id is None and getattr(self, "right_panel", None) is not None:
+            active_batch_id = getattr(self.right_panel, "current_batch_id", None)
+
+        if self.is_start_button_mode and active_batch_id is not None:
             self.start_btn_ref.setVisible(True)
             is_playing = hasattr(self, "is_playing") and self.is_playing
             self.start_btn_ref.setEnabled(not is_playing)
@@ -2317,13 +2354,18 @@ class DisplayPanel(QWidget):
 
         # 3. Save button visibility and state
         has_results = False
-        if self.logic.current_images:
+        if not fast and self.logic.current_images:
             first_img_path = self.logic.current_images[0].path
             results = self.logic.detect_processed_results(first_img_path)
             if results:
                 has_results = True
 
-        if has_results:
+        # In fast mode the result scan is intentionally skipped, but the
+        # overlay still needs to be laid out immediately so Start is visible.
+        # Leave the existing Save state untouched until the normal refresh.
+        if fast:
+            has_results = None
+        if has_results is True:
             self.save_btn_ref.setEnabled(True)
             self.save_btn_ref.setStyleSheet(
                 """
@@ -2347,7 +2389,7 @@ class DisplayPanel(QWidget):
             if not is_grid and self.display_stack.currentIndex() == 1:
                 # If we are in preview view and has_results, ensure we trigger result mode internally
                 pass
-        else:
+        elif has_results is False:
             self.save_btn_ref.setEnabled(False)
             self.save_btn_ref.setStyleSheet(
                 """
@@ -2365,7 +2407,7 @@ class DisplayPanel(QWidget):
         # 4. Overall overlay visibility
         if hasattr(self, "controls_overlay"):
             if (
-                self.is_start_button_mode and self.current_batch_id is not None
+                self.is_start_button_mode and active_batch_id is not None
             ) or not is_grid:
                 self.controls_overlay.show()
                 self.controls_bar.adjustSize()

@@ -1,9 +1,9 @@
 import numpy as np
 import os
-import shutil
 import zipfile
 import sys
 import importlib
+from functools import lru_cache
 
 # If run directly for compilation, force JIT mode
 if __name__ == "__main__":
@@ -60,6 +60,17 @@ def precompute_gradients_kernel(
             grad_x[y, x] = 0.0
             grad_y[y, x] = 0.0
 
+
+@ti.kernel
+def clear_f32_2d_kernel(
+    dst: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+):
+    """Clear a resident f32 plane without a host staging/upload round-trip."""
+    for y, x in ti.ndrange(h, w):
+        dst[y, x] = 0.0
+
 @ti.kernel
 def equalize_brightness_kernel(
     src: ti.types.ndarray(),
@@ -103,6 +114,11 @@ def phase1_coarse_analysis_kernel(
     noise_offset_factor: ti.f32
 ):
     """Generates a coarse confidence map using hybrid gradient similarity."""
+    # ``noise_sigma`` is invariant for the complete dispatch.  Hoist its
+    # guarded reciprocal out of the per-tile confidence math so the kernel
+    # performs one multiply instead of a max+divide for every coarse tile.
+    # The guard preserves the previous behavior for zero/near-zero noise.
+    inv_noise_sigma = 1.0 / ti.max(1e-6, noise_sigma)
     for r, c in coarse_confidence:
         tile_y = r * coarse_tile_h
         tile_x = c * coarse_tile_w
@@ -119,7 +135,7 @@ def phase1_coarse_analysis_kernel(
                 noise_sigma, 1.0, 1e-6, 0.0
             )
             
-            diff_ratio = mad_score / ti.max(1e-6, noise_sigma)
+            diff_ratio = mad_score * inv_noise_sigma
             adjusted = ti.max(0.0, diff_ratio - noise_offset_factor)
             exponent = adjusted * motion_sensitivity * 0.5
             
@@ -159,7 +175,20 @@ def phase2_fine_analysis_kernel(
 ):
     """Performs sliding window analysis for fine weight map accumulation on GPU."""
     pass_row_mod = pass_idx // 2
-    pass_col_mod = pass_idx % 2
+    # ``pass_idx`` is a non-negative dispatch selector in [0, 3].  The
+    # low-bit form is equivalent to modulo here and avoids a second integer
+    # remainder operation in every invocation of the fine-analysis graph.
+    pass_col_mod = pass_idx & 1
+
+    # The window dimensions and their denominators are invariant for every
+    # pixel in this dispatch.  Hoisting the reciprocal removes two floating
+    # point divisions from the inner loop while retaining the same Hanning
+    # expression and border behavior.
+    inv_tile_h = 1.0 / float(tile_h - 1) if tile_h > 1 else 0.0
+    inv_tile_w = 1.0 / float(tile_w - 1) if tile_w > 1 else 0.0
+    # Keep the original literal to avoid changing the established window
+    # phase while still hoisting it out of the pixel loop.
+    two_pi = 2.0 * 3.1415926535
     
     num_rows = row_starts.shape[0]
     num_cols = col_starts.shape[0]
@@ -224,8 +253,8 @@ def phase2_fine_analysis_kernel(
                 
                 if final_conf >= 1e-6:
                     for y, x in ti.ndrange(curr_h, curr_w):
-                        wy = 0.5 * (1.0 - ti.cos(2.0 * 3.1415926535 * float(y) / float(tile_h - 1))) if tile_h > 1 else 1.0
-                        wx = 0.5 * (1.0 - ti.cos(2.0 * 3.1415926535 * float(x) / float(tile_w - 1))) if tile_w > 1 else 1.0
+                        wy = 0.5 * (1.0 - ti.cos(two_pi * float(y) * inv_tile_h)) if tile_h > 1 else 1.0
+                        wx = 0.5 * (1.0 - ti.cos(two_pi * float(x) * inv_tile_w)) if tile_w > 1 else 1.0
                         wy = ti.max(wy, 1e-4)
                         wx = ti.max(wx, 1e-4)
                         w_val = wy * wx
@@ -245,10 +274,14 @@ def accumulate_spatial_merging_kernel(
     num_channels: ti.i32
 ):
     """Bilinearly interpolates work resolution weights to full resolution and accumulates frames."""
+    # Coordinate scales are dispatch invariants.  Computing them once avoids
+    # two divisions per full-resolution output pixel.
+    y_scale = float(h_work) / float(h_full)
+    x_scale = float(w_work) / float(w_full)
     for i, j in ti.ndrange(h_full, w_full):
         # Map full-res coordinates to work-res coordinates (floating point)
-        y_work_f = float(i) * float(h_work) / float(h_full)
-        x_work_f = float(j) * float(w_work) / float(w_full)
+        y_work_f = float(i) * y_scale
+        x_work_f = float(j) * x_scale
         
         # Bilinear interpolation bounds
         y0 = ti.cast(ti.floor(y_work_f), ti.i32)
@@ -293,6 +326,13 @@ def compile_spatial_tcm(arch=None, suffix="vulkan"):
     g_grad = ti.graph.GraphBuilder()
     g_grad.dispatch(precompute_gradients_kernel, sym_img, sym_grad_x, sym_grad_y, sym_h_grad, sym_w_grad)
     module.add_graph("precompute_gradients", g_grad.compile())
+
+    sym_clear_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", dtype=ti.f32, ndim=2)
+    sym_clear_h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", dtype=ti.i32)
+    sym_clear_w = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", dtype=ti.i32)
+    g_clear = ti.graph.GraphBuilder()
+    g_clear.dispatch(clear_f32_2d_kernel, sym_clear_dst, sym_clear_h, sym_clear_w)
+    module.add_graph("clear_f32_2d", g_clear.compile())
 
     # Gradient symbols for reuse
     sym_curr_grad_x = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "curr_grad_x", dtype=ti.f32, ndim=2)
@@ -654,28 +694,53 @@ def compile_spatial_tcm(arch=None, suffix="vulkan"):
     )
     module.add_graph("generate_fine_weights_4passes", g_4passes.compile())
 
-    # Save AOT module to temporary directory, package into ZIP (.tcm), and cleanup
-    file_dir = os.path.dirname(os.path.abspath(__file__))
-    tmp_dir = os.path.abspath(os.path.join(file_dir, "tmp_aot_spatial"))
-    if os.path.exists(tmp_dir):
-        shutil.rmtree(tmp_dir)
-    os.makedirs(tmp_dir)
-    module.save(tmp_dir)
+    # Save through the canonical archiver.  The old hand-written ZIP path
+    # omitted ``aot_metadata.tcb`` for graphics backends, which made otherwise
+    # valid Vulkan/OpenGL artifacts fail the LLVM20 compatibility preflight.
+    try:
+        from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
+    except (ImportError, RuntimeError) as import_error:
+        # A compiler must be able to emit a graphics artifact before a runtime
+        # embedding context exists.  Importing through the package initializer
+        # would construct AOTEngine and reject OpenGL without capability JSON;
+        # load this stdlib-only archiver directly instead.  Runtime admission
+        # remains fail-closed and still requires real capability evidence.
+        artifact_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "../../../../../../../taichi_vision/taichi_algorithm/aot_py/aot_artifact.py",
+            )
+        )
+        spec = importlib.util.spec_from_file_location(
+            "pixel_refine_aot_artifact_standalone", artifact_path
+        )
+        if spec is None or spec.loader is None:
+            raise import_error
+        artifact_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(artifact_module)
+        archive_module = artifact_module.archive_module
 
+    file_dir = os.path.dirname(os.path.abspath(__file__))
+    # Test/build automation can redirect the packaged artifact without
+    # touching the checked-in application assets.  Normal callers retain the
+    # historical output location.
+    output_override = os.environ.get("PIXEL_REFINE_SPATIAL_TCM_OUTPUT_DIR")
+    output_root = (
+        os.path.abspath(output_override)
+        if output_override
+        else file_dir
+    )
     # Find the pixel_refine_desktop root folder to ensure correct assets output path
     cur = os.path.abspath(file_dir)
     while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
         cur = os.path.dirname(cur)
-    out_dir = os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = (
+        output_root
+        if output_override
+        else os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
+    )
     tcm_path = os.path.join(out_dir, f"spatial_{suffix}.tcm")
-
-    with zipfile.ZipFile(tcm_path, 'w', zipfile.ZIP_DEFLATED) as tcm_zip:
-        for root, dirs, files in os.walk(tmp_dir):
-            for file in files:
-                tcm_zip.write(os.path.join(root, file), os.path.relpath(os.path.join(root, file), tmp_dir))
-    
-    shutil.rmtree(tmp_dir)
+    archive_module(module, tcm_path)
     print(f"Spatial AOT packaged successfully to: {tcm_path}")
 
 if __name__ == "__main__":
@@ -701,7 +766,15 @@ class SpatialScratchCache:
     def acquire(self, engine, name, shape, dtype=np.float32, **kwargs):
         shape = tuple(int(v) for v in shape)
         buf = self._slots.get(name)
-        if buf is not None and tuple(buf.shape) == shape:
+        # Shape alone is insufficient for safe reuse: callers may switch
+        # analysis precision between batches while keeping the same
+        # resolution.  Reusing a mismatched buffer would either force an
+        # implicit conversion in the bridge or corrupt the next dispatch.
+        if (
+            buf is not None
+            and tuple(buf.shape) == shape
+            and np.dtype(getattr(buf, "dtype", dtype)) == np.dtype(dtype)
+        ):
             return buf
         if buf is not None:
             try:
@@ -723,23 +796,122 @@ class SpatialScratchCache:
 
 
 def _resolve_spatial_tcm(engine):
-    """Resolve the spatial AOT TCM matching the active backend, with safe fallback.
+    """Resolve the spatial AOT TCM for the active target.
 
-    The spatial artifact is compiled per-backend (spatial_cuda / spatial_vulkan /
-    spatial_cpu).  Prefer the arch-specific artifact, then fall back to the
-    existing vulkan/cpu variants so the graph binary always matches the runtime.
+    Rebuilt LLVM20 artifacts live in the canonical target-qualified tree
+    (``spatial_<backend>_<arch>_<os>[_<vendor>].tcm``).  Resolve that identity
+    first so a fresh target artifact is never shadowed by a stale flat archive.
+    The historical ``ui/data/aot_assets`` layout remains an explicit fallback
+    for existing application bundles during migration.
     """
+    arch = str(getattr(engine, "arch", "cpu")).lower()
+    try:
+        from taichi_vision.taichi_aot.artifact_targets import (
+            detect_target,
+            resolve_artifact,
+        )
+        from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
+
+        target = detect_target(
+            backend=arch,
+            device=getattr(engine, "gpu_name", ""),
+        )
+        roots = []
+        override = os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT", "").strip()
+        if override:
+            roots.append(os.path.abspath(override))
+        else:
+            staged = staged_tcm_root(target.target_id)
+            if staged is not None:
+                roots.append(os.path.abspath(str(staged)))
+            # Project-local canonical target tree (works even when no runtime
+            # bundle is staged yet).
+            roots.append(
+                os.path.abspath(
+                    os.path.join(
+                        os.path.dirname(__file__),
+                        "../../../../../../taichi_vision/taichi_algorithm/aot_tcm",
+                    )
+                )
+            )
+        seen_roots = set()
+        for root in roots:
+            root = os.path.normcase(os.path.realpath(root))
+            if root in seen_roots or not os.path.isdir(root):
+                continue
+            seen_roots.add(root)
+            resolved = resolve_artifact(
+                root,
+                "spatial",
+                target,
+                allow_legacy=False,
+            )
+            if resolved is not None:
+                return os.path.abspath(str(resolved))
+    except (ImportError, OSError, RuntimeError, ValueError):
+        # Keep migration/frozen builds usable if the registry is omitted.
+        pass
+
     file_dir = os.path.dirname(os.path.abspath(__file__))
     cur = os.path.abspath(file_dir)
     while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
         cur = os.path.dirname(cur)
     assets = os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
-    arch = str(getattr(engine, "arch", "vulkan")).lower()
     for cand in (arch, "vulkan", "cpu"):
         candidate = os.path.join(assets, f"spatial_{cand}.tcm")
         if os.path.exists(candidate):
             return os.path.abspath(candidate)
     return os.path.abspath(os.path.join(assets, "spatial_vulkan.tcm"))
+
+
+def _tcm_graph_available(tcm_path, graph_name):
+    """Return whether *graph_name* is indexed by the current TCM file.
+
+    The public call shape is intentionally unchanged.  The metadata result is
+    cached below with the artifact size/mtime in the key so replacing a TCM at
+    the same path cannot leave a stale graph decision in a long-running
+    process.
+    """
+    try:
+        stat = os.stat(os.fspath(tcm_path))
+        fingerprint = (
+            int(stat.st_mtime_ns),
+            int(getattr(stat, "st_ctime_ns", stat.st_mtime_ns)),
+            int(stat.st_size),
+        )
+    except (OSError, TypeError, ValueError):
+        fingerprint = (None, None, None)
+    return _tcm_graph_available_cached(
+        os.fspath(tcm_path), str(graph_name), *fingerprint
+    )
+
+
+@lru_cache(maxsize=16)
+def _tcm_graph_available_cached(
+    tcm_path, graph_name, mtime_ns, ctime_ns, file_size
+):
+    """Check a packaged graph before dispatching an optional newer graph.
+
+    During rolling updates, an older spatial artifact may remain in the
+    application tree.  Metadata gating keeps that artifact usable and avoids
+    sending an unknown graph name to the native bridge (which could quarantine
+    an otherwise valid module).
+    """
+    try:
+        with zipfile.ZipFile(os.fspath(tcm_path), "r") as archive:
+            marker = str(graph_name).encode("utf-8")
+            # LLVM/CPU/CUDA archives use graphs.tcb; SPIR-V graphics
+            # archives use graphs.json.  Both are authoritative graph
+            # indexes, so the optional graph gate must understand both.
+            for index_name in ("graphs.tcb", "graphs.json"):
+                try:
+                    if marker in archive.read(index_name):
+                        return True
+                except KeyError:
+                    continue
+        return False
+    except (OSError, KeyError, zipfile.BadZipFile, TypeError, ValueError):
+        return False
 
 
 def generate_spatial_weights_taichi(
@@ -762,7 +934,7 @@ def generate_spatial_weights_taichi(
     """
     Calculates the weight map for a single frame relative to the reference using Taichi AOT.
     """
-    import taichi_library.taichi_aot as taichi_aot
+    import taichi_vision.taichi_aot as taichi_aot
     engine = taichi_aot.engine
     scratch = kwargs.get("scratch_cache")
 
@@ -785,10 +957,26 @@ def generate_spatial_weights_taichi(
 
     t_start = time.perf_counter()
 
-    # 1. Reset weight map sum to 0
-    zeros = np.zeros(weight_map_sum.shape, dtype=np.float32)
-    from taichi_library.taichi_aot.engine import _LIB, _RUNTIME
-    _LIB.write_to_gpu_buffer(_RUNTIME, weight_map_sum.handle, zeros.ctypes.data, weight_map_sum.size_bytes)
+    # 1. Reset weight map sum to 0. New spatial TCMs clear the resident
+    # buffer in-place on the active backend, avoiding a full-frame host
+    # allocation and upload for every input frame. Older artifacts retain
+    # the compatible host reset path until they are rebuilt.
+    if _tcm_graph_available(tcm_path, "clear_f32_2d"):
+        mod.run(
+            "clear_f32_2d",
+            dst=weight_map_sum,
+            h=int(weight_map_sum.shape[0]),
+            w=int(weight_map_sum.shape[1]),
+        )
+    else:
+        zeros = np.zeros(weight_map_sum.shape, dtype=np.float32)
+        from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
+        _LIB.write_to_gpu_buffer(
+            _RUNTIME,
+            weight_map_sum.handle,
+            zeros.ctypes.data,
+            weight_map_sum.size_bytes,
+        )
 
     if profile_hotspots:
         engine.sync()
@@ -1103,7 +1291,7 @@ def accumulate_spatial_merging_taichi(
     """
     Accumulates a frame into the global sum using its processed weight map using Taichi AOT.
     """
-    import taichi_library.taichi_aot as taichi_aot
+    import taichi_vision.taichi_aot as taichi_aot
     engine = taichi_aot.engine
 
     # Load Module (backend-aware)

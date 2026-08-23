@@ -1,0 +1,70 @@
+name: Runtime Hardening
+
+on:
+  pull_request:
+    paths:
+      - "taichi_vision/backend_config.py"
+      - "taichi_vision/device_selection.py"
+      - "taichi_vision/taichi_aot/**"
+      - "taichi_vision/taichi_algorithm/aot_py/**"
+      - ".github/workflows/runtime-hardening.yml"
+  push:
+    branches: [main]
+    paths:
+      - "taichi_vision/backend_config.py"
+      - "taichi_vision/device_selection.py"
+      - "taichi_vision/taichi_aot/**"
+      - "taichi_vision/taichi_algorithm/aot_py/**"
+      - ".github/workflows/runtime-hardening.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-safe-hardening:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test runner
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Compile runtime Python sources
+        run: |
+          python -m compileall -q \
+            taichi_vision/backend_config.py \
+            taichi_vision/device_selection.py \
+            taichi_vision/taichi_aot
+
+      - name: Run CPU-safe hardening regressions
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          root = Path("taichi_vision/taichi_aot/tests")
+          names = (
+              "test_facade_import_failure.py",
+              "test_residency_hardening.py",
+              "test_intel_vulkan_device_identity.py",
+              "test_pipeline_scheduler_config_scope.py",
+              "test_backend_manager_authority.py",
+              "test_strict_policy_booleans.py",
+          )
+          tests = [str(root / name) for name in names if (root / name).is_file()]
+          if not tests:
+              print("No CPU-safe hardening regression files are present on this ref yet.")
+              raise SystemExit(0)
+
+          subprocess.check_call([sys.executable, "-m", "pytest", "-q", *tests])
+          PY

@@ -1,7 +1,80 @@
 import os
 import numpy as np
-from taichi_library import taichi_aot
-from taichi_library.taichi_aot import get_engine
+from taichi_vision import taichi_aot
+from taichi_vision.taichi_aot import get_engine
+
+
+def _resolve_aot_asset(name, *, engine=None):
+    """Resolve an optional canonical TCM root for isolated parity probes.
+
+    The desktop UI still owns its historical flat asset directory by default.
+    A test/build process can set ``PIXEL_REFINE_AOT_TCM_ROOT`` to force the
+    bridge helpers to use the same backend-qualified artifacts as
+    ``taichi_vision``.  This is deliberately opt-in so existing application
+    packaging and public call sites remain unchanged.
+    """
+
+    engine = engine or get_engine()
+    # Keep this bridge on the same target-qualified resolver as the public
+    # ``aot_api`` facade.  Previously only the test override was considered;
+    # normal application runs therefore loaded the old flat
+    # ``ui/data/aot_assets/normalize_image_*.tcm`` archives even when the
+    # active LLVM20 bundle already contained a rebuilt target artifact. Those
+    # legacy archives can lack ``aot_metadata.tcb`` and fail during a later
+    # spatial crop dispatch, which looks like a lifecycle failure.
+    arch = str(getattr(engine, "arch", "cpu")).lower()
+    try:
+        from taichi_vision.taichi_aot.artifact_targets import (
+            detect_target,
+            resolve_artifact,
+        )
+        from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
+
+        target = detect_target(
+            backend=arch,
+            device=getattr(engine, "gpu_name", ""),
+        )
+        stem, _ = os.path.splitext(name)
+        roots = []
+        override = os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT", "").strip()
+        if override:
+            roots.append(os.path.abspath(override))
+        else:
+            staged = staged_tcm_root(target.target_id)
+            if staged is not None:
+                roots.append(os.path.abspath(str(staged)))
+            roots.append(
+                os.path.abspath(
+                    os.path.join(
+                        os.path.dirname(__file__),
+                        "../../../../../../taichi_vision/taichi_algorithm/aot_tcm",
+                    )
+                )
+            )
+        seen_roots = set()
+        for root in roots:
+            root = os.path.normcase(os.path.realpath(root))
+            if root in seen_roots or not os.path.isdir(root):
+                continue
+            seen_roots.add(root)
+            resolved = resolve_artifact(
+                root,
+                stem,
+                target,
+                allow_legacy=False,
+            )
+            if resolved is not None:
+                return os.path.abspath(str(resolved))
+    except (ImportError, OSError, RuntimeError, ValueError):
+        # Resolution is an additive hardening layer. If a package/frozen build
+        # omits the registry, preserve the historical fallback below.
+        pass
+
+    file_dir = os.path.dirname(os.path.abspath(__file__))
+    aot_assets_dir = os.path.abspath(
+        os.path.join(file_dir, "../../../../../ui/data/aot_assets")
+    )
+    return os.path.join(aot_assets_dir, name)
 
 
 def normalize_image_gpu(image_gpu, dtype, out_gpu=None):
@@ -14,11 +87,7 @@ def normalize_image_gpu(image_gpu, dtype, out_gpu=None):
 
     src_f32 = image_gpu.cast(np.float32)
 
-    file_dir = os.path.dirname(os.path.abspath(__file__))
-    aot_assets_dir = os.path.abspath(
-        os.path.join(file_dir, "../../../../../ui/data/aot_assets")
-    )
-    tcm_path = os.path.join(aot_assets_dir, "normalize_image.tcm")
+    tcm_path = _resolve_aot_asset("normalize_image.tcm", engine=engine)
 
     inv_scale = 1.0
     buf_dtype = getattr(image_gpu, "dtype", dtype)
@@ -46,11 +115,7 @@ def to_gamma_proxy_gpu(
     image_gpu, scale=1.0, gamma_pow=2.22, slope=4.5, cutoff=0.018, dst_gpu=None
 ):
     engine = get_engine()
-    file_dir = os.path.dirname(os.path.abspath(__file__))
-    aot_assets_dir = os.path.abspath(
-        os.path.join(file_dir, "../../../../../ui/data/aot_assets")
-    )
-    tcm_path = os.path.join(aot_assets_dir, "gamma_proxy.tcm")
+    tcm_path = _resolve_aot_asset("gamma_proxy.tcm", engine=engine)
 
     mod = engine.load(tcm_path)
     if dst_gpu is None:
@@ -116,7 +181,7 @@ def prepare_reference_for_alignment(
     num_layers=3,
 ):
     """Prepare reference image pyramid on GPU. Returns (l0, l1, l2, ...) — caller must destroy all."""
-    from taichi_library.taichi_aot import (
+    from taichi_vision.taichi_aot import (
         TaichiGPUBuffer,
     )
 
@@ -206,7 +271,7 @@ def prepare_comparison_for_alignment(
     num_layers=3,
 ):
     """Prepare comparison image pyramid on GPU. Returns (l0, l1, l2, ...) — caller must destroy all."""
-    from taichi_library.taichi_aot import (
+    from taichi_vision.taichi_aot import (
         TaichiGPUBuffer,
     )
 
@@ -336,7 +401,7 @@ def prepare_frame_aot(
     ref_image_w,
 ):
     """Prepare comparison frame on GPU for merging. Returns (curr_full_gpu, curr_work_gray_gpu)."""
-    from taichi_library.taichi_aot.engine import (
+    from taichi_vision.taichi_aot.engine import (
         TaichiGPUBuffer,
     )
 

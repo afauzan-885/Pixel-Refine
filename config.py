@@ -22,6 +22,40 @@ CACHE_DIR = "database/cache/thumbnails"
 COMPARISON_CACHE_DIR = "database/cache/comparison"
 CONFIG_DIR = os.path.join("database", "setting")
 
+# Canonical resident compute-block size for large-image AOT processing.
+# Keep this in the application config so demosaic, alignment and denoising
+# share one bounded-memory policy instead of carrying per-module literals.
+# Defaults are retained only for headless/legacy callers.  Desktop runtime
+# values are read from Performance Settings through ``get_compute_block_settings``.
+COMPUTE_BLOCK_SIZE = 1024
+COMPUTE_BLOCK_MODE = os.environ.get("PIXEL_REFINE_COMPUTE_BLOCK_MODE", "auto").strip().lower()
+
+
+def get_compute_block_settings():
+    """Read the persisted performance block policy without importing Qt."""
+    import json
+
+    result = {
+        "enabled": True,
+        "block_size": COMPUTE_BLOCK_SIZE,
+        "threshold_mp": 12.0,
+        "mode": COMPUTE_BLOCK_MODE,
+    }
+    try:
+        with open(GENERAL_SETTINGS_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            result["enabled"] = bool(data.get("compute_block_enabled", result["enabled"]))
+            result["block_size"] = int(data.get("compute_block_size", result["block_size"]))
+            result["threshold_mp"] = float(data.get("compute_block_threshold_mp", result["threshold_mp"]))
+            result["mode"] = str(data.get("compute_block_mode", result["mode"])).strip().lower()
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    if result["block_size"] not in (512, 768, 1024, 2048):
+        result["block_size"] = COMPUTE_BLOCK_SIZE
+    result["threshold_mp"] = max(0.1, result["threshold_mp"])
+    return result
+
 # ==============================================================================
 # CENTRALIZED NATURAL TONE MAPPING PARAMETERS (SINGLE SOURCE OF TRUTH)
 # ==============================================================================

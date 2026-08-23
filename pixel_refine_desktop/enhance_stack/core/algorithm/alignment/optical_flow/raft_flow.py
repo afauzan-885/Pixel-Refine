@@ -287,7 +287,7 @@ class RAFTFlow(LucasKanadeGPU):
             return None
 
         try:
-            from taichi_library import taichi_aot
+            from taichi_vision import taichi_aot
 
             full_h, full_w = target.shape[:2]
             with taichi_aot.engine.reserve_device_execution("raft_remap"):

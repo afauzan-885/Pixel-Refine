@@ -25,7 +25,10 @@ def init_algorithm_data():
                         "No Super Resolution",
                         language_config.NONE_SUPER_RESOLUTION_DESCRIPTION,
                     ),
-                    ("WSR", "Weighted-Spatial Multi-Frame Super-Resolution"),
+                    (
+                        "splattingSR",
+                        "Confidence-guided subpixel splatting super-resolution",
+                    ),
                 ],
             },
             "denoising": {

@@ -1,60 +1,72 @@
 package org.pixelrefine.mobile
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.animation.Crossfade
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import org.pixelrefine.mobile.model.Screen
-import org.pixelrefine.genericui.theme.DarkTheme
+import org.pixelrefine.genericui.animations.ToastHost
+import org.pixelrefine.genericui.theme.GenericThemeProvider
 import org.pixelrefine.genericui.theme.LightTheme
-import org.pixelrefine.genericui.theme.LocalGenericTheme
-import org.pixelrefine.genericui.theme.LocalTheme
+import org.pixelrefine.mobile.state.AppScreen
+import org.pixelrefine.mobile.state.NavigationState
+import org.pixelrefine.mobile.state.ProjectState
+import org.pixelrefine.mobile.ui.HomeProjectsScreen
 import org.pixelrefine.mobile.ui.HomeScreen
-import org.pixelrefine.mobile.ui.SettingsScreen
-import org.pixelrefine.mobile.ui.WorkspaceScreen
+import org.pixelrefine.mobile.ui.ProjectScreen
+import org.pixelrefine.mobile.ui.WelcomeScreen
 
 /**
- * Root aplikasi — mirror AppState/navigation di main_mobile.py.
- * (KISS: navigasi sederhana pakai state Compose, tanpa library nav.)
+ * Root Application Container dengan Multi-Screen Router & Theme Manager.
  */
 @Composable
 fun App() {
-    var isDark by remember { mutableStateOf(false) }
-    val theme = if (isDark) DarkTheme else LightTheme
+    val navState = remember { NavigationState() }
+    val projectState = remember { ProjectState() }
 
-    var screen by remember { mutableStateOf<Screen>(Screen.Home) }
-    var currentTool by remember { mutableStateOf("MFDenoiser") }
+    GenericThemeProvider(theme = LightTheme) {
+        Crossfade(targetState = navState.currentScreen) { screen ->
+            when (screen) {
+                AppScreen.WELCOME -> {
+                    WelcomeScreen(
+                        onTimeout = {
+                            navState.navigateTo(AppScreen.HOME)
+                        }
+                    )
+                }
 
-    CompositionLocalProvider(LocalTheme provides theme) {
-        MaterialTheme {
-            Box(Modifier.fillMaxSize().background(theme.bgSecondary)) {
-                when (screen) {
-                    Screen.Home -> HomeScreen(
-                        onOpenTool = { tool ->
-                            currentTool = tool
-                            screen = Screen.Workspace
+                AppScreen.HOME -> {
+                    HomeScreen(
+                        onOpenDenoising = {
+                            navState.navigateTo(AppScreen.PROJECT_WORKSPACE)
                         },
-                        onOpenSettings = { screen = Screen.Settings },
+                        onOpenProjects = {
+                            navState.navigateTo(AppScreen.HOME_PROJECTS)
+                        },
                     )
-                    Screen.Workspace -> WorkspaceScreen(
-                        toolName = currentTool,
-                        onHome = { screen = Screen.Home },
-                        onSwitchTool = { tool -> currentTool = tool },
+                }
+
+                AppScreen.HOME_PROJECTS -> {
+                    HomeProjectsScreen(
+                        onBack = {
+                            navState.navigateTo(AppScreen.HOME)
+                        },
+                        onOpenProject = { projectName ->
+                            navState.navigateTo(AppScreen.PROJECT_WORKSPACE)
+                        },
                     )
-                    Screen.Settings -> SettingsScreen(
-                        isDark = isDark,
-                        onToggleDark = { isDark = it },
-                        onBack = { screen = Screen.Home },
+                }
+
+                AppScreen.PROJECT_WORKSPACE -> {
+                    ProjectScreen(
+                        state = projectState,
+                        onBack = {
+                            navState.navigateTo(AppScreen.HOME)
+                        },
                     )
                 }
             }
         }
+
+        // Host Toast Notifikasi Global
+        ToastHost()
     }
 }

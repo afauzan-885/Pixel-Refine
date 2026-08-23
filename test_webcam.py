@@ -24,11 +24,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 
-from taichi_library.taichi_algorithm.camera_api2 import (
+from taichi_vision.taichi_algorithm.camera_api2 import (
     OpenCVSource,
     SyntheticSource,
 )
-from taichi_library.taichi_algorithm.camera_api2.parallel_capture_denoise import (
+from taichi_vision.taichi_algorithm.camera_api2.parallel_capture_denoise import (
     ParallelCaptureDenoise,
 )
 

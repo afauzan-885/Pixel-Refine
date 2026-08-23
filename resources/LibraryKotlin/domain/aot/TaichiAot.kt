@@ -4,7 +4,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Entry point utama Taichi AOT di Kotlin (1:1 Paritas Python `from taichi_library import taichi_aot as aot`).
+ * Entry point utama Taichi AOT di Kotlin (1:1 Paritas Python `from taichi_vision import taichi_aot as aot`).
  *
  * Mengusung prinsip KISS, Zero-Overhead, dan sintaksis yang sepenuhnya Pythonic.
  */

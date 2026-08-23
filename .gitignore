@@ -84,6 +84,10 @@ __pycache__/
 taichi_library/taichi_algorithm/aot_tcm/.cpu_aot_cache/
 taichi_library/taichi_algorithm/aot_tcm/**/.cpu_aot_cache/
 
+# Renamed Taichi AOT package caches and compiler intermediates
+taichi_vision/taichi_algorithm/aot_tcm/.cpu_aot_cache/
+taichi_vision/taichi_algorithm/aot_tcm/**/.cpu_aot_cache/
+
 # Taichi AOT generated caches, quarantine archives, and compiler intermediates
 taichi_library/**/__pycache__/
 taichi_library/**/.pytest_cache/
@@ -93,3 +97,12 @@ taichi_library/taichi_algorithm/aot_py/**/*.exp
 taichi_library/taichi_algorithm/aot_py/**/*.lib
 taichi_library/taichi_algorithm/aot_py/test_output*/
 taichi_library/taichi_algorithm/aot_py/test_report.txt
+
+taichi_vision/**/__pycache__/
+taichi_vision/**/.pytest_cache/
+taichi_vision/taichi_algorithm/aot_tcm/.quarantine*/
+taichi_vision/taichi_algorithm/aot_py/**/*.obj
+taichi_vision/taichi_algorithm/aot_py/**/*.exp
+taichi_vision/taichi_algorithm/aot_py/**/*.lib
+taichi_vision/taichi_algorithm/aot_py/test_output*/
+taichi_vision/taichi_algorithm/aot_py/test_report.txt

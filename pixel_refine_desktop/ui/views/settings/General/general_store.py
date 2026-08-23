@@ -18,6 +18,10 @@ DEFAULTS = {
     "backend_test_results": {},
     "allowed_backend_ids": [],
     "auto_fallback": False,
+    "compute_block_enabled": True,
+    "compute_block_size": 1024,
+    "compute_block_threshold_mp": 12.0,
+    "compute_block_mode": "auto",
 }
 
 _general_store = None

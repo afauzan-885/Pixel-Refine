@@ -53,7 +53,7 @@ class FarnebackFlowCPU:
 
     def calculate_flow(self, reference_gray, target_gray, config):
         """Run the full-frame Taichi AOT Farneback implementation."""
-        from taichi_library.taichi_algorithm import calcOpticalFlowFarneback
+        from taichi_vision.taichi_algorithm import calcOpticalFlowFarneback
         flow = calcOpticalFlowFarneback(
             np.ascontiguousarray(reference_gray, dtype=np.float32),
             np.ascontiguousarray(target_gray, dtype=np.float32),
@@ -81,7 +81,7 @@ class FarnebackFlowCPU:
         # native AOT path.  This avoids cv2 remap (and its backend-dependent
         # interpolation/rounding) while retaining the same public API.
         try:
-            from taichi_library import taichi_aot
+            from taichi_vision import taichi_aot
             if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
                 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.optical_flow_utils.flow_blocking import to_flow_gray_u8
                 ref_gray = to_flow_gray_u8(reference).astype(np.float32, copy=False)

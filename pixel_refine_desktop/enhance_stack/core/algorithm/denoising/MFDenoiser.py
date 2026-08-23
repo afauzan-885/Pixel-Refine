@@ -17,9 +17,6 @@ from typing import Optional
 
 import h5py
 import numpy as np
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QProgressBar, QVBoxLayout
-
 from config import GENERAL_SETTINGS_FILE
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     cleanup_old_hdf5_files,
@@ -464,7 +461,7 @@ class MFDenoiserAlgorithm:
             )
 
     @staticmethod
-    def _configure_compute_runtime(ctx):
+    def _configure_compute_runtime(ctx, frame_shape=None):
         """Connect this pipeline to the shared adaptive block/VRAM runtime."""
         # Keep full-frame for backends with sufficient residency, but do not
         # force a 12--50 MP OpenGL/GLES graph beyond its admission budget.
@@ -474,23 +471,42 @@ class MFDenoiserAlgorithm:
         mode = "full_frame"
         block_enabled = False
         ctx.params["processing_mode"] = mode
-        requested_size = int(ctx.params.get("tile_size", 256) or 256)
-        block_size = max(64, min(1024, requested_size))
+        import config as app_config
+
+        block_settings = app_config.get_compute_block_settings()
+
+        # The UI tile size controls denoising neighbourhoods; it must not
+        # silently redefine the resident compute-block size used by all AOT
+        # stages.  Use the shared application policy instead.
+        block_size = int(block_settings.get("block_size", 1024))
+        block_size = max(64, block_size)
         block_size = max(64, (block_size // 16) * 16)
 
         try:
-            from taichi_library import taichi_aot
+            from taichi_vision import taichi_aot
 
             engine = taichi_aot.get_engine()
             backend = str(getattr(engine, "arch", "")).strip().lower()
             memory = taichi_aot.get_memory_status(force=True)
             pipeline_limit = int(memory.get("pipeline_resident_limit", 0) or 0)
             pressure = str(memory.get("pressure", "healthy")).lower()
-            policy = os.environ.get("PIXEL_REFINE_MFDENOISER_BLOCK", "auto").strip().lower()
-            if policy in {"1", "true", "on", "block", "tile", "tiled"}:
-                block_enabled = True
+            policy = (
+                os.environ.get(
+                    "PIXEL_REFINE_MFDENOISER_BLOCK",
+                    block_settings.get("mode", "block"),
+                )
+                .strip()
+                .lower()
+            )
+            if policy in {"1", "true", "on", "block", "always", "tile", "tiled"}:
+                block_enabled = bool(block_settings.get("enabled", True))
             elif policy in {"0", "false", "off", "full", "frame", "full_frame"}:
                 block_enabled = False
+            elif frame_shape is not None:
+                frame_mp = (int(frame_shape[0]) * int(frame_shape[1])) / 1_000_000.0
+                block_enabled = bool(block_settings.get("enabled", True)) and (
+                    frame_mp > float(block_settings.get("threshold_mp", 12.0))
+                )
             else:
                 # OpenGL/GLES desktop paths do not expose a reliable device
                 # heap budget.  Use bounded tiles whenever the resident limit
@@ -498,7 +514,8 @@ class MFDenoiserAlgorithm:
                 # governor reports pressure; CUDA/Vulkan remain full-frame by
                 # default when their graph fits.
                 block_enabled = backend in {"opengl", "gles"} and (
-                    pressure != "healthy" or (pipeline_limit > 0 and pipeline_limit < 768 * 1024**2)
+                    pressure != "healthy"
+                    or (pipeline_limit > 0 and pipeline_limit < 768 * 1024**2)
                 )
             mode = "block" if block_enabled else "full_frame"
             ctx.params["processing_mode"] = mode
@@ -552,7 +569,7 @@ class MFDenoiserAlgorithm:
         if not ctx.compute_runtime.get("available"):
             return
         try:
-            from taichi_library import taichi_aot
+            from taichi_vision import taichi_aot
 
             stats = taichi_aot.get_block_cache_stats()
             device = stats.get("device", {})
@@ -736,9 +753,7 @@ class MFDenoiserAlgorithm:
                     config.get("ai_batch_size", 15),
                 )
             ),
-            "h5_write_batch_size": int(
-                config.get("mfdenoiser_h5_write_batch_size", 4)
-            ),
+            "h5_write_batch_size": int(config.get("mfdenoiser_h5_write_batch_size", 4)),
             "use_alignment_cache": bool(
                 config.get("mfdenoiser_use_alignment_cache", False)
             ),
@@ -1395,7 +1410,7 @@ class MFDenoiserAlgorithm:
             # Dense flow owns large pyramids and accumulators. Drop reusable
             # output tiles from earlier stages so they cannot compete for VRAM.
             try:
-                from taichi_library import taichi_aot
+                from taichi_vision import taichi_aot
 
                 taichi_aot.engine.sync()
                 taichi_aot.engine.get_device_block_cache().clear()
@@ -1503,9 +1518,7 @@ class MFDenoiserAlgorithm:
             elif ctx.reference_image is not None:
                 ctx.result_image = np.array(ctx.reference_image, copy=True)
             elif ctx.image_paths:
-                ctx.result_image = self._load_single_frame(
-                    ctx, ctx.image_paths[0]
-                )
+                ctx.result_image = self._load_single_frame(ctx, ctx.image_paths[0])
             print(
                 f"[MFDenoiser][Merge] No Denoising reference="
                 f"{_frame_info(ctx.result_image)}"
@@ -1516,24 +1529,37 @@ class MFDenoiserAlgorithm:
         ctx.result_image = algorithm.run(ctx, frames, batch_plan=batch_plan)
         if ctx.result_image is not None:
             try:
-                from taichi_library import taichi_aot
+                from taichi_vision import taichi_aot
                 from config import DEFAULT_TONE_MAPPING_PARAMS
+
                 if ctx.result_image.dtype in (np.float32, np.float64):
                     img_f32 = ctx.result_image.astype(np.float32, copy=False)
                     max_v = float(np.max(img_f32))
                     if max_v > 1.0:
                         img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
-                    img_tm = taichi_aot.naturalTonemapping(img_f32, **DEFAULT_TONE_MAPPING_PARAMS)
+                    img_tm = taichi_aot.naturalTonemapping(
+                        img_f32, **DEFAULT_TONE_MAPPING_PARAMS
+                    )
                     if max_v > 255.0:
-                        ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+                        ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(
+                            np.uint16
+                        )
                     elif max_v > 1.0:
-                        ctx.result_image = np.clip(img_tm * 255.0, 0, 255).astype(np.uint8)
+                        ctx.result_image = np.clip(img_tm * 255.0, 0, 255).astype(
+                            np.uint8
+                        )
                     else:
-                        ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+                        ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(
+                            np.uint16
+                        )
                 elif ctx.result_image.dtype == np.uint16:
                     img_f32 = ctx.result_image.astype(np.float32) / 65535.0
-                    img_tm = taichi_aot.naturalTonemapping(img_f32, **DEFAULT_TONE_MAPPING_PARAMS)
-                    ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
+                    img_tm = taichi_aot.naturalTonemapping(
+                        img_f32, **DEFAULT_TONE_MAPPING_PARAMS
+                    )
+                    ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(
+                        np.uint16
+                    )
             except Exception as e_tm:
                 print(f"[MFDenoiser] Tone mapping result image warning: {e_tm}")
         print(f"[MFDenoiser][Merge] result={_frame_info(ctx.result_image)}")
@@ -1664,6 +1690,10 @@ class MFDenoiserAlgorithm:
                 return None
             if stop_requested and stop_requested():
                 return None
+            # The MP threshold can be evaluated deterministically after the
+            # first decoded frame is available.
+            if getattr(ctx, "ref_h", None) and getattr(ctx, "ref_w", None):
+                self._configure_compute_runtime(ctx, (ctx.ref_h, ctx.ref_w))
         batch_plan = self.build_batch_plan(ctx)
 
         # run_pipeline owns the high-level policy. Later, cache/HDF5 can be

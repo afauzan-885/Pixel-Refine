@@ -2,7 +2,7 @@
 
 This file is the project-level knowledge base for AI and human contributors.
 Normative rules remain in `ai_governance/`; user-facing API documentation is
-under `taichi_library/documentation/`.
+under `taichi_vision/documentation/`.
 
 ## Agent operating contract
 
@@ -21,7 +21,7 @@ Non-negotiable barriers:
 
 - Preserve public Taichi API compatibility unless the user explicitly approves
   an API change.
-- `taichi_library/taichi_aot/engine.py` is the runtime source of truth; do not
+- `taichi_vision/taichi_aot/engine.py` is the runtime source of truth; do not
   change it without explicit approval.
 - An unvalidated block path must recover through the same-backend full-frame
   path or report an actionable error. Never silently substitute CPU.
@@ -35,7 +35,7 @@ Non-negotiable barriers:
 
 ```text
 Pixel Refine application
-  -> taichi_library.taichi_aot (stable compatibility facade)
+  -> taichi_vision.taichi_aot (stable compatibility facade)
   -> taichi_algorithm.aot_api (public dispatch, dtype and block policy)
   -> taichi_aot.engine (one lifecycle/context/bridge owner)
   -> target-qualified bridge + taichi_c_api + TCM
@@ -45,7 +45,7 @@ Pixel Refine application
 The public import is:
 
 ```python
-from taichi_library import taichi_aot as aot
+from taichi_vision import taichi_aot as aot
 ```
 
 `artifact_targets.py` and `target_manifest.json` resolve backend, OS,
@@ -63,7 +63,7 @@ Scope: Windows desktop x86-64, snapshot 2026-08-17.
 - Inventory observed by audit: 69 TCM archives per desktop target (276 total).
   Artifact presence is not runtime qualification.
 - Public `aot_api` catalog: 115 non-underscore function entry points,
-  documented in `taichi_library/documentation/API_USAGE.md`.
+  documented in `taichi_vision/documentation/API_USAGE.md`.
 - Full-frame is the correctness and recovery baseline. Native block execution,
   OpenGL native graphs, and recorded pipelines remain guarded optimizations.
 - Allocation caching and tile-result caching are separate, bounded policies.
@@ -91,7 +91,7 @@ available.
 
 ## Algorithm status
 
-Use `taichi_library/documentation/ALGORITHM_STATUS.md` as the status matrix.
+Use `taichi_vision/documentation/ALGORITHM_STATUS.md` as the status matrix.
 Resize, Gaussian/gradients/Canny, and recorded remap/warp gates are the current
 qualified baseline for tested desktop targets. Demosaic variants, MLRI-ADMM,
 optical flow/block matching, RANSAC/OFB/AKAZE, most denoisers, FFT/NCC, HDR,
@@ -113,18 +113,18 @@ command, parity, lifecycle, and memory evidence.
 
 Canonical references:
 
-- `taichi_library/documentation/README.md`
-- `taichi_library/documentation/API_USAGE.md`
-- `taichi_library/documentation/ARCHITECTURE.md`
-- `taichi_library/documentation/BUILD_AND_VALIDATION.md`
-- `taichi_library/AOT_BACKEND_MATRIX.md`
+- `taichi_vision/documentation/README.md`
+- `taichi_vision/documentation/API_USAGE.md`
+- `taichi_vision/documentation/ARCHITECTURE.md`
+- `taichi_vision/documentation/BUILD_AND_VALIDATION.md`
+- `taichi_vision/AOT_BACKEND_MATRIX.md`
 - `ai_governance/CURRENT_IMPLEMENTATION.md`
 - `ai_governance/skills/taichi-aot-dev/SKILL.md`
 
 ## Desktop application boundary
 
 `pixel_refine_desktop/` is the application layer. Its denoising/alignment
-orchestrators call `taichi_library`; kernels and backend selection must not be
+orchestrators call `taichi_vision`; kernels and backend selection must not be
 duplicated there. The retired C++ spatial-similarity files and
 `denoising/Similarity.py` are no longer valid implementation paths.
 

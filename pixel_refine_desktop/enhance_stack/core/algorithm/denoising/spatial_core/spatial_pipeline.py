@@ -93,7 +93,7 @@ def process_in_gpu(
         'block_flow'        — HDR+ optical-flow tile matching (default)
         'block_correlation' — Hierarchical Phase Correlation
     """
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
         taichi_bridge,
     )
@@ -188,7 +188,7 @@ def process_in_gpu(
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.alignment_core import (
         get_taichi_worker,
     )
-    from taichi_library.taichi_algorithm.taichi_worker import (
+    from taichi_vision.taichi_algorithm.taichi_worker import (
         create_taichi_ndarray,
         release_taichi_ndarray,
         download_taichi_ndarray,
@@ -199,7 +199,7 @@ def process_in_gpu(
         accumulate_spatial_merging_taichi,
         SpatialScratchCache,
     )
-    from taichi_library.taichi_algorithm.interpolation.bilinear_interpolation import (
+    from taichi_vision.taichi_algorithm.interpolation.bilinear_interpolation import (
         bilinear_resize,
     )
 
@@ -224,7 +224,13 @@ def process_in_gpu(
 
         _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
         _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
-        _base_window_gpu = taichi_aot.hanning((tile_h, tile_w), exclude_boundary=False)
+        # ``phase2_fine_analysis`` keeps ``base_window`` in its graph ABI for
+        # compatibility, but the maintained kernel computes the window from
+        # ``tile_h/tile_w`` and never reads that argument.  Do not allocate a
+        # full device-side Hanning buffer here: at 12 MP this otherwise adds a
+        # resident allocation that contributes no result and is destroyed only
+        # after the complete batch.
+        _base_window_gpu = None
 
         _rows_gpu = taichi_aot.upload(row_starts)
         _rows_gpu.dtype = np.int32
@@ -301,7 +307,9 @@ def process_in_gpu(
                             current_image=curr_work_gray_gpu,
                             reference_image=ref_work_res_pass2_gpu,
                             weight_map_sum=_weight_work_gpu,
-                            base_window=_base_window_gpu,
+                            # Retained as a public-wrapper argument; the AOT
+                            # graph receives the compatibility scalar 0.
+                            base_window=None,
                             stability_map=None,
                             row_starts=_rows_gpu,
                             col_starts=_cols_gpu,
@@ -354,7 +362,12 @@ def process_in_gpu(
                                 else f"Spatial Merging: {i+1}/{num_images} (GPU Taichi)"
                             )
                             update_progress(prog, msg)
-                        time.sleep(0.01)
+                        # Progress callbacks are already dispatched through the
+                        # UI-safe channel.  A fixed 10 ms sleep per frame made
+                        # the native path pay an artificial latency tax and
+                        # did not provide synchronization; the next native
+                        # dispatch performs its own required ordering.
+                        time.sleep(0)
 
                     # Free chunk RAM instantly
                     del chunk_images
@@ -386,13 +399,17 @@ def process_in_gpu(
                     ref_img=_ref_full_gpu,
                     dst=_final_image_gpu,
                 )
-                final_image_sum_full_res[:] = _final_image_gpu.to_numpy()
+                # Read directly into the caller-owned output array.  The
+                # previous form allocated a second full-resolution host
+                # tensor and copied it into ``final_image_sum_full_res``;
+                # avoiding that transient matters for large RAW frames.
+                _final_image_gpu.to_numpy(out=final_image_sum_full_res)
                 _ref_full_gpu.destroy()
                 _final_image_gpu.destroy()
             else:
-                final_image_sum_full_res[:] = _sum_gpu.to_numpy()
+                _sum_gpu.to_numpy(out=final_image_sum_full_res)
 
-            weight_map_sum_full_res[:] = _weight_sum_full_gpu.to_numpy()
+            _weight_sum_full_gpu.to_numpy(out=weight_map_sum_full_res)
             return True
         except Exception:
             import traceback

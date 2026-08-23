@@ -10,9 +10,9 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from taichi_library.taichi_aot.engine import AOTEngine
+from taichi_vision.taichi_aot.engine import AOTEngine
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import taichi_bridge
-from taichi_library import taichi_aot
+from taichi_vision import taichi_aot
 
 def put_text(img, text):
     res = img.copy()
@@ -34,7 +34,7 @@ def test_stress_hybrid_pipeline():
     print(f"Working with zoomed image: {w}x{h}")
     
     # Load AOT Modules
-    tcm_path = os.path.join(project_root, "taichi_library", "taichi_algorithm", "aot_tcm", "optical_flow_vulkan.tcm")
+    tcm_path = os.path.join(project_root, "taichi_vision", "taichi_algorithm", "aot_tcm", "optical_flow_vulkan.tcm")
     mod = engine.load(tcm_path)
     
     # Pergeseran 5 tahap

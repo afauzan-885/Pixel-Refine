@@ -70,15 +70,6 @@ def find_cudnn_dlls():
             for pattern in ("cudnn64_*.dll", "cublas64_*.dll", "cufft64_*.dll", "curand64_*.dll"):
                 dlls.extend(path.rglob(pattern))
 
-    for base in (
-        Path("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA"),
-        Path("C:/Program Files/NVIDIA"),
-        Path("C:/tools/cuda"),
-    ):
-        if base.exists():
-            for pattern in ("cudnn64_*.dll", "cublas64_*.dll", "cufft64_*.dll", "curand64_*.dll"):
-                dlls.extend(base.rglob(pattern))
-
     if not dlls:
         try:
             result = subprocess.check_output(

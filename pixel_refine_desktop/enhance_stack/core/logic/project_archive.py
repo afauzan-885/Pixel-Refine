@@ -98,22 +98,67 @@ def session_has_data(database_path: str) -> bool:
     return bool(parameters) if isinstance(parameters, dict) else False
 
 
+def _is_verified_project(path: str) -> bool:
+    """Return whether *path* is a real, readable Pixel Refine project.
+
+    Recent-project history must not become a directory listing of every test
+    fixture created by the project archive tests.  A project is accepted only
+    when it is a readable `.prf` ZIP containing a valid Pixel Refine manifest;
+    temporary test archives are deliberately excluded from user history.
+    """
+    try:
+        normalized = os.path.abspath(os.fspath(path))
+        if not normalized.lower().endswith(PROJECT_EXTENSION):
+            return False
+        if not os.path.isfile(normalized):
+            return False
+        temp_root = os.path.normcase(os.path.abspath(tempfile.gettempdir()))
+        candidate = os.path.normcase(normalized)
+        try:
+            if os.path.commonpath((candidate, temp_root)) == temp_root:
+                return False
+        except ValueError:
+            # Different Windows volumes cannot share a common path; that is
+            # necessarily outside the temporary directory.
+            pass
+        with zipfile.ZipFile(normalized, "r") as archive:
+            if archive.testzip() is not None or "manifest.json" not in archive.namelist():
+                return False
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        return (
+            isinstance(manifest, dict)
+            and manifest.get("magic") == PROJECT_MAGIC
+            and int(manifest.get("format_version", 0)) >= 1
+        )
+    except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile):
+        return False
+
+
 def recent_projects(limit: int = 10) -> list[str]:
     values = _read_json(RECENT_PROJECTS_PATH, [])
     if not isinstance(values, list):
         return []
     result = []
+    changed = False
     for value in values:
         path = os.path.abspath(str(value))
-        if os.path.isfile(path) and path.lower().endswith(PROJECT_EXTENSION):
+        if _is_verified_project(path):
             result.append(path)
+        else:
+            changed = True
         if len(result) >= limit:
             break
+    if len(result) != len(values[:limit]):
+        changed = True
+    if changed:
+        _write_json(RECENT_PROJECTS_PATH, result[:limit])
     return result
 
 
 def remember_project(path: str, limit: int = 10) -> None:
     normalized = os.path.abspath(path)
+    if not _is_verified_project(normalized):
+        return
     values = [normalized] + [item for item in recent_projects(limit * 2) if item != normalized]
     _write_json(RECENT_PROJECTS_PATH, values[:limit])
 

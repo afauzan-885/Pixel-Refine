@@ -14,6 +14,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,10 +43,41 @@ fun Button(
     enabled: Boolean = true,
     bgColor: Color? = null,
     textColor: Color? = null,
+    debounceMs: Long = 300L,
+    isLoading: Boolean = false,
+    loadingText: String = "Wait...",
+    timeoutMs: Long = 10000L,
 ) {
     val theme = LocalGenericTheme.current
+    var lastClickTime by remember { mutableLongStateOf(0L) }
+    var internalLoading by remember { androidx.compose.runtime.mutableStateOf(false) }
+
+    // Efek Timeout Recovery: Jika proses hang / macet melebihi timeoutMs, otomatis pulihkan tombol
+    androidx.compose.runtime.LaunchedEffect(internalLoading) {
+        if (internalLoading) {
+            kotlinx.coroutines.delay(timeoutMs)
+            internalLoading = false // Auto-reset agar tombol tidak terkunci selamanya jika terjadi hang/crash
+        }
+    }
+
+    val isBusy = isLoading || internalLoading
+    val isEffectivelyEnabled = enabled && !isBusy
+
+    val debouncedOnClick = {
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastClickTime >= debounceMs && isEffectivelyEnabled) {
+            lastClickTime = currentTime
+            internalLoading = true
+            try {
+                onClick()
+            } catch (e: Throwable) {
+                internalLoading = false // Langsung pulihkan jika ada synchronous crash
+            }
+        }
+    }
+
     val effectiveBg = when {
-        !enabled -> theme.textMuted.copy(alpha = 0.4f)
+        !isEffectivelyEnabled -> theme.textMuted.copy(alpha = 0.4f)
         bgColor != null -> bgColor
         variant == Variant.Outline || variant == Variant.Ghost -> Color.Transparent
         else -> variantColor(theme, variant)
@@ -59,22 +94,37 @@ fun Button(
         Modifier.border(1.5.dp, theme.primary, RoundedCornerShape(theme.radiusMd))
     } else Modifier
 
+    val displayText = if (isBusy) loadingText else text
+
     Box(
         modifier = modifier
-            .fillMaxWidth()
             .height(height)
             .clip(RoundedCornerShape(theme.radiusMd))
             .then(borderModifier)
             .background(effectiveBg)
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(enabled = isEffectivelyEnabled, onClick = debouncedOnClick)
+            .padding(horizontal = 12.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = text,
-            color = effectiveText,
-            fontWeight = FontWeight.Bold,
-            fontSize = fontSize,
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (isBusy) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(effectiveText.copy(alpha = 0.8f)),
+                )
+            }
+            Text(
+                text = displayText,
+                color = effectiveText,
+                fontSize = fontSize,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
     }
 }
 

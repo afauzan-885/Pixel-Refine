@@ -35,9 +35,7 @@ def _ensure_llvm20_interpreter():
     ):
         return
 
-    runtime_root = os.environ.get(
-        "PIXEL_REFINE_RUNTIME_ROOT", r"D:\development_build\taichi_runtime_llvm20\release"
-    )
+    runtime_root = os.environ.get("PIXEL_REFINE_RUNTIME_ROOT", "").strip()
     project_root = os.path.dirname(os.path.abspath(__file__))
     candidate = os.environ.get(
         "PIXEL_REFINE_PYTHON_INTERPRETER",
@@ -52,7 +50,10 @@ def _ensure_llvm20_interpreter():
         return
 
     os.environ["PIXEL_REFINE_LLVM20_REEXEC"] = "1"
-    os.environ["PIXEL_REFINE_RUNTIME_ROOT"] = os.path.abspath(runtime_root)
+    if runtime_root:
+        os.environ["PIXEL_REFINE_RUNTIME_ROOT"] = os.path.abspath(runtime_root)
+    else:
+        os.environ.pop("PIXEL_REFINE_RUNTIME_ROOT", None)
     os.environ["PIXEL_REFINE_CANONICAL_LAUNCH"] = "1"
     extra_python_path = os.environ.get("PIXEL_REFINE_EXTRA_PYTHONPATH", "").strip()
     os.environ["PYTHONPATH"] = os.pathsep.join(
@@ -93,7 +94,7 @@ def _bootstrap_aot_backend_from_settings():
     except Exception:
         return
 
-    from taichi_library.backend_config import normalize_backend
+    from taichi_vision.backend_config import normalize_backend
 
     arch = normalize_backend(
         settings.get("device_backend_arch") or "cpu",
@@ -109,7 +110,7 @@ def _bootstrap_aot_backend_from_settings():
     selector = settings.get("device_selector")
     if arch in ("vulkan", "opengl") and not isinstance(selector, dict):
         # One-time migration from settings written before stable selectors.
-        from taichi_library.device_selection import make_device_selector
+        from taichi_vision.device_selection import make_device_selector
 
         legacy_name = str(settings.get("device_backend") or "")
         if legacy_name and "cpu" not in legacy_name.lower():
@@ -117,7 +118,7 @@ def _bootstrap_aot_backend_from_settings():
             settings["device_selector"] = selector
     if arch in ("vulkan", "opengl") and isinstance(selector, dict):
         try:
-            from taichi_library.device_selection import (
+            from taichi_vision.device_selection import (
                 resolve_device_selector,
                 scan_vulkan_device_records,
             )
@@ -147,7 +148,7 @@ def _bootstrap_aot_backend_from_settings():
     except (TypeError, ValueError):
         return
 
-    from taichi_library.backend_config import BackendConfig, backend_env
+    from taichi_vision.backend_config import BackendConfig, backend_env
 
     canonical_config = BackendConfig(
         backend=arch or "cpu",
@@ -283,7 +284,7 @@ def _cleanup_aot_backend(reason="app-shutdown"):
 
     try:
         import gc
-        import taichi_library.taichi_aot as taichi_aot
+        import taichi_vision.taichi_aot as taichi_aot
 
         try:
             taichi_aot.unload_all_modules()
@@ -476,7 +477,11 @@ class PixelRefineMain(QMainWindow):
         splash.update_status("Setting up main window...", 50)
 
         # Window icon and title
-        self.setWindowIcon(QIcon("resources/assets/icons/enhance_stack.png"))
+        # Use the canonical application logo for the title bar, taskbar,
+        # About dialog, and .prf file association.  ICO contains the native
+        # multi-resolution Windows variants and avoids scaling the PNG at
+        # every window creation.
+        self.setWindowIcon(QIcon("resources/assets/images/Logo_Pixel_Refine.ico"))
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
 
         # Window configuration
@@ -697,6 +702,7 @@ def main():
 
     # Create application
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon("resources/assets/images/Logo_Pixel_Refine.ico"))
     register_project_file_association()
 
     project_argument = next(

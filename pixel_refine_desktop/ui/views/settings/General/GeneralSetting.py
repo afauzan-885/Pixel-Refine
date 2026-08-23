@@ -17,7 +17,7 @@ from pixel_refine_desktop.ui.views.settings.General.Language import language_con
 from resources.GenericUILibrary.modals import modal_confirm
 from .general_store import get_general_store
 from .helpers import restart_application
-from taichi_library.device_selection import (
+from taichi_vision.device_selection import (
     make_device_selector,
     resolve_device_selector,
     scan_cuda_device_records,
@@ -142,7 +142,7 @@ class HardwareBackendTestWorker(QObject):
         for index, option in enumerate(self.options, start=1):
             text = option.get("text", "")
             result_key = option.get("key", text)
-            from taichi_library.backend_config import normalize_backend, parse_device_id
+            from taichi_vision.backend_config import normalize_backend, parse_device_id
 
             backend = normalize_backend(option.get("backend", "cpu"), allow_auto=False)
             device_id = parse_device_id(option.get("device_id"), 0) or 0
@@ -227,7 +227,7 @@ class HardwareBackendTestWorker(QObject):
             test_path = os.path.abspath(
                 os.path.join(
                     os.path.dirname(__file__),
-                    "../../../../../taichi_library/taichi_algorithm/"
+                    "../../../../../taichi_vision/taichi_algorithm/"
                     "aot_py/tests/test_comprehensif.py",
                 )
             )
@@ -248,7 +248,7 @@ class HardwareBackendTestWorker(QObject):
                 probe_path = os.path.abspath(
                     os.path.join(
                         os.path.dirname(__file__),
-                        "../../../../../taichi_library/vulkan_probe.py",
+                        "../../../../../taichi_vision/vulkan_probe.py",
                     )
                 )
                 command = [
@@ -946,7 +946,7 @@ class GeneralSettingsPage(Container, SyncMixin):
 
         import os
 
-        from taichi_library.backend_config import normalize_backend
+        from taichi_vision.backend_config import normalize_backend
 
         backend = normalize_backend(option.get("backend", "cpu"), allow_auto=False)
         device_id = int(option.get("device_id", -1))
@@ -966,7 +966,7 @@ class GeneralSettingsPage(Container, SyncMixin):
                 )
             self.store.set("device_selector", selector)
 
-        from taichi_library.backend_config import BackendConfig, backend_env
+        from taichi_vision.backend_config import BackendConfig, backend_env
 
         canonical_config = BackendConfig(
             backend=backend,

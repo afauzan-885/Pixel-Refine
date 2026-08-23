@@ -2,6 +2,11 @@ import taichi as ti
 import os
 import sys
 
+try:
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
+except ImportError:
+    from aot_artifact import archive_module
+
 # Path setup
 file_dir = os.path.dirname(os.path.abspath(__file__))
 # 6 levels up to reach pixel_refine_desktop
@@ -35,7 +40,10 @@ def compile_normalize_image_aot(arch=ti.vulkan, save_path="normalize_image_vulka
     builder2.dispatch(kernels.normalize_vec3_f32_to_vec3_f32_kernel, src_vec3, dst_vec3, inv_scale)
     module.add_graph("normalize_vec3_f32_to_vec3_f32", builder2.compile())
 
-    module.archive(save_path)
+    # Use the canonical archiver so LLVM/GFX metadata (including
+    # ``aot_metadata.tcb``) is retained.  The legacy ``Module.archive`` path
+    # emitted artifacts that the current runtime correctly quarantines.
+    archive_module(module, save_path)
     print(f"Successfully compiled and archived to: {save_path}")
     ti.reset()
 
@@ -47,7 +55,7 @@ if __name__ == "__main__":
     
     archs = [(ti.vulkan, "vulkan"), (ti.cuda, "cuda"), (ti.cpu, "cpu")]
     for arch, suffix in archs:
-        save_path = os.path.join(assets_dir, f"image_io_{suffix}.tcm")
+        save_path = os.path.join(assets_dir, f"normalize_image_{suffix}.tcm")
         try:
             compile_normalize_image_aot(arch=arch, save_path=save_path)
         except Exception as e:

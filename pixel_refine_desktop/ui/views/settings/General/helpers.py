@@ -57,7 +57,7 @@ def restart_application():
         # The previous code referenced LLVM20_STAGING_ROOT without importing
         # it, so Apply Settings failed before QProcess could start.
         try:
-            from taichi_library.llvm20_runtime_paths import runtime_root as resolve_runtime_root
+            from taichi_vision.llvm20_runtime_paths import runtime_root as resolve_runtime_root
 
             runtime_root = (
                 Path(previous_runtime_root).expanduser()
