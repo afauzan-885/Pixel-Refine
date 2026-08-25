@@ -6,12 +6,12 @@ import unittest
 
 import numpy as np
 
-from taichi_library.taichi_aot.block import (
+from taichi_vision.taichi_aot.block import (
     can_auto_block,
     can_auto_partition_dispatch,
     registered_block_adapters,
 )
-from taichi_library.taichi_aot.block_adapters import (
+from taichi_vision.taichi_aot.block_adapters import (
     LOCAL_STENCIL_ADAPTER_OPERATIONS,
     register_local_stencil_block_adapters,
     verify_adapter_parity,

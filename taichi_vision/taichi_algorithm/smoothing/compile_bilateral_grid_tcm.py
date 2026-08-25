@@ -8,16 +8,16 @@ import sys
 
 # Path injection for project root
 file_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "aot_py"))
-# aot_py -> taichi_algorithm -> taichi_library -> project root
+# aot_py -> taichi_algorithm -> taichi_vision -> project root
 project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 
-import taichi_library.taichi_algorithm.smoothing.bilateral_grid as bg
+import taichi_vision.taichi_algorithm.smoothing.bilateral_grid as bg
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
 except ImportError:  # Direct script execution.
     from aot_artifact import archive_module
 

@@ -11,7 +11,7 @@ import json
 import os
 import tempfile
 from .capabilities import backend_candidates, classify_device
-from taichi_library.backend_config import normalize_backend
+from taichi_vision.backend_config import normalize_backend
 
 
 @dataclass

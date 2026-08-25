@@ -19,13 +19,13 @@ import sys
 import tempfile
 import time
 
-# Direct worker execution places ``taichi_library`` rather than its parent at
+# Direct worker execution places ``taichi_vision`` rather than its parent at
 # sys.path[0]. Add the repository root without importing taichi_aot.
 _IMPORT_ROOT = Path(__file__).resolve().parent.parent
 if str(_IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(_IMPORT_ROOT))
 
-from taichi_library.device_selection import (
+from taichi_vision.device_selection import (
     device_fingerprint,
     is_translation_device,
     make_device_selector,
@@ -91,7 +91,7 @@ def _native_intel_record(device_id: int, records=None):
 
 def _qualification_key(record, project_root=None) -> str:
     # Import lazily: vulkan_probe intentionally avoids constructing taichi_aot.
-    from taichi_library.vulkan_probe import vulkan_inventory_digest
+    from taichi_vision.vulkan_probe import vulkan_inventory_digest
 
     inventory = vulkan_inventory_digest(project_root)
     identity = {
@@ -209,7 +209,7 @@ def qualification_status(device_id: int, project_root=None, records=None) -> dic
             "status": "ineligible",
             "reason": "selected adapter is not a native Intel Vulkan ICD",
         }
-    from taichi_library.vulkan_probe import intel_vulkan_is_validated
+    from taichi_vision.vulkan_probe import intel_vulkan_is_validated
 
     if intel_vulkan_is_validated(
         device_id=int(device_id), project_root=project_root
@@ -381,7 +381,7 @@ def _run_worker(args) -> int:
             )
             return 2
         _update_entry(key, status="running", worker_pid=os.getpid(), error="")
-        from taichi_library.vulkan_probe import (
+        from taichi_vision.vulkan_probe import (
             run_all_intel_vulkan_comprehensive,
         )
 

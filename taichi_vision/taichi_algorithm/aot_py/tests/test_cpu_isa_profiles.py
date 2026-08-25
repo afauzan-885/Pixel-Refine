@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from taichi_library.taichi_aot.cpu_isa_profiles import select_cpu_variant
+from taichi_vision.taichi_aot.cpu_isa_profiles import select_cpu_variant
 
 
 def test_malformed_string_flags_do_not_enable_x86_optimized_variant():

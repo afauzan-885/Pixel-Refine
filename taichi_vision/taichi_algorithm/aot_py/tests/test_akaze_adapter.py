@@ -11,13 +11,13 @@ import unittest
 
 import numpy as np
 
-from taichi_library.taichi_aot.block import (
+from taichi_vision.taichi_aot.block import (
     can_auto_block,
     can_auto_partition_dispatch,
     can_partition_block,
     registered_block_adapters,
 )
-from taichi_library.taichi_aot.block_adapters import (
+from taichi_vision.taichi_aot.block_adapters import (
     AKAZE_ADAPTER_OPERATIONS,
     register_akaze_block_adapters,
     run_akaze_keypoints_partition_tiled,

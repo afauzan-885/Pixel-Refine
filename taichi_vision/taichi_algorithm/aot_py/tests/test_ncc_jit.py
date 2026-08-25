@@ -28,7 +28,7 @@ class NCCJITTests(unittest.TestCase):
         )
         code = r"""
 import numpy as np
-from taichi_library.taichi_algorithm.alignment.ncc import zncc
+from taichi_vision.taichi_algorithm.alignment.ncc import zncc
 rng = np.random.default_rng(4)
 image = rng.random((20, 24), dtype=np.float32)
 template = image[5:10, 7:13].copy()

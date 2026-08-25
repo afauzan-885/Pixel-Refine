@@ -32,11 +32,11 @@ class AlgorithmSpec:
 # implementation list.  Existing AOT leaves are referenced directly; new
 # orchestration/reference stages are labelled accordingly.
 ALGORITHM_CATALOG: tuple[AlgorithmSpec, ...] = (
-    AlgorithmSpec("phase_correlation", "alignment", "taichi_library.taichi_algorithm.alignment.phase_correlation", "phase_correlation", "aot", notes="Requires the target-qualified phase-correlation artifact; audit_aot_matrix.py is authoritative per target"),
+    AlgorithmSpec("phase_correlation", "alignment", "taichi_vision.taichi_algorithm.alignment.phase_correlation", "phase_correlation", "aot", notes="Requires the target-qualified phase-correlation artifact; audit_aot_matrix.py is authoritative per target"),
     AlgorithmSpec(
         "OFB_keypoints",
         "alignment",
-        "taichi_library.taichi_algorithm.feature_matching.ofb",
+        "taichi_vision.taichi_algorithm.feature_matching.ofb",
         "detect_ofb_keypoints",
         "taichi-jit",
         notes=(
@@ -49,7 +49,7 @@ ALGORITHM_CATALOG: tuple[AlgorithmSpec, ...] = (
     AlgorithmSpec(
         "AKAZE_descriptors",
         "alignment",
-        "taichi_library.taichi_algorithm.feature_matching.akaze",
+        "taichi_vision.taichi_algorithm.feature_matching.akaze",
         "compute_descriptors_kernel",
         "taichi-jit",
         notes=(
@@ -58,23 +58,23 @@ ALGORITHM_CATALOG: tuple[AlgorithmSpec, ...] = (
             "a standalone descriptor call is not an AOT runtime claim"
         ),
     ),
-    AlgorithmSpec("RANSAC_homography", "alignment", "taichi_library.taichi_algorithm.alignment.quality", "choose_best_transform", "numpy-reference", notes="AOT RANSAC leaf remains available separately"),
-    AlgorithmSpec("TPS_refinement", "alignment", "taichi_library.taichi_algorithm.alignment.tps", "fit_tps_checked", "numpy-reference"),
-    AlgorithmSpec("APAP_refinement", "alignment", "taichi_library.taichi_algorithm.alignment.apap", "fit_apap", "numpy-reference"),
-    AlgorithmSpec("planar_stitch", "panorama", "taichi_library.taichi_algorithm.panorama.stitch", "stitch_panorama", "aot-or-numpy"),
-    AlgorithmSpec("sparse_to_dense_warp", "panorama", "taichi_library.taichi_algorithm.panorama.stitch", "sparse_to_dense_warp", "aot-or-numpy", notes="TPS/APAP maps are evaluated by the caller; AOT remap/remap_with_flow leaves handle dense sampling"),
-    AlgorithmSpec("cylindrical_projection", "panorama", "taichi_library.taichi_algorithm.panorama.projection", "cylindrical_projection", "aot-or-taichi-jit-or-numpy", notes="AOT composes host inverse-map construction with the qualified remap leaf"),
-    AlgorithmSpec("spherical_projection", "panorama", "taichi_library.taichi_algorithm.panorama.projection", "spherical_projection", "aot-or-taichi-jit-or-numpy", notes="AOT composes host inverse-map construction with the qualified remap leaf"),
-    AlgorithmSpec("equirectangular_projection", "panorama", "taichi_library.taichi_algorithm.panorama.projection", "equirectangular_projection", "aot-or-taichi-jit-or-numpy", notes="AOT composes host inverse-map construction with the qualified remap leaf"),
-    AlgorithmSpec("exposure_compensation", "panorama", "taichi_library.taichi_algorithm.panorama.exposure", "compensate_exposure", "taichi-jit-or-numpy", notes="JIT sufficient-statistics reduction and affine apply"),
-    AlgorithmSpec("dynamic_programming_seam", "panorama", "taichi_library.taichi_algorithm.panorama.seam", "dynamic_programming_seam", "taichi-jit-or-numpy", notes="JIT energy; deterministic DP control flow remains host"),
-    AlgorithmSpec("graph_cut_seam_surrogate", "panorama", "taichi_library.taichi_algorithm.panorama.seam", "graph_cut_surrogate", "taichi-jit-or-numpy", notes="bounded surrogate; not a max-flow claim"),
-    AlgorithmSpec("graph_cut_maxflow_seam", "panorama", "taichi_library.taichi_algorithm.panorama.seam", "graph_cut_maxflow", "aot-hybrid-or-taichi-jit-or-numpy", notes="exact bounded float64 host max-flow; target-qualified AOT/JIT unary maps compose with the same deterministic host solver; stale targets fail closed"),
-    AlgorithmSpec("HDR_laplacian_fusion", "hdr", "taichi_library.taichi_algorithm.aot_api.research_pipeline", "hdr_fuse_aot", "aot", notes="Target-qualified hdr TCM required; no cross-target CPU fallback"),
+    AlgorithmSpec("RANSAC_homography", "alignment", "taichi_vision.taichi_algorithm.alignment.quality", "choose_best_transform", "numpy-reference", notes="AOT RANSAC leaf remains available separately"),
+    AlgorithmSpec("TPS_refinement", "alignment", "taichi_vision.taichi_algorithm.alignment.tps", "fit_tps_checked", "numpy-reference"),
+    AlgorithmSpec("APAP_refinement", "alignment", "taichi_vision.taichi_algorithm.alignment.apap", "fit_apap", "numpy-reference"),
+    AlgorithmSpec("planar_stitch", "panorama", "taichi_vision.taichi_algorithm.panorama.stitch", "stitch_panorama", "aot-or-numpy"),
+    AlgorithmSpec("sparse_to_dense_warp", "panorama", "taichi_vision.taichi_algorithm.panorama.stitch", "sparse_to_dense_warp", "aot-or-numpy", notes="TPS/APAP maps are evaluated by the caller; AOT remap/remap_with_flow leaves handle dense sampling"),
+    AlgorithmSpec("cylindrical_projection", "panorama", "taichi_vision.taichi_algorithm.panorama.projection", "cylindrical_projection", "aot-or-taichi-jit-or-numpy", notes="AOT composes host inverse-map construction with the qualified remap leaf"),
+    AlgorithmSpec("spherical_projection", "panorama", "taichi_vision.taichi_algorithm.panorama.projection", "spherical_projection", "aot-or-taichi-jit-or-numpy", notes="AOT composes host inverse-map construction with the qualified remap leaf"),
+    AlgorithmSpec("equirectangular_projection", "panorama", "taichi_vision.taichi_algorithm.panorama.projection", "equirectangular_projection", "aot-or-taichi-jit-or-numpy", notes="AOT composes host inverse-map construction with the qualified remap leaf"),
+    AlgorithmSpec("exposure_compensation", "panorama", "taichi_vision.taichi_algorithm.panorama.exposure", "compensate_exposure", "taichi-jit-or-numpy", notes="JIT sufficient-statistics reduction and affine apply"),
+    AlgorithmSpec("dynamic_programming_seam", "panorama", "taichi_vision.taichi_algorithm.panorama.seam", "dynamic_programming_seam", "taichi-jit-or-numpy", notes="JIT energy; deterministic DP control flow remains host"),
+    AlgorithmSpec("graph_cut_seam_surrogate", "panorama", "taichi_vision.taichi_algorithm.panorama.seam", "graph_cut_surrogate", "taichi-jit-or-numpy", notes="bounded surrogate; not a max-flow claim"),
+    AlgorithmSpec("graph_cut_maxflow_seam", "panorama", "taichi_vision.taichi_algorithm.panorama.seam", "graph_cut_maxflow", "aot-hybrid-or-taichi-jit-or-numpy", notes="exact bounded float64 host max-flow; target-qualified AOT/JIT unary maps compose with the same deterministic host solver; stale targets fail closed"),
+    AlgorithmSpec("HDR_laplacian_fusion", "hdr", "taichi_vision.taichi_algorithm.aot_api.research_pipeline", "hdr_fuse_aot", "aot", notes="Target-qualified hdr TCM required; no cross-target CPU fallback"),
     AlgorithmSpec(
         "HDR_deghost_confidence",
         "hdr",
-        "taichi_library.taichi_algorithm.image_processing.hdr_stack",
+        "taichi_vision.taichi_algorithm.image_processing.hdr_stack",
         "deghost_confidence",
         "aot-hybrid-or-taichi-jit-or-numpy",
         notes=(
@@ -87,7 +87,7 @@ ALGORITHM_CATALOG: tuple[AlgorithmSpec, ...] = (
     AlgorithmSpec(
         "Debevec_response",
         "hdr",
-        "taichi_library.taichi_algorithm.image_processing.hdr_response",
+        "taichi_vision.taichi_algorithm.image_processing.hdr_response",
         "estimate_response_curve",
         "aot-hybrid-or-taichi-jit-or-numpy",
         notes=(
@@ -99,7 +99,7 @@ ALGORITHM_CATALOG: tuple[AlgorithmSpec, ...] = (
     AlgorithmSpec(
         "Robertson_response",
         "hdr",
-        "taichi_library.taichi_algorithm.image_processing.hdr_response",
+        "taichi_vision.taichi_algorithm.image_processing.hdr_response",
         "estimate_response_curve_robertson",
         "aot-hybrid-or-taichi-jit-or-numpy",
         notes=(
@@ -108,11 +108,11 @@ ALGORITHM_CATALOG: tuple[AlgorithmSpec, ...] = (
             "the alternating solver remain host-side."
         ),
     ),
-    AlgorithmSpec("radiance_merge", "hdr", "taichi_library.taichi_algorithm.image_processing.hdr_response", "merge_radiance", "aot-hybrid-or-taichi-jit-or-numpy", notes="AOT weighted/log merge leaves; calibration solver remains host-bounded"),
+    AlgorithmSpec("radiance_merge", "hdr", "taichi_vision.taichi_algorithm.image_processing.hdr_response", "merge_radiance", "aot-hybrid-or-taichi-jit-or-numpy", notes="AOT weighted/log merge leaves; calibration solver remains host-bounded"),
     AlgorithmSpec(
         "Reinhard_tone_map",
         "hdr",
-        "taichi_library.taichi_algorithm.image_processing.tone_mapping",
+        "taichi_vision.taichi_algorithm.image_processing.tone_mapping",
         "reinhard_tone_map",
         "taichi-jit-or-numpy",
         notes=(
@@ -121,14 +121,14 @@ ALGORITHM_CATALOG: tuple[AlgorithmSpec, ...] = (
             "qualified TCM leaves"
         ),
     ),
-    AlgorithmSpec("focus_Tenengrad", "focus", "taichi_library.taichi_algorithm.focus_stack.measures", "focus_measure", "aot", notes="Derivative leaves require a target-qualified gradients artifact"),
-    AlgorithmSpec("focus_Laplacian", "focus", "taichi_library.taichi_algorithm.focus_stack.measures", "focus_measure", "aot", notes="Derivative leaves require a target-qualified gradients artifact"),
-    AlgorithmSpec("focus_Brenner", "focus", "taichi_library.taichi_algorithm.focus_stack.measures", "focus_measure", "taichi-jit-or-numpy"),
-    AlgorithmSpec("all_in_focus_fusion", "focus", "taichi_library.taichi_algorithm.focus_stack.pipeline", "focus_stack", "aot-or-taichi-jit-or-numpy", notes="measure leaves can be AOT or explicit Taichi JIT; label/fusion host orchestration"),
+    AlgorithmSpec("focus_Tenengrad", "focus", "taichi_vision.taichi_algorithm.focus_stack.measures", "focus_measure", "aot", notes="Derivative leaves require a target-qualified gradients artifact"),
+    AlgorithmSpec("focus_Laplacian", "focus", "taichi_vision.taichi_algorithm.focus_stack.measures", "focus_measure", "aot", notes="Derivative leaves require a target-qualified gradients artifact"),
+    AlgorithmSpec("focus_Brenner", "focus", "taichi_vision.taichi_algorithm.focus_stack.measures", "focus_measure", "taichi-jit-or-numpy"),
+    AlgorithmSpec("all_in_focus_fusion", "focus", "taichi_vision.taichi_algorithm.focus_stack.pipeline", "focus_stack", "aot-or-taichi-jit-or-numpy", notes="measure leaves can be AOT or explicit Taichi JIT; label/fusion host orchestration"),
     AlgorithmSpec(
         "five_point_essential",
         "sfm",
-        "taichi_library.taichi_algorithm.sfm.five_point_solver",
+        "taichi_vision.taichi_algorithm.sfm.five_point_solver",
         "solve_five_point",
         "aot-hybrid-or-numpy",
         notes=(
@@ -140,7 +140,7 @@ ALGORITHM_CATALOG: tuple[AlgorithmSpec, ...] = (
     AlgorithmSpec(
         "cheirality_pose",
         "sfm",
-        "taichi_library.taichi_algorithm.sfm.cheirality_check",
+        "taichi_vision.taichi_algorithm.sfm.cheirality_check",
         "check_cheirality_full",
         "numpy-reference",
         notes="The public pose contract is host-side; sfm_cheirality_*_aot leaves expose validation arrays only",
@@ -148,22 +148,22 @@ ALGORITHM_CATALOG: tuple[AlgorithmSpec, ...] = (
     AlgorithmSpec(
         "adaptive_triangulation",
         "sfm",
-        "taichi_library.taichi_algorithm.sfm.triangulation",
+        "taichi_vision.taichi_algorithm.sfm.triangulation",
         "triangulate_adaptive",
         "numpy-reference",
         notes="The public adaptive solver is host-side; sfm_triangulate_adaptive_aot is a lower-level hybrid leaf",
     ),
-    AlgorithmSpec("pairwise_SfM", "sfm", "taichi_library.taichi_algorithm.sfm.reconstruction_pipeline", "reconstruct_pair", "numpy-reference", notes="Complete pose selection is host-side; backend='aot' fails closed until a complete qualified solver graph exists"),
-    AlgorithmSpec("sequence_pose_graph", "sfm", "taichi_library.taichi_algorithm.sfm.reconstruction_pipeline", "reconstruct_sequence", "numpy-reference", notes="Sequence orchestration composes the host pairwise solver; lower-level AOT geometry leaves are explicit"),
-    AlgorithmSpec("plane_sweep_MVS", "sfm", "taichi_library.taichi_algorithm.sfm.reconstruction_pipeline", "run_plane_sweep_mvs", "aot-or-taichi-jit-or-numpy", notes="AOT reuses sfm_stereo cost/winner/refine leaves; host orchestration remains"),
-    AlgorithmSpec("SGM_MVS", "sfm", "taichi_library.taichi_algorithm.sfm.mvs_regularization", "run_sgm_mvs", "aot-hybrid-or-taichi-jit-or-numpy", notes="Target-qualified sfm_stereo artifacts execute each SGM path natively; direction aggregation remains host and stale targets fail closed"),
-    AlgorithmSpec("PatchMatch_MVS", "sfm", "taichi_library.taichi_algorithm.sfm.mvs_regularization", "run_patchmatch_mvs", "aot-hybrid-or-taichi-jit-or-numpy", notes="Target-qualified sfm_stereo artifacts execute deterministic propagation natively; host controls iteration sequencing and stale targets fail closed"),
-    AlgorithmSpec("bundle_adjustment", "sfm", "taichi_library.taichi_algorithm.aot_api.research_pipeline", "bundle_adjust_lm_aot", "aot", notes="Target-qualified sfm_bundle artifact required; host Schur solve/orchestration remains explicit"),
-    AlgorithmSpec("point_cloud_filter_normals", "sfm", "taichi_library.taichi_algorithm.sfm.reconstruction_pipeline", "run_point_cloud_pipeline", "aot-or-numpy"),
+    AlgorithmSpec("pairwise_SfM", "sfm", "taichi_vision.taichi_algorithm.sfm.reconstruction_pipeline", "reconstruct_pair", "numpy-reference", notes="Complete pose selection is host-side; backend='aot' fails closed until a complete qualified solver graph exists"),
+    AlgorithmSpec("sequence_pose_graph", "sfm", "taichi_vision.taichi_algorithm.sfm.reconstruction_pipeline", "reconstruct_sequence", "numpy-reference", notes="Sequence orchestration composes the host pairwise solver; lower-level AOT geometry leaves are explicit"),
+    AlgorithmSpec("plane_sweep_MVS", "sfm", "taichi_vision.taichi_algorithm.sfm.reconstruction_pipeline", "run_plane_sweep_mvs", "aot-or-taichi-jit-or-numpy", notes="AOT reuses sfm_stereo cost/winner/refine leaves; host orchestration remains"),
+    AlgorithmSpec("SGM_MVS", "sfm", "taichi_vision.taichi_algorithm.sfm.mvs_regularization", "run_sgm_mvs", "aot-hybrid-or-taichi-jit-or-numpy", notes="Target-qualified sfm_stereo artifacts execute each SGM path natively; direction aggregation remains host and stale targets fail closed"),
+    AlgorithmSpec("PatchMatch_MVS", "sfm", "taichi_vision.taichi_algorithm.sfm.mvs_regularization", "run_patchmatch_mvs", "aot-hybrid-or-taichi-jit-or-numpy", notes="Target-qualified sfm_stereo artifacts execute deterministic propagation natively; host controls iteration sequencing and stale targets fail closed"),
+    AlgorithmSpec("bundle_adjustment", "sfm", "taichi_vision.taichi_algorithm.aot_api.research_pipeline", "bundle_adjust_lm_aot", "aot", notes="Target-qualified sfm_bundle artifact required; host Schur solve/orchestration remains explicit"),
+    AlgorithmSpec("point_cloud_filter_normals", "sfm", "taichi_vision.taichi_algorithm.sfm.reconstruction_pipeline", "run_point_cloud_pipeline", "aot-or-numpy"),
     AlgorithmSpec(
         "point_to_plane_ICP",
         "sfm",
-        "taichi_library.taichi_algorithm.sfm.registration",
+        "taichi_vision.taichi_algorithm.sfm.registration",
         "point_to_plane_icp",
         "aot-or-taichi-jit-or-numpy",
         notes="AOT accumulator is qualified on CPU Windows and Vulkan NVIDIA artifacts; other targets remain fail-closed",
@@ -171,17 +171,17 @@ ALGORITHM_CATALOG: tuple[AlgorithmSpec, ...] = (
     AlgorithmSpec(
         "TSDF_fusion",
         "sfm",
-        "taichi_library.taichi_algorithm.sfm.registration",
+        "taichi_vision.taichi_algorithm.sfm.registration",
         "integrate_tsdf",
         "aot-or-taichi-jit-or-numpy",
         notes="AOT integration is qualified on CPU Windows and Vulkan NVIDIA artifacts; other targets remain fail-closed",
     ),
-    AlgorithmSpec("PnP_quality_gate", "sfm", "taichi_library.taichi_algorithm.sfm.registration", "solve_pnp_checked", "opencv-reference", notes="explicit reference backend; no fabricated fallback"),
-    AlgorithmSpec("Poisson_surface", "sfm", "taichi_library.taichi_algorithm.sfm.reconstruction_pipeline", "run_point_cloud_pipeline", "aot-or-numpy"),
+    AlgorithmSpec("PnP_quality_gate", "sfm", "taichi_vision.taichi_algorithm.sfm.registration", "solve_pnp_checked", "opencv-reference", notes="explicit reference backend; no fabricated fallback"),
+    AlgorithmSpec("Poisson_surface", "sfm", "taichi_vision.taichi_algorithm.sfm.reconstruction_pipeline", "run_point_cloud_pipeline", "aot-or-numpy"),
     AlgorithmSpec(
         "texture_UV_atlas",
         "sfm",
-        "taichi_library.taichi_algorithm.sfm.texture_mapping",
+        "taichi_vision.taichi_algorithm.sfm.texture_mapping",
         "rasterize_texture_atlas",
         "aot-or-taichi-jit-or-numpy",
         notes="bounded UV rasteriser; AOT composes host barycentric maps with the target-qualified remap leaf",

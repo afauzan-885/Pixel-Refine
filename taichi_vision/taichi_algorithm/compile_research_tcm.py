@@ -20,21 +20,21 @@ os.environ.setdefault("AOT_MODE", "0")
 
 import taichi as ti
 
-from taichi_library.taichi_algorithm.image_processing import hdr_fusion as _hdr
-from taichi_library.taichi_algorithm.image_processing import hdr_stack as _hdr_stack
-from taichi_library.taichi_algorithm.image_processing import hdr_response as _hdr_response
-from taichi_library.taichi_algorithm.image_processing import tone_mapping as _tone
-from taichi_library.taichi_algorithm.sfm import bundle_adjustment as _ba
-from taichi_library.taichi_algorithm.sfm import cheirality_check as _cheir
-from taichi_library.taichi_algorithm.sfm import feature_matching as _match
-from taichi_library.taichi_algorithm.sfm import five_point_solver as _five
-from taichi_library.taichi_algorithm.sfm import plane_sweep as _stereo
-from taichi_library.taichi_algorithm.sfm import mvs_regularization as _mvs
-from taichi_library.taichi_algorithm.sfm import point_cloud as _cloud
-from taichi_library.taichi_algorithm.sfm import poisson_recon as _poisson
-from taichi_library.taichi_algorithm.sfm import registration as _registration
-from taichi_library.taichi_algorithm.sfm import triangulation as _tri
-from taichi_library.taichi_algorithm.panorama import seam as _seam
+from taichi_vision.taichi_algorithm.image_processing import hdr_fusion as _hdr
+from taichi_vision.taichi_algorithm.image_processing import hdr_stack as _hdr_stack
+from taichi_vision.taichi_algorithm.image_processing import hdr_response as _hdr_response
+from taichi_vision.taichi_algorithm.image_processing import tone_mapping as _tone
+from taichi_vision.taichi_algorithm.sfm import bundle_adjustment as _ba
+from taichi_vision.taichi_algorithm.sfm import cheirality_check as _cheir
+from taichi_vision.taichi_algorithm.sfm import feature_matching as _match
+from taichi_vision.taichi_algorithm.sfm import five_point_solver as _five
+from taichi_vision.taichi_algorithm.sfm import plane_sweep as _stereo
+from taichi_vision.taichi_algorithm.sfm import mvs_regularization as _mvs
+from taichi_vision.taichi_algorithm.sfm import point_cloud as _cloud
+from taichi_vision.taichi_algorithm.sfm import poisson_recon as _poisson
+from taichi_vision.taichi_algorithm.sfm import registration as _registration
+from taichi_vision.taichi_algorithm.sfm import triangulation as _tri
+from taichi_vision.taichi_algorithm.panorama import seam as _seam
 
 
 def _nd(name: str, dtype, ndim: int):

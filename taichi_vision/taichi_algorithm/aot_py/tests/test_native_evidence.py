@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import unittest
 
-from taichi_library.taichi_aot.block import (
+from taichi_vision.taichi_aot.block import (
     block_coverage_report,
     can_auto_block,
     can_auto_partition_dispatch,
 )
-from taichi_library.taichi_aot.native_evidence import (
+from taichi_vision.taichi_aot.native_evidence import (
     NativePartitionEvidence,
     clear_native_partition_evidence,
     lookup_native_partition_evidence,
@@ -32,7 +32,7 @@ from taichi_library.taichi_aot.native_evidence import (
     register_verified_native_opengl_partition_evidence,
     register_verified_native_opengl_intel_evidence,
 )
-from taichi_library.taichi_aot.block_adapters import register_low_risk_block_adapters
+from taichi_vision.taichi_aot.block_adapters import register_low_risk_block_adapters
 
 
 class NativeEvidenceTests(unittest.TestCase):

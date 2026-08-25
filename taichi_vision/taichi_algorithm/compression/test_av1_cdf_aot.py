@@ -4,7 +4,7 @@ from __future__ import annotations
 import unittest
 from types import MappingProxyType
 
-from taichi_library.taichi_algorithm.compression.av1_cdf_aot import (
+from taichi_vision.taichi_algorithm.compression.av1_cdf_aot import (
     AOM_SOURCE_REF,
     AV1CDFUnsupportedContext,
     AV1CDFValidationError,

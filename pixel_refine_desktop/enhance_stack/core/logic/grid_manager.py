@@ -10,12 +10,17 @@ Windowed Lazy Loading:
 - Recovery watchdog setiap 15 detik untuk retry card yang tertinggal.
 """
 
+import os
+
 from PySide6.QtCore import QTimer, QPoint, QRect
 from PySide6.QtWidgets import QWidget
 from typing import Optional, Callable, List, Dict, Any
 from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
     ProcessManager,
     is_widget_alive,
+)
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    thumbnail_creation_enabled,
 )
 
 # Jumlah card maksimal yang memiliki gambar di RAM sekaligus
@@ -120,6 +125,10 @@ class GridManager:
 
             card = ImageCard(card_id=str(img.id), size=110)
             card._image_path = img.path
+            if not thumbnail_creation_enabled(self.panel.logic.thumbnail_policy):
+                card.set_placeholder_text(
+                    os.path.basename(img.path).replace("_", "\n")
+                )
 
             if not is_zombie:
                 card.double_clicked.connect(self.panel._on_card_double_clicked)
@@ -182,6 +191,9 @@ class GridManager:
         2. Card dalam WINDOW_SIZE terdekat → load jika belum termuat.
         3. Card di luar window → unload untuk bebaskan RAM.
         """
+        if not thumbnail_creation_enabled(self.panel.logic.thumbnail_policy):
+            return
+
         all_cards = self.panel.all_cards
         if not all_cards:
             return
@@ -249,6 +261,10 @@ class GridManager:
 
     def _start_background_sync(self):
         """Trigger background sync setelah breathing room selesai."""
+        if not thumbnail_creation_enabled(self.panel.logic.thumbnail_policy):
+            self._real_paths_for_sync = []
+            return
+
         if not self._real_paths_for_sync:
             return
 
@@ -305,6 +321,10 @@ class GridManager:
         - Jika semua dalam window sudah termuat → stop timer.
         - Jika ada yang tertinggal → reset _is_fetching (lepas stuck state), retry.
         """
+        if not thumbnail_creation_enabled(self.panel.logic.thumbnail_policy):
+            self.stop_recovery_timer()
+            return
+
         all_cards = self.panel.all_cards
         if not all_cards:
             self.stop_recovery_timer()

@@ -822,7 +822,7 @@ def _delta_samples(data: Any, inverse: bool = False, bit_depth: int | None = Non
         # Keep the container parser dependency-free.  Importing the AOT
         # dispatcher here would initialize a GPU context merely by importing
         # ``read_dng_aot``; predictor paths are the only callers that need it.
-        from taichi_library.taichi_algorithm.aot_api.research import _dispatch
+        from taichi_vision.taichi_algorithm.aot_api.research import _dispatch
 
         result = _dispatch(
             "compression_image",

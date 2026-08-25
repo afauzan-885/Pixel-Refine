@@ -6,7 +6,7 @@ AOT_MODE = os.environ.get("AOT_MODE", os.environ.get("AOT_MODE", "1"))
 os.environ["AOT_MODE"] = AOT_MODE
 os.environ["AOT_MODE"] = AOT_MODE
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "1.0.0"
 MODEL_CONFIG = {
     "refiner": "database/Learning_Model/mobilenet_refiner.pth",
     "backbone": "database/Learning_Model/mobilenet_v2_weights.pth",
@@ -16,7 +16,9 @@ MODEL_CONFIG = {
 # falling back to the legacy E: LLVM15 venv.
 PYTHON_INTERPRETER = os.environ.get(
     "PIXEL_REFINE_PYTHON_INTERPRETER",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "Scripts", "python.exe"),
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "venv", "Scripts", "python.exe"
+    ),
 )
 CACHE_DIR = "database/cache/thumbnails"
 COMPARISON_CACHE_DIR = "database/cache/comparison"
@@ -28,33 +30,56 @@ CONFIG_DIR = os.path.join("database", "setting")
 # Defaults are retained only for headless/legacy callers.  Desktop runtime
 # values are read from Performance Settings through ``get_compute_block_settings``.
 COMPUTE_BLOCK_SIZE = 1024
-COMPUTE_BLOCK_MODE = os.environ.get("PIXEL_REFINE_COMPUTE_BLOCK_MODE", "auto").strip().lower()
+COMPUTE_BLOCK_MODE = (
+    os.environ.get("PIXEL_REFINE_COMPUTE_BLOCK_MODE", "auto").strip().lower()
+)
 
 
 def get_compute_block_settings():
     """Read the persisted performance block policy without importing Qt."""
     import json
 
+    def normalize_mode(value):
+        value = str(value or "").strip().lower()
+        if value in {"block", "always", "enabled", "enable", "on", "true", "1"}:
+            return "block"
+        if value in {"full", "disabled", "disable", "off", "false", "0"}:
+            return "full"
+        return "auto"
+
     result = {
         "enabled": True,
         "block_size": COMPUTE_BLOCK_SIZE,
         "threshold_mp": 12.0,
-        "mode": COMPUTE_BLOCK_MODE,
+        "mode": normalize_mode(COMPUTE_BLOCK_MODE),
     }
     try:
         with open(GENERAL_SETTINGS_FILE, "r", encoding="utf-8") as handle:
             data = json.load(handle)
         if isinstance(data, dict):
-            result["enabled"] = bool(data.get("compute_block_enabled", result["enabled"]))
-            result["block_size"] = int(data.get("compute_block_size", result["block_size"]))
-            result["threshold_mp"] = float(data.get("compute_block_threshold_mp", result["threshold_mp"]))
-            result["mode"] = str(data.get("compute_block_mode", result["mode"])).strip().lower()
+            result["block_size"] = int(
+                data.get("compute_block_size", result["block_size"])
+            )
+            result["threshold_mp"] = float(
+                data.get("compute_block_threshold_mp", result["threshold_mp"])
+            )
+            if "compute_block_mode" in data:
+                result["mode"] = normalize_mode(data.get("compute_block_mode"))
+            else:
+                # Migrate settings written before Block Processing became the
+                # single source of truth for enabling/disabling block mode.
+                legacy_enabled = bool(
+                    data.get("compute_block_enabled", result["enabled"])
+                )
+                result["mode"] = "auto" if legacy_enabled else "full"
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         pass
     if result["block_size"] not in (512, 768, 1024, 2048):
         result["block_size"] = COMPUTE_BLOCK_SIZE
     result["threshold_mp"] = max(0.1, result["threshold_mp"])
+    result["enabled"] = result["mode"] != "full"
     return result
+
 
 # ==============================================================================
 # CENTRALIZED NATURAL TONE MAPPING PARAMETERS (SINGLE SOURCE OF TRUTH)

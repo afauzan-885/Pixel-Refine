@@ -791,7 +791,7 @@ def non_local_means(
 
     # --- AOT path: use pre-compiled fixed-parameter kernels ---
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
 
         return taichi_aot.non_local_means(
             src,

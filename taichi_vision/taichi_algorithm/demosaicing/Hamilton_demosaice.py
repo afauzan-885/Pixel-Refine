@@ -42,7 +42,7 @@ def hamilton(
     aot = _get_aot()
     if not aot or not hasattr(aot, "hamilton"):
         # Import the AOT wrapper dynamically to execute
-        import taichi_library.taichi_aot as ta_aot
+        import taichi_vision.taichi_aot as ta_aot
 
         aot = ta_aot
 

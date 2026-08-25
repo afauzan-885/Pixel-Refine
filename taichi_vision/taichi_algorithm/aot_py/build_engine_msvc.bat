@@ -16,26 +16,26 @@ if /I "%~1"=="cpu" (
   rem source-tree pr-msvc cache can silently mix an older C-API ABI and hang
   rem during init when the x86_64 bridge loads beside fresh TCM artifacts.
   set "TAICHI_LIB=%PROJECT_ROOT%\test_algorithm\aot_targets\build\cpu_x86_64_windows\out"
-  set "OUTPUT_DIR=%PROJECT_ROOT%\taichi_library\taichi_algorithm\aot_py\aot_dll\cpu"
+  set "OUTPUT_DIR=%PROJECT_ROOT%\taichi_vision\taichi_algorithm\aot_py\aot_dll\cpu"
 )
 if /I "%~1"=="vulkan" (
   rem Keep Vulkan/OpenGL desktop bridge ABI-matched to the isolated
   rem vulkan_x86_64_windows target, never the historical pr-vk cache.
   set "TAICHI_LIB=%PROJECT_ROOT%\test_algorithm\aot_targets\build\vulkan_x86_64_windows\out"
-  set "OUTPUT_DIR=%PROJECT_ROOT%\taichi_library\taichi_algorithm\aot_py\aot_dll\vulkan"
+  set "OUTPUT_DIR=%PROJECT_ROOT%\taichi_vision\taichi_algorithm\aot_py\aot_dll\vulkan"
 )
 if /I "%~1"=="opengl" (
   rem OpenGL desktop bridge is built against the OpenGL-only profile.  Its
   rem context is selected by the active WGL/EGL/ICD policy at runtime.
   set "TAICHI_LIB=%PROJECT_ROOT%\test_algorithm\aot_targets\build\opengl_x86_64_windows\out"
-  set "OUTPUT_DIR=%PROJECT_ROOT%\taichi_library\taichi_algorithm\aot_py\aot_dll\opengl"
+  set "OUTPUT_DIR=%PROJECT_ROOT%\taichi_vision\taichi_algorithm\aot_py\aot_dll\opengl"
 )
 if /I "%~1"=="cuda" (
   rem CUDA target is configured in the isolated target harness.  The bridge
   rem must link the matching C-API import library; never fall back to a Vulkan
   rem or CPU DLL with a different ABI.
   set "TAICHI_LIB=%PROJECT_ROOT%\test_algorithm\aot_targets\build\cuda_x86_64_windows_nvidia\out"
-  set "OUTPUT_DIR=%PROJECT_ROOT%\taichi_library\taichi_algorithm\aot_py\aot_dll\cuda"
+  set "OUTPUT_DIR=%PROJECT_ROOT%\taichi_vision\taichi_algorithm\aot_py\aot_dll\cuda"
 )
 rem Optional isolated validation override.  This is useful when a newer
 rem LLVM/CUDA C-API build is being tested: it keeps the public bridge output

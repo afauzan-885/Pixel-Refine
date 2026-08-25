@@ -29,14 +29,14 @@ References:
     with a Laplacian Pyramid", 2011
 
 Usage (JIT):
-    from taichi_library.taichi_algorithm import reinhard_tone_map, srgb_gamma
-    from taichi_library.taichi_algorithm import local_tone_map
+    from taichi_vision.taichi_algorithm import reinhard_tone_map, srgb_gamma
+    from taichi_vision.taichi_algorithm import local_tone_map
     result = reinhard_tone_map(hdr_image, key=0.18)
     result = srgb_gamma(result)
     result = local_tone_map(hdr_image)
 
 Usage (AOT):
-    import taichi_library.taichi_aot as ta
+    import taichi_vision.taichi_aot as ta
     result = ta.tone_map(hdr_image, method='local')
 """
 

@@ -19,7 +19,7 @@ try:
         validate_same_shape,
     )
 except ImportError:  # pragma: no cover - direct pytest collection fallback
-    from taichi_library.taichi_algorithm.pipeline_common import (
+    from taichi_vision.taichi_algorithm.pipeline_common import (
         PipelineReport,
         as_gray_float32,
         finite_fraction,

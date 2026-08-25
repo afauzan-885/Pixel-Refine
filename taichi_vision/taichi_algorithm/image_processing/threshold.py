@@ -5,7 +5,7 @@ OpenCV-compatible threshold operations.
 Parity: cv2.threshold(src, thresh, maxval, type)
 
 Usage (JIT):
-    from taichi_library.taichi_algorithm import threshold, THRESH_BINARY, THRESH_BINARY_INV
+    from taichi_vision.taichi_algorithm import threshold, THRESH_BINARY, THRESH_BINARY_INV
     result, thresh_val = threshold(src, 127, 255, 'BINARY')
 """
 

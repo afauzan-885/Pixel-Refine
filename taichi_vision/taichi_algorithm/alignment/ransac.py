@@ -813,7 +813,7 @@ def ransac_flow_cleanup(
     Supports both NumPy and Taichi ndarrays natively.
     """
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.ransac_flow_cleanup(flow, threshold=threshold, return_gpu=hasattr(flow, "to_numpy"))
 
     if not TAICHI_AVAILABLE:

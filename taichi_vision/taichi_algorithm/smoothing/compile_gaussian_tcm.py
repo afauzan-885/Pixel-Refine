@@ -11,10 +11,10 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-gaussian_mod = importlib.import_module("taichi_library.taichi_algorithm.smoothing.gaussian")
+gaussian_mod = importlib.import_module("taichi_vision.taichi_algorithm.smoothing.gaussian")
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
 except ImportError:  # Direct script execution.
     from aot_artifact import normalize_tcm
 

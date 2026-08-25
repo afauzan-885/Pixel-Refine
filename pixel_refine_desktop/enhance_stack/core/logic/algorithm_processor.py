@@ -25,7 +25,10 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
     running_similarity as running_mf_similarity,
     running_mf_denoiser,
-    running_similarity as running_similarity_fusion,
+)
+
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.weightnet import (
+    running_weightnet,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.SplatSR import (
     running_splatting_sr,
@@ -95,14 +98,34 @@ class AlgorithmProcessorThread(QThread):
             is_sr_checked = self.settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
             is_denoise_checked = self.settings.get(config.KEY_CHECKBOX_DENOISING, False)
 
-            raw_align = self.settings.get(config.KEY_ALIGNMENT) or self.settings.get(config.KEY_ALIGNMENT_ALGO, "No Alignment")
-            alignment_choice = raw_align if (is_align_checked and raw_align not in ("", "None")) else "No Alignment"
+            raw_align = self.settings.get(config.KEY_ALIGNMENT) or self.settings.get(
+                config.KEY_ALIGNMENT_ALGO, "No Alignment"
+            )
+            alignment_choice = (
+                raw_align
+                if (is_align_checked and raw_align not in ("", "None"))
+                else "No Alignment"
+            )
 
-            raw_sr = self.settings.get(config.KEY_SUPER_RESOLUTION) or self.settings.get(config.KEY_SUPER_RESOLUTION_ALGO, "No Super Resolution")
-            super_resolution_choice = raw_sr if (is_sr_checked and raw_sr not in ("", "None")) else "No Super Resolution"
+            raw_sr = self.settings.get(
+                config.KEY_SUPER_RESOLUTION
+            ) or self.settings.get(
+                config.KEY_SUPER_RESOLUTION_ALGO, "No Super Resolution"
+            )
+            super_resolution_choice = (
+                raw_sr
+                if (is_sr_checked and raw_sr not in ("", "None"))
+                else "No Super Resolution"
+            )
 
-            raw_denoise = self.settings.get(config.KEY_DENOISING) or self.settings.get(config.KEY_DENOISING_ALGO, "No Denoising")
-            denoising_choice = raw_denoise if (is_denoise_checked and raw_denoise not in ("", "None")) else "No Denoising"
+            raw_denoise = self.settings.get(config.KEY_DENOISING) or self.settings.get(
+                config.KEY_DENOISING_ALGO, "No Denoising"
+            )
+            denoising_choice = (
+                raw_denoise
+                if (is_denoise_checked and raw_denoise not in ("", "None"))
+                else "No Denoising"
+            )
 
             denoising_active = denoising_choice not in (
                 "",
@@ -112,7 +135,7 @@ class AlgorithmProcessorThread(QThread):
             denoising_owns_alignment = denoising_choice in (
                 "Average",
                 "Similarity",
-                "Similarity Fusion",
+                "Spatial AI",
             )
             # SplattingSR performs its own internal Block Matching pass to
             # generate sub-pixel flow/confidence maps.  Never run the
@@ -230,13 +253,19 @@ class AlgorithmProcessorThread(QThread):
                         stop_callback=get_stop_cb,
                         alignment_backend=alignment_choice,
                     ),
-                    "Similarity Fusion": lambda: running_similarity_fusion(
+                    "Spatial AI": lambda: running_weightnet(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
-                        alignment_backend=alignment_choice,
+                    ),
+                    "FusionNet": lambda: running_weightnet(
+                        self.parent_panel,
+                        single_process=self.single_process,
+                        batch_id=self.batch_id,
+                        progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
                     ),
                     "No Denoising": lambda: None,
                     "None": lambda: None,

@@ -219,15 +219,18 @@ def get_denoising_registry():
         merge_average_from_hdf5,
         merge_average_from_paths,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_fusion import (
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.SpatiaFusion import (
         SpatialFusionDenoisingAlgorithm,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.weightnet import (
+        FusionNetDenoisingAlgorithm,
     )
 
     algorithms = [
         NoDenoisingAlgorithm(),
         AverageDenoisingAlgorithm(),
         SpatialFusionDenoisingAlgorithm(),
-        SimilarityFusionDenoisingAlgorithm(),
+        FusionNetDenoisingAlgorithm(),
     ]
     return {algo.NAME: algo for algo in algorithms}
 
@@ -332,7 +335,9 @@ def _build_algorithm_alias_map(registry):
         "no denoising": "No Denoising",
         "average": "Average",
         "similarity": "Similarity",
-        "similarity fusion": "Similarity Fusion",
+        "fusionnet": "FusionNet",
+        "weightnet": "FusionNet",
+        "spatial ai": "FusionNet",
     }
     for alias, target in explicit_aliases.items():
         if target in registry:

@@ -20,7 +20,7 @@ _ROOT = Path(__file__).resolve().parents[4]
 
 _PROBE = r"""
 import numpy as np
-import taichi_library.taichi_algorithm as ta
+import taichi_vision.taichi_algorithm as ta
 
 img = np.arange(25, dtype=np.float32).reshape(5, 5)
 rgb = np.stack([img, img + 100.0, img + 200.0], axis=-1)

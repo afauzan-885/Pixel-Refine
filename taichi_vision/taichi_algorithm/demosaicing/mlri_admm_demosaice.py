@@ -28,7 +28,7 @@ def mlri_admm_demosaic(
     from ..common import _get_aot
     aot = _get_aot()
     if not aot or not hasattr(aot, "mlri_admm_demosaic"):
-        import taichi_library.taichi_aot as ta_aot
+        import taichi_vision.taichi_aot as ta_aot
         aot = ta_aot
         
     is_taichi = hasattr(bayer, "to_numpy") or hasattr(cmatrix, "to_numpy")
@@ -54,7 +54,7 @@ def mlri_admm_demosaic_1channel(
     from ..common import _get_aot
     aot = _get_aot()
     if not aot or not hasattr(aot, "mlri_admm_demosaic_1channel"):
-        import taichi_library.taichi_aot as ta_aot
+        import taichi_vision.taichi_aot as ta_aot
         aot = ta_aot
         
     is_taichi = hasattr(bayer, "to_numpy")
@@ -77,7 +77,7 @@ def mlri_admm_demosaic_half_res(
     from ..common import _get_aot
     aot = _get_aot()
     if not aot or not hasattr(aot, "mlri_admm_demosaic_half_res"):
-        import taichi_library.taichi_aot as ta_aot
+        import taichi_vision.taichi_aot as ta_aot
         aot = ta_aot
         
     is_taichi = hasattr(bayer, "to_numpy")
@@ -100,7 +100,7 @@ def mlri_admm_demosaic_rgb_half_res(
     from ..common import _get_aot
     aot = _get_aot()
     if not aot or not hasattr(aot, "mlri_admm_demosaic_rgb_half_res"):
-        import taichi_library.taichi_aot as ta_aot
+        import taichi_vision.taichi_aot as ta_aot
         aot = ta_aot
         
     is_taichi = hasattr(bayer, "to_numpy") or hasattr(cmatrix, "to_numpy")
@@ -123,7 +123,7 @@ def mlri_admm_demosaic_3channel(
     from ..common import _get_aot
     aot = _get_aot()
     if not aot or not hasattr(aot, "mlri_admm_demosaic_3channel"):
-        import taichi_library.taichi_aot as ta_aot
+        import taichi_vision.taichi_aot as ta_aot
         aot = ta_aot
         
     is_taichi = hasattr(bayer, "to_numpy") or hasattr(cmatrix, "to_numpy")

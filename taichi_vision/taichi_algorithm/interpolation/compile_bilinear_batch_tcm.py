@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
-from taichi_library.taichi_algorithm.interpolation import bilinear_interpolation as bilinear
+from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
+from taichi_vision.taichi_algorithm.interpolation import bilinear_interpolation as bilinear
 
 
 ARCHES = {
@@ -73,7 +73,7 @@ def compile_bilinear_batch(backend=None, output=None, *, arch=None, save_path=No
     if output is None:
         output = (
             ROOT
-            / "taichi_library"
+            / "taichi_vision"
             / "taichi_algorithm"
             / "aot_tcm"
             / target_id

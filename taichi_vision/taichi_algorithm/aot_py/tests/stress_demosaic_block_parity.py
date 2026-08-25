@@ -44,8 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    from taichi_library.taichi_algorithm import aot_api as api
-    from taichi_library.taichi_aot import engine
+    from taichi_vision.taichi_algorithm import aot_api as api
+    from taichi_vision.taichi_aot import engine
 
     method = str(args.method).strip().lower()
     if method not in {"dcb", "hamilton", "bilinear"}:

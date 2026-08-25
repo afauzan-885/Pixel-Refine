@@ -5,7 +5,7 @@ GPU-accelerated histogram computation.
 Parity: np.histogram(src, bins, range)
 
 Usage (JIT):
-    from taichi_library.taichi_algorithm import histogram
+    from taichi_vision.taichi_algorithm import histogram
     hist, bin_edges = histogram(src, bins=256, range=(0, 256))
 """
 

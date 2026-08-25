@@ -12,11 +12,11 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 box_filter_mod = importlib.import_module(
-    "taichi_library.taichi_algorithm.smoothing.box_filter"
+    "taichi_vision.taichi_algorithm.smoothing.box_filter"
 )
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
 except ImportError:
     from aot_artifact import archive_module
 

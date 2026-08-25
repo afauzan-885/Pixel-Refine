@@ -82,7 +82,7 @@ class MassAlgorithmEditDialog(QDialog):
                 "Average",
                 "Median",
                 "Similarity",
-                "Similarity Fusion",
+                "Spatial AI",
                 "No Denoising",
             ],
         }

@@ -45,7 +45,7 @@ def android_clang(api_level: int) -> Path:
 
 DEFAULT_ANDROID_API = int(os.environ.get("PIXEL_REFINE_ANDROID_API", "26"))
 DEFAULT_CLANG = android_clang(DEFAULT_ANDROID_API)
-DEFAULT_OUTPUT = ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "cpu_arm64_android" / "runtime_arm64_android.bc"
+DEFAULT_OUTPUT = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "cpu_arm64_android" / "runtime_arm64_android.bc"
 TARGET_PROFILES = {
     "cpu_arm64_android": {
         "triple": lambda api: f"aarch64-unknown-linux-android{int(api)}",
@@ -60,7 +60,7 @@ TARGET_PROFILES = {
         # portable LLVM bitcode; linking against a Linux libc happens on the
         # target device/toolchain, not during AOT archive generation.
         "clang": NDK_PREBUILT / "bin" / "clang.exe",
-        "output": ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "cpu_arm64_linux" / "runtime_arm64_linux.bc",
+        "output": ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "cpu_arm64_linux" / "runtime_arm64_linux.bc",
     },
 }
 

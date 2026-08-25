@@ -18,7 +18,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 jbf = importlib.import_module(
-    "taichi_library.taichi_algorithm.smoothing.joint_bilateral_guidance"
+    "taichi_vision.taichi_algorithm.smoothing.joint_bilateral_guidance"
 )
 
 def compile_jbf_aot(arch=ti.vulkan, save_path="jbf_vulkan.tcm"):

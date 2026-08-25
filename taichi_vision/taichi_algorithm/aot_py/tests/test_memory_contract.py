@@ -12,7 +12,7 @@ from collections import UserDict
 ROOT = Path(__file__).resolve().parents[4]
 _SPEC = importlib.util.spec_from_file_location(
     "pixel_refine_memory_contract",
-    ROOT / "taichi_library" / "taichi_aot" / "memory.py",
+    ROOT / "taichi_vision" / "taichi_aot" / "memory.py",
 )
 assert _SPEC is not None and _SPEC.loader is not None
 MEMORY = importlib.util.module_from_spec(_SPEC)

@@ -15,6 +15,9 @@ from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
     BatchImageImportThreading,
 )
 from pixel_refine_desktop.enhance_stack.core.logic.process_manager import ProcessManager
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    thumbnail_creation_enabled,
+)
 
 
 class ImportManager(QObject):
@@ -124,6 +127,8 @@ class ImportManager(QObject):
 
         card = ImageCard(card_id=str(img.id), size=110)
         card._image_path = img.path
+        if not thumbnail_creation_enabled(self.panel.logic.thumbnail_policy):
+            card.set_placeholder_text(os.path.basename(img.path).replace("_", "\n"))
         card.double_clicked.connect(self.panel._on_card_double_clicked)
         card.clicked.connect(
             lambda cid, event, c=card: self.panel._on_card_clicked(cid, event, c)

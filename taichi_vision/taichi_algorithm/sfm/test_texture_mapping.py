@@ -73,7 +73,7 @@ class TextureMappingTests(unittest.TestCase):
             captured["kwargs"] = kwargs
             return np.zeros((*map_x.shape, src.shape[2]), dtype=np.float32)
 
-        with patch("taichi_library.taichi_algorithm.aot_api.remap", fake_remap):
+        with patch("taichi_vision.taichi_algorithm.aot_api.remap", fake_remap):
             result = rasterize_texture_atlas(
                 self.uv,
                 self.faces,

@@ -11,6 +11,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 if __name__ == "__main__":
     run_module(
-        "taichi_library.taichi_algorithm.aot_py.tests.extreme_stress_test",
+        "taichi_vision.taichi_algorithm.aot_py.tests.extreme_stress_test",
         run_name="__main__",
     )

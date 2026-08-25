@@ -28,7 +28,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[3]
-TCM_ROOT = ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm"
+TCM_ROOT = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
 TRIPLES = {
     "cpu_arm64_android": "aarch64-unknown-linux-android26",
     "cpu_arm64_linux": "aarch64-unknown-linux-gnu",

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from taichi_library import taichi_aot as aot
+from taichi_vision import taichi_aot as aot
 
 
 class VramSampler:

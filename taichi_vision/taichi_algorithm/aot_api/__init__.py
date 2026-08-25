@@ -18,7 +18,7 @@ if project_root not in sys.path:
 
 
 # Import the Generic AOT Engine and Buffer Pool
-from taichi_library.taichi_aot.engine import (
+from taichi_vision.taichi_aot.engine import (
     AOTEngine,
     TaichiGPUBuffer,
     InputArray,
@@ -30,7 +30,7 @@ from taichi_library.taichi_aot.engine import (
     backend_info,
     engine,
 )
-from taichi_library.taichi_aot.backend_config import (
+from taichi_vision.taichi_aot.backend_config import (
     BackendConfig,
     CANONICAL_BACKENDS,
     GPU_BACKENDS,
@@ -38,42 +38,42 @@ from taichi_library.taichi_aot.backend_config import (
     normalize_vendor,
     backend_env,
 )
-from taichi_library.taichi_aot.capabilities import (
+from taichi_vision.taichi_aot.capabilities import (
     BackendCapabilities,
     classify_device,
     backend_candidates,
 )
-from taichi_library.taichi_aot.backend_manager import (
+from taichi_vision.taichi_aot.backend_manager import (
     BackendManager,
     BackendDecision,
     preflight_backend,
 )
-from taichi_library.taichi_aot.artifact_targets import (
+from taichi_vision.taichi_aot.artifact_targets import (
     TargetSpec,
     detect_target,
     resolve_artifact,
     load_target_manifest,
 )
-from taichi_library.taichi_aot.engine import enable_experiment_mode, is_experiment_mode
-from taichi_library.taichi_algorithm.demosaicing.demosaic_runtime import (
+from taichi_vision.taichi_aot.engine import enable_experiment_mode, is_experiment_mode
+from taichi_vision.taichi_algorithm.demosaicing.demosaic_runtime import (
     DemosaicBufferSet,
 )
-from taichi_library.taichi_algorithm.demosaicing.demosaic_graph_manifest import (
+from taichi_vision.taichi_algorithm.demosaicing.demosaic_graph_manifest import (
     resolve_graph_name,
     registered_graph_names,
 )
-from taichi_library.taichi_aot.engine import (
+from taichi_vision.taichi_aot.engine import (
     INTER_CUBIC,
     INTER_LINEAR,
     INTER_NEAREST,
     INTER_AREA,
 )
-from taichi_library.taichi_aot.engine import (
+from taichi_vision.taichi_aot.engine import (
     COLOR_BGR2GRAY,
     COLOR_RGB2GRAY,
     COLOR_GRAY2BGR,
 )
-from taichi_library.taichi_aot.block import (
+from taichi_vision.taichi_aot.block import (
     BlockGrid,
     BlockRecord,
     BlockState,
@@ -114,7 +114,7 @@ from taichi_library.taichi_aot.block import (
     block_coverage_report,
     checksum,
 )
-from taichi_library.taichi_aot.block_adapters import (
+from taichi_vision.taichi_aot.block_adapters import (
     PartitionContext,
     LOW_RISK_ADAPTER_OPERATIONS,
     LOCAL_STENCIL_ADAPTER_OPERATIONS,
@@ -215,7 +215,7 @@ from taichi_library.taichi_aot.block_adapters import (
     verify_map_reduce_parity,
     optical_flow_partition_gap_report,
 )
-from taichi_library.taichi_aot.native_evidence import (
+from taichi_vision.taichi_aot.native_evidence import (
     NativePartitionEvidence,
     register_native_partition_evidence,
     lookup_native_partition_evidence,
@@ -232,7 +232,7 @@ from taichi_library.taichi_aot.native_evidence import (
     register_verified_native_opengl_partition_evidence,
     register_verified_native_opengl_intel_evidence,
 )
-from taichi_library.taichi_aot.generic_block import (
+from taichi_vision.taichi_aot.generic_block import (
     BlockComputeSpec,
     BlockTileContext,
     BlockPlanUnavailable,
@@ -243,7 +243,7 @@ from taichi_library.taichi_aot.generic_block import (
     run_generic_blocks,
     run_registered_block_adapter,
 )
-from taichi_library.taichi_aot.compute_block import (
+from taichi_vision.taichi_aot.compute_block import (
     ComputeBlockAnalysis,
     ComputeBlockMetadata,
     analyze_compute_block_source,
@@ -251,11 +251,11 @@ from taichi_library.taichi_aot.compute_block import (
     current_compute_block_scope,
     get_compute_block_registry,
 )
-from taichi_library.taichi_aot.pipeline_scheduler import (
+from taichi_vision.taichi_aot.pipeline_scheduler import (
     PipelineStage,
     run_block_pipeline,
 )
-from taichi_library.taichi_aot.auto_pipeline import (
+from taichi_vision.taichi_aot.auto_pipeline import (
     AutoPipelinePlanner,
     GraphSpec,
     PipelinePlan,
@@ -267,7 +267,7 @@ from taichi_library.taichi_aot.auto_pipeline import (
     ConservativeAutoTuner,
     AutoPipelineAutotuner,
 )
-from taichi_library.taichi_algorithm.taichi_worker import ti_thread
+from taichi_vision.taichi_algorithm.taichi_worker import ti_thread
 
 # Bridge to specialized AOT functions
 # Moved to lazy imports in wrapper functions below to avoid circular imports
@@ -406,7 +406,7 @@ def _mod(name: str):
         active_tcm_dir = _tcm_dir
         if not os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT", "").strip():
             try:
-                from taichi_library.llvm20_runtime_paths import tcm_root as staged_tcm_root
+                from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
 
                 staged_root = staged_tcm_root(target.target_id)
             except (ImportError, OSError, ValueError):
@@ -2137,7 +2137,7 @@ def normalize_image(
     src: InputArray, dtype: np.dtype, out: OutputArray = None
 ) -> TaichiGPUBuffer:
     """High-level normalization [0, 1] using AOT."""
-    from taichi_library.taichi_algorithm.alignment.taichi_bridge import (
+    from taichi_vision.taichi_algorithm.alignment.taichi_bridge import (
         normalize_image_gpu,
     )
 
@@ -2149,7 +2149,7 @@ def to_gamma_proxy(
     src: InputArray, scale: float = 1.0, out: OutputArray = None
 ) -> TaichiGPUBuffer:
     """High-level Gamma Proxy transformation using AOT."""
-    from taichi_library.taichi_algorithm.alignment.taichi_bridge import (
+    from taichi_vision.taichi_algorithm.alignment.taichi_bridge import (
         to_gamma_proxy_gpu,
     )
 
@@ -3116,7 +3116,7 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
     is_vec = getattr(src_buf, "is_vector", False)
     is_2d = (len(src_buf.shape) == 2) and not is_vec
 
-    from taichi_library.taichi_algorithm.smoothing.gaussian import (
+    from taichi_vision.taichi_algorithm.smoothing.gaussian import (
         compute_gaussian_weights,
     )
 
@@ -3159,8 +3159,6 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
     if owned_f32_src:
         src_buf.destroy()
     output = dst_buf if return_gpu else dst_buf.to_numpy()
-    if owned_f32_src:
-        src_buf.destroy()
     return output
 
 
@@ -3298,7 +3296,7 @@ def median_filter(src, return_gpu=False, **kwargs):
     ):
         # RGB graph is enabled only after an isolated child-process probe.  A
         # crashing Intel driver therefore cannot take down the application.
-        from taichi_library.taichi_aot.capabilities import opengl_native_probe
+        from taichi_vision.taichi_aot.capabilities import opengl_native_probe
 
         native_median_supported = opengl_native_probe("median")
     if np.dtype(median_dtype) != np.dtype(np.float32) or (
@@ -3612,7 +3610,7 @@ def ransac_flow_cleanup_aot(flow, threshold=1.0, return_gpu=False):
     # Normalize host input without an extra NumPy round-trip; an already
     # imported vector buffer is materialized only for this legacy ABI boundary
     # until a native vector-to-scalar external-memory view is available.
-    from taichi_library.taichi_algorithm.aot_wrapper import _InputArray
+    from taichi_vision.taichi_algorithm.aot_wrapper import _InputArray
 
     flow_owned = False
     if is_gpu and getattr(flow, "is_vector", False):
@@ -4618,7 +4616,7 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
                 is_vector=False,
                 host_accessible=True,
             )
-            from taichi_library.taichi_aot.engine import _LIB, _RUNTIME
+            from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
 
             _LIB.write_to_gpu_buffer(
                 _RUNTIME, flow_buf.handle, flow_array.ctypes.data, flow_buf.nbytes
@@ -4788,7 +4786,7 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
         flow_buf = engine.allocate(
             flow.shape, dtype=np.float32, is_vector=False, host_accessible=True
         )
-        from taichi_library.taichi_aot.engine import _LIB, _RUNTIME
+        from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
 
         _LIB.write_to_gpu_buffer(
             _RUNTIME,
@@ -4830,6 +4828,9 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
             if getattr(dst_buf, "is_vector", False)
             else dst_buf.view_as_vector(True)
         )
+    flow_v = flow_buf
+    if getattr(flow_v, "is_vector", False):
+        flow_v = flow_v.view_as_vector(False)
 
     scale_x = float(full_w) / float(w_flow)
     scale_y = float(full_h) / float(h_flow)
@@ -4838,7 +4839,7 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
     _mod("remap").run(
         graph_name,
         src=src_v,
-        flow=flow_buf,
+        flow=flow_v,
         dst=dst_v,
         h_src=int(h_src),
         w_src=int(w_src),
@@ -4864,7 +4865,7 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
     # Cast back to original dtype or download with CPU fallback
     if return_gpu:
         if dst is not None and dst is not dst_buf:
-            from taichi_library.taichi_algorithm.common import copy_field
+            from taichi_vision.taichi_algorithm.common import copy_field
 
             copy_field(dst_buf, dst)
             dst_buf.release()
@@ -4920,7 +4921,7 @@ def smooth_flow_gpu(flow, sigma=1.0, kernel_size=5, dst=None):
     Returns:
         TaichiGPUBuffer (H, W, 2) — smoothed flow. Caller must destroy when done.
     """
-    from taichi_library.taichi_algorithm.smoothing.gaussian import (
+    from taichi_vision.taichi_algorithm.smoothing.gaussian import (
         compute_gaussian_weights,
     )
 
@@ -7072,6 +7073,42 @@ def naturalTonemapping(
 def tone_map_srgb(src, return_gpu=False, dst=None):
     """Compatibility alias for :func:`naturalTonemapping`."""
     return naturalTonemapping(src, return_gpu=return_gpu, dst=dst)
+
+
+def AutoEnhance(
+    src,
+    params=None,
+    return_params=False,
+    return_gpu=False,
+    dst=None,
+    **kwargs,
+):
+    """
+    Histogram-Guided Adaptive Natural Tone Mapping with Decoupled Analysis.
+    - If `params` is None: Analyzes histogram on `src` first.
+    - If `params` is provided: Applies tone mapping directly without re-computing analysis.
+    """
+    from taichi_vision.taichi_algorithm.enhancement.auto_enhance import (
+        AutoEnhance as _AutoEnhance,
+    )
+
+    return _AutoEnhance(
+        src,
+        params=params,
+        return_params=return_params,
+        return_gpu=return_gpu,
+        dst=dst,
+        **kwargs,
+    )
+
+
+def analyze_auto_enhance_params(src):
+    """Analyze luminance histogram metrics and return adaptive tone mapping parameters."""
+    from taichi_vision.taichi_algorithm.enhancement.auto_enhance import (
+        analyze_auto_enhance_params as _analyze,
+    )
+
+    return _analyze(src)
 
 
 @ti_thread
@@ -9962,7 +9999,7 @@ def inpaint(src, mask, inpaint_radius=3, flags=0, return_gpu=False):
     Taichi AOT Inpainting.
     Dispatches individual kernels in sequence (distance transform, dilate, fill).
     """
-    from taichi_library.taichi_aot.capabilities import opengl_native_probe
+    from taichi_vision.taichi_aot.capabilities import opengl_native_probe
 
     src_shape = getattr(src, "shape", ())
     src_dtype = getattr(src, "dtype", np.float32)
@@ -10879,7 +10916,7 @@ def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
     """AOT Guided Filter (edge-preserving smoothing).
     Uses box_filter module for box averaging and guided_filter module for element-wise ops.
     """
-    from taichi_library.taichi_aot.capabilities import opengl_native_probe
+    from taichi_vision.taichi_aot.capabilities import opengl_native_probe
 
     if engine.arch.lower() in ("opengl", "gles") and (
         os.environ.get("PIXEL_REFINE_AOT_NATIVE_GUIDED", "1") != "1"
@@ -11291,7 +11328,7 @@ def seamless_clone_aot(
     return_gpu=False,
 ):
     """AOT Seamless Cloning (Poisson Image Editing)."""
-    from taichi_library.taichi_aot.capabilities import opengl_native_probe
+    from taichi_vision.taichi_aot.capabilities import opengl_native_probe
 
     src_shape = getattr(src, "shape", ())
     dst_shape = getattr(dst_img, "shape", ())
@@ -11505,7 +11542,7 @@ def farneback_flow(
     return_gpu=False,
 ):
     if str(getattr(engine, "arch", "")).lower() in ("opengl", "gles"):
-        from taichi_library.taichi_algorithm import aot_wrapper as _flow_wrapper
+        from taichi_vision.taichi_algorithm import aot_wrapper as _flow_wrapper
 
         _flow_wrapper._prepare_opengl_flow_family("farneback")
     if (
@@ -11603,7 +11640,7 @@ def farneback_flow(
         return_gpu,
     )
     if return_gpu and str(getattr(engine, "arch", "")).lower() in ("opengl", "gles"):
-        from taichi_library.taichi_algorithm import aot_wrapper as _flow_wrapper
+        from taichi_vision.taichi_algorithm import aot_wrapper as _flow_wrapper
 
         _flow_wrapper._register_opengl_flow_output(result)
     return result
@@ -11645,7 +11682,7 @@ def _farneback_flow_full(
     -------
     flow : (H, W, 2) float32 – flow field where flow[:,:,0]=dx, flow[:,:,1]=dy.
     """
-    from taichi_library.taichi_algorithm.optical_flow.farneback_flow import (
+    from taichi_vision.taichi_algorithm.optical_flow.farneback_flow import (
         prepare_gaussian_constants,
         compute_smoothing_weights,
     )
@@ -11917,7 +11954,7 @@ def bm3d(
     ref_pos_np = np.array(ref_positions_list, dtype=np.int32)
     ref_pos_buf = InputArray(ref_pos_np)
 
-    from taichi_library.taichi_algorithm.denoising.bm3d import _get_dct_matrix
+    from taichi_vision.taichi_algorithm.denoising.bm3d import _get_dct_matrix
 
     T_np = _get_dct_matrix(N)
     T_buf = InputArray(T_np)
@@ -12136,7 +12173,7 @@ def _pipeline_graph_specs(
     """
     names = tuple(str(name) for name in names)
     try:
-        from taichi_library.taichi_aot.auto_pipeline import GraphSpec
+        from taichi_vision.taichi_aot.auto_pipeline import GraphSpec
 
         shape_tuple = tuple(max(1, int(value)) for value in shape)
         pixels = max(1, int(np.prod(shape_tuple, dtype=np.int64)))
@@ -12374,7 +12411,7 @@ def _lucas_kanade_pipeline_graphs(shape, kwargs):
 
 def _run_lucas_kanade_gpu_tile(prev_tile, next_tile, kwargs):
     """Execute one LK block through a recorded graph sequence when safe."""
-    from taichi_library.taichi_algorithm import calcOpticalFlowPyrLK
+    from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
 
     pipeline_graphs = _lucas_kanade_pipeline_graphs(prev_tile.shape, kwargs)
     if os.environ.get("PIXEL_REFINE_AOT_DISABLE_BLOCK_PIPELINE") == "1":
@@ -12969,7 +13006,7 @@ def _run_lucas_kanade_batch_blocks(prev, next, kwargs, halo):
 
 def lucasKanade(prev, next, **kwargs):
     """Dense grid Lucas-Kanade optical flow."""
-    from taichi_library.taichi_algorithm import calcOpticalFlowPyrLK
+    from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
 
     if (
         engine.get_block_config().enabled
@@ -13015,7 +13052,7 @@ def lucasKanade(prev, next, **kwargs):
 
 def blockMatching(prev, next, **kwargs):
     """Dense block matching optical flow with parabolic fit."""
-    from taichi_library.taichi_algorithm import calcOpticalFlowBlockMatching
+    from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
 
     step = max(4, int(kwargs.get("grid_step", 16)))
     block_h, block_w = engine.get_block_config().normalized_size()
@@ -13064,7 +13101,7 @@ from .research_pipeline import (  # noqa: E402,F401
     poisson_reconstruct_aot,
 )
 
-from taichi_library.taichi_algorithm.image_processing.extended_aot import (  # noqa: E402,F401
+from taichi_vision.taichi_algorithm.image_processing.extended_aot import (  # noqa: E402,F401
     dilate_aot,
     erode_aot,
     histogram_aot,
@@ -13081,7 +13118,7 @@ from taichi_library.taichi_algorithm.image_processing.extended_aot import (  # n
 
 def encode_grayscale_aot(*args, **kwargs):
     """Lazy compatibility wrapper for the optional JPEG implementation."""
-    from taichi_library.taichi_algorithm.compression.jpeg_aot import (
+    from taichi_vision.taichi_algorithm.compression.jpeg_aot import (
         encode_grayscale_aot as _encode_grayscale_aot,
     )
 
@@ -13090,7 +13127,7 @@ def encode_grayscale_aot(*args, **kwargs):
 
 def encode_rgb_aot(*args, **kwargs):
     """Lazy compatibility wrapper for the optional JPEG implementation."""
-    from taichi_library.taichi_algorithm.compression.jpeg_aot import (
+    from taichi_vision.taichi_algorithm.compression.jpeg_aot import (
         encode_rgb_aot as _encode_rgb_aot,
     )
 
@@ -13099,7 +13136,7 @@ def encode_rgb_aot(*args, **kwargs):
 
 def jpeg_encode_aot(*args, **kwargs):
     """Lazy compatibility wrapper for the optional JPEG implementation."""
-    from taichi_library.taichi_algorithm.compression.jpeg_aot import (
+    from taichi_vision.taichi_algorithm.compression.jpeg_aot import (
         jpeg_encode_aot as _jpeg_encode_aot,
     )
 
@@ -13108,16 +13145,16 @@ def jpeg_encode_aot(*args, **kwargs):
 # Pre-demosaic RAW semantic/native stages.  These imports are additive to the
 # historical API; the native functions load ``compression_raw`` lazily on
 # first execution and never route a missing artifact to another backend.
-from taichi_library.taichi_algorithm.compression.raw_frame import (  # noqa: E402,F401
+from taichi_vision.taichi_algorithm.compression.raw_frame import (  # noqa: E402,F401
     RawMosaicFrame,
     raw_frame_from_dng,
 )
-from taichi_library.taichi_algorithm.compression.dng_aot import (  # noqa: E402,F401
+from taichi_vision.taichi_algorithm.compression.dng_aot import (  # noqa: E402,F401
     DNGCapabilityError,
     DNGCapabilityReport,
     dng_capability_report,
 )
-from taichi_library.taichi_algorithm.compression.raw_pipeline import (  # noqa: E402,F401
+from taichi_vision.taichi_algorithm.compression.raw_pipeline import (  # noqa: E402,F401
     RawFusionReport,
     RawFlowTileContract,
     raw_flow_tile_contract,

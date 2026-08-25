@@ -9,7 +9,7 @@ import sys
 import importlib
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
 except ImportError:  # Direct ``python compile_common_tcm.py`` invocation.
     from aot_artifact import normalize_tcm
 
@@ -18,7 +18,7 @@ project_root = os.path.abspath(os.path.join(file_dir, "../.."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-common_mod = importlib.import_module("taichi_library.taichi_algorithm.common")
+common_mod = importlib.import_module("taichi_vision.taichi_algorithm.common")
 common_mod = importlib.reload(common_mod)
 
 
@@ -476,7 +476,7 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
 
     # 9. copyMakeBorder Kernels (Fusing copy_make_border into common.tcm)
     border_mod = importlib.import_module(
-        "taichi_library.taichi_algorithm.image_processing.copy_make_border"
+        "taichi_vision.taichi_algorithm.image_processing.copy_make_border"
     )
 
     def add_border_2d(dtype_name, dtype):

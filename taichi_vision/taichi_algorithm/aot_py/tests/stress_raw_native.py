@@ -24,8 +24,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from taichi_library.taichi_algorithm.compression.raw_frame import RawMosaicFrame
-from taichi_library.taichi_algorithm.compression.raw_pipeline import (
+from taichi_vision.taichi_algorithm.compression.raw_frame import RawMosaicFrame
+from taichi_vision.taichi_algorithm.compression.raw_pipeline import (
     fuse_raw_pair_native,
     raw_normalize_headroom_native,
     raw_weight_map_native,

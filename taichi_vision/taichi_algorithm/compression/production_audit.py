@@ -44,7 +44,7 @@ def _compression_root() -> Path:
 
 
 def _repository_root() -> Path:
-    # compression/ -> taichi_algorithm/ -> taichi_library/ -> repository
+    # compression/ -> taichi_algorithm/ -> taichi_vision/ -> repository
     return _compression_root().parents[2]
 
 
@@ -87,7 +87,7 @@ def _imports_audit() -> dict[str, Any]:
 def _load_report(module_name: str, function_name: str) -> dict[str, Any]:
     try:
         module = __import__(
-            f"taichi_library.taichi_algorithm.compression.{module_name}",
+            f"taichi_vision.taichi_algorithm.compression.{module_name}",
             fromlist=[function_name],
         )
         value = getattr(module, function_name)()
@@ -100,7 +100,7 @@ def _load_report(module_name: str, function_name: str) -> dict[str, Any]:
 
 
 def _tcm_artifacts() -> dict[str, Any]:
-    root = _repository_root() / "taichi_library" / "taichi_algorithm" / "aot_tcm"
+    root = _repository_root() / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
     artifacts = []
     if root.exists():
         for path in sorted(root.rglob("compression_image_*.tcm")):
@@ -317,10 +317,10 @@ def run_production_audit() -> dict[str, Any]:
     compression_root = _compression_root()
     native_buffer_path = {
         "numpy_free_public_facade": (
-            _repository_root() / "taichi_library" / "native_compression.py"
+            _repository_root() / "taichi_vision" / "native_compression.py"
         ).is_file(),
         "numpy_free_dng_facade": (
-            _repository_root() / "taichi_library" / "native_dng.py"
+            _repository_root() / "taichi_vision" / "native_dng.py"
         ).is_file(),
         "direct_c_abi_runner": (compression_root / "native_dispatch.py").is_file(),
         "native_yuv_preparation": (compression_root / "native_video_prep.py").is_file(),

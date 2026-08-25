@@ -160,11 +160,17 @@ def _spatial_parity_report(
             item["finite"] = False
             return False
         item["finite"] = True
-        diff = np.abs(lhs.astype(np.float64, copy=False) - rhs.astype(np.float64, copy=False))
+        diff = np.abs(
+            lhs.astype(np.float64, copy=False) - rhs.astype(np.float64, copy=False)
+        )
         item["max_abs"] = float(np.max(diff)) if diff.size else 0.0
         item["mean_abs"] = float(np.mean(diff)) if diff.size else 0.0
         item["rmse"] = float(np.sqrt(np.mean(np.square(diff)))) if diff.size else 0.0
-        reference_l1 = float(np.mean(np.abs(lhs.astype(np.float64, copy=False)))) if lhs.size else 0.0
+        reference_l1 = (
+            float(np.mean(np.abs(lhs.astype(np.float64, copy=False))))
+            if lhs.size
+            else 0.0
+        )
         item["relative_l1"] = float(item["mean_abs"] / max(reference_l1, 1.0e-12))
         item["passed"] = bool(np.allclose(lhs, rhs, atol=atol, rtol=rtol))
         return item["passed"]
@@ -173,7 +179,10 @@ def _spatial_parity_report(
     weight_ok = _compare("weight", full_weight, block_weight)
     count_ok = full_count == block_count
     report["count"]["equal"] = count_ok
-    if report["image"]["relative_l1"] is not None and report["weight"]["relative_l1"] is not None:
+    if (
+        report["image"]["relative_l1"] is not None
+        and report["weight"]["relative_l1"] is not None
+    ):
         report["loss_score"] = max(
             float(report["image"]["relative_l1"]),
             float(report["weight"]["relative_l1"]),
@@ -281,12 +290,21 @@ class SpatialFusionProcessor:
             )
         block_size = max(64, int(block_size))
         halo = max(0, int(halo))
-        channels = int(reference_image_float.shape[2]) if reference_image_float.ndim == 3 else 1
+        channels = (
+            int(reference_image_float.shape[2])
+            if reference_image_float.ndim == 3
+            else 1
+        )
         full_sum = np.zeros((ref_image_h, ref_image_w, channels), dtype=np.float32)
         full_weight = np.zeros((ref_image_h, ref_image_w), dtype=np.float32)
         processed_total = 0
         blocks = [
-            (y0, min(y0 + block_size, ref_image_h), x0, min(x0 + block_size, ref_image_w))
+            (
+                y0,
+                min(y0 + block_size, ref_image_h),
+                x0,
+                min(x0 + block_size, ref_image_w),
+            )
             for y0 in range(0, ref_image_h, block_size)
             for x0 in range(0, ref_image_w, block_size)
         ]
@@ -298,8 +316,7 @@ class SpatialFusionProcessor:
             cx0, cx1 = max(0, x0 - halo), min(ref_image_w, x1 + halo)
             crop_h, crop_w = cy1 - cy0, cx1 - cx0
             crop_images = [
-                np.ascontiguousarray(frame[cy0:cy1, cx0:cx1])
-                for frame in images
+                np.ascontiguousarray(frame[cy0:cy1, cx0:cx1]) for frame in images
             ]
             crop_reference = np.ascontiguousarray(
                 reference_image_float[cy0:cy1, cx0:cx1]
@@ -380,7 +397,7 @@ class SpatialFusionProcessor:
         lib_path=None,
         num_workers=-1,
         weight_of_each_image=False,
-        enable_alignment=True,
+        enable_alignment=False,
         scale_down_factor: float = 1.0,
         return_raw=False,
         is_linear_mode=False,

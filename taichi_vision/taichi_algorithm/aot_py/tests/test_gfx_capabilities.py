@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from taichi_library.taichi_aot.gfx_capabilities import (
+from taichi_vision.taichi_aot.gfx_capabilities import (
     classify_desktop_opengl,
     classify_gles,
     classify_vulkan,

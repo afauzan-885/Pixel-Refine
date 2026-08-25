@@ -21,15 +21,15 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module, normalize_tcm
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module, normalize_tcm
 except ImportError:
     from aot_artifact import archive_module, normalize_tcm
 
 try:
-    from taichi_library.taichi_algorithm.demosaicing.demosaic_aot_builder import (
+    from taichi_vision.taichi_algorithm.demosaicing.demosaic_aot_builder import (
         register_hamilton_graphs,
     )
-    from taichi_library.taichi_algorithm.demosaicing.demosaic_postprocess import (
+    from taichi_vision.taichi_algorithm.demosaicing.demosaic_postprocess import (
         rgb_to_bgr_i32,
     )
 except ImportError:

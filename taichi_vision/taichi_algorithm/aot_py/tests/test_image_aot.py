@@ -3,7 +3,7 @@
 Run one backend per process, for example::
 
     $env:AOT_ARCH = "cpu"
-    python -m taichi_library.taichi_algorithm.aot_py.tests.test_image_aot
+    python -m taichi_vision.taichi_algorithm.aot_py.tests.test_image_aot
 
 The suite deliberately uses small NumPy invariants and a Pillow decode check
 so it remains useful without requiring OpenCV in the compiler environment.
@@ -15,7 +15,7 @@ import io
 
 import numpy as np
 
-from taichi_library.taichi_algorithm.image_processing.extended_aot import (
+from taichi_vision.taichi_algorithm.image_processing.extended_aot import (
     copy_make_border_aot,
     dilate_aot,
     enhance_image_aot,
@@ -29,7 +29,7 @@ from taichi_library.taichi_algorithm.image_processing.extended_aot import (
     threshold_aot,
     warp_affine_aot,
 )
-from taichi_library.taichi_algorithm.compression.jpeg_aot import (
+from taichi_vision.taichi_algorithm.compression.jpeg_aot import (
     encode_grayscale_aot,
     encode_rgb_aot,
 )

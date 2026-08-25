@@ -28,6 +28,7 @@ class ImageCard(QWidget):
         self._is_selected = False
         self._is_loading = True
         self._is_fetching = False
+        self._placeholder_text = ""
         self._opacity = 1.0  # Tingkat transparansi (0.0 - 1.0)
 
         # Configure geometry reinforcement
@@ -43,6 +44,7 @@ class ImageCard(QWidget):
         """Display an image on the card (Pixel-Perfect Image Drawing)."""
         self._is_loading = False
         self._is_fetching = False
+        self._placeholder_text = ""
         if q_image and not q_image.isNull():
             self._image = q_image
         else:
@@ -55,7 +57,16 @@ class ImageCard(QWidget):
             self._is_loading = loading
             if loading:
                 self._image = None
+                self._placeholder_text = ""
             self.update()
+
+    def set_placeholder_text(self, text: str):
+        """Display lightweight text in place of a thumbnail image."""
+        self._image = None
+        self._is_loading = False
+        self._is_fetching = False
+        self._placeholder_text = str(text or "")
+        self.update()
 
     def unload_image(self):
         """Unload image to free memory (Reinforced)."""
@@ -63,6 +74,7 @@ class ImageCard(QWidget):
             self._is_loading = True
             self._is_fetching = False
             self._image = None
+            self._placeholder_text = ""
             self.update()
 
     def has_image(self) -> bool:
@@ -131,10 +143,7 @@ class ImageCard(QWidget):
         # 2. Content (Image / Loading / Placeholder)
         content_rect = rect.adjusted(5, 5, -5, -5)  # Internal padding
 
-        if self._is_loading:
-            painter.setPen(QColor(theme.text_secondary))
-            painter.drawText(content_rect, Qt.AlignmentFlag.AlignCenter, "Loading..")
-        elif self._image:
+        if self._image:
             # Gunakan drawImage langsung dengan SmoothTransformation
             # Ini mengatasi bug gambar terpotong saat lazy loading/scroll
             img_size = self._image.size()
@@ -148,6 +157,22 @@ class ImageCard(QWidget):
 
             # Pixel-to-pixel drawing: Render image directly into target rect
             painter.drawImage(target_rect, self._image)
+        elif self._placeholder_text:
+            placeholder_rect = rect.adjusted(1, 1, -1, -1)
+            painter.setPen(QColor("gray"))
+            painter.setBrush(QColor("lightgray"))
+            painter.drawRect(placeholder_rect)
+
+            painter.setPen(QColor(theme.text_secondary))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawText(
+                content_rect,
+                Qt.AlignmentFlag.AlignCenter,
+                self._placeholder_text,
+            )
+        elif self._is_loading:
+            painter.setPen(QColor(theme.text_secondary))
+            painter.drawText(content_rect, Qt.AlignmentFlag.AlignCenter, "Loading..")
         else:
             painter.setPen(QColor(theme.text_secondary))
             painter.drawText(content_rect, Qt.AlignmentFlag.AlignCenter, "!")

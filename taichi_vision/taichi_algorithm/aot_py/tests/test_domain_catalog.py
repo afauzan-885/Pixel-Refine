@@ -11,8 +11,8 @@ import unittest
 
 import numpy as np
 
-from taichi_library.taichi_algorithm.alignment.quality import choose_best_transform
-from taichi_library.taichi_algorithm.domain_catalog import (
+from taichi_vision.taichi_algorithm.alignment.quality import choose_best_transform
+from taichi_vision.taichi_algorithm.domain_catalog import (
     ALGORITHM_CATALOG,
     COMPOSED_AOT_LEAVES,
     audit_catalog,
@@ -76,10 +76,10 @@ class DomainCatalogTests(unittest.TestCase):
     def test_composed_aot_leaves_exist_in_compiler_registry_and_manifest(self):
         # AST/static compiler registry is intentionally imported without
         # initializing Taichi; this catches stale high-level routing names.
-        from taichi_library.taichi_algorithm.aot_py.compile_aot_backend_suite import (
+        from taichi_vision.taichi_algorithm.aot_py.compile_aot_backend_suite import (
             JOBS,
         )
-        from taichi_library.taichi_algorithm.aot_py.target_registry import (
+        from taichi_vision.taichi_algorithm.aot_py.target_registry import (
             TARGET_BACKENDS,
         )
 
@@ -137,7 +137,7 @@ class DomainCatalogTests(unittest.TestCase):
             r"""
 import json
 import numpy as np
-from taichi_library.taichi_algorithm.aot_api import akaze, ofb
+from taichi_vision.taichi_algorithm.aot_api import akaze, ofb
 
 rng = np.random.default_rng(123)
 rows, cols = np.indices((48, 56), dtype=np.float32)

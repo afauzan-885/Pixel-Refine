@@ -5,7 +5,7 @@ GPU-accelerated SSIM computation.
 Parity: skimage.metrics.structural_similarity
 
 Usage (JIT):
-    from taichi_library.taichi_algorithm import ssim
+    from taichi_vision.taichi_algorithm import ssim
     score = ssim(img1, img2, window_size=11)
 """
 

@@ -1,8 +1,8 @@
 """Dependency-free backend naming and configuration primitives.
 
-This module deliberately lives at the ``taichi_library`` root so compiler
+This module deliberately lives at the ``taichi_vision`` root so compiler
 workers and settings code can normalize a backend without importing
-``taichi_library.taichi_aot`` (whose package initializer creates a native
+``taichi_vision.taichi_aot`` (whose package initializer creates a native
 runtime).  The AOT package re-exports the same symbols for public callers.
 """
 

@@ -1187,7 +1187,7 @@ class LegacyPartitionEvidence:
     executor: str
     strategy: PartitionStrategy
     specialized: bool = False
-    source: str = "taichi_library.taichi_algorithm.aot_api"
+    source: str = "taichi_vision.taichi_algorithm.aot_api"
     requires_adapter: bool = True
     parity_qualified: bool = False
     backend_capability: BackendCapability = field(

@@ -1,6 +1,6 @@
 """Manifest-driven native AOT payload planner for release builders.
 
-The module intentionally sits at ``taichi_library`` (whose package initializer
+The module intentionally sits at ``taichi_vision`` (whose package initializer
 is side-effect free) so Nuitka/PyInstaller can use it without importing the
 runtime package or creating a GPU context.
 """
@@ -557,8 +557,8 @@ def plan_aot_bundle(*, tcm_root: os.PathLike[str] | str, dll_root: os.PathLike[s
 
     modules_out = tuple(sorted({name for items in available.values() for name in items if requested_set is None or name in requested_set}))
     staging_dir = Path(tempfile.mkdtemp(prefix="pixel-refine-aot-bundle-", dir=str(staging_parent) if staging_parent else None))
-    staging_tcm = staging_dir / "taichi_library" / "taichi_algorithm" / "aot_tcm"
-    staging_dll = staging_dir / "taichi_library" / "taichi_algorithm" / "aot_py" / "aot_dll"
+    staging_tcm = staging_dir / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
+    staging_dll = staging_dir / "taichi_vision" / "taichi_algorithm" / "aot_py" / "aot_dll"
     try:
         for target in target_ids:
             (staging_tcm / target).mkdir(parents=True, exist_ok=True)
@@ -628,8 +628,8 @@ def plan_aot_bundle(*, tcm_root: os.PathLike[str] | str, dll_root: os.PathLike[s
     return AOTBundlePlan(
         tuple(selected_backends), target_ids, modules_out, tuple(artifacts),
         tuple(bridges),
-        ((staging_tcm, "taichi_library/taichi_algorithm/aot_tcm"),
-         (staging_dll, "taichi_library/taichi_algorithm/aot_py/aot_dll")),
+        ((staging_tcm, "taichi_vision/taichi_algorithm/aot_tcm"),
+         (staging_dll, "taichi_vision/taichi_algorithm/aot_py/aot_dll")),
         staging_dir,
         preflight_report,
     )

@@ -10,7 +10,7 @@ Example (CPU TCM):
     $env:AOT_MODE = "1"
     $env:AOT_ARCH = "cpu"
     $env:AOT_ALLOW_HOST_FALLBACK = "0"
-    python -m taichi_library.taichi_algorithm.compression.verify_png_aot --require-tcm
+    python -m taichi_vision.taichi_algorithm.compression.verify_png_aot --require-tcm
 """
 
 from __future__ import annotations

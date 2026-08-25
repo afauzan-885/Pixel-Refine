@@ -733,7 +733,7 @@ class SwitchableParameterPanel(QWidget):
                 if self.content_wrapper.isVisible() and self.active_tab != "alignment":
                     self.active_tab = None
                     self.set_expanded(False)
-            elif denoising_algo in ["Similarity", "Similarity Fusion"]:
+            elif denoising_algo in ["Similarity", "Spatial AI"]:
                 self.btn_align_tab.setVisible(True)
                 self.btn_denoise_tab.setVisible(True)
                 self.btn_denoise_tab.setEnabled(True)
@@ -743,6 +743,31 @@ class SwitchableParameterPanel(QWidget):
                 self.setMinimumSize(50, self._collapsed_height())
                 self.setMaximumSize(50, self._collapsed_height())
             self._sync_overlay_geometry()
+
+    def apply_algorithm_visibility_fast(self, settings):
+        """Update only A/D visibility without rebuilding the overlay.
+
+        This is intentionally side-effect-light and is called before the
+        heavier style/geometry synchronization.  It keeps the algorithm
+        controls responsive while the full parameter panel catches up.
+        """
+        if not isinstance(settings, dict):
+            return False
+        denoising_algo = str(
+            settings.get(config.KEY_DENOISING, "No Denoising")
+        ).strip()
+        self.current_denoising_algo = denoising_algo
+        if denoising_algo in ("No Denoising", "None", ""):
+            self.btn_align_tab.setVisible(False)
+            self.btn_denoise_tab.setVisible(False)
+            self.btn_denoise_tab.setEnabled(False)
+            return False
+
+        self.btn_align_tab.setVisible(True)
+        show_denoise = denoising_algo in ("Similarity", "Spatial AI")
+        self.btn_denoise_tab.setVisible(show_denoise)
+        self.btn_denoise_tab.setEnabled(show_denoise)
+        return True
 
     def _normalize_alignment_name(self, value):
         mapping = {

@@ -190,7 +190,7 @@ def _normalize_webp_argb(image: np.ndarray) -> tuple[np.ndarray, int, int]:
     argb = np.stack((alpha, red, green, blue), axis=-1).astype(np.uint8, copy=False)
     if os.environ.get("WEBP_USE_AOT_PREP", "0") == "1":
         try:
-            from taichi_library.taichi_algorithm.aot_api.research import _dispatch
+            from taichi_vision.taichi_algorithm.aot_api.research import _dispatch
 
             result = _dispatch(
                 "compression_image",
@@ -488,7 +488,7 @@ def _webp_literal_histograms(argb: np.ndarray) -> list[np.ndarray]:
     """Return VP8L literal histograms, optionally using the matching TCM graph."""
     if os.environ.get("WEBP_USE_AOT_HIST", "0") == "1":
         try:
-            from taichi_library.taichi_algorithm.aot_api.research import _dispatch
+            from taichi_vision.taichi_algorithm.aot_api.research import _dispatch
 
             height, width = argb.shape[:2]
             source = np.ascontiguousarray(argb, dtype=np.float32)

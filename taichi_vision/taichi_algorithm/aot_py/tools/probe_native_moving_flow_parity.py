@@ -21,8 +21,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 def run(*, size: int = 64, block_size: int = 16) -> dict[str, object]:
-    from taichi_library import taichi_aot
-    from taichi_library.taichi_algorithm import aot_api
+    from taichi_vision import taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api
 
     size = int(size)
     block_size = int(block_size)

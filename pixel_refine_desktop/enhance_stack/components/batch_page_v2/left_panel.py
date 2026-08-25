@@ -300,8 +300,8 @@ class LeftPanel(QWidget):
         denoising = settings.get("denoising")
 
         process_suffix = None
-        if denoising in ["Average", "Median", "Similarity", "Similarity Fusion"]:
-            process_suffix = "similarity" if denoising == "Similarity Fusion" else denoising.lower()
+        if denoising in ["Average", "Median", "Similarity", "Spatial AI", "FusionNet"]:
+            process_suffix = "weightnet" if denoising == "FusionNet" else ("spatial_ai" if denoising == "Spatial AI" else denoising.lower())
 
         # If no relevant process found that produces a stack result, possibly skip
         # Add others if needed (e.g. if Alignment produces a visualization?)

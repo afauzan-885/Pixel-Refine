@@ -26,17 +26,17 @@ import sys
 import types
 import numpy as np
 
-base = pathlib.Path("taichi_library/taichi_algorithm")
+base = pathlib.Path("taichi_vision/taichi_algorithm")
 for name, path in [
-    ("taichi_library", base.parent.parent),
-    ("taichi_library.taichi_algorithm", base),
-    ("taichi_library.taichi_algorithm.sfm", base / "sfm"),
+    ("taichi_vision", base.parent.parent),
+    ("taichi_vision.taichi_algorithm", base),
+    ("taichi_vision.taichi_algorithm.sfm", base / "sfm"),
 ]:
     module = types.ModuleType(name)
     module.__path__ = [str(path)]
     sys.modules[name] = module
 
-name = "taichi_library.taichi_algorithm.pipeline_common"
+name = "taichi_vision.taichi_algorithm.pipeline_common"
 spec = importlib.util.spec_from_file_location(name, base / "pipeline_common.py")
 common = importlib.util.module_from_spec(spec)
 sys.modules[name] = common
@@ -50,15 +50,15 @@ def load(name, path):
     return module
 
 registration = load(
-    "taichi_library.taichi_algorithm.sfm.registration",
+    "taichi_vision.taichi_algorithm.sfm.registration",
     base / "sfm" / "registration.py",
 )
 plane_sweep = load(
-    "taichi_library.taichi_algorithm.sfm.plane_sweep",
+    "taichi_vision.taichi_algorithm.sfm.plane_sweep",
     base / "sfm" / "plane_sweep.py",
 )
 mvs_regularization = load(
-    "taichi_library.taichi_algorithm.sfm.mvs_regularization",
+    "taichi_vision.taichi_algorithm.sfm.mvs_regularization",
     base / "sfm" / "mvs_regularization.py",
 )
 if not registration.TAICHI_AVAILABLE:

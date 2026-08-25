@@ -27,7 +27,7 @@ def arm_demosaic(
     from ..common import _get_aot
     aot = _get_aot()
     if not aot or not hasattr(aot, "arm_demosaic"):
-        import taichi_library.taichi_aot as ta_aot
+        import taichi_vision.taichi_aot as ta_aot
         aot = ta_aot
         
     is_taichi = hasattr(bayer, "to_numpy") or hasattr(cmatrix, "to_numpy")

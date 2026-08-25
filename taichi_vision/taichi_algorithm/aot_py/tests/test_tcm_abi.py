@@ -12,7 +12,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[4]
-CONTRACT_PATH = ROOT / "taichi_library" / "taichi_aot" / "tcm_contract.py"
+CONTRACT_PATH = ROOT / "taichi_vision" / "taichi_aot" / "tcm_contract.py"
 SPEC = importlib.util.spec_from_file_location("pixel_refine_tcm_contract_test", CONTRACT_PATH)
 if SPEC is None or SPEC.loader is None:  # pragma: no cover
     raise RuntimeError(f"cannot load {CONTRACT_PATH}")

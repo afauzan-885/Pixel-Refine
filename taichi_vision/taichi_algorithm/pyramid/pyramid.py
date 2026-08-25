@@ -164,7 +164,7 @@ def build_image_pyramid(
 ) -> list:
     """CPU interface: Build image pyramid and return list of NumPy arrays."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return [lvl.to_numpy() for lvl in taichi_aot.image_pyramid(image, levels=n_levels, return_gpu=True)]
 
     if not TAICHI_AVAILABLE:
@@ -201,7 +201,7 @@ def build_image_pyramid_gpu(
         buffer_provider: "pool" or "new".
     """
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.image_pyramid(image_gpu, levels=n_levels, return_gpu=True)
 
     if not TAICHI_AVAILABLE:
@@ -298,7 +298,7 @@ def upsample_flow(
 ) -> np.ndarray:
     """CPU interface: Upsample flow using NumPy input/output."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library.taichi_aot import get_engine
+        from taichi_vision.taichi_aot import get_engine
         engine = get_engine()
         src_gpu = engine.upload(flow)
         dst_gpu = engine.allocate((target_h, target_w, 2), dtype=np.float32)
@@ -334,7 +334,7 @@ def upsample_flow_gpu(
 ):
     """GPU native interface: Upsample flow from one ti.ndarray to another."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         pyramid_mod = taichi_aot._mod("pyramid")
         if isinstance(scale, (tuple, list)):
             sx = scale[0]

@@ -1,6 +1,6 @@
 """High-level AOT orchestration for the research algorithms.
 
-The compiled graphs in :mod:`taichi_library.taichi_algorithm.aot_api.research` are small
+The compiled graphs in :mod:`taichi_vision.taichi_algorithm.aot_api.research` are small
 array-to-array kernels.  This module composes those kernels into the public
 algorithms used by the experimental library.  Python owns validation,
 variable-length pyramids, sparse Schur solves, voxel grouping, and mesh
@@ -752,7 +752,7 @@ def poisson_reconstruct_aot(
     for _ in range(max(0, int(solver_iterations))):
         field = sfm_poisson_step_aot(field, divergence, mask, omega=omega)
 
-    from taichi_library.taichi_algorithm.sfm.poisson_recon import _marching_cubes_numpy
+    from taichi_vision.taichi_algorithm.sfm.poisson_recon import _marching_cubes_numpy
 
     vertices, faces = _marching_cubes_numpy(
         field.astype(np.float64),

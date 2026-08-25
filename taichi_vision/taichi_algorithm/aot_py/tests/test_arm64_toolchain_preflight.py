@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from taichi_library.taichi_algorithm.aot_py.arm64_toolchain_preflight import (
+from taichi_vision.taichi_algorithm.aot_py.arm64_toolchain_preflight import (
     preflight_arm64_toolchain,
 )
 

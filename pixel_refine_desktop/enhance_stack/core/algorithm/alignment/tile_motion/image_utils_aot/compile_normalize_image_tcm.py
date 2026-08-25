@@ -1,11 +1,7 @@
 import taichi as ti
+import importlib.util
 import os
 import sys
-
-try:
-    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
-except ImportError:
-    from aot_artifact import archive_module
 
 # Path setup
 file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +36,26 @@ def compile_normalize_image_aot(arch=ti.vulkan, save_path="normalize_image_vulka
     builder2.dispatch(kernels.normalize_vec3_f32_to_vec3_f32_kernel, src_vec3, dst_vec3, inv_scale)
     module.add_graph("normalize_vec3_f32_to_vec3_f32", builder2.compile())
 
+    # The archiver itself is stdlib-only, but importing it through the package
+    # initializes the application AOT runtime as a parent-module side effect.
+    # That creates a second OpenGL context in the compiler process.  Load the
+    # file directly after ``ti.init`` so the requested Taichi architecture is
+    # the only compiler context in this process.
+    artifact_path = os.path.abspath(
+        os.path.join(
+            file_dir,
+            "../../../../../../../taichi_vision/taichi_algorithm/aot_py/aot_artifact.py",
+        )
+    )
+    spec = importlib.util.spec_from_file_location(
+        "pixel_refine_normalize_image_archiver", artifact_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load AOT archiver: {artifact_path}")
+    artifact_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(artifact_module)
+    archive_module = artifact_module.archive_module
+
     # Use the canonical archiver so LLVM/GFX metadata (including
     # ``aot_metadata.tcb``) is retained.  The legacy ``Module.archive`` path
     # emitted artifacts that the current runtime correctly quarantines.
@@ -53,7 +69,12 @@ if __name__ == "__main__":
     assets_dir = os.path.abspath(os.path.join(script_dir, "../../../../../../ui/data/aot_assets"))
     os.makedirs(assets_dir, exist_ok=True)
     
-    archs = [(ti.vulkan, "vulkan"), (ti.cuda, "cuda"), (ti.cpu, "cpu")]
+    archs = [
+        (ti.vulkan, "vulkan"),
+        (ti.cuda, "cuda"),
+        (ti.opengl, "opengl"),
+        (ti.cpu, "cpu"),
+    ]
     for arch, suffix in archs:
         save_path = os.path.join(assets_dir, f"normalize_image_{suffix}.tcm")
         try:

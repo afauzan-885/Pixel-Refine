@@ -196,8 +196,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # Import only after the caller has selected the backend environment.
-    from taichi_library.taichi_algorithm import aot_api as api
-    from taichi_library.taichi_aot import engine
+    from taichi_vision.taichi_algorithm import aot_api as api
+    from taichi_vision.taichi_aot import engine
 
     operations = _normalize_operations(args.operations.split(","))
     sizes = tuple(float(value) for value in args.sizes.split(",") if value.strip())

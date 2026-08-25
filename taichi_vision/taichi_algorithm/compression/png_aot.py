@@ -59,7 +59,7 @@ def _bounded_output(payload: bytes, limit: int | None, name: str) -> bytes:
 
 def _dispatch(*args, **kwargs):
     """Lazy AOT dispatch so importing container helpers stays side-effect free."""
-    from taichi_library.taichi_algorithm.aot_api.research import _dispatch as dispatch
+    from taichi_vision.taichi_algorithm.aot_api.research import _dispatch as dispatch
 
     return dispatch(*args, **kwargs)
 

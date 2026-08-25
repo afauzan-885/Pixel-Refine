@@ -2,10 +2,10 @@
 
 Run from the repository root, for example:
 
-    python -m taichi_library.taichi_algorithm.aot_py.tools.probe_native_partition --backend cpu
-    $env:PIXEL_REFINE_AOT_ARCH='vulkan'; $env:AOT_ARCH='vulkan'; $env:AOT_DEVICE='0'; $env:TARGET_VENDOR='intel'; python -m taichi_library.taichi_algorithm.aot_py.tools.probe_native_partition --backend vulkan --device 0
-    python -m taichi_library.taichi_algorithm.aot_py.tools.probe_native_partition --backend opengl --device 0
-    python -m taichi_library.taichi_algorithm.aot_py.tools.probe_native_partition --backend cuda --device 0
+    python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_native_partition --backend cpu
+    $env:PIXEL_REFINE_AOT_ARCH='vulkan'; $env:AOT_ARCH='vulkan'; $env:AOT_DEVICE='0'; $env:TARGET_VENDOR='intel'; python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_native_partition --backend vulkan --device 0
+    python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_native_partition --backend opengl --device 0
+    python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_native_partition --backend cuda --device 0
 
 The process selects one backend before importing the AOT facade.  Output is a
 single JSON record suitable for attaching to the native partition evidence
@@ -618,8 +618,8 @@ def run(
     os.environ.setdefault("TARGET_VENDOR", "nvidia")
 
     # Import only after backend selection variables are set.
-    from taichi_library.taichi_algorithm import aot_api as aot
-    from taichi_library.taichi_aot import engine
+    from taichi_vision.taichi_algorithm import aot_api as aot
+    from taichi_vision.taichi_aot import engine
     _validate_runtime_selection(engine, backend, device)
 
     rng = np.random.default_rng(1234)

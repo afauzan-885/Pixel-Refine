@@ -217,7 +217,7 @@ def main():
         command = command[1:]
     if not command:
         parser.error(
-            "missing command, example: python -m taichi_library.taichi_algorithm.aot_py.tools.experiment -- python scratch/my_test.py"
+            "missing command, example: python -m taichi_vision.taichi_algorithm.aot_py.tools.experiment -- python scratch/my_test.py"
         )
     raise SystemExit(run_experiment(command, args.timeout))
 

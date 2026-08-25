@@ -542,7 +542,8 @@ class AlgorithmPanel(QWidget, SyncMixin):
             "Average",
             "Median",
             "Similarity",
-            "Similarity Fusion",
+            "FusionNet",
+            "Spatial AI",
         ] or super_res not in ["", "None", "No Super Resolution"]
         for btn in self._all_process_buttons:
             if hasattr(self, "display_panel") and self.display_panel and btn == self.display_panel.start_btn_ref:
@@ -563,7 +564,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
         is_algo_active = (
             denoising not in none_values
             and denoising
-            not in ["Average", "Median", "Similarity", "Similarity Fusion"]
+            not in ["Average", "Median", "Similarity", "FusionNet", "Spatial AI"]
         ) or (
             super_res not in none_values
         )

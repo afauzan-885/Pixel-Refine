@@ -2,7 +2,7 @@
 
 This facade deliberately loads only the standard-library DNG container,
 bitstream, and Deflate modules.  The legacy ndarray API remains available
-through ``taichi_library.taichi_algorithm.compression.dng_aot``; callers that
+through ``taichi_vision.taichi_algorithm.compression.dng_aot``; callers that
 need a native byte/memoryview boundary should use this module instead.
 """
 
@@ -17,8 +17,8 @@ from typing import Any
 
 def _load_dng_module() -> Any:
     root = Path(__file__).resolve().parent.parent
-    compression = root / "taichi_library" / "taichi_algorithm" / "compression"
-    package_name = "taichi_library._native_dng"
+    compression = root / "taichi_vision" / "taichi_algorithm" / "compression"
+    package_name = "taichi_vision._native_dng"
     package = sys.modules.get(package_name)
     if package is None:
         package = types.ModuleType(package_name)

@@ -24,10 +24,10 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import algorithm module (JIT mode)
-nlm_mod = importlib.import_module("taichi_library.taichi_algorithm.denoising.nlm")
+nlm_mod = importlib.import_module("taichi_vision.taichi_algorithm.denoising.nlm")
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
 except ImportError:  # Direct script execution.
     from aot_artifact import normalize_tcm
 

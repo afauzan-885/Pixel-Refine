@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from taichi_library.taichi_aot import (
+from taichi_vision.taichi_aot import (
     bm3d_partition_gap_report,
     register_bounded_semantic_adapters,
     run_adapter_tiled,

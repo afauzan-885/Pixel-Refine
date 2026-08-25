@@ -13,11 +13,11 @@ Algorithm (Mertens et al. + Noise-Aware Enhancement):
 Priority: Noise > Exposure > Detail
 
 Usage (JIT):
-    from taichi_library.taichi_algorithm import hdr_fuse
+    from taichi_vision.taichi_algorithm import hdr_fuse
     result = hdr_fuse(frames, noise_sigmas=None)
 
 Usage (AOT):
-    import taichi_library.taichi_aot as ta
+    import taichi_vision.taichi_aot as ta
     result = ta.hdr_fusion(frames)
 """
 

@@ -12,7 +12,7 @@ if project_root not in sys.path:
 
 
 import importlib
-med_mod = importlib.import_module("taichi_library.taichi_algorithm.smoothing.median_filter")
+med_mod = importlib.import_module("taichi_vision.taichi_algorithm.smoothing.median_filter")
 
 def compile_median_aot(arch, save_path):
     print(f"\n>>> Compiling MEDIAN AOT for: {arch}")

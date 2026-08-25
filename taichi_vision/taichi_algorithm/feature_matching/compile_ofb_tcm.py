@@ -9,7 +9,7 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from taichi_library.taichi_algorithm.feature_matching.ofb import (
+from taichi_vision.taichi_algorithm.feature_matching.ofb import (
     compute_score_map,
     extract_grid_keypoints,
     _compute_descriptors_kernel,

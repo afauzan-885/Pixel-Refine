@@ -11,13 +11,13 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 os.environ["AOT_MODE"] = "1"
-from taichi_library import taichi_aot
-from taichi_library.taichi_aot.engine import AOTEngine, TaichiGPUBuffer
+from taichi_vision import taichi_aot
+from taichi_vision.taichi_aot.engine import AOTEngine, TaichiGPUBuffer
 
 def extreme_stress_test():
     engine = AOTEngine()
     img_path = os.path.join(project_root, "test_algorithm/IMG_20160202_015247.png")
-    output_dir = os.path.join(project_root, "taichi_library/taichi_algorithm/aot_py/test_output")
+    output_dir = os.path.join(project_root, "taichi_vision/taichi_algorithm/aot_py/test_output")
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"--- EXTREME STRESS TEST (GRAYSCALE) ---")

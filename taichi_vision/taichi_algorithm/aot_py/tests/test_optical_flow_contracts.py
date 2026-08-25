@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unittest
 
-from taichi_library.taichi_aot import (
+from taichi_vision.taichi_aot import (
     OPTICAL_FLOW_CONTRACT_OPERATIONS,
     OPTICAL_FLOW_IDENTITY_ADAPTER_OPERATIONS,
     can_auto_block,

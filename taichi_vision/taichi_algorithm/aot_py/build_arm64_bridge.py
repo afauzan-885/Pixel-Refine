@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - exercised by ``python build_*.py``
 ROOT = Path(__file__).resolve().parents[3]
 TAICHI_ROOT = ROOT / "test_algorithm" / "taichi_upstream" / "stable-v1.7.4-development"
 SOURCE = (
-    ROOT / "taichi_library" / "taichi_algorithm" / "aot_py" / "taichi_aot_engine.cpp"
+    ROOT / "taichi_vision" / "taichi_algorithm" / "aot_py" / "taichi_aot_engine.cpp"
 )
 NDK_PREBUILT = (
     ROOT
@@ -96,7 +96,7 @@ PROFILES = {
         "minimum_api": 26,
         "clang": ANDROID_CLANG,
         "output": ROOT
-        / "taichi_library"
+        / "taichi_vision"
         / "taichi_algorithm"
         / "aot_py"
         / "aot_dll"
@@ -116,7 +116,7 @@ PROFILES = {
         "triple": "aarch64-unknown-linux-gnu",
         "clang": LINUX_CLANG,
         "output": ROOT
-        / "taichi_library"
+        / "taichi_vision"
         / "taichi_algorithm"
         / "aot_py"
         / "aot_dll"
@@ -139,7 +139,7 @@ PROFILES = {
         # provide a Linux sysroot separately.
         "clang": GNU_AARCH64_CXX if GNU_AARCH64_CXX.exists() else LINUX_CLANG,
         "output": ROOT
-        / "taichi_library"
+        / "taichi_vision"
         / "taichi_algorithm"
         / "aot_py"
         / "aot_dll"
@@ -160,7 +160,7 @@ PROFILES = {
         "triple": "aarch64-unknown-linux-gnu",
         "clang": GNU_AARCH64_CXX if GNU_AARCH64_CXX.exists() else LINUX_CLANG,
         "output": ROOT
-        / "taichi_library"
+        / "taichi_vision"
         / "taichi_algorithm"
         / "aot_py"
         / "aot_dll"
@@ -182,7 +182,7 @@ PROFILES = {
         "minimum_api": 26,
         "clang": ANDROID_CLANG,
         "output": ROOT
-        / "taichi_library"
+        / "taichi_vision"
         / "taichi_algorithm"
         / "aot_py"
         / "aot_dll"
@@ -203,7 +203,7 @@ PROFILES = {
         "minimum_api": 26,
         "clang": ANDROID_CLANG,
         "output": ROOT
-        / "taichi_library"
+        / "taichi_vision"
         / "taichi_algorithm"
         / "aot_py"
         / "aot_dll"

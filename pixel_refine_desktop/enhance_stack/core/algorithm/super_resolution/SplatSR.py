@@ -172,6 +172,142 @@ class SplatSRAlgorithm:
         return flow
 
     @staticmethod
+    def _build_lucas_kanade_params(config):
+        """Translate the application LK settings to taichi_vision's API."""
+        win_size = max(5, int(config.get("win_size", 13)))
+        if win_size % 2 == 0:
+            win_size += 1
+        return {
+            "winSize": (win_size, win_size),
+            "maxLevel": max(0, int(config.get("max_level", 2))),
+            "criteria": (
+                3,
+                max(1, int(config.get("iterations", 8))),
+                float(config.get("epsilon", 0.03)),
+            ),
+            "grid_step": max(4, int(config.get("grid_step", 48))),
+            "border_margin": max(0, int(config.get("border_margin", 8))),
+            "motion_mode": str(config.get("motion_mode", "fast")),
+            "dense_mode": "blocky_clamped",
+            "max_flow_px": float(config.get("max_flow_px", 64.0)),
+        }
+
+    @staticmethod
+    def _splat_flow_from_lk_flow(lk_flow):
+        """Convert reference-to-current warp flow to source-to-output flow.
+
+        ``calcOpticalFlowPyrLK(reference, current)`` returns the displacement
+        used by ``remap_with_flow(current, lk_flow)``.  The splat graph instead
+        evaluates ``source + flow`` in output coordinates, so it needs the
+        inverse displacement for the original current frame.
+        """
+        flow = np.ascontiguousarray(lk_flow, dtype=np.float32)
+        if flow.ndim != 3 or flow.shape[-1] != 2:
+            raise ValueError(f"Lucas-Kanade flow must be HxWx2, got {flow.shape}")
+        if not np.isfinite(flow).all():
+            raise ValueError("Lucas-Kanade flow contains NaN or infinity")
+        return np.ascontiguousarray(-flow, dtype=np.float32)
+
+    @classmethod
+    def _estimate_lucas_kanade_pair(
+        cls,
+        reference,
+        target,
+        index,
+        *,
+        config,
+        matching_scale=1.0,
+        update_progress=None,
+        stop_requested=None,
+    ):
+        """Return ``(lk_flow, warped_target)`` using taichi_vision directly."""
+        if stop_requested and stop_requested():
+            return None
+        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
+
+        reference = np.ascontiguousarray(reference, dtype=np.float32)
+        target = np.ascontiguousarray(target, dtype=np.float32)
+        if reference.ndim != 2 or target.shape != reference.shape:
+            raise ValueError(
+                f"Lucas-Kanade expects matching 2-D frames, got "
+                f"{reference.shape} and {target.shape}"
+            )
+        h, w = reference.shape
+        matching_scale = float(max(1.0e-3, min(1.0, matching_scale)))
+        if matching_scale < 0.999:
+            proxy_h = max(32, int(round(h * matching_scale)))
+            proxy_w = max(32, int(round(w * matching_scale)))
+            matching_reference = cv2.resize(
+                reference, (proxy_w, proxy_h), interpolation=cv2.INTER_AREA
+            )
+            matching_target = cv2.resize(
+                target, (proxy_w, proxy_h), interpolation=cv2.INTER_AREA
+            )
+        else:
+            matching_reference, matching_target = reference, target
+
+        if update_progress:
+            update_progress(9, f"Lucas-Kanade alignment {index + 1}...")
+        lk_flow = calcOpticalFlowPyrLK(
+            np.ascontiguousarray(matching_reference, dtype=np.float32),
+            np.ascontiguousarray(matching_target, dtype=np.float32),
+            **cls._build_lucas_kanade_params(config),
+        )
+        if isinstance(lk_flow, tuple):
+            lk_flow = lk_flow[0]
+        lk_flow = np.asarray(lk_flow, dtype=np.float32)
+        if lk_flow.ndim != 3 or lk_flow.shape[-1] != 2:
+            raise RuntimeError(
+                f"taichi_vision Lucas-Kanade returned unexpected flow shape "
+                f"{lk_flow.shape}"
+            )
+        if matching_scale < 0.999:
+            lk_flow = np.stack(
+                [
+                    cv2.resize(lk_flow[..., axis], (w, h), interpolation=cv2.INTER_LINEAR)
+                    / np.float32(matching_scale)
+                    for axis in range(2)
+                ],
+                axis=-1,
+            )
+        lk_flow = np.ascontiguousarray(lk_flow, dtype=np.float32)
+        if lk_flow.shape != (h, w, 2) or not np.isfinite(lk_flow).all():
+            raise RuntimeError(
+                f"taichi_vision Lucas-Kanade returned invalid flow {lk_flow.shape}"
+            )
+
+        try:
+            warped_target = taichi_aot.remap_with_flow(
+                target,
+                lk_flow,
+                h,
+                w,
+                return_gpu=False,
+            )
+        except Exception as exc:
+            active_arch = str(getattr(taichi_aot.engine, "arch", "")).lower()
+            if active_arch != "cpu":
+                raise
+            # The CPU remap artifact may be quarantined after a runtime rebuild.
+            # Keep recovery explicit and CPU-only; GPU paths must report native
+            # remap failures instead of silently crossing backends.
+            from .spatial_weight_pipeline import _numpy_remap_with_flow
+
+            print(
+                "[splattingSR] CPU taichi_aot remap unavailable; using explicit "
+                f"NumPy warp recovery: {exc}"
+            )
+            warped_target = _numpy_remap_with_flow(target, lk_flow)
+        warped_target = np.ascontiguousarray(warped_target, dtype=np.float32)
+        if warped_target.shape != (h, w) or not np.isfinite(warped_target).all():
+            raise RuntimeError(
+                f"taichi_aot.remap_with_flow returned invalid warped frame "
+                f"{warped_target.shape}"
+            )
+        return lk_flow, warped_target
+
+    @staticmethod
     def _estimate_internal_block_matching_pair(
         matcher, config, reference, target, index, matching_scale=1.0
     ):
@@ -273,7 +409,7 @@ class SplatSRAlgorithm:
         scale=2,
         update_progress=None,
         stop_requested=None,
-        alignment_method="block_matching",
+        alignment_method="lucas_kanade",
         num_iterations=None,
     ):
         """Confidence-guided subpixel splatting reconstruction.
@@ -313,11 +449,15 @@ class SplatSRAlgorithm:
         frames = np.ascontiguousarray(np.stack(ys).astype(np.float32))
         n, h, w = frames.shape
         if update_progress:
-            update_progress(8, "Estimating internal block-matching flow...")
-        if str(alignment_method or "block_matching").strip().lower() != "block_matching":
+            update_progress(8, "Estimating internal Lucas-Kanade flow...")
+        if str(alignment_method or "lucas_kanade").strip().lower() not in {
+            "lucas_kanade",
+            "block_matching",  # Backward-compatible saved-session value.
+            "internal",
+        }:
             raise ValueError(
-                "splattingSR requires internal block_matching alignment; "
-                "external alignment is not supported"
+                "splattingSR requires internal taichi_vision Lucas-Kanade "
+                "alignment; external alignment is not supported"
             )
         # For large frames, stream one flow/confidence plane at a time.  The
         # previous full-frame path materialized flow[N,H,W,2] and confidence
@@ -327,41 +467,43 @@ class SplatSRAlgorithm:
         block_settings = app_config.get_compute_block_settings()
         block_size = int(block_settings.get("block_size", 1024))
         threshold_mp = float(block_settings.get("threshold_mp", 12.0))
+        block_mode = str(block_settings.get("mode", "auto")).strip().lower()
+        frame_mp = (h * w) / 1.0e6
         block_enabled = bool(block_settings.get("enabled", True)) and (
-            (h * w) / 1.0e6 >= threshold_mp
+            block_mode == "block"
+            or (block_mode == "auto" and frame_mp >= threshold_mp)
         )
         if block_enabled:
-            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching_gpu import BlockMatchingGPU
             from .spatial_weight_pipeline import generate_spatial_weight_map_blockwise
 
-            matcher = BlockMatchingGPU()
-            matcher_config = matcher.load_config()
+            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
+                LucasKanadeGPU,
+            )
+
+            lk_config = LucasKanadeGPU.load_config()
             cache = {}
             reference = frames[0]
-            # Motion estimation is only a low-resolution control signal for
-            # splatting.  Dispatching Lucas-Kanade on a 1024px proxy can take
-            # tens of seconds on MX150/Vulkan and leaves the watchdog with no
-            # heartbeat.  Keep the proxy bounded to 256px (the dense flow is
-            # upsampled back to the source resolution below).
+            # Keep large-frame alignment bounded to a proxy, while preserving
+            # the full-resolution flow contract after upsampling.
             flow_proxy_max = max(
                 128,
                 int(os.environ.get("SPLATSR_FLOW_PROXY_MAX", "256")),
             )
             flow_proxy_scale = min(1.0, flow_proxy_max / float(max(h, w)))
             # The proxy is not the final alignment product.  Use a bounded
-            # fast LK configuration so a driver cannot spend an unbounded
+            # native LK configuration so a driver cannot spend an unbounded
             # amount of time building a deep pyramid for every burst frame.
-            matcher_config = dict(matcher_config)
-            matcher_config.update(
-                grid_step=max(64, int(matcher_config.get("grid_step", 48))),
-                win_size=min(13, int(matcher_config.get("win_size", 13))),
+            lk_config = dict(lk_config)
+            lk_config.update(
+                grid_step=max(64, int(lk_config.get("grid_step", 48))),
+                win_size=min(13, int(lk_config.get("win_size", 13))),
                 max_level=0,
                 iterations=1,
                 motion_mode="fast",
                 adaptive=False,
             )
             print(
-                f"[splattingSR] block_matching flow proxy="
+                f"[splattingSR] lucas_kanade flow proxy="
                 f"{flow_proxy_scale:.3f} ({max(32, int(h * flow_proxy_scale))}x"
                 f"{max(32, int(w * flow_proxy_scale))})"
             )
@@ -369,58 +511,46 @@ class SplatSRAlgorithm:
             def flow_provider(index):
                 if index not in cache:
                     if index == 0:
-                        cache[index] = np.zeros((h, w, 2), dtype=np.float32)
+                        cache[index] = (
+                            np.zeros((h, w, 2), dtype=np.float32),
+                            reference,
+                        )
                     else:
                         if update_progress:
                             update_progress(
                                 9 + int((index / max(n - 1, 1)) * 12),
-                                f"SpatialFusion alignment {index + 1}/{n}...",
+                                f"Lucas-Kanade alignment {index + 1}/{n}...",
                             )
-                        # Process one source frame at a time.  This is the
-                        # same SpatialFusion alignment graph, but avoids
-                        # retaining the complete burst flow tensor in RAM.
-                        try:
-                            pair_flow = self._estimate_spatial_alignment_flow(
-                                np.ascontiguousarray(
-                                    frames[[0, index]], dtype=np.float32
-                                ),
-                                update_progress=update_progress,
-                                stop_requested=stop_requested,
-                                proxy_scale=flow_proxy_scale,
-                            )
-                            cache[index] = np.ascontiguousarray(
-                                pair_flow[1], dtype=np.float32
-                            )
-                            print(
-                                f"[splattingSR] alignment=SpatialFusion frame {index + 1}/{n}"
-                            )
-                        except Exception as exc:
-                            print(
-                                f"[splattingSR] SpatialFusion frame {index + 1} "
-                                f"unavailable; same-backend block matcher recovery: {exc}"
-                            )
-                            cache[index] = self._estimate_internal_block_matching_pair(
-                                matcher,
-                                matcher_config,
-                                reference,
-                                frames[index],
-                                index,
-                                matching_scale=flow_proxy_scale,
-                            )
+                        lk_flow, warped = self._estimate_lucas_kanade_pair(
+                            reference,
+                            frames[index],
+                            index,
+                            config=lk_config,
+                            matching_scale=flow_proxy_scale,
+                            update_progress=update_progress,
+                            stop_requested=stop_requested,
+                        )
+                        if lk_flow is None:
+                            raise RuntimeError("Lucas-Kanade alignment was cancelled")
+                        cache[index] = (
+                            self._splat_flow_from_lk_flow(lk_flow),
+                            warped,
+                        )
                     if update_progress:
                         update_progress(
                             10 + int((index / max(n - 1, 1)) * 12),
-                            f"Block-matching flow {index + 1}/{n}",
+                            f"Lucas-Kanade flow/warp {index + 1}/{n}",
                         )
-                return cache[index]
+                return cache[index][0]
 
             def confidence_provider(index):
-                flow_plane = flow_provider(index)
+                flow_provider(index)
+                _, warped = cache[index]
                 if index == 0:
+                    cache.pop(index, None)
                     return np.ones((h, w), dtype=np.float32)
-                # Use the exact SpatialFusion AOT weight stage.  It is
-                # evaluated blockwise so the reference pyramid, gradients,
-                # and weight accumulator never occupy full-frame residency.
+                # Match SpatialFusion: confidence is computed from the already
+                # warped frame, so the weight stage must not warp a second time.
                 if update_progress:
                     update_progress(
                         20 + int((index / max(n - 1, 1)) * 4),
@@ -428,10 +558,10 @@ class SplatSRAlgorithm:
                     )
                 result = generate_spatial_weight_map_blockwise(
                     reference,
-                    frames[index],
-                    flow_plane,
+                    warped,
+                    None,
                     block_size=block_size,
-                    halo=max(32, int(matcher_config.get("win_size", 13))),
+                    halo=max(32, int(lk_config.get("win_size", 13))),
                     tile_size=min(256, block_size),
                     overlap=0.2,
                     motion_sensitivity=1.0,
@@ -521,47 +651,53 @@ class SplatSRAlgorithm:
                 return cv2.cvtColor(cv2.merge([y_hr, cr, cb]), cv2.COLOR_YCrCb2RGB)
             return y_hr
 
-        try:
-            flow = self._estimate_spatial_alignment_flow(
-                frames,
-                update_progress=update_progress,
-                stop_requested=stop_requested,
-                proxy_scale=1.0,
-            )
-            print("[splattingSR] alignment=SpatialFusion shared flow")
-        except Exception as exc:
-            print(
-                f"[splattingSR] shared SpatialFusion alignment unavailable; "
-                f"using bounded same-backend flow fallback: {exc}"
-            )
-            flow = self._estimate_internal_block_matching_flow(
-                frames, update_progress=update_progress, stop_requested=stop_requested
-            )
-        if flow is None:
-            return None
-        # Use the exact SpatialFusion AOT weight stage before splatting.  The
-        # flow is used only to warp the analysis view; the original frames and
-        # flow remain the inputs to the sub-pixel splat accumulator.
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
+            LucasKanadeGPU,
+        )
         from .spatial_weight_pipeline import SpatialWeightMapGenerator
 
+        lk_config = LucasKanadeGPU.load_config()
+        splat_flow = np.zeros((n, h, w, 2), dtype=np.float32)
+        confidence = np.ones((n, h, w), dtype=np.float32)
+
+        # Follow SpatialFusion's ordering exactly: LK flow -> warp -> spatial
+        # confidence.  The raw frames and inverse flow are retained for the
+        # final sub-pixel splat so the source is not interpolated twice.
         with SpatialWeightMapGenerator(
             frames[0], tile_size=256, overlap=0.2, noise_sigma=0.015
         ) as weight_generator:
-            confidence = np.stack(
-                [
-                    np.ones((h, w), dtype=np.float32)
-                    if index == 0
-                    else weight_generator.generate(frames[index], flow[index])
-                    for index in range(n)
-                ],
-                axis=0,
-            )
+            for index in range(1, n):
+                if stop_requested and stop_requested():
+                    return None
+                if update_progress:
+                    update_progress(
+                        9 + int((index / max(n - 1, 1)) * 10),
+                        f"Lucas-Kanade alignment {index + 1}/{n}...",
+                    )
+                pair_lk_flow, warped = self._estimate_lucas_kanade_pair(
+                    frames[0],
+                    frames[index],
+                    index,
+                    config=lk_config,
+                    update_progress=None,
+                    stop_requested=stop_requested,
+                )
+                if pair_lk_flow is None:
+                    return None
+                splat_flow[index] = self._splat_flow_from_lk_flow(pair_lk_flow)
+                confidence[index] = weight_generator.generate(warped)
+                del warped
+                if update_progress:
+                    update_progress(
+                        20 + int((index / max(n - 1, 1)) * 4),
+                        f"SpatialFusion weight map {index + 1}/{n}",
+                    )
         try:
             from .spatial_splat_runtime import SpatialSplatAOT
             if update_progress:
                 update_progress(20, "Running native GPU subpixel splatting...")
             result, _ = SpatialSplatAOT().run(
-                frames[..., None], confidence, flow, scale=scale
+                frames[..., None], confidence, splat_flow, scale=scale
             )
         except Exception as native_error:
             try:
@@ -583,7 +719,10 @@ class SplatSRAlgorithm:
             if update_progress:
                 update_progress(20, "Native splat ABI unavailable; using CPU oracle...")
             result, _ = robust_subpixel_splat(
-                frames[..., None], flow=flow, confidence=confidence, scale=scale
+                frames[..., None],
+                flow=splat_flow,
+                confidence=confidence,
+                scale=scale,
             )
         if np.issubdtype(dtype_ref, np.integer):
             max_val = np.iinfo(dtype_ref).max
@@ -808,7 +947,7 @@ def main(
             ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else "single_process"
             # SplattingSR owns alignment internally.  Never consume an
             # externally aligned HDF5 product here; doing so would align the
-            # burst before the internal BlockMatchingGPU stage.
+            # burst before the internal Lucas-Kanade stage.
             data_source = image_paths
         else:
             if batch_id is None:
@@ -817,7 +956,7 @@ def main(
             image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
             ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else f"batch_{batch_id}"
             # Keep the raw/session image order and let the internal
-            # BlockMatchingGPU stage estimate motion.  The SpatialFusion
+            # Lucas-Kanade stage estimates motion.  The SpatialFusion
             # HDF5 alignment cache is deliberately not an input to SplatSR.
             data_source = image_paths
 

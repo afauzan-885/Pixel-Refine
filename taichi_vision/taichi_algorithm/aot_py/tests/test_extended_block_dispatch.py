@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from taichi_library.taichi_algorithm import aot_api
-from taichi_library.taichi_algorithm.image_processing import extended_aot
+from taichi_vision.taichi_algorithm import aot_api
+from taichi_vision.taichi_algorithm.image_processing import extended_aot
 
 
 class ExtendedBlockDispatchTests(unittest.TestCase):

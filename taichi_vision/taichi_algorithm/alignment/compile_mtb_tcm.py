@@ -23,7 +23,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import algorithm module (JIT mode)
-mtb_mod = importlib.import_module("taichi_library.taichi_algorithm.alignment.mtb")
+mtb_mod = importlib.import_module("taichi_vision.taichi_algorithm.alignment.mtb")
 
 ASSETS_DIR = os.path.join(file_dir, "../aot_tcm")
 

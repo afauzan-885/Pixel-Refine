@@ -8,7 +8,7 @@ round-trip support from actual graph support.
 Example::
 
     $env:AOT_ARCH = "cpu"
-    python taichi_library/taichi_algorithm/aot_py/dtype_probe.py --dtype uint16
+    python taichi_vision/taichi_algorithm/aot_py/dtype_probe.py --dtype uint16
 """
 
 from __future__ import annotations
@@ -75,8 +75,8 @@ def main():
     }
 
     try:
-        from taichi_library import taichi_aot as ta
-        from taichi_library.taichi_aot.engine import engine
+        from taichi_vision import taichi_aot as ta
+        from taichi_vision.taichi_aot.engine import engine
     except Exception as exc:  # pragma: no cover - environment failure
         message = str(exc).strip().splitlines()
         result["runtime"] = {

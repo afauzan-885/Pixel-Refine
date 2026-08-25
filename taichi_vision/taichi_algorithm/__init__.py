@@ -6,7 +6,7 @@ import numpy as np
 import os
 import importlib
 import builtins
-from taichi_library.config import AOT_MODE
+from taichi_vision.config import AOT_MODE
 
 ti = None
 if AOT_MODE == "0":
@@ -240,11 +240,11 @@ if AOT_MODE == "1":
         # Lazy import keeps compiler workers from constructing the runtime
         # during package initialization.  The canonical implementation lives
         # under taichi_algorithm; taichi_aot only provides compatibility shims.
-        from taichi_library.taichi_algorithm.image_processing import extended_aot as _extended
+        from taichi_vision.taichi_algorithm.image_processing import extended_aot as _extended
         return getattr(_extended, name)
 
     def _aot_jpeg(name):
-        from taichi_library.taichi_algorithm.compression import jpeg_aot as _jpeg
+        from taichi_vision.taichi_algorithm.compression import jpeg_aot as _jpeg
         return getattr(_jpeg, name)
 
     def dilate(src, kernel=None, iterations=1):
@@ -1392,7 +1392,7 @@ def calcOpticalFlowFarneback(
     return_diagnostics=False,
 ):
     """OpenCV-style dense Farneback optical flow backed by taichi_aot."""
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
 
     if preset != "opencv" or return_diagnostics:
         raise ValueError("Taichi AOT Farneback supports the OpenCV preset without diagnostics")

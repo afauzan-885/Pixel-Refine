@@ -27,8 +27,8 @@ inspect_model.py
 view_images_list.py
 upx_compression.py
 nuitka_build.py
-taichi_library copy.rar
-taichi_library_experimental_20260628_150822.zip
+taichi_vision copy.rar
+taichi_vision_experimental_20260628_150822.zip
 build_android.py
 
 # Ignore virtual environment directories
@@ -77,27 +77,14 @@ __pycache__/
 
 # Local governance and experimental archives
 /ai_governance/
-/taichi_library copy.rar
-/taichi_library_experimental_20260628_150822.zip
+/taichi_vision copy.rar
+/taichi_vision_experimental_20260628_150822.zip
 
 # Runtime expansion of packed CPU AOT archives (content-addressed cache)
-taichi_library/taichi_algorithm/aot_tcm/.cpu_aot_cache/
-taichi_library/taichi_algorithm/aot_tcm/**/.cpu_aot_cache/
-
-# Renamed Taichi AOT package caches and compiler intermediates
 taichi_vision/taichi_algorithm/aot_tcm/.cpu_aot_cache/
 taichi_vision/taichi_algorithm/aot_tcm/**/.cpu_aot_cache/
 
 # Taichi AOT generated caches, quarantine archives, and compiler intermediates
-taichi_library/**/__pycache__/
-taichi_library/**/.pytest_cache/
-taichi_library/taichi_algorithm/aot_tcm/.quarantine*/
-taichi_library/taichi_algorithm/aot_py/**/*.obj
-taichi_library/taichi_algorithm/aot_py/**/*.exp
-taichi_library/taichi_algorithm/aot_py/**/*.lib
-taichi_library/taichi_algorithm/aot_py/test_output*/
-taichi_library/taichi_algorithm/aot_py/test_report.txt
-
 taichi_vision/**/__pycache__/
 taichi_vision/**/.pytest_cache/
 taichi_vision/taichi_algorithm/aot_tcm/.quarantine*/

@@ -40,7 +40,7 @@ def _load_runtime_modules():
 
     package_name = "pixel_refine_compute_block_benchmark"
     package = __import__("types").ModuleType(package_name)
-    package.__path__ = [str(ROOT / "taichi_library" / "taichi_aot")]
+    package.__path__ = [str(ROOT / "taichi_vision" / "taichi_aot")]
     sys.modules[package_name] = package
 
     def load(name: str, path: Path):
@@ -52,10 +52,10 @@ def _load_runtime_modules():
         spec.loader.exec_module(module)
         return module
 
-    block = load(f"{package_name}.block", ROOT / "taichi_library" / "taichi_aot" / "block.py")
+    block = load(f"{package_name}.block", ROOT / "taichi_vision" / "taichi_aot" / "block.py")
     generic = load(
         f"{package_name}.generic_block",
-        ROOT / "taichi_library" / "taichi_aot" / "generic_block.py",
+        ROOT / "taichi_vision" / "taichi_aot" / "generic_block.py",
     )
     return block, generic
 

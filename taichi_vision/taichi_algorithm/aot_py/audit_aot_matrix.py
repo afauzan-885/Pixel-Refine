@@ -8,8 +8,8 @@ Vulkan/OpenGL suite is not mistaken for a vendor-specific compilation.
 
 Usage::
 
-    python taichi_library/taichi_algorithm/aot_py/audit_aot_matrix.py
-    python taichi_library/taichi_algorithm/aot_py/audit_aot_matrix.py --json
+    python taichi_vision/taichi_algorithm/aot_py/audit_aot_matrix.py
+    python taichi_vision/taichi_algorithm/aot_py/audit_aot_matrix.py --json
 """
 
 from __future__ import annotations
@@ -25,15 +25,15 @@ from typing import Any, Mapping
 import zipfile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-AOT_ROOT = PROJECT_ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm"
-AOT_DLL_ROOT = PROJECT_ROOT / "taichi_library" / "taichi_algorithm" / "aot_py" / "aot_dll"
+AOT_ROOT = PROJECT_ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
+AOT_DLL_ROOT = PROJECT_ROOT / "taichi_vision" / "taichi_algorithm" / "aot_py" / "aot_dll"
 MANIFEST_PATH = AOT_ROOT / "target_manifest.json"
-COMPILER_PATH = PROJECT_ROOT / "taichi_library" / "taichi_algorithm" / "aot_py" / "compile_aot_backend_suite.py"
+COMPILER_PATH = PROJECT_ROOT / "taichi_vision" / "taichi_algorithm" / "aot_py" / "compile_aot_backend_suite.py"
 
-# Load the pure target registry without importing ``taichi_library.taichi_aot``
+# Load the pure target registry without importing ``taichi_vision.taichi_aot``
 # itself.  The package initializer creates a GPU engine, which would make a
 # filesystem-only audit unexpectedly claim an OpenGL context.
-_TARGETS_PATH = PROJECT_ROOT / "taichi_library" / "taichi_aot" / "artifact_targets.py"
+_TARGETS_PATH = PROJECT_ROOT / "taichi_vision" / "taichi_aot" / "artifact_targets.py"
 _SPEC = importlib.util.spec_from_file_location("pixel_refine_audit_artifact_targets", _TARGETS_PATH)
 if _SPEC is None or _SPEC.loader is None:  # pragma: no cover - repository invariant
     raise ImportError(f"cannot load target registry: {_TARGETS_PATH}")

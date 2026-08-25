@@ -11,8 +11,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from taichi_library import taichi_aot as aot
-from taichi_library.taichi_algorithm.aot_py.tests.stress_optical_flow_blocks import VramSampler
+from taichi_vision import taichi_aot as aot
+from taichi_vision.taichi_algorithm.aot_py.tests.stress_optical_flow_blocks import VramSampler
 
 
 def timed(stages, name, function):

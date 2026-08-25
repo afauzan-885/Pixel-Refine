@@ -158,15 +158,18 @@ def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
         layout_instance.workspace_panel.clear_display
     )
 
-    # Saat setting algoritma berubah -> update state di panel parameter overlay
-    layout_instance.batch_panel.algorithm_settings_changed.connect(
-        layout_instance.workspace_panel.display_panel.param_panel.update_settings_state
-    )
     # Keep display controls (including Start) synchronized directly from the
     # in-memory settings signal.  JSON persistence remains asynchronous in
     # RightPanel and must not block this UI path.
     layout_instance.batch_panel.algorithm_settings_changed.connect(
         layout_instance.workspace_panel.display_panel.apply_algorithm_settings_fast
+    )
+    # Update the heavier parameter overlay after the primary controls are
+    # already visible. Qt invokes slots in connection order; keeping this
+    # listener second removes the apparent 1-2 second delay when switching
+    # between Average/Similarity and SplattingSR.
+    layout_instance.batch_panel.algorithm_settings_changed.connect(
+        layout_instance.workspace_panel.display_panel.param_panel.update_settings_state
     )
 
     # Setup Layout

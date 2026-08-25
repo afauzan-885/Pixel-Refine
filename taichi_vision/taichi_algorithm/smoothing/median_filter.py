@@ -148,7 +148,7 @@ def median_filter(
 ):
     """Supports both NumPy and Taichi ndarrays."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.median_filter(src, return_gpu=hasattr(src, "to_numpy"))
 
     if not TAICHI_AVAILABLE:
@@ -195,7 +195,7 @@ def median_filter_flow(
 ):
     """Supports both NumPy and Taichi ndarrays."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.median_filter(src, return_gpu=hasattr(src, "to_numpy"))
 
     if not TAICHI_AVAILABLE:

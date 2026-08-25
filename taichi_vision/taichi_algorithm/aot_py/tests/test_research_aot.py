@@ -3,7 +3,7 @@
 Run with an already-selected backend, for example::
 
     $env:AOT_ARCH = "cpu"
-    python -m taichi_library.taichi_algorithm.aot_py.tests.test_research_aot
+    python -m taichi_vision.taichi_algorithm.aot_py.tests.test_research_aot
 
 The same script can be run in separate processes with ``cuda``, ``vulkan``,
 and ``opengl``.  Keeping one backend per process mirrors the native engine's
@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 
-from taichi_library import taichi_aot as ta
+from taichi_vision import taichi_aot as ta
 
 
 def _check(name, actual, expected, *, atol=2e-5, rtol=2e-5):
@@ -760,7 +760,7 @@ def run_accuracy_suite():
             f"Poisson rasterization max error={errors['poisson_raster_oracle']:g}"
         )
 
-    from taichi_library.taichi_algorithm.camera_api2 import AOTCameraPipeline
+    from taichi_vision.taichi_algorithm.camera_api2 import AOTCameraPipeline
 
     camera_pipeline = AOTCameraPipeline(width=10, height=8, target_fps=120.0)
     camera_pipeline.start()
@@ -890,7 +890,7 @@ def run_benchmark():
         repeats=3,
     )
 
-    from taichi_library.taichi_algorithm.camera_api2 import AOTCameraPipeline
+    from taichi_vision.taichi_algorithm.camera_api2 import AOTCameraPipeline
 
     camera_pipeline = AOTCameraPipeline(width=32, height=32, target_fps=120.0)
     y_small = np.full((32, 32), 128, dtype=np.uint8)

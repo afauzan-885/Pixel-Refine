@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import unittest
 
-from taichi_library.taichi_aot import (
+from taichi_vision.taichi_aot import (
     OPTICAL_FLOW_CONTRACT_OPERATIONS,
     moving_optical_flow_partition_gap_report,
     verify_moving_flow_translation_contract,
     aggregate_native_moving_flow_candidates,
     qualify_native_moving_flow_candidates,
 )
-from taichi_library.taichi_aot.native_evidence import native_partition_evidence_snapshot
+from taichi_vision.taichi_aot.native_evidence import native_partition_evidence_snapshot
 
 
 class MovingOpticalFlowContractTests(unittest.TestCase):

@@ -7,8 +7,8 @@ import unittest
 
 import numpy as np
 
-from taichi_library.taichi_aot.block import lookup_block_adapter
-from taichi_library.taichi_aot.compute_block import compute_block
+from taichi_vision.taichi_aot.block import lookup_block_adapter
+from taichi_vision.taichi_aot.compute_block import compute_block
 
 
 class _FakeCpuRuntime:

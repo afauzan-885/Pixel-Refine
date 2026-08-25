@@ -168,7 +168,7 @@ if TAICHI_AVAILABLE:
 @ti_thread
 def bilateral_grid_filter(img, dst=None, s_s=16, s_r=16, sigma_s=1.0, sigma_r=1.0):
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         preset = "medium"
         if s_s <= 8: preset = "heavy"
         elif s_s >= 32: preset = "light"

@@ -11,7 +11,7 @@ import os
 
 if os.environ.get("AOT_MODE", "1") == "0":
     ti = importlib.import_module("taichi")
-    common = importlib.import_module("taichi_library.taichi_algorithm.common")
+    common = importlib.import_module("taichi_vision.taichi_algorithm.common")
 else:  # pragma: no cover - runtime loads the compiled TCM archive
     ti = None
     common = None

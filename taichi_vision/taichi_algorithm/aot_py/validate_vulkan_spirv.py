@@ -9,7 +9,7 @@ environment; it does *not* prove driver execution on an Android device.
 Example::
 
     python validate_vulkan_spirv.py --root \
-        taichi_library/taichi_algorithm/aot_tcm/vulkan_x86_64_windows
+        taichi_vision/taichi_algorithm/aot_tcm/vulkan_x86_64_windows
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ROOT = (
-    ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "vulkan_x86_64_windows"
+    ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "vulkan_x86_64_windows"
 )
 
 

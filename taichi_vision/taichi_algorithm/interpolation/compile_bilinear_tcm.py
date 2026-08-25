@@ -12,13 +12,13 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
 except ImportError:
     from aot_artifact import archive_module
 
 # Set AOT Mode for the algorithm imports
 
-import taichi_library.taichi_algorithm.interpolation.bilinear_interpolation as bilinear
+import taichi_vision.taichi_algorithm.interpolation.bilinear_interpolation as bilinear
 
 def compile_bilinear_tcm(arch=ti.vulkan, save_path="bilinear_vulkan.tcm"):
     print(f"\n>>> Compiling Bilinear AOT for: {arch}")

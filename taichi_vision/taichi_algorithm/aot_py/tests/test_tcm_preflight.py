@@ -11,8 +11,8 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[4]
-CONTRACT_PATH = ROOT / "taichi_library" / "taichi_aot" / "tcm_contract.py"
-PREFLIGHT_PATH = ROOT / "taichi_library" / "taichi_aot" / "tcm_preflight.py"
+CONTRACT_PATH = ROOT / "taichi_vision" / "taichi_aot" / "tcm_contract.py"
+PREFLIGHT_PATH = ROOT / "taichi_vision" / "taichi_aot" / "tcm_preflight.py"
 
 
 def _load(path: Path, name: str):

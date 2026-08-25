@@ -5,7 +5,7 @@ OpenCV-compatible normalization operations.
 Parity: cv2.normalize(src, dst, alpha, beta, norm_type)
 
 Usage (JIT):
-    from taichi_library.taichi_algorithm import normalize
+    from taichi_vision.taichi_algorithm import normalize
     result = normalize(src, alpha=0, beta=255, norm_type='MINMAX')
 """
 

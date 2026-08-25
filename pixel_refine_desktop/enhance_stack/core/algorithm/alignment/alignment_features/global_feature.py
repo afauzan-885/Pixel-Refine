@@ -421,7 +421,10 @@ def load_images_from_paths(
     progress_start=0,
     progress_end=100,
 ):
-    images = []
+    # Results are collected by original path index.  Native/IO futures may
+    # complete in any order, but the burst contract requires path 0 to remain
+    # the reference frame.
+    ordered_images = {}
     raw_extensions = {".dng", ".cr2", ".nef", ".arw", ".orf", ".rw2", ".pef", ".srw"}
     num_threads = 3
 
@@ -468,6 +471,9 @@ def load_images_from_paths(
     total_paths = len(image_paths)
     loaded_count = 0
 
+    def _ordered_result():
+        return [ordered_images[index] for index in range(total_paths) if index in ordered_images]
+
     # Desktop OpenGL contexts are thread-affine.  The native AOT bridge is
     # initialized on the caller thread, while the historical RAW loader sent
     # every demosaic job through a ThreadPoolExecutor.  That combination can
@@ -508,11 +514,11 @@ def load_images_from_paths(
                             if res is not None:
                                 if isinstance(res, tuple):
                                     img, proxy = res
-                                    images.append(img)
+                                    ordered_images[idx_path] = img
                                     if gt_proxy_result is None:
                                         gt_proxy_result = proxy
                                 else:
-                                    images.append(res)
+                                    ordered_images[idx_path] = res
                         except Exception as exc:
                             print(f"Error loading RAW image: {exc}")
                         finally:
@@ -535,7 +541,7 @@ def load_images_from_paths(
                             generate_ref_proxy=generate_proxy,
                             alignment_tonemapping_linear=alignment_tonemapping_linear,
                         )
-                        raw_futures.append(future)
+                        raw_futures.append((idx_path, future))
             else:
                 if os.path.exists(path):
                     if alignment_tonemapping_linear:
@@ -544,16 +550,20 @@ def load_images_from_paths(
                         )
                     else:
                         future = executor.submit(cv2.imread, path, cv2.IMREAD_UNCHANGED)
-                    standard_futures.append(future)
+                    # Keep the path index with the future.  Completion order
+                    # is not the burst order; frame 0 is the persistent
+                    # reference for denoising and must remain path 0.
+                    standard_futures.append((idx_path, future))
 
         # Ambil hasil dari gambar RAW
-        for future in as_completed(raw_futures):
+        # Resolve in path order for the same reason as standard images.  RAW
+        # demosaic is already parallelized by the executor; ordering and
+        # parallelism are independent concerns here.
+        for idx_path, future in raw_futures:
             if stop_requested and stop_requested():
                 executor.shutdown(wait=False, cancel_futures=True)
-                # Return partial or empty
-                if capture_ref_proxy:
-                    return images, None
-                return images
+                result = _ordered_result()
+                return (result, None) if capture_ref_proxy else result
 
             try:
                 res = future.result()
@@ -561,12 +571,12 @@ def load_images_from_paths(
                     # Check if tuple (dual return)
                     if isinstance(res, tuple):
                         img, proxy = res
-                        images.append(img)
+                        ordered_images[idx_path] = img
                         # We assume only one proxy is generated (from first image)
                         if gt_proxy_result is None:
                             gt_proxy_result = proxy
                     else:
-                        images.append(res)
+                        ordered_images[idx_path] = res
             except Exception as e:
                 print(f"Error loading RAW image: {e}")
             finally:
@@ -581,17 +591,19 @@ def load_images_from_paths(
                     )
 
         # Ambil hasil dari gambar Standard
-        for future in as_completed(standard_futures):
+        # Resolve standard-image futures in submission order.  Resolving with
+        # ``as_completed`` here can silently swap the reference/support frames
+        # depending on filesystem/cache timing.
+        for idx_path, future in standard_futures:
             if stop_requested and stop_requested():
                 executor.shutdown(wait=False, cancel_futures=True)
-                if capture_ref_proxy:
-                    return images, None
-                return images
+                result = _ordered_result()
+                return (result, None) if capture_ref_proxy else result
 
             try:
                 img = future.result()
                 if img is not None:
-                    images.append(img)
+                    ordered_images[idx_path] = img
             except Exception as e:
                 print(f"Error loading standard image: {e}")
             finally:
@@ -606,6 +618,7 @@ def load_images_from_paths(
                         f"Loading standard image {loaded_count}/{total_paths}...",
                     )
 
+    images = _ordered_result()
     if capture_ref_proxy:
         return images, gt_proxy_result
 

@@ -651,6 +651,13 @@ class ThumbnailBatchProcessor(QObject):
         """
         Process single image thumbnail dengan sistem cache 3 level (L0 Global -> L1 RAM -> L2 Disk).
         """
+        from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+            thumbnail_creation_enabled,
+        )
+
+        if not thumbnail_creation_enabled():
+            return
+
         # Map path to current batch context for single process too
         self.path_to_batch[image_path] = self.current_batch_id
 
@@ -722,7 +729,11 @@ class ThumbnailBatchProcessor(QObject):
         """
         Process multiple images dengan Bulk Load dari L0 Global -> L1 RAM -> L2 Disk.
         """
-        if not image_paths:
+        from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+            thumbnail_creation_enabled,
+        )
+
+        if not image_paths or not thumbnail_creation_enabled():
             return
 
         remaining_paths = []
@@ -811,6 +822,15 @@ class ThumbnailBatchProcessor(QObject):
 
     def _on_thumbnail_ready(self, q_image, image_path):
         """Internal callback saat dekoding gambar selesai."""
+        from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+            thumbnail_creation_enabled,
+        )
+
+        if not thumbnail_creation_enabled():
+            self._in_flight.discard(image_path)
+            self.callbacks.pop(image_path, None)
+            return
+
         is_success = not q_image.isNull()
 
         # Remove from in-flight tracker
@@ -890,16 +910,20 @@ class ThumbnailBatchProcessor(QObject):
                     self.saved_count += 1
             self._emit_progress()
 
-    def stop_all(self):
-        """Stop semua background tasks dan pastikan data tersimpan."""
+    def stop_all(self, persist=True):
+        """Stop semua background tasks, optionally persisting pending results."""
         # 1. Bersihkan antrean thread pool agar tidak ada task baru mulai
         try:
             QThreadPool.globalInstance().clear()
         except Exception:
             pass
 
-        # 2. Simpan data tertunda (harus sebelum cleanup)
-        self.flush_to_disk()
+        # 2. Simpan data tertunda (harus sebelum cleanup), kecuali pembatalan
+        # eksplisit akibat thumbnail dinonaktifkan.
+        if persist:
+            self.flush_to_disk()
+        else:
+            self.pending_save_queue.clear()
 
         # 3. Cleanup state
         try:

@@ -1,6 +1,6 @@
 import pytest
 
-from taichi_library.taichi_aot.llvm20_profiles import (
+from taichi_vision.taichi_aot.llvm20_profiles import (
     CUDA_ARM64_LINUX_NVIDIA,
     LLVM20Toolchain,
     get_target_profile,

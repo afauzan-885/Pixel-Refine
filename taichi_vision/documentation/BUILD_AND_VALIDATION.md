@@ -3,8 +3,7 @@
 ## Build
 
 Run commands from the maintained `taichi_vision` package namespace. The
-retired `taichi_library` namespace and the `taichi_vision copy` snapshot must
-not be used for compilation, tests, or wheel assembly.
+standalone hardware test is maintained beside Performance Settings.
 
 Family compiler scripts live beside their kernels. Shared orchestration lives
 in `taichi_algorithm/aot_py/`; target artifacts live in
@@ -12,7 +11,7 @@ in `taichi_algorithm/aot_py/`; target artifacts live in
 
 ```powershell
 python -m taichi_vision.taichi_algorithm.aot_py.compile_aot_backend_suite --help
-python -m taichi_vision.taichi_algorithm.aot_py.tests.test_comprehensif --fast
+python pixel_refine_desktop/ui/views/settings/Perfomance/test_comprehensif.py --run-logic --fast
 ```
 
 Use the project venv. Never mix bridge, C API, or TCM artifacts from different

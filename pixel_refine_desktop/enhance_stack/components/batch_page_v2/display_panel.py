@@ -63,6 +63,9 @@ from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 
 # Logic
 from pixel_refine_desktop.enhance_stack.core.logic.display_logic import DisplayLogic
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    thumbnail_creation_enabled,
+)
 from pixel_refine_desktop.enhance_stack.core.logic import display_manager
 from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
     ProcessManager,
@@ -371,6 +374,13 @@ class BackgroundBatchPreloader(QThread):
 
     def run(self):
         """Pre-load thumbnails ke GlobalThumbnailCache secara diam-diam di background."""
+        from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+            thumbnail_creation_enabled,
+        )
+
+        if not thumbnail_creation_enabled():
+            return
+
         try:
             from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
                 get_global_cache,
@@ -384,7 +394,7 @@ class BackgroundBatchPreloader(QThread):
         global_cache = get_global_cache()
 
         for path in self.image_paths:
-            if self._is_cancelled:
+            if self._is_cancelled or not thumbnail_creation_enabled():
                 break
 
             # Skip jika sudah ada di L0 cache
@@ -396,22 +406,29 @@ class BackgroundBatchPreloader(QThread):
                 repo = get_thumbnail_repo()
                 cached_disk = repo.get_thumbnail(path)
                 if not cached_disk.isNull():
+                    if self._is_cancelled or not thumbnail_creation_enabled():
+                        break
                     global_cache.put(path, cached_disk)
-                    if not self._is_cancelled:
+                    if not self._is_cancelled and thumbnail_creation_enabled():
                         self.thumbnail_preloaded.emit(self.batch_id, path)
                     continue
 
                 # Decode thumbnail (process_thumbnail_logic otomatis pakai RawDemosaicThrottle)
+                if self._is_cancelled or not thumbnail_creation_enabled():
+                    break
+
                 pil_thumb = process_thumbnail_logic(path, (128, 128))
-                if self._is_cancelled:
+                if self._is_cancelled or not thumbnail_creation_enabled():
                     break
                 if pil_thumb:
                     q_image = convert_pil_to_qimage(pil_thumb)
                     if not q_image.isNull():
                         # Simpan ke disk dan L0
+                        if self._is_cancelled or not thumbnail_creation_enabled():
+                            break
                         repo.save_thumbnail(path, q_image)
                         global_cache.put(path, q_image)
-                        if not self._is_cancelled:
+                        if not self._is_cancelled and thumbnail_creation_enabled():
                             self.thumbnail_preloaded.emit(self.batch_id, path)
             except Exception as e:
                 if not self._is_cancelled:
@@ -455,6 +472,9 @@ class DisplayPanel(QWidget):
 
         self.controller = controller
         self.logic = DisplayLogic()
+        self.logic.thumbnail_policy.changed.connect(
+            self._on_thumbnail_policy_changed
+        )
 
         # Managers
         self.selection_manager = SelectionManager(self)
@@ -1143,6 +1163,39 @@ class DisplayPanel(QWidget):
 
             self.logic.load_visible_thumbnails(pairs)
 
+    @Slot(bool)
+    def _on_thumbnail_policy_changed(self, enabled):
+        """Stop thumbnail work immediately when the global setting is disabled."""
+        if enabled:
+            if self.all_cards:
+                self.lazy_load_timer.start()
+            return
+
+        for preloader in list(self._bg_preloaders.values()):
+            try:
+                preloader.cancel()
+            except Exception:
+                pass
+        self._bg_preloaders.clear()
+
+        self.logic.get_thumbnail_processor().stop_all(persist=False)
+        self.grid_manager.stop_staged_timer()
+        self.toast.hide()
+
+        # Remove thumbnails that were already displayed so the disabled state
+        # is deterministic, including panels that were open before the toggle.
+        for card in list(self.all_cards.values()):
+            try:
+                card._is_fetching = False
+                if card.has_image():
+                    card.unload_image()
+                if hasattr(card, "_image_path") and card._image_path:
+                    card.set_placeholder_text(
+                        os.path.basename(card._image_path).replace("_", "\n")
+                    )
+            except Exception:
+                pass
+
     # =========================================================================
     # === 1. PUBLIC SLOTS UNTUK MEMUAT DATA ===
     # =========================================================================
@@ -1369,6 +1422,9 @@ class DisplayPanel(QWidget):
         """
         Load thumbnail asinkron untuk image card dengan Viewport-Aware Animation.
         """
+        if not thumbnail_creation_enabled(self.logic.thumbnail_policy):
+            return
+
         self.logic.load_thumbnail_async(
             image_path, lambda img, p: self._on_thumbnail_ready(img, p, card_widget)
         )
@@ -2031,6 +2087,9 @@ class DisplayPanel(QWidget):
         Maks 1 preloader per batch_id. Jika preloader sebelumnya masih berjalan, ia di-cancel
         dulu sebelum preloader baru dimulai (karena gambar mungkin berubah).
         """
+        if not thumbnail_creation_enabled(self.logic.thumbnail_policy):
+            return
+
         try:
             batch_id_str = str(batch_id)
 
@@ -2292,8 +2351,22 @@ class DisplayPanel(QWidget):
         self._algorithm_ui_settings = dict(settings)
         denoising = str(settings.get("denoising", "")).strip()
         super_resolution = str(settings.get("super_resolution", "")).strip()
+        parameter_overlay_active = denoising in {
+            "Average",
+            "Median",
+            "Similarity",
+            "Spatial AI",
+            "FusionNet",
+        }
+        if hasattr(self, "param_panel"):
+            self.param_panel.apply_algorithm_visibility_fast(settings)
+        if parameter_overlay_active:
+            self.param_overlay.show()
+            self.param_overlay.raise_()
+        elif denoising in {"", "None", "No Denoising"}:
+            self.param_overlay.hide()
         self.set_start_button_mode(
-            denoising in {"Average", "Median", "Similarity", "Similarity Fusion"}
+            parameter_overlay_active
             or super_resolution not in {
                 "",
                 "None",

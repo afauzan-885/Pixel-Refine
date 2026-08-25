@@ -30,8 +30,8 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 import importlib
-fb = importlib.import_module('taichi_library.taichi_algorithm.optical_flow.farneback_flow')
-pyr = importlib.import_module('taichi_library.taichi_algorithm.pyramid.pyramid')
+fb = importlib.import_module('taichi_vision.taichi_algorithm.optical_flow.farneback_flow')
+pyr = importlib.import_module('taichi_vision.taichi_algorithm.pyramid.pyramid')
 
 
 def _package_tcm(module, out_dir, tcm_name):

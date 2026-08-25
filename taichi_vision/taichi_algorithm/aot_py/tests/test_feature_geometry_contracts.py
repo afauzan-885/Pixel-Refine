@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from taichi_library.taichi_aot import (
+from taichi_vision.taichi_aot import (
     FEATURE_GEOMETRY_CONTRACT_OPERATIONS,
     can_auto_block,
     can_auto_partition_dispatch,

@@ -37,7 +37,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from taichi_library.taichi_algorithm.compression.raw_pipeline import (
+from taichi_vision.taichi_algorithm.compression.raw_pipeline import (
     RawFlowTileContract,
     raw_alignment_guide_dng,
     raw_optical_flow_dng,
@@ -105,7 +105,7 @@ def _rss_bytes() -> int:
 
 def _runtime_info() -> dict[str, object]:
     """Return actual runtime identity only after the AOT engine is initialized."""
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
 
     runtime = taichi_aot.engine
     return {

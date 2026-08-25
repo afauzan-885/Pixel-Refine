@@ -320,7 +320,7 @@ def joint_bilateral_filter(src, guide, preset="medium", radius=2, buffer_provide
     General-purpose Joint Bilateral Filter.
     """
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.joint_bilateral_filter(src, guide, preset=preset, radius=radius, return_gpu=hasattr(src, "to_numpy"))
 
     if not TAICHI_AVAILABLE:
@@ -361,7 +361,7 @@ def joint_bilateral_upsample(src_low, guide_hi, preset="medium", buffer_provider
     Joint Bilateral Upsampling (JBLU).
     """
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.joint_bilateral_upsample(src_low, guide_hi, preset=preset, return_gpu=hasattr(src_low, "to_numpy"))
 
     if not TAICHI_AVAILABLE:

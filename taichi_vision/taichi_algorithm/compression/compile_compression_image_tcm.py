@@ -14,9 +14,9 @@ import taichi as ti
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-import taichi_library.taichi_algorithm.compression.kernels as compression_kernels
+import taichi_vision.taichi_algorithm.compression.kernels as compression_kernels
 
-from taichi_library.taichi_algorithm.compression.kernels import (
+from taichi_vision.taichi_algorithm.compression.kernels import (
     JPEG_QUALITY_TABLE,
     JPEG_CHROMA_TABLE,
     JPEG_QUALITY_TABLE_FIELD,

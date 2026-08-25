@@ -15,12 +15,77 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSpinBox,
     QDoubleSpinBox,
+    QAbstractSpinBox,
     QTextEdit,
     QButtonGroup,
 )
 from PySide6.QtCore import Signal, Qt, Slot
 from .mixins import RealtimeMixin
 from .theme import create_checkbox_style
+
+
+def _numeric_spinbox_style():
+    """Consistent clickable numeric input styling for integer and decimal fields."""
+    return """
+        QSpinBox, QDoubleSpinBox {
+            background-color: #FFFFFF;
+            border: 1px solid #E8EDF2;
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 11pt;
+            color: #333333;
+        }
+        QSpinBox:hover, QDoubleSpinBox:hover {
+            border-color: #0078D4;
+        }
+        QSpinBox:focus, QDoubleSpinBox:focus {
+            border-color: #0078D4;
+            border-width: 2px;
+        }
+        QSpinBox:disabled, QDoubleSpinBox:disabled {
+            background-color: #F5F8FA;
+            color: #8A949E;
+        }
+        QSpinBox::up-button, QDoubleSpinBox::up-button {
+            subcontrol-origin: border;
+            subcontrol-position: top right;
+            width: 20px;
+            border-left: 1px solid #E8EDF2;
+            border-bottom: 1px solid #E8EDF2;
+            border-top-right-radius: 4px;
+            background-color: #F5F8FA;
+        }
+        QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {
+            background-color: #E8EDF2;
+        }
+        QSpinBox::down-button, QDoubleSpinBox::down-button {
+            subcontrol-origin: border;
+            subcontrol-position: bottom right;
+            width: 20px;
+            border-left: 1px solid #E8EDF2;
+            border-bottom-right-radius: 4px;
+            background-color: #F5F8FA;
+        }
+        QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+            background-color: #E8EDF2;
+        }
+        QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+            image: none;
+            width: 0px;
+            height: 0px;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-bottom: 5px solid #666666;
+        }
+        QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+            image: none;
+            width: 0px;
+            height: 0px;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid #666666;
+        }
+    """
 
 
 class FormGroup(QWidget, RealtimeMixin):
@@ -64,67 +129,13 @@ class FormGroup(QWidget, RealtimeMixin):
             self.input.setMinimum(0)
             self.input.setMaximum(999)
             # Apply modern styling to match other inputs
-            self.input.setStyleSheet(
-                """
-                QSpinBox {
-                    background-color: #FFFFFF;
-                    border: 1px solid #E8EDF2;
-                    border-radius: 4px;
-                    padding: 6px 10px;
-                    font-size: 11pt;
-                    color: #333333;
-                }
-                QSpinBox:hover {
-                    border-color: #0078D4;
-                }
-                QSpinBox:focus {
-                    border-color: #0078D4;
-                    border-width: 2px;
-                }
-                QSpinBox::up-button {
-                    subcontrol-origin: border;
-                    subcontrol-position: top right;
-                    width: 20px;
-                    border-left: 1px solid #E8EDF2;
-                    border-bottom: 1px solid #E8EDF2;
-                    border-top-right-radius: 4px;
-                    background-color: #F5F8FA;
-                }
-                QSpinBox::up-button:hover {
-                    background-color: #E8EDF2;
-                }
-                QSpinBox::down-button {
-                    subcontrol-origin: border;
-                    subcontrol-position: bottom right;
-                    width: 20px;
-                    border-left: 1px solid #E8EDF2;
-                    border-bottom-right-radius: 4px;
-                    background-color: #F5F8FA;
-                }
-                QSpinBox::down-button:hover {
-                    background-color: #E8EDF2;
-                }
-                QSpinBox::up-arrow {
-                    image: none;
-                    width: 0px;
-                    height: 0px;
-                    border-left: 4px solid transparent;
-                    border-right: 4px solid transparent;
-                    border-bottom: 5px solid #666666;
-                }
-                QSpinBox::down-arrow {
-                    image: none;
-                    width: 0px;
-                    height: 0px;
-                    border-left: 4px solid transparent;
-                    border-right: 4px solid transparent;
-                    border-top: 5px solid #666666;
-                }
-            """
-            )
+            self.input.setStyleSheet(_numeric_spinbox_style())
             self.input.valueChanged.connect(lambda v: self.value_changed.emit(v))
         elif input_type == "decimal":
             self.input = QDoubleSpinBox()
+            self.input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+            self.input.setAccelerated(True)
+            self.input.setStyleSheet(_numeric_spinbox_style())
             self.input.valueChanged.connect(lambda v: self.value_changed.emit(v))
         elif input_type == "select":
             self.input = QComboBox()

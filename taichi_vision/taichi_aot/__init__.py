@@ -2,10 +2,10 @@
 
 The runtime (engine, memory policy, backend selection, and artifact loading)
 stays in this package.  Algorithm implementations live in
-``taichi_library.taichi_algorithm.aot_api`` so there is one maintained source
+``taichi_vision.taichi_algorithm.aot_api`` so there is one maintained source
 tree.  Importing this module keeps the historical public API unchanged:
 
-    import taichi_library.taichi_aot as ta
+    import taichi_vision.taichi_aot as ta
     ta.resize(image, (1024, 768))
 
 The explicit runtime imports below also preserve ``ta.engine`` and the
@@ -14,6 +14,39 @@ backend-management helpers used by the application.
 
 import os
 import sys
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+
+
+def _load_canonical_engine_source():
+    """Load the maintained Python engine instead of a stale compiled sibling.
+
+    Python gives ``engine.cp*.pyd`` precedence over ``engine.py``.  The
+    checked-in binary was built against the retired package namespace, while
+    ``engine.py`` is the maintained lifecycle/runtime source.  Loading the
+    source module explicitly keeps backend initialization canonical and makes
+    the package independent from that stale build artifact.
+    """
+    module_name = f"{__name__}.engine"
+    loaded = sys.modules.get(module_name)
+    if loaded is not None:
+        return loaded
+
+    source_path = Path(__file__).with_name("engine.py")
+    spec = spec_from_file_location(module_name, source_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load canonical engine source: {source_path}")
+    module = module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+_load_canonical_engine_source()
 
 # Jalur Dynamic Loading: Utamakan Binary Native DLL (.pyd/.so) di Mode Production,
 # dan fallback ke source code .py di Mode Development.
@@ -69,6 +102,7 @@ except Exception:
         COLOR_RGB2GRAY,
         COLOR_GRAY2BGR,
     )
+
 from .backend_config import (
     BackendConfig,
     CANONICAL_BACKENDS,
@@ -298,16 +332,16 @@ from .auto_pipeline import (
     ConservativeAutoTuner,
     AutoPipelineAutotuner,
 )
-from taichi_library.taichi_algorithm.compression.raw_frame import (
+from taichi_vision.taichi_algorithm.compression.raw_frame import (
     RawMosaicFrame,
     raw_frame_from_dng,
 )
-from taichi_library.taichi_algorithm.compression.dng_aot import (
+from taichi_vision.taichi_algorithm.compression.dng_aot import (
     DNGCapabilityError,
     DNGCapabilityReport,
     dng_capability_report,
 )
-from taichi_library.taichi_algorithm.compression.raw_pipeline import (
+from taichi_vision.taichi_algorithm.compression.raw_pipeline import (
     RawFusionReport,
     RawFlowTileContract,
     raw_flow_tile_contract,
@@ -328,8 +362,8 @@ from taichi_library.taichi_algorithm.compression.raw_pipeline import (
 
 # Keep the complete historical algorithm surface available at the old import
 # path.  The implementation is now maintained only in ``taichi_algorithm``.
-from taichi_library.taichi_algorithm.aot_api import *  # noqa: F401,F403,E402
-from taichi_library.taichi_algorithm.aot_api import (  # noqa: E402
+from taichi_vision.taichi_algorithm.aot_api import *  # noqa: F401,F403,E402
+from taichi_vision.taichi_algorithm.aot_api import (  # noqa: E402
     _mod,
     _module_cache,
     load_tcm,
@@ -345,7 +379,7 @@ from taichi_library.taichi_algorithm.aot_api import (  # noqa: E402
 )
 
 try:
-    from taichi_library.taichi_algorithm.taichi_worker import ti_thread
+    from taichi_vision.taichi_algorithm.taichi_worker import ti_thread
 except Exception:  # pragma: no cover - compiler-only environments
     ti_thread = None
 

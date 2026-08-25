@@ -12,11 +12,11 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 
-import taichi_library.taichi_algorithm.pyramid.fft
-fft_module = sys.modules["taichi_library.taichi_algorithm.pyramid.fft"]
+import taichi_vision.taichi_algorithm.pyramid.fft
+fft_module = sys.modules["taichi_vision.taichi_algorithm.pyramid.fft"]
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
 except ImportError:
     from aot_artifact import archive_module
 

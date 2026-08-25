@@ -11,8 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 import zipfile
 
-from taichi_library.taichi_aot.artifact_targets import TargetSpec, resolve_artifact
-from taichi_library.taichi_aot.tcm_preflight import preflight_tcm
+from taichi_vision.taichi_aot.artifact_targets import TargetSpec, resolve_artifact
+from taichi_vision.taichi_aot.tcm_preflight import preflight_tcm
 
 
 CUDA_TARGET = TargetSpec(

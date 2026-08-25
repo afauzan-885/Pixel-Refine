@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from taichi_library.cuda_arch_matrix import architecture_name, normalize_compute_capability
+from taichi_vision.cuda_arch_matrix import architecture_name, normalize_compute_capability
 
 
 def normalize_device_name(value: str) -> str:
@@ -627,7 +627,7 @@ def scan_vulkan_device_names(project_root) -> list[str]:
     """
     dll = (
         Path(project_root)
-        / "taichi_library"
+        / "taichi_vision"
         / "taichi_algorithm"
         / "aot_py"
         / "aot_dll"

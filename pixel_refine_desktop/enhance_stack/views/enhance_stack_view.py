@@ -6,8 +6,8 @@ Subclass of WorkspaceView from workplace framework.
 
 from PySide6.QtCore import QThread, QTimer, Signal, QObject, Slot, Qt
 from PySide6.QtGui import QKeySequence, QShortcut, QIcon, QPixmap
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget, QMenu, QProgressDialog
-from resources.GenericUILibrary import Button
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget, QMenu, QProgressDialog, QLabel
+from resources.GenericUILibrary import Button, Modal
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from pixel_refine_desktop.enhance_stack.core.logic.project_archive import (
     load_project,
@@ -268,15 +268,46 @@ class EnhanceStackView(WorkspaceView):
             # Selection restoration can normalize persisted settings; capture
             # the clean baseline only after that synchronization is complete.
             self._project_baseline_token = session_state_token(self.db_path)
-            QMessageBox.information(
-                self,
-                getattr(language_config, "PROJECT_OPEN", "Open Project..."),
-                os.path.basename(self._current_project_path),
-            )
+            self._show_project_loaded_modal(result)
         except Exception as exc:
             QMessageBox.critical(self, "Project Error", str(exc))
             return False
         return True
+
+    def _show_project_loaded_modal(self, result):
+        """Show the standard GenericUILibrary success modal after project load."""
+        project_name = os.path.basename(self._current_project_path or "project.prf")
+        batch_map = result.get("batch_id_map", {}) if isinstance(result, dict) else {}
+        batch_count = len(batch_map) if isinstance(batch_map, dict) else 0
+
+        modal = Modal(
+            title="",
+            size="small",
+            parent=self,
+        )
+
+        # Gunakan title-bar sebagai satu-satunya header agar tidak ada judul
+        # besar yang terduplikasi di dalam isi modal.
+        modal.header.hide()
+        modal.setWindowTitle(f"Berhasil memuat {project_name}")
+
+        # Padatkan layout khusus modal informasi ini agar tidak menyisakan
+        # ruang vertikal kosong yang berlebihan.
+        modal.body.layout.setContentsMargins(15, 5, 15, 5)
+        modal.footer.layout().setContentsMargins(15, 4, 15, 7)
+
+        message = QLabel(f"Berhasil memuat {batch_count} batch")
+        message.setWordWrap(True)
+        message_font = message.font()
+        base_point_size = message_font.pointSizeF()
+        if base_point_size <= 0:
+            base_point_size = 10.0
+        message_font.setPointSizeF(base_point_size + 2.0)
+        message.setFont(message_font)
+        modal.set_body(message)
+        modal.add_footer_button("OK", variant="primary")
+        modal.fit_to_content(max_width=420, max_height=180)
+        modal.exec()
 
     def project_has_unsaved_changes(self) -> bool:
         """Return whether the current session differs from its saved baseline."""

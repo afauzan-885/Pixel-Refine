@@ -34,58 +34,58 @@ _artifact_override = os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT")
 ARTIFACT_DIR = (
     Path(_artifact_override).expanduser().resolve()
     if _artifact_override
-    else PROJECT_ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm"
+    else PROJECT_ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
 )
-PACKAGE = "taichi_library.taichi_algorithm.aot_py"
+PACKAGE = "taichi_vision.taichi_algorithm.aot_py"
 # Family-local compiler modules live next to the algorithm source.  Keep the
 # short names in JOBS for readability and resolve them through this map so the
 # orchestration contract remains stable while the source tree is colocated.
 COLOCATED_COMPILER_PACKAGES = {
     # Shared cross-family compilers live beside the algorithm package.  The
     # aot_py modules remain compatibility shims for older direct commands.
-    "compile_cast_tcm": "taichi_library.taichi_algorithm",
-    "compile_common_tcm": "taichi_library.taichi_algorithm",
-    "compile_research_tcm": "taichi_library.taichi_algorithm",
-    "compile_akaze_tcm": "taichi_library.taichi_algorithm.feature_matching",
-    "compile_ofb_tcm": "taichi_library.taichi_algorithm.feature_matching",
-    "compile_area_tcm": "taichi_library.taichi_algorithm.interpolation",
-    "compile_bicubic_tcm": "taichi_library.taichi_algorithm.interpolation",
-    "compile_bilinear_tcm": "taichi_library.taichi_algorithm.interpolation",
-    "compile_bilinear_batch_tcm": "taichi_library.taichi_algorithm.interpolation",
-    "compile_nearest_tcm": "taichi_library.taichi_algorithm.interpolation",
-    "compile_remap_tcm": "taichi_library.taichi_algorithm.interpolation",
-    "compile_arm_tcm": "taichi_library.taichi_algorithm.demosaicing",
-    "compile_bilinear_demosaice_tcm": "taichi_library.taichi_algorithm.demosaicing",
-    "compile_dcb_tcm": "taichi_library.taichi_algorithm.demosaicing",
-    "compile_hamilton_tcm": "taichi_library.taichi_algorithm.demosaicing",
-    "compile_highlight_recovery_tcm": "taichi_library.taichi_algorithm.demosaicing",
-    "compile_mlri_admm_tcm": "taichi_library.taichi_algorithm.demosaicing",
-    "compile_bilateral_grid_tcm": "taichi_library.taichi_algorithm.smoothing",
-    "compile_box_filter_tcm": "taichi_library.taichi_algorithm.smoothing",
-    "compile_gaussian_tcm": "taichi_library.taichi_algorithm.smoothing",
-    "compile_jbf_tcm": "taichi_library.taichi_algorithm.smoothing",
-    "compile_median_tcm": "taichi_library.taichi_algorithm.smoothing",
-    "compile_bm3d_tcm": "taichi_library.taichi_algorithm.denoising",
-    "compile_nlm_tcm": "taichi_library.taichi_algorithm.denoising",
-    "compile_block_matching_tcm": "taichi_library.taichi_algorithm.optical_flow",
-    "compile_farneback_tcm": "taichi_library.taichi_algorithm.optical_flow",
-    "compile_horn_schunck_tcm": "taichi_library.taichi_algorithm.optical_flow",
-    "compile_lucas_kanade_tcm": "taichi_library.taichi_algorithm.optical_flow",
-    "compile_lucas_kanade_batch_tcm": "taichi_library.taichi_algorithm.optical_flow",
-    "compile_fft_tcm": "taichi_library.taichi_algorithm.pyramid",
-    "compile_pyramid_tcm": "taichi_library.taichi_algorithm.pyramid",
-    "compile_gradients_tcm": "taichi_library.taichi_algorithm.math_ops",
-    "compile_math_ops": "taichi_library.taichi_algorithm.math_ops",
-    "compile_mtb_tcm": "taichi_library.taichi_algorithm.alignment",
-    "compile_ncc_tcm": "taichi_library.taichi_algorithm.alignment",
-    "compile_phase_corr_tcm": "taichi_library.taichi_algorithm.alignment",
-    "compile_ransac_tcm": "taichi_library.taichi_algorithm.alignment",
-    "compile_analysis_suite_tcm": "taichi_library.taichi_algorithm.image_processing",
-    "compile_extended_tcm": "taichi_library.taichi_algorithm.image_processing",
-    "compile_inpaint_tcm": "taichi_library.taichi_algorithm.image_processing",
-    "compile_seamless_clone_tcm": "taichi_library.taichi_algorithm.image_processing",
-    "compile_compression_image_tcm": "taichi_library.taichi_algorithm.compression",
-    "compile_raw_pipeline_tcm": "taichi_library.taichi_algorithm.compression",
+    "compile_cast_tcm": "taichi_vision.taichi_algorithm",
+    "compile_common_tcm": "taichi_vision.taichi_algorithm",
+    "compile_research_tcm": "taichi_vision.taichi_algorithm",
+    "compile_akaze_tcm": "taichi_vision.taichi_algorithm.feature_matching",
+    "compile_ofb_tcm": "taichi_vision.taichi_algorithm.feature_matching",
+    "compile_area_tcm": "taichi_vision.taichi_algorithm.interpolation",
+    "compile_bicubic_tcm": "taichi_vision.taichi_algorithm.interpolation",
+    "compile_bilinear_tcm": "taichi_vision.taichi_algorithm.interpolation",
+    "compile_bilinear_batch_tcm": "taichi_vision.taichi_algorithm.interpolation",
+    "compile_nearest_tcm": "taichi_vision.taichi_algorithm.interpolation",
+    "compile_remap_tcm": "taichi_vision.taichi_algorithm.interpolation",
+    "compile_arm_tcm": "taichi_vision.taichi_algorithm.demosaicing",
+    "compile_bilinear_demosaice_tcm": "taichi_vision.taichi_algorithm.demosaicing",
+    "compile_dcb_tcm": "taichi_vision.taichi_algorithm.demosaicing",
+    "compile_hamilton_tcm": "taichi_vision.taichi_algorithm.demosaicing",
+    "compile_highlight_recovery_tcm": "taichi_vision.taichi_algorithm.demosaicing",
+    "compile_mlri_admm_tcm": "taichi_vision.taichi_algorithm.demosaicing",
+    "compile_bilateral_grid_tcm": "taichi_vision.taichi_algorithm.smoothing",
+    "compile_box_filter_tcm": "taichi_vision.taichi_algorithm.smoothing",
+    "compile_gaussian_tcm": "taichi_vision.taichi_algorithm.smoothing",
+    "compile_jbf_tcm": "taichi_vision.taichi_algorithm.smoothing",
+    "compile_median_tcm": "taichi_vision.taichi_algorithm.smoothing",
+    "compile_bm3d_tcm": "taichi_vision.taichi_algorithm.denoising",
+    "compile_nlm_tcm": "taichi_vision.taichi_algorithm.denoising",
+    "compile_block_matching_tcm": "taichi_vision.taichi_algorithm.optical_flow",
+    "compile_farneback_tcm": "taichi_vision.taichi_algorithm.optical_flow",
+    "compile_horn_schunck_tcm": "taichi_vision.taichi_algorithm.optical_flow",
+    "compile_lucas_kanade_tcm": "taichi_vision.taichi_algorithm.optical_flow",
+    "compile_lucas_kanade_batch_tcm": "taichi_vision.taichi_algorithm.optical_flow",
+    "compile_fft_tcm": "taichi_vision.taichi_algorithm.pyramid",
+    "compile_pyramid_tcm": "taichi_vision.taichi_algorithm.pyramid",
+    "compile_gradients_tcm": "taichi_vision.taichi_algorithm.math_ops",
+    "compile_math_ops": "taichi_vision.taichi_algorithm.math_ops",
+    "compile_mtb_tcm": "taichi_vision.taichi_algorithm.alignment",
+    "compile_ncc_tcm": "taichi_vision.taichi_algorithm.alignment",
+    "compile_phase_corr_tcm": "taichi_vision.taichi_algorithm.alignment",
+    "compile_ransac_tcm": "taichi_vision.taichi_algorithm.alignment",
+    "compile_analysis_suite_tcm": "taichi_vision.taichi_algorithm.image_processing",
+    "compile_extended_tcm": "taichi_vision.taichi_algorithm.image_processing",
+    "compile_inpaint_tcm": "taichi_vision.taichi_algorithm.image_processing",
+    "compile_seamless_clone_tcm": "taichi_vision.taichi_algorithm.image_processing",
+    "compile_compression_image_tcm": "taichi_vision.taichi_algorithm.compression",
+    "compile_raw_pipeline_tcm": "taichi_vision.taichi_algorithm.compression",
 }
 FORK_PYTHON = (
     PROJECT_ROOT
@@ -314,7 +314,7 @@ def _target_artifact_path(name: str, target_id: str) -> Path:
 def _load_tcm_contract():
     """Load contract helpers without importing the public AOT package."""
 
-    contract_path = PROJECT_ROOT / "taichi_library" / "taichi_aot" / "tcm_contract.py"
+    contract_path = PROJECT_ROOT / "taichi_vision" / "taichi_aot" / "tcm_contract.py"
     spec = importlib.util.spec_from_file_location("pixel_refine_tcm_contract_build", contract_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load TCM contract helper: {contract_path}")
@@ -398,7 +398,7 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
     # an explicit opt-in for the staged Windows profile; the worker still
     # validates the resulting payload before promotion.
     if backend == "opengl" and os.environ.get("PIXEL_REFINE_AOT_NATIVE_CONTEXT") == "1":
-        from taichi_library import taichi_aot as _native_context  # noqa: F401
+        from taichi_vision import taichi_aot as _native_context  # noqa: F401
     import taichi as ti
 
     # Compile each target with its actual Taichi architecture.  The worker uses

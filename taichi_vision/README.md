@@ -14,10 +14,9 @@ This `taichi_vision` directory is the only maintained algorithm/runtime
 package. `taichi_vision copy` is an obsolete snapshot and is not part of the
 package, build, test, wheel, or application import path.
 
-The former `taichi_library` namespace is not a supported runtime dependency.
-All application imports, compiler commands, documentation, and package data
-must use `taichi_vision`. Historical archives or migration records containing
-the old name are not runtime inputs.
+No legacy namespace alias is registered at runtime. All application imports,
+compiler commands, documentation, and package data must use `taichi_vision`.
+Historical archives or migration records are not runtime inputs.
 
 Runtime lifecycle, backend selection, target-qualified bridges, TCM loading,
 memory policy, and block/full-frame recovery are owned by

@@ -6,7 +6,7 @@ Single-source API for all Taichi AOT-compiled kernels.
 All functions follow NumPy/OpenCV naming conventions and signatures.
 
 Usage:
-    from taichi_library.taichi_algorithm.aot_wrapper import ta
+    from taichi_vision.taichi_algorithm.aot_wrapper import ta
 
     # OpenCV-compatible
     result = ta.resize(src, (width, height))
@@ -32,7 +32,7 @@ NORM_HAMMING = 6
 TM_CCOEFF_NORMED = 5
 
 # ── Environment setup ──────────────────────────────────────────────────
-from taichi_library.config import AOT_MODE
+from taichi_vision.config import AOT_MODE
 
 # ── Lazy module loading ────────────────────────────────────────────────
 _modules = {}
@@ -82,8 +82,8 @@ def _get_fixed_pool():
     global _fixed_pool
     if _fixed_pool is None:
         try:
-            from taichi_library.taichi_aot.engine import FixedBufferPool
-            from taichi_library.taichi_aot import get_engine
+            from taichi_vision.taichi_aot.engine import FixedBufferPool
+            from taichi_vision.taichi_aot import get_engine
         except ImportError:
             return None
         _fixed_pool = FixedBufferPool(get_engine())
@@ -102,7 +102,7 @@ def _get_buf(key, shape, dtype=np.float32):
     """Get buffer from FixedBufferPool (512x512) or fallback to OutputArray."""
     pool = _get_fixed_pool()
     if pool is None:
-        from taichi_library.taichi_aot.engine import OutputArray
+        from taichi_vision.taichi_aot.engine import OutputArray
 
         return OutputArray(shape, dtype)
     return pool.acquire(shape, dtype)
@@ -143,7 +143,7 @@ def _get_engine():
         # second env-based preflight here: that used to let this wrapper pick
         # a different adapter from the singleton engine during hybrid-GPU
         # startup.
-        from taichi_library.taichi_aot import get_engine
+        from taichi_vision.taichi_aot import get_engine
 
         _engine = get_engine()
     return _engine
@@ -164,7 +164,7 @@ if os.environ.get("PIXEL_REFINE_AOT_COMPILE_ONLY", "0") == "1":
     DynamicArg = None
     _populate_dynamic_arg = None
 else:
-    from taichi_library.taichi_aot.engine import DynamicArg, _populate_dynamic_arg
+    from taichi_vision.taichi_aot.engine import DynamicArg, _populate_dynamic_arg
 
 
 def _get_module(name):
@@ -177,7 +177,7 @@ def _get_module(name):
         # the native loader.  The previous unsuffixed path depended on the
         # legacy ``name_<backend>.tcm`` files and could silently load an
         # artifact compiled for a different adapter.
-        from taichi_library.taichi_aot.artifact_targets import (
+        from taichi_vision.taichi_aot.artifact_targets import (
             detect_target,
             resolve_artifact,
         )
@@ -194,7 +194,7 @@ def _get_module(name):
         if explicit_tcm_root:
             tcm_root = os.path.abspath(explicit_tcm_root)
         else:
-            from taichi_library.llvm20_runtime_paths import tcm_root as staged_tcm_root
+            from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
 
             staged_root = staged_tcm_root(target.target_id)
             tcm_root = os.path.abspath(
@@ -232,17 +232,17 @@ def _InputArray(data, is_vector=False, force_vector=None):
         force_vector: If True, force vector mode; if False, force non-vector;
                        if None, use is_vector value.
     """
-    from taichi_library.taichi_aot.engine import InputArray
+    from taichi_vision.taichi_aot.engine import InputArray
 
     # Map force_vector to is_vector (InputArray doesn't have force_vector param)
     effective_vector = is_vector
     if force_vector is not None:
         effective_vector = force_vector
     if force_vector is False and isinstance(data, np.ndarray):
-        from taichi_library.taichi_aot import engine as aot_engine
+        from taichi_vision.taichi_aot import engine as aot_engine
         import importlib
 
-        engine_mod = importlib.import_module("taichi_library.taichi_aot.engine")
+        engine_mod = importlib.import_module("taichi_vision.taichi_aot.engine")
 
         arr = np.ascontiguousarray(data)
         buf = aot_engine.allocate(
@@ -264,7 +264,7 @@ def _InputArray(data, is_vector=False, force_vector=None):
 
 def _OutputArray(shape, dtype=np.float32):
     """Create output buffer for AOT kernel."""
-    from taichi_library.taichi_aot.engine import OutputArray
+    from taichi_vision.taichi_aot.engine import OutputArray
     return OutputArray(shape, dtype)
 
 
@@ -294,7 +294,7 @@ def array(src, dtype=np.float32):
 
 
 def copy(src):
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     return taichi_aot.copy(src)
 
     """Copy array (same as numpy.copy) — persistent buffer."""
@@ -308,7 +308,7 @@ def copy(src):
 
 
 def copy_3ch(src):
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     return taichi_aot.copy(src)
 
     """Copy 3-channel array (same as numpy.copy for 3D arrays) — persistent buffer."""
@@ -322,7 +322,7 @@ def copy_3ch(src):
 
 
 def split_channels(src):
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     return taichi_aot.split_3ch(src)
 
     """Split 3-channel array into 3 single-channel arrays (same as cv2.split)."""
@@ -370,7 +370,7 @@ def merge(channels):
 
 
 def absdiff(src1, src2):
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     return taichi_aot.absdiff(src1, src2)
 
     """Absolute difference between two arrays (same as cv2.absdiff) — persistent buffer."""
@@ -463,7 +463,7 @@ copy_make_border = copyMakeBorder
 
 def non_local_means(src, h_param=10.0, search_window=7, patch_size=3):
     """Apply Non-Local Means (NLM) Denoising (same as cv2.fastNlMeansDenoising)."""
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
 
     return taichi_aot.non_local_means(
         src, h_param=h_param, search_window=search_window, patch_size=patch_size
@@ -483,7 +483,7 @@ def bm3d(
     cycle_spins=1,
 ):
     """Apply BM3D (Hybrid Fast Collaborative Denoising)."""
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
 
     return taichi_aot.bm3d(
         src,
@@ -516,7 +516,7 @@ COLOR_YCrCb2BGR = 37
 def cvtColor(src, code):
     # Keep this compatibility wrapper on the canonical AOT graph contracts;
     # legacy ``cmn_gray``/``color`` names are not shipped anymore.
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     return taichi_aot.cvtColor(src, code)
 
     """Convert image color space (same as cv2.cvtColor) — persistent buffer."""
@@ -564,7 +564,7 @@ def cvtColor(src, code):
 
 
 def Sobel(src, dx, dy, ksize=3):
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     gx, gy = taichi_aot.sobel(src, return_gpu=_is_gpu_buffer(src))
     return gx if dx >= 1 and dy == 0 else gy
 
@@ -594,7 +594,7 @@ def Sobel(src, dx, dy, ksize=3):
 
 
 def Laplacian(src, ksize=1):
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     return taichi_aot.laplacian(src, return_gpu=_is_gpu_buffer(src))
 
     """Apply Laplacian operator (same as cv2.Laplacian)."""
@@ -628,7 +628,7 @@ def resize(src, dsize, interpolation=INTER_LINEAR):
     # Keep the legacy convenience wrapper on the canonical AOT implementation
     # so graph names, vector views, dtype normalization, and tiled/full-frame
     # policy remain identical across all backends.
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
 
     return taichi_aot.resize(src, dsize, interpolation=interpolation)
 
@@ -691,7 +691,7 @@ def resize(src, dsize, interpolation=INTER_LINEAR):
 
 
 def remap(src, map1, map2, interpolation=INTER_LINEAR):
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     return taichi_aot.remap(src, map1, map2)
 
     """Remap image (same as cv2.remap).
@@ -730,7 +730,7 @@ def remap(src, map1, map2, interpolation=INTER_LINEAR):
 
 
 def gaussianBlur(src, ksize, sigmaX=0, sigmaY=0):
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     kernel = int(ksize[0] if isinstance(ksize, (tuple, list)) else ksize)
     sigma = float(sigmaX or sigmaY or 1.0)
     return taichi_aot.gaussian_blur(src, sigma=sigma, kernel_size=kernel)
@@ -814,7 +814,7 @@ def blur(src, ksize):
 
 
 def medianBlur(src, ksize):
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     return taichi_aot.median_filter(src)
 
     """Apply Median filter (same as cv2.medianBlur).
@@ -898,7 +898,7 @@ MORPH_ELLIPSE = 2
 
 
 def Canny(src, threshold1, threshold2, apertureSize=3):
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
     return taichi_aot.canny_aot(src, low_threshold=threshold1, high_threshold=threshold2)
 
     """Apply Canny edge detection (same as cv2.Canny).
@@ -1092,7 +1092,7 @@ def CLAHE(src, clipLimit=2.0, tileGridSize=(8, 8)):
     # the target-qualified three-pass AOT graph (histogram, clipped CDF, and
     # bilinear LUT interpolation) while preserving the OpenCV-style wrapper
     # signature and float32 output contract.
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
 
     source = np.ascontiguousarray(src, dtype=np.float32)
     return taichi_aot.clahe_aot(
@@ -1105,7 +1105,7 @@ def CLAHE(src, clipLimit=2.0, tileGridSize=(8, 8)):
 
 def dilate(src, kernel, iterations=1):
     """Dilate image through the target-qualified morphology graph."""
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
 
     return taichi_aot.dilate_aot(
         np.ascontiguousarray(src, dtype=np.float32),
@@ -1116,7 +1116,7 @@ def dilate(src, kernel, iterations=1):
 
 def erode(src, kernel, iterations=1):
     """Erode image through the target-qualified morphology graph."""
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
 
     return taichi_aot.erode_aot(
         np.ascontiguousarray(src, dtype=np.float32),
@@ -1443,7 +1443,7 @@ def calcOpticalFlowPyrLK(
                     host_result, diagnostics = host_result
                 else:
                     diagnostics = None
-                from taichi_library import taichi_aot
+                from taichi_vision import taichi_aot
                 gpu_result = taichi_aot.engine.upload(
                     np.ascontiguousarray(host_result, dtype=np.float32),
                     is_vector=True, vector_dim=2,
@@ -1685,7 +1685,7 @@ def calcOpticalFlowPyrLK(
             raise
         if is_prev_gpu or is_next_gpu:
             raise
-        from taichi_library.taichi_algorithm.optical_flow.lucas_kanade import (
+        from taichi_vision.taichi_algorithm.optical_flow.lucas_kanade import (
             calcOpticalFlowPyrLK as _calc_lk,
         )
 
@@ -1905,7 +1905,7 @@ def calcOpticalFlowBlockMatching(
                     host_result, diagnostics = host_result
                 else:
                     diagnostics = None
-                from taichi_library import taichi_aot
+                from taichi_vision import taichi_aot
                 gpu_result = taichi_aot.engine.upload(
                     np.ascontiguousarray(host_result, dtype=np.float32),
                     is_vector=True, vector_dim=2,

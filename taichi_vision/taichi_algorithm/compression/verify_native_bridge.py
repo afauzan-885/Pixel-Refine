@@ -20,10 +20,10 @@ import types
 def _load_stack():
     root = pathlib.Path(__file__).resolve().parents[3]
     package_paths = {
-        "taichi_library": root / "taichi_library",
-        "taichi_library.taichi_algorithm": root / "taichi_library" / "taichi_algorithm",
-        "taichi_library.taichi_algorithm.compression": root / "taichi_library" / "taichi_algorithm" / "compression",
-        "taichi_library.taichi_aot": root / "taichi_library" / "taichi_aot",
+        "taichi_vision": root / "taichi_vision",
+        "taichi_vision.taichi_algorithm": root / "taichi_vision" / "taichi_algorithm",
+        "taichi_vision.taichi_algorithm.compression": root / "taichi_vision" / "taichi_algorithm" / "compression",
+        "taichi_vision.taichi_aot": root / "taichi_vision" / "taichi_aot",
     }
     for name, path in package_paths.items():
         package = types.ModuleType(name)
@@ -39,13 +39,13 @@ def _load_stack():
         spec.loader.exec_module(module)
         return module
 
-    compression = root / "taichi_library" / "taichi_algorithm" / "compression"
-    abi = load("taichi_library.taichi_aot.native_codec_abi", root / "taichi_library" / "taichi_aot" / "native_codec_abi.py")
-    dispatch = load("taichi_library.taichi_algorithm.compression.native_dispatch", compression / "native_dispatch.py")
-    prep = load("taichi_library.taichi_algorithm.compression.native_video_prep", compression / "native_video_prep.py")
-    verify = load("taichi_library.taichi_algorithm.compression.verify_native_video_prep", compression / "verify_native_video_prep.py")
+    compression = root / "taichi_vision" / "taichi_algorithm" / "compression"
+    abi = load("taichi_vision.taichi_aot.native_codec_abi", root / "taichi_vision" / "taichi_aot" / "native_codec_abi.py")
+    dispatch = load("taichi_vision.taichi_algorithm.compression.native_dispatch", compression / "native_dispatch.py")
+    prep = load("taichi_vision.taichi_algorithm.compression.native_video_prep", compression / "native_video_prep.py")
+    verify = load("taichi_vision.taichi_algorithm.compression.verify_native_video_prep", compression / "verify_native_video_prep.py")
     predictor = load(
-        "taichi_library.taichi_algorithm.compression.av1_predict_aot",
+        "taichi_vision.taichi_algorithm.compression.av1_predict_aot",
         compression / "av1_predict_aot.py",
     )
     return abi, dispatch, prep, verify, predictor

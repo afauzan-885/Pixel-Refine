@@ -14,7 +14,7 @@ if project_root not in sys.path:
 
 # Set AOT Mode for the algorithm imports
 
-from taichi_library.taichi_algorithm.interpolation.remap import (
+from taichi_vision.taichi_algorithm.interpolation.remap import (
     _remap_kernel,
     _remap_kernel_vec3,
     _build_flow_maps_kernel,
@@ -32,7 +32,7 @@ from taichi_library.taichi_algorithm.interpolation.remap import (
     _warp_perspective_offset_kernel,
     _warp_perspective_offset_kernel_vec3,
 )
-from taichi_library.taichi_algorithm.image_processing.enhance_image import (
+from taichi_vision.taichi_algorithm.image_processing.enhance_image import (
     _enhance_grayscale_kernel,
 )
 

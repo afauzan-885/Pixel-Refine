@@ -33,7 +33,7 @@ Modul taichi_algorithm yang dipanggil (reuse):
   - ta.hamilton_demosaic() / ta.arm_demosaic(): RAW Bayer demosaic
 
 Usage:
-  from taichi_library.taichi_algorithm.camera_api2 import (
+  from taichi_vision.taichi_algorithm.camera_api2 import (
       yuv420_to_rgb, nv21_to_rgb, yuv_to_gray,
       CameraPipeline, create_preview_pipeline,
       LatestFrameQueue, AdaptiveFrameController, FrameBufferPool,

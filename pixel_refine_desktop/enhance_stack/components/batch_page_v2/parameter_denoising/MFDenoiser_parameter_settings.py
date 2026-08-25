@@ -1053,6 +1053,11 @@ class SimilarityParameterPage(QWidget):
         self.cpu_btn = QPushButton("CPU")
         self.gpu_btn = QPushButton("GPU")
         self.ai_btn = QPushButton("AI")
+        # AI WeightNet is temporarily quarantined from the production UI.  The
+        # control remains instantiated so the old settings schema can be
+        # restored later without a migration, but it is not user-selectable.
+        self.ai_btn.setVisible(False)
+        self.ai_btn.setEnabled(False)
         for btn in (self.cpu_btn, self.gpu_btn, self.ai_btn):
             btn.setCheckable(True)
             btn.setFixedHeight(26)
@@ -1126,9 +1131,7 @@ class SimilarityParameterPage(QWidget):
 
         self.cpu_btn.clicked.connect(lambda: self._set_backend("cpu"))
         self.gpu_btn.clicked.connect(lambda: self._set_backend("gpu"))
-        self.ai_btn.clicked.connect(lambda: self._set_backend("ai"))
-
-        # Lock to CPU if app backend arch is cpu (excluding AI backend which runs fine on CPU)
+        # Lock to CPU if app backend arch is cpu.
         self._cpu_only = is_cpu_backend()
         if self._cpu_only:
             self.gpu_btn.setVisible(False)
@@ -1187,9 +1190,12 @@ class SimilarityParameterPage(QWidget):
 
     def _set_backend(self, backend, save=True):
         if backend == "ai":
-            self.ai_btn.setChecked(True)
-            self.cpu_btn.setChecked(False)
-            self.gpu_btn.setChecked(False)
+            # Normalize stale persisted AI settings to the maintained spatial
+            # backend while the AI route is quarantined.
+            backend = "cpu" if getattr(self, "_cpu_only", False) else "gpu"
+            self.ai_btn.setChecked(False)
+            self.gpu_btn.setChecked(backend == "gpu")
+            self.cpu_btn.setChecked(backend == "cpu")
         elif backend == "gpu" and not getattr(self, "_cpu_only", False):
             self.gpu_btn.setChecked(True)
             self.cpu_btn.setChecked(False)
@@ -1200,14 +1206,9 @@ class SimilarityParameterPage(QWidget):
             self.ai_btn.setChecked(False)
         self._apply_toggle_styles()
 
-        # Dynamically show/hide parameters based on backend
-        is_ai = (backend == "ai")
         ai_keys = {"work_resolution_scale", "ai_tile_size", "ai_overlap_percent", "ai_batch_size", "ai_model_type"}
         for key, widget in self.widgets_by_key.items():
-            if is_ai:
-                widget.setVisible(key in ai_keys)
-            else:
-                widget.setVisible(key not in ai_keys)
+            widget.setVisible(key not in ai_keys)
 
         if save and not self._loading:
             self._save_config()
@@ -1230,7 +1231,9 @@ class SimilarityParameterPage(QWidget):
                     row._update_value_text(control.value())
 
         backend = str(config.get("similarity_backend", "gpu")).strip().lower()
-        if getattr(self, "_cpu_only", False) and backend != "ai":
+        if backend == "ai":
+            backend = "cpu" if getattr(self, "_cpu_only", False) else "gpu"
+        if getattr(self, "_cpu_only", False):
             backend = "cpu"
         self._set_backend(backend, save=False)
         self._loading = False
@@ -1253,9 +1256,7 @@ class SimilarityParameterPage(QWidget):
                 config[key] = control.isChecked()
             elif ft == "slider":
                 config[key] = control.value() * float(field.get("scale", 1.0))
-        if self.ai_btn.isChecked():
-            config["similarity_backend"] = "ai"
-        elif self.gpu_btn.isChecked():
+        if self.gpu_btn.isChecked():
             config["similarity_backend"] = "gpu"
         else:
             config["similarity_backend"] = "cpu"

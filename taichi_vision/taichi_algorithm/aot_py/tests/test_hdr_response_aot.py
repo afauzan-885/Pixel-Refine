@@ -14,8 +14,8 @@ _ROOT = Path(__file__).resolve().parents[4]
 _PROBE = r"""
 import os
 import numpy as np
-from taichi_library.taichi_algorithm.image_processing.hdr_stack import deghost_confidence
-from taichi_library.taichi_algorithm.image_processing.hdr_response import (
+from taichi_vision.taichi_algorithm.image_processing.hdr_stack import deghost_confidence
+from taichi_vision.taichi_algorithm.image_processing.hdr_response import (
     estimate_response_curve,
     merge_radiance,
 )

@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from taichi_library.taichi_algorithm.aot_py.cpu_linux_toolchain_preflight import (
+from taichi_vision.taichi_algorithm.aot_py.cpu_linux_toolchain_preflight import (
     preflight_cpu_linux_toolchain,
 )
 

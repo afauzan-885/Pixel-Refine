@@ -251,7 +251,7 @@ def inpaint(src, mask, inpaint_radius=3, flags=INPAINT_TELEA,
     """
     # --- AOT path ---
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.inpaint(src, mask, inpaint_radius=inpaint_radius,
                                    flags=flags, return_gpu=not isinstance(src, np.ndarray))
 

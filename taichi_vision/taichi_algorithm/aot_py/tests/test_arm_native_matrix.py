@@ -11,7 +11,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[4]
-AOT_PY = ROOT / "taichi_library" / "taichi_algorithm" / "aot_py"
+AOT_PY = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_py"
 if str(AOT_PY) not in sys.path:
     sys.path.insert(0, str(AOT_PY))
 
@@ -30,7 +30,7 @@ AUDIT = _load("arm_matrix_audit", AOT_PY / "audit_aot_matrix.py")
 VALIDATOR = _load("arm_bridge_validator", AOT_PY / "validate_arm_bridge.py")
 TARGETS = _load(
     "arm_artifact_targets",
-    ROOT / "taichi_library" / "taichi_aot" / "artifact_targets.py",
+    ROOT / "taichi_vision" / "taichi_aot" / "artifact_targets.py",
 )
 
 
@@ -71,7 +71,7 @@ class ArmNativeMatrixTests(unittest.TestCase):
 
     def test_manifest_rejects_contradictory_arm_qualification(self):
         manifest_path = (
-            ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
+            ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
         )
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         payload["runtime_requirements"]["cpu_arm64_android"]["native_runtime"] = True

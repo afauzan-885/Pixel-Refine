@@ -634,7 +634,7 @@ def calcOpticalFlowPyrLK(
             }
         return result
 
-    from taichi_library.taichi_algorithm import common
+    from taichi_vision.taichi_algorithm import common
 
     prev_np = _as_gray_f32(prev)
     next_np = _as_gray_f32(next)

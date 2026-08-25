@@ -18,10 +18,10 @@ import numpy as np
 # import beyond ``tests``.  Use the canonical repository package path instead;
 # this keeps the harness independent of invocation style without changing the
 # runtime API under test.
-from taichi_library.taichi_algorithm.sfm.reconstruction_pipeline import (
+from taichi_vision.taichi_algorithm.sfm.reconstruction_pipeline import (
     run_point_cloud_pipeline,
 )
-from taichi_library.taichi_algorithm.sfm.registration import (
+from taichi_vision.taichi_algorithm.sfm.registration import (
     integrate_tsdf,
     point_to_plane_icp,
 )

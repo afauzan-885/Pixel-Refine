@@ -100,7 +100,7 @@ def phase_correlation(
         where response is the correlation peak value [0.0, 1.0].
     """
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.phase_correlation(ref_layer, comp_layer)
 
     if not TAICHI_AVAILABLE:

@@ -18,7 +18,7 @@ _ROOT = Path(__file__).resolve().parents[4]
 
 _PROBE = r"""
 import numpy as np
-import taichi_library.taichi_algorithm as ta
+import taichi_vision.taichi_algorithm as ta
 
 desc1 = np.zeros((7, 16), dtype=np.uint8)
 desc2 = desc1.copy()

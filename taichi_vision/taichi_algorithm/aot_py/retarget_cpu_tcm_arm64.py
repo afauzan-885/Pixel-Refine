@@ -38,7 +38,7 @@ except ImportError:  # direct script execution
 
 
 ROOT = Path(__file__).resolve().parents[3]
-TCM_ROOT = ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm"
+TCM_ROOT = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
 ARM_DATALAYOUT = (
     "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-"
     "i64:64-i128:128-n32:64-S128-Fn32"

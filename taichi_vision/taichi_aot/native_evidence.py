@@ -1016,12 +1016,12 @@ def register_probe_result(
 
 _OBSERVED_PROBE_COMMAND_CPU = (
     "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
-    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
     "probe_native_partition.py --backend cpu --device 0 --block-size 7"
 )
 _OBSERVED_PROBE_COMMAND_VULKAN_NVIDIA = (
     "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
-    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
     "probe_native_partition.py --backend vulkan --device 0 --block-size 7"
 )
 
@@ -1049,13 +1049,13 @@ _OBSERVED_OPTIONAL_PROBE_ARGUMENTS = (
 )
 _OBSERVED_PROBE_COMMAND_CPU_OPTIONAL = (
     "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
-    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
     "probe_native_partition.py --backend cpu --device 0 --block-size 7 "
     + _OBSERVED_OPTIONAL_PROBE_ARGUMENTS
 )
 _OBSERVED_PROBE_COMMAND_VULKAN_NVIDIA_OPTIONAL = (
     "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
-    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
     "probe_native_partition.py --backend vulkan --device 0 --block-size 7 "
     + _OBSERVED_OPTIONAL_PROBE_ARGUMENTS
 )
@@ -1099,13 +1099,13 @@ _OBSERVED_EXTENDED_PROBE_ARGUMENTS = (
 )
 _OBSERVED_PROBE_COMMAND_CPU_EXTENDED = (
     "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
-    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
     "probe_native_partition.py --backend cpu --device 0 --block-size 7 "
     + _OBSERVED_EXTENDED_PROBE_ARGUMENTS
 )
 _OBSERVED_PROBE_COMMAND_VULKAN_NVIDIA_EXTENDED = (
     "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
-    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
     "probe_native_partition.py --backend vulkan --device 0 --block-size 7 "
     + _OBSERVED_EXTENDED_PROBE_ARGUMENTS
 )
@@ -1114,7 +1114,7 @@ _OBSERVED_PROBE_COMMAND_VULKAN_INTEL_EXTENDED = (
     "$env:PIXEL_REFINE_AOT_ARCH='vulkan'; $env:AOT_ARCH='vulkan'; "
     "$env:PIXEL_REFINE_BACKEND='vulkan'; $env:AOT_DEVICE='0'; "
     "$env:PIXEL_REFINE_AOT_DEVICE='0'; $env:TARGET_VENDOR='intel'; "
-    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
     "probe_native_partition.py --backend vulkan --device 0 --block-size 7 "
     + _OBSERVED_EXTENDED_PROBE_ARGUMENTS
 )
@@ -1124,7 +1124,7 @@ _OBSERVED_PROBE_COMMAND_VULKAN_NVIDIA_RESIZE = (
     "$env:BACKEND='vulkan'; $env:PIXEL_REFINE_BACKEND='vulkan'; "
     "$env:AOT_DEVICE='0'; $env:PIXEL_REFINE_AOT_DEVICE='0'; "
     "$env:TARGET_VENDOR='nvidia'; venv\\Scripts\\python.exe -u -m "
-    "taichi_library.taichi_algorithm.aot_py.tools.probe_resize_partition "
+    "taichi_vision.taichi_algorithm.aot_py.tools.probe_resize_partition "
     "--backend vulkan --device 0 --block-size 7 --interpolations linear "
     "--expected-vendor nvidia --expected-device \"NVIDIA GeForce MX150\""
 )
@@ -1134,7 +1134,7 @@ _OBSERVED_PROBE_COMMAND_VULKAN_INTEL_RESIZE = (
     "$env:BACKEND='vulkan'; $env:PIXEL_REFINE_BACKEND='vulkan'; "
     "$env:AOT_DEVICE='0'; $env:PIXEL_REFINE_AOT_DEVICE='0'; "
     "$env:TARGET_VENDOR='intel'; venv\\Scripts\\python.exe -u -m "
-    "taichi_library.taichi_algorithm.aot_py.tools.probe_resize_partition "
+    "taichi_vision.taichi_algorithm.aot_py.tools.probe_resize_partition "
     "--backend vulkan --device 0 --block-size 7 --interpolations linear "
     "--expected-vendor intel --expected-device \"Intel(R) UHD Graphics 620\""
 )
@@ -1144,7 +1144,7 @@ _OBSERVED_PROBE_COMMAND_CUDA_BASE = (
     "$env:PIXEL_REFINE_BACKEND='cuda'; $env:AOT_DEVICE='0'; "
     "$env:PIXEL_REFINE_AOT_DEVICE='0'; $env:CUDA_DEVICE='0'; "
     "$env:PIXEL_REFINE_CUDA_DEVICE='0'; $env:TARGET_VENDOR='nvidia'; "
-    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
     "probe_native_partition.py --backend cuda --device 0 --block-size 7 "
     "--operations base"
 )
@@ -1154,7 +1154,7 @@ _OBSERVED_PROBE_COMMAND_CUDA_EXTENDED = (
     "$env:PIXEL_REFINE_BACKEND='cuda'; $env:AOT_DEVICE='0'; "
     "$env:PIXEL_REFINE_AOT_DEVICE='0'; $env:CUDA_DEVICE='0'; "
     "$env:PIXEL_REFINE_CUDA_DEVICE='0'; $env:TARGET_VENDOR='nvidia'; "
-    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
     "probe_native_partition.py --backend cuda --device 0 --block-size 7 "
     + _OBSERVED_EXTENDED_PROBE_ARGUMENTS
 )
@@ -1165,7 +1165,7 @@ _OBSERVED_PROBE_COMMAND_CUDA_RESIZE = (
     "$env:AOT_DEVICE='0'; $env:PIXEL_REFINE_AOT_DEVICE='0'; "
     "$env:CUDA_DEVICE='0'; $env:PIXEL_REFINE_CUDA_DEVICE='0'; "
     "$env:TARGET_VENDOR='nvidia'; venv\\Scripts\\python.exe -u -m "
-    "taichi_library.taichi_algorithm.aot_py.tools.probe_resize_partition "
+    "taichi_vision.taichi_algorithm.aot_py.tools.probe_resize_partition "
     "--backend cuda --device 0 --block-size 7 --interpolations linear "
     "--expected-vendor nvidia --expected-device \"NVIDIA GeForce MX150\""
 )
@@ -1173,7 +1173,7 @@ _OBSERVED_PROBE_COMMAND_OPENGL_NVIDIA_EXTENDED = (
     "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
     "$env:BACKEND='opengl'; "
     "$env:TARGET_VENDOR='nvidia'; "
-    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
     "probe_native_partition.py --backend opengl --device 0 --block-size 7 "
     + _OBSERVED_EXTENDED_PROBE_ARGUMENTS
 )
@@ -1455,7 +1455,7 @@ def register_verified_native_vulkan_intel_base_evidence(
         "$env:BACKEND='vulkan'; $env:PIXEL_REFINE_BACKEND='vulkan'; "
         "$env:AOT_DEVICE='0'; $env:PIXEL_REFINE_AOT_DEVICE='0'; "
         "$env:TARGET_VENDOR='intel'; venv\\Scripts\\python.exe -u -m "
-        "taichi_library.taichi_algorithm.aot_py.tools.probe_native_partition "
+        "taichi_vision.taichi_algorithm.aot_py.tools.probe_native_partition "
         "--backend vulkan --device 0 --block-size 7 --operations base"
     )
     records: list[NativePartitionEvidence] = []
@@ -1631,7 +1631,7 @@ def register_verified_native_cuda_partition_evidence(
         "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
         "$env:AOT_ARCH='cuda'; $env:BACKEND='cuda'; $env:AOT_DEVICE='0'; "
         "$env:TARGET_VENDOR='nvidia'; venv\\Scripts\\python.exe -u -m "
-        "taichi_library.taichi_algorithm.aot_py.tools.probe_native_partition "
+        "taichi_vision.taichi_algorithm.aot_py.tools.probe_native_partition "
         f"--backend cuda --device 0 --block-size 7 --operations {probe_operations}"
     )
     records: list[NativePartitionEvidence] = []
@@ -1724,7 +1724,7 @@ def register_verified_native_opengl_partition_evidence(
                     "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
                     "$env:BACKEND='opengl'; "
                     "$env:TARGET_VENDOR='nvidia'; "
-                    "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+                    "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
                     "probe_native_partition.py --backend opengl --device 0 --block-size 7 "
                     "--operations base"
                     if operation
@@ -1782,13 +1782,13 @@ def register_verified_native_opengl_intel_evidence(
     base_command = (
         "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
         "$env:BACKEND='opengl'; $env:TARGET_VENDOR='intel'; "
-        "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+        "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
         "probe_native_partition.py --backend opengl --device 0 --block-size 7 --operations base"
     )
     extended_command = (
         "$env:AOT_MODE='1'; $env:PYTHONPATH='E:\\APP Developer\\Pixel Refine'; "
         "$env:BACKEND='opengl'; $env:TARGET_VENDOR='intel'; "
-        "python -u taichi_library\\taichi_algorithm\\aot_py\\tools\\"
+        "python -u taichi_vision\\taichi_algorithm\\aot_py\\tools\\"
         "probe_native_partition.py --backend opengl --device 0 --block-size 7 "
         "--operations morphology,filter2d,threshold,normalize,"
         "joint_bilateral_guidance,enhance_image,joint_bilateral_filter,"

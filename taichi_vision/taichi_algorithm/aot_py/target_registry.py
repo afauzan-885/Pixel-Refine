@@ -16,7 +16,7 @@ from typing import Mapping
 
 
 ROOT = Path(__file__).resolve().parents[3]
-MANIFEST_PATH = ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
+MANIFEST_PATH = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
 SUPPORTED_BACKENDS = ("cpu", "vulkan", "opengl", "gles", "cuda")
 # Build jobs use these suffixes while atomically replacing a target artifact.
 # They are not release modules and must not make an otherwise complete target

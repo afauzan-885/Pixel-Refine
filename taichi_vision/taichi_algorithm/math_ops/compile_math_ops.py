@@ -34,7 +34,7 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from taichi_library.taichi_algorithm.math_ops import math_ops_kernels
+from taichi_vision.taichi_algorithm.math_ops import math_ops_kernels
 
 
 def compile_math_ops(arch=ti.vulkan, out_dir=None):

@@ -18,7 +18,7 @@ import pathlib
 import numpy as np
 import taichi as ti
 
-path = pathlib.Path("taichi_library/taichi_algorithm/sfm/texture_mapping.py")
+path = pathlib.Path("taichi_vision/taichi_algorithm/sfm/texture_mapping.py")
 spec = importlib.util.spec_from_file_location("texture_mapping_standalone", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

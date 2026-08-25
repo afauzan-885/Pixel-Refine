@@ -9,7 +9,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[4]
-MODULE_PATH = ROOT / "taichi_library" / "taichi_algorithm" / "aot_py" / "validate_vulkan_spirv.py"
+MODULE_PATH = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_py" / "validate_vulkan_spirv.py"
 SPEC = importlib.util.spec_from_file_location("spirv_validator", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)

@@ -11,7 +11,7 @@ import subprocess
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PYTHON_EXE = sys.executable
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "build_native_aot")
-TARGET_DIR = os.path.join(PROJECT_ROOT, "taichi_library", "taichi_aot")
+TARGET_DIR = os.path.join(PROJECT_ROOT, "taichi_vision", "taichi_aot")
 
 def compile_package_pyd():
     print(f"===========================================================")

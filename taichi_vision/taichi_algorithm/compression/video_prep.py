@@ -13,7 +13,7 @@ import os
 
 import numpy as np
 
-from taichi_library.taichi_algorithm.aot_api.research import _dispatch
+from taichi_vision.taichi_algorithm.aot_api.research import _dispatch
 
 
 _SUBSAMPLING = {"444": "444", "422": "422", "420": "420"}

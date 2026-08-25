@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
-from taichi_library.taichi_algorithm.optical_flow import lucas_kanade_batch as batch
+from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
+from taichi_vision.taichi_algorithm.optical_flow import lucas_kanade_batch as batch
 
 
 ARCHES = {
@@ -64,7 +64,7 @@ def compile_lucas_kanade_batch(
     if output is None:
         output = (
             ROOT
-            / "taichi_library"
+            / "taichi_vision"
             / "taichi_algorithm"
             / "aot_tcm"
             / target_id

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from taichi_library.taichi_algorithm.aot_py.tools.probe_resize_partition import (
+from taichi_vision.taichi_algorithm.aot_py.tools.probe_resize_partition import (
     DEFAULT_CASES,
     _parse_interpolations,
     _validate_device_identity,

@@ -11,11 +11,11 @@ import unittest
 
 import numpy as np
 
-from taichi_library.taichi_aot.block import (
+from taichi_vision.taichi_aot.block import (
     can_auto_partition_dispatch,
     registered_block_adapters,
 )
-from taichi_library.taichi_aot.block_adapters import (
+from taichi_vision.taichi_aot.block_adapters import (
     LEGACY_LOCAL_ADAPTER_OPERATIONS,
     register_legacy_local_block_adapters,
     verify_adapter_parity,

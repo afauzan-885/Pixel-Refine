@@ -28,8 +28,8 @@ except ImportError:  # direct script execution
 
 
 ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_SOURCE = ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "vulkan_x86_64_windows"
-DEFAULT_OUTPUT = ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "vulkan_arm64_android"
+DEFAULT_SOURCE = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "vulkan_x86_64_windows"
+DEFAULT_OUTPUT = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "vulkan_arm64_android"
 REQUIRED_ENTRIES = {"__content__", "__version__", "metadata.json", "graphs.json"}
 
 

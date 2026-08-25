@@ -51,7 +51,10 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
     running_mf_denoiser,
     running_similarity as running_mf_similarity,
-    running_similarity as running_similarity_fusion,
+)
+
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.weightnet import (
+    running_weightnet,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
@@ -448,6 +451,8 @@ class BatchPageV2Layout(QWidget):
             settings = algo_panel.logic.get_settings()
             alignment_choice = settings.get(config.KEY_ALIGNMENT, "No Alignment")
             denoising_choice = settings.get(config.KEY_DENOISING, "No Denoising")
+            if denoising_choice == "Similarity Fusion":
+                denoising_choice = "FusionNet"
             super_resolution_choice = settings.get(
                 config.KEY_SUPER_RESOLUTION, "No Super Resolution"
             )
@@ -470,7 +475,8 @@ class BatchPageV2Layout(QWidget):
             denoising_owns_alignment = denoising_choice in (
                 "Average",
                 "Similarity",
-                "Similarity Fusion",
+                "Spatial AI",
+                "FusionNet",
             )
 
             # Proses untuk Alignment. Some denoising pipelines own alignment
@@ -543,11 +549,10 @@ class BatchPageV2Layout(QWidget):
                     alignment_backend=alignment_choice,
                 )
                 denoising_executed = True
-            elif denoising_choice == "Similarity Fusion":
-                running_similarity_fusion(
+            elif denoising_choice in ("Spatial AI", "FusionNet"):
+                running_weightnet(
                     self,
                     single_process=True,
-                    alignment_backend=alignment_choice,
                 )
                 denoising_executed = True
             elif denoising_choice == "No Denoising":

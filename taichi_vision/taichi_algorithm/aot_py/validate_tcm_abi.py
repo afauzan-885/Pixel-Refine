@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 # Loading the contract by file path is intentional.  Importing the public
 # ``taichi_aot`` package initializes the native AOT engine; this command is an
 # offline validator and must never create a GPU context or watchdog heartbeat.
-_CONTRACT_PATH = ROOT / "taichi_library" / "taichi_aot" / "tcm_contract.py"
+_CONTRACT_PATH = ROOT / "taichi_vision" / "taichi_aot" / "tcm_contract.py"
 _SPEC = importlib.util.spec_from_file_location("pixel_refine_tcm_contract", _CONTRACT_PATH)
 if _SPEC is None or _SPEC.loader is None:  # pragma: no cover - packaging error
     raise RuntimeError(f"cannot load TCM contract module: {_CONTRACT_PATH}")

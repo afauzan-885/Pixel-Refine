@@ -17,7 +17,7 @@ from typing import Mapping
 
 import numpy as np
 
-from taichi_library.taichi_aot.engine import (
+from taichi_vision.taichi_aot.engine import (
     InputArray,
     OutputArray,
     TaichiGPUBuffer,

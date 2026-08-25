@@ -1,7 +1,7 @@
 # AOT backend build and verification
 
 > **Canonical developer/AI handoff document** (snapshot: 2026-08-08).  This
-> file is the source of truth for the experimental `taichi_library` runtime.
+> file is the source of truth for the experimental `taichi_vision` runtime.
 > It documents the stable contracts and the explicit gates around unfinished
 > features so a new contributor does not need to reverse-engineer the entire
 > repository.  The upstream Taichi source remains under
@@ -23,7 +23,7 @@ TCM/bridge artifacts, **Verification** for parity and lifecycle evidence, and
 The supported application boundary is:
 
 ```python
-from taichi_library import taichi_aot
+from taichi_vision import taichi_aot
 ```
 
 The public algorithm calls do not contain backend-specific names.  Select the
@@ -59,10 +59,10 @@ Application / Pixel Refine
         |
 taichi_algorithm wrappers (optional OpenCV-style convenience API)
         |
-taichi_library.taichi_aot.__init__  <- compatibility facade + runtime exports
+taichi_vision.taichi_aot.__init__  <- compatibility facade + runtime exports
 taichi_algorithm.aot_api            <- canonical public dispatch, dtype policy, tiles
         |
-taichi_library.taichi_aot.engine    <- one runtime/context/bridge owner
+taichi_vision.taichi_aot.engine    <- one runtime/context/bridge owner
         |
 target-qualified bridge + libtaichi_c_api + .tcm archive
         |
@@ -79,7 +79,7 @@ same manifest; do not create a second handwritten target list.
 ### Canonical source layout
 
 ```text
-taichi_library/
+taichi_vision/
 ├─ taichi_algorithm/                 # single source for algorithms
 │  ├─ aot_api/                       # public AOT algorithms and dispatch
 │  ├─ alignment/, demosaicing/, ...  # reusable algorithm families/kernels
@@ -121,7 +121,7 @@ python your_algorithm.py
 
 ```python
 import numpy as np
-from taichi_library import taichi_aot as aot
+from taichi_vision import taichi_aot as aot
 
 image = np.ascontiguousarray(load_image(), dtype=np.float32)
 
@@ -156,7 +156,7 @@ tests and for the three optical-flow tile paths, but it is not required for
 ordinary application calls.
 
 ```python
-from taichi_library import taichi_aot as aot
+from taichi_vision import taichi_aot as aot
 
 print(aot.get_block_config())
 print(aot.get_memory_status(force=True))
@@ -173,7 +173,7 @@ print(aot.get_block_cache_stats())
 
 # Large host pipelines use the scheduler; it restores the previous policy
 # even when a stage raises.
-from taichi_library.taichi_aot import PipelineStage, run_block_pipeline
+from taichi_vision.taichi_aot import PipelineStage, run_block_pipeline
 result = run_block_pipeline(image, [
     PipelineStage("blur", lambda x: aot.gaussian_blur(x, sigma=1.5)),
     PipelineStage("gray", lambda x: aot.rgb2gray(x)),
@@ -248,7 +248,7 @@ is not a stable contract yet.  Do not infer parallel execution from the
 
 ### Generic custom block contract
 
-`taichi_library/taichi_aot/generic_block.py` provides
+`taichi_vision/taichi_aot/generic_block.py` provides
 `BlockComputeSpec`/`run_generic_blocks()` for algorithms whose tile semantics
 are not represented by the native registry.  A custom spec owns its input
 reader, halo, tile runner, validator, merger, cache namespace, and optional
@@ -262,7 +262,7 @@ For a regular NumPy image callable, the additive `@compute_block` declaration
 can request the same generic path without changing its public invocation:
 
 ```python
-from taichi_library import taichi_aot as aot
+from taichi_vision import taichi_aot as aot
 
 @aot.compute_block(halo=8)
 def custom_filter(image):
@@ -307,25 +307,25 @@ selection, memory ownership, or native-library loading in an algorithm module.
 
 ```powershell
 # 1. Static target/bridge/artifact audit (does not initialize a GPU)
-python taichi_library/taichi_algorithm/aot_py/audit_aot_matrix.py
+python taichi_vision/taichi_algorithm/aot_py/audit_aot_matrix.py
 
 # 2. Best-effort target matrix; pending toolchains remain visible
-python taichi_library/taichi_algorithm/aot_py/background_compile.py `
+python taichi_vision/taichi_algorithm/aot_py/background_compile.py `
   --all-targets --best-effort --workers 2 --timeout 900
 
 # 3. Re-run the public comprehensive and research suites on the selected target
-python taichi_library/taichi_algorithm/aot_py/tests/test_comprehensif.py
-python taichi_library/taichi_algorithm/aot_py/tests/test_research_aot.py
+python pixel_refine_desktop/ui/views/settings/Perfomance/test_comprehensif.py
+python taichi_vision/taichi_algorithm/aot_py/tests/test_research_aot.py
 
 # 4. Cache/lifecycle regression
-python -m taichi_library.taichi_algorithm.aot_py.tests.stress_block_copy
+python -m taichi_vision.taichi_algorithm.aot_py.tests.stress_block_copy
 
 # 5. Generic custom block contract (no native device required)
 python -m unittest test_algorithm.test_generic_block
 python -m unittest test_algorithm.test_compute_block
 
 # 5. Desktop Vulkan shader portability
-python taichi_library/taichi_algorithm/aot_py/validate_vulkan_spirv.py
+python taichi_vision/taichi_algorithm/aot_py/validate_vulkan_spirv.py
 ```
 
 Run the unit tests that do not require a physical GPU before any driver test:
@@ -357,7 +357,7 @@ inventory and ABI shape only; parity and native-driver runs are still required.
    been rebuilt and retested:
 
 ```python
-from taichi_library import taichi_aot
+from taichi_vision import taichi_aot
 taichi_aot.clear_block_quarantine("operation_name")
 ```
 
@@ -367,7 +367,7 @@ the normal dispatcher must decide from the target capability and memory
 policy.
 
 The public Python API is unchanged. Select the implementation before importing
-`taichi_library.taichi_aot`:
+`taichi_vision.taichi_aot`:
 
 ```powershell
 $env:PIXEL_REFINE_AOT_ARCH = "cpu"       # or "vulkan" / "opengl" / "gles"
@@ -447,8 +447,8 @@ The source compiler registry is shared by `compile_aot_backend_suite.py` and
 still emitting ABI-qualified archives for each backend/OS/architecture:
 
 ```powershell
-python taichi_library/taichi_algorithm/aot_py/background_compile.py --all-targets --workers 2
-python taichi_library/taichi_algorithm/aot_py/audit_aot_matrix.py
+python taichi_vision/taichi_algorithm/aot_py/background_compile.py --all-targets --workers 2
+python taichi_vision/taichi_algorithm/aot_py/audit_aot_matrix.py
 ```
 
 For a workstation that does not have every host/cross toolchain, use
@@ -457,7 +457,7 @@ profiles are returned as `status: pending_toolchain`. Worker timeouts are
 reported as `status: timeout` instead of aborting the entire matrix:
 
 ```powershell
-python taichi_library/taichi_algorithm/aot_py/background_compile.py `
+python taichi_vision/taichi_algorithm/aot_py/background_compile.py `
   --all-targets --best-effort --workers 2
 ```
 
@@ -488,7 +488,7 @@ pressure, and `PIXEL_REFINE_AOT_BUFFER_CACHE=0` explicitly disables reuse.
 Query cache telemetry with:
 
 ```python
-from taichi_library import taichi_aot
+from taichi_vision import taichi_aot
 print(taichi_aot.get_block_cache_stats())
 ```
 
@@ -525,20 +525,20 @@ suite:
 ```powershell
 $py = "build/wheel-test-venv/Scripts/python.exe"
 & $py -m pip install --force-reinstall --no-deps dist/*.whl
-& $py taichi_library/taichi_algorithm/aot_py/tests/test_comprehensif.py
+& $py pixel_refine_desktop/ui/views/settings/Perfomance/test_comprehensif.py
 ```
 
 For CPU/Vulkan parity (including exact integer cases and one-ULP float checks):
 
 ```powershell
-& $py taichi_library/taichi_algorithm/aot_py/test_aot_backend_parity.py `
+& $py taichi_vision/taichi_algorithm/aot_py/test_aot_backend_parity.py `
   --compare --compare-backend vulkan --device 1
 ```
 
 The Intel UHD 620 native Vulkan gate is:
 
 ```powershell
-python taichi_library/vulkan_probe.py --comprehensive --all-intel --persist --repeat 5 --timeout 1200
+python taichi_vision/vulkan_probe.py --comprehensive --all-intel --persist --repeat 5 --timeout 1200
 ```
 
 ## Current qualification snapshot
@@ -834,7 +834,7 @@ driver, which can invalidate large SSBO bindings.
 The internal scheduler is available as:
 
 ```python
-from taichi_library.taichi_aot import PipelineStage, run_block_pipeline
+from taichi_vision.taichi_aot import PipelineStage, run_block_pipeline
 
 result = run_block_pipeline(image, [
     PipelineStage("blur", lambda x: gaussian_blur(x, sigma=1.5)),

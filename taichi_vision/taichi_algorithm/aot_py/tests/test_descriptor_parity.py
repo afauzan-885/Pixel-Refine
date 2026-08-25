@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from taichi_library.taichi_aot.descriptor_parity import (
+from taichi_vision.taichi_aot.descriptor_parity import (
     cross_check_binary_descriptors_reference,
     match_binary_descriptors_reference,
     ratio_cross_check_binary_descriptors_reference,

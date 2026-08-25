@@ -41,9 +41,9 @@ BACKENDS = {
 }
 
 VERIFIERS = {
-    "jpeg": ("-m", "taichi_library.taichi_algorithm.compression.verify_jpeg_production"),
-    "heic": ("-m", "taichi_library.taichi_algorithm.compression.verify_heic_production"),
-    "hevc_general": ("-m", "taichi_library.taichi_algorithm.compression.verify_hevc_general_aot"),
+    "jpeg": ("-m", "taichi_vision.taichi_algorithm.compression.verify_jpeg_production"),
+    "heic": ("-m", "taichi_vision.taichi_algorithm.compression.verify_heic_production"),
+    "hevc_general": ("-m", "taichi_vision.taichi_algorithm.compression.verify_hevc_general_aot"),
 }
 
 
@@ -137,7 +137,7 @@ def _run_verifier(backend: str, verifier: str) -> dict[str, Any]:
 
 def _artifact_status(backend: str) -> dict[str, Any]:
     target = BACKENDS[backend]["target"]
-    path = ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / target / f"compression_image_{target}.tcm"
+    path = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / target / f"compression_image_{target}.tcm"
     return {"target": target, "path": str(path), "exists": path.is_file(), "bytes": path.stat().st_size if path.is_file() else 0}
 
 

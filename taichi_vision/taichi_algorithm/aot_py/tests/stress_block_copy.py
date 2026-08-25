@@ -1,7 +1,7 @@
 """GPU stress and resilience checks for block-based common.copy.
 
 Run with:
-    python -m taichi_library.taichi_algorithm.aot_py.tests.stress_block_copy
+    python -m taichi_vision.taichi_algorithm.aot_py.tests.stress_block_copy
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from time import perf_counter
 
 import numpy as np
 
-from taichi_library import taichi_aot
+from taichi_vision import taichi_aot
 
 
 CASES = (

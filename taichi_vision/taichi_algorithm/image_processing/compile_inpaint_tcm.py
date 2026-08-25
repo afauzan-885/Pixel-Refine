@@ -28,7 +28,7 @@ if project_root not in sys.path:
 
 # Import algorithm module (JIT mode)
 inpaint_mod = importlib.import_module(
-    "taichi_library.taichi_algorithm.image_processing.inpaint"
+    "taichi_vision.taichi_algorithm.image_processing.inpaint"
 )
 
 ASSETS_DIR = os.path.join(file_dir, "../aot_tcm")

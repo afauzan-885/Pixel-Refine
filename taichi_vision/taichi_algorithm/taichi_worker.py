@@ -16,7 +16,7 @@ import time
 import ctypes
 import numpy as np
 
-from taichi_library.config import AOT_MODE
+from taichi_vision.config import AOT_MODE
 
 # Check if we are running in AOT mode (default: yes)
 _IS_AOT_MODE = any("aot" in arg.lower() or "compiler" in arg.lower() for arg in sys.argv) or AOT_MODE == "1"
@@ -127,7 +127,7 @@ class _TaichiWorker(threading.Thread):
             ti_cpu_threads = max(1, num_cores - reserved_cores)
 
             # Allow manual override via environment variable
-            from taichi_library.backend_config import normalize_backend
+            from taichi_vision.backend_config import normalize_backend
 
             raw_arch = (
                 os.environ.get("TAICHI_ARCH")

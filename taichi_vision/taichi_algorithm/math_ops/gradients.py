@@ -136,7 +136,7 @@ def sobel(src, dst_dx=None, dst_dy=None, buffer_provider="pool", enable_tiling=T
     Caller responsible for releasing if pool used.
     """
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         dx, dy = taichi_aot.sobel(src, return_gpu=True)
         # Handle copying if user passed specific dst_dx/dy or needs numpy (fallback logic)
         # To keep it safe, if dst_dx is None we return GPU buffer
@@ -202,7 +202,7 @@ def laplacian(src, dst=None, buffer_provider="pool", enable_tiling=True):
     Compute Laplacian.
     """
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         res = taichi_aot.laplacian(src, return_gpu=True)
         if dst is None:
             return res

@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from taichi_library.taichi_algorithm.aot_py.tools.probe_native_partition import (
+from taichi_vision.taichi_algorithm.aot_py.tools.probe_native_partition import (
     ALL_OPERATIONS,
     BASE_OPERATIONS,
     GLOBAL_DIAGNOSTIC_OPERATIONS,
@@ -155,7 +155,7 @@ class ProbeOperationSelectionTests(unittest.TestCase):
     def test_cuda_device_name_uses_driver_identity(self):
         completed = SimpleNamespace(returncode=0, stdout="NVIDIA GeForce MX150\n")
         with patch(
-            "taichi_library.taichi_algorithm.aot_py.tools.probe_native_partition.subprocess.run",
+            "taichi_vision.taichi_algorithm.aot_py.tools.probe_native_partition.subprocess.run",
             return_value=completed,
         ) as run:
             self.assertEqual(_cuda_device_name(0), "NVIDIA GeForce MX150")
@@ -164,7 +164,7 @@ class ProbeOperationSelectionTests(unittest.TestCase):
     def test_cuda_device_name_fails_closed_when_driver_query_fails(self):
         completed = SimpleNamespace(returncode=1, stdout="")
         with patch(
-            "taichi_library.taichi_algorithm.aot_py.tools.probe_native_partition.subprocess.run",
+            "taichi_vision.taichi_algorithm.aot_py.tools.probe_native_partition.subprocess.run",
             return_value=completed,
         ):
             self.assertEqual(_cuda_device_name(0), "")

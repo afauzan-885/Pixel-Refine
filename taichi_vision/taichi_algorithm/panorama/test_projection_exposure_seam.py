@@ -91,7 +91,7 @@ class PanoramaPrimitiveTests(unittest.TestCase):
             captured["return_gpu"] = return_gpu
             return np.zeros((*map_x.shape, src.shape[2]), dtype=np.float32)
 
-        with patch("taichi_library.taichi_algorithm.aot_api.remap", fake_remap):
+        with patch("taichi_vision.taichi_algorithm.aot_api.remap", fake_remap):
             result = project_image(
                 self.image,
                 projection="spherical",

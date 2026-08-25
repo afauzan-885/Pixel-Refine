@@ -8,7 +8,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[3]
-PATH = ROOT / "taichi_library" / "taichi_aot" / "llvm20_profiles.py"
+PATH = ROOT / "taichi_vision" / "taichi_aot" / "llvm20_profiles.py"
 SPEC = importlib.util.spec_from_file_location("pixel_refine_llvm20_profiles_linux_test", PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)

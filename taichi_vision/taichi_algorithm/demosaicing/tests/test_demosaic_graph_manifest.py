@@ -21,13 +21,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from taichi_library.taichi_algorithm.demosaicing.demosaic_graph_manifest import (
+from taichi_vision.taichi_algorithm.demosaicing.demosaic_graph_manifest import (
     GRAPH_MANIFEST,
     graph_specs,
     registered_graph_names,
     resolve_graph_name,
 )
-from taichi_library.taichi_algorithm.demosaicing.demosaic_runtime import (
+from taichi_vision.taichi_algorithm.demosaicing.demosaic_runtime import (
     DemosaicBufferSet,
     DemosaicGraphSpec,
     DemosaicInputs,

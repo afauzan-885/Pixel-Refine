@@ -1,6 +1,6 @@
 """NumPy-free public entry point for the additive native compression ABI.
 
-The historical ``taichi_library.taichi_algorithm`` package eagerly imports
+The historical ``taichi_vision.taichi_algorithm`` package eagerly imports
 the broad image-processing compatibility surface, including NumPy-backed
 modules.  Native compression callers need a narrow import that does not pay
 that cost or claim a dependency-free path after the fact.  This facade loads
@@ -23,8 +23,8 @@ from typing import Any
 
 def _load_stack() -> tuple[Any, Any]:
     root = Path(__file__).resolve().parent.parent
-    compression = root / "taichi_library" / "taichi_algorithm" / "compression"
-    package_name = "taichi_library._compression_native"
+    compression = root / "taichi_vision" / "taichi_algorithm" / "compression"
+    package_name = "taichi_vision._compression_native"
     package = sys.modules.get(package_name)
     if package is None:
         package = types.ModuleType(package_name)

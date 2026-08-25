@@ -5,7 +5,7 @@ OpenCV-compatible 2D filter convolution.
 Parity: cv2.filter2D(src, ddepth, kernel)
 
 Usage (JIT):
-    from taichi_library.taichi_algorithm import filter2d
+    from taichi_vision.taichi_algorithm import filter2d
     result = filter2d(src, kernel, border_mode='REFLECT_101')
 """
 

@@ -7,7 +7,7 @@ the native-evidence registry, or ``engine.py``.
 
 Example (Intel Vulkan):
 
-    python -m taichi_library.taichi_algorithm.aot_py.tools.probe_vulkan_stage_watchdog \
+    python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_vulkan_stage_watchdog \
         --backend vulkan --vendor intel --operation both --timeout 12
 
 The child reports the backend/device and the stage at which it stopped.  A
@@ -53,8 +53,8 @@ def _child_source(operation: str, stage: str) -> str:
 import json, time, traceback\n
 started = time.perf_counter()\n
 try:\n
-    import taichi_library.taichi_aot as aot\n
-    import taichi_library.taichi_algorithm.aot_api as api\n
+    import taichi_vision.taichi_aot as aot\n
+    import taichi_vision.taichi_algorithm.aot_api as api\n
     imported_at = time.perf_counter()\n
     result = {{\n
         "backend": str(getattr(aot.engine, "arch", "")),\n

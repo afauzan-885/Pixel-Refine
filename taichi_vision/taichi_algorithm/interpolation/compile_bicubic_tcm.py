@@ -12,13 +12,13 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
 except ImportError:
     from aot_artifact import archive_module
 
 # Set AOT Mode globally before importing taichi_worker or related scripts
 
-from taichi_library.taichi_algorithm.interpolation import bicubic_interpolation as bicubic
+from taichi_vision.taichi_algorithm.interpolation import bicubic_interpolation as bicubic
 
 
 def compile_bicubic_aot(arch=ti.vulkan, save_path="bicubic_interpolation_vulkan.tcm"):

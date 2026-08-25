@@ -58,7 +58,7 @@ def run_block_pipeline(source, stages: Iterable[PipelineStage], *,
         raise TypeError("cancel_check must be callable or None")
     if cancel_check is not None and bool(cancel_check()):
         raise PipelineCancelledError(0)
-    import taichi_library.taichi_aot as aot
+    import taichi_vision.taichi_aot as aot
     memory = aot.get_memory_status()
     if block_size is None:
         block_size = int(memory["recommended_block_size"])

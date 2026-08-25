@@ -226,7 +226,7 @@ def bilinear_resize(src, target_h: int, target_w: int, dst=None, buffer_provider
         Resized image in the same format as input (NumPy or Taichi)
     """
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.resize(src, (target_w, target_h), interpolation=taichi_aot.INTER_LINEAR, return_gpu=hasattr(src, "to_numpy"), dst=dst)
 
     if not TAICHI_AVAILABLE:

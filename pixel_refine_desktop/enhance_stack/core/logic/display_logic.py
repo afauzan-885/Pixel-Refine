@@ -10,6 +10,9 @@ from pathlib import Path
 from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
     ThumbnailBatchProcessor,
 )
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    ThumbnailPolicy,
+)
 
 # Image display helper
 from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import (
@@ -33,6 +36,7 @@ class DisplayLogic:
         """Initialize display logic."""
         self.current_batch_id = None
         self.current_images = []
+        self.thumbnail_policy = ThumbnailPolicy()
         self.thumbnail_processor = ThumbnailBatchProcessor(thumbnail_size=(128, 128))
         self.image_loader_thread = None
         self.last_preview_info = None
@@ -80,6 +84,9 @@ class DisplayLogic:
             image_path: Path ke image file
             callback: Callable(QImage, str) - Called ketika thumbnail ready
         """
+        if not self.thumbnail_policy.is_enabled():
+            return
+
         self.thumbnail_processor.process_image(image_path, callback)
 
     def load_thumbnails_bulk_async(self, path_callback_pairs: list):
@@ -88,6 +95,9 @@ class DisplayLogic:
         path_callback_pairs: list of (image_path, callback)
         """
         if not path_callback_pairs:
+            return
+
+        if not self.thumbnail_policy.is_enabled():
             return
 
         image_paths = [p for p, c in path_callback_pairs]
@@ -285,6 +295,9 @@ class DisplayLogic:
         Returns:
             List of (path, card) tuples to load
         """
+        if not self.thumbnail_policy.is_enabled():
+            return []
+
         if not all_cards or grid_container.isHidden():
             return []
 
@@ -321,7 +334,7 @@ class DisplayLogic:
         Args:
             to_load_pairs: List of (path, card, callback_maker) tuples
         """
-        if not to_load_pairs:
+        if not to_load_pairs or not self.thumbnail_policy.is_enabled():
             return
 
         pairs = []

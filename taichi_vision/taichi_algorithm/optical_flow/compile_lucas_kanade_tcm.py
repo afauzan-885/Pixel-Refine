@@ -27,7 +27,7 @@ if project_root not in sys.path:
 
 import importlib
 
-lk = importlib.import_module("taichi_library.taichi_algorithm.optical_flow.lucas_kanade")
+lk = importlib.import_module("taichi_vision.taichi_algorithm.optical_flow.lucas_kanade")
 
 
 def _package_tcm(module, out_dir, tcm_name):

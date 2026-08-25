@@ -1,9 +1,6 @@
 import numpy as np
 import os
-import cv2
 import gc
-import queue
-import threading
 import traceback
 import time
 
@@ -144,6 +141,7 @@ def process_in_gpu(
         flow_backend = str(flow_backend or "alignment_tile").strip().lower()
         if alignment_variant == "block_align":
             flow_backend = "block_align"
+        print(f"[GPU Alignment] Internal backend={flow_backend}")
 
         if flow_backend in ("none", "off", "disabled", "no_alignment"):
             success = True

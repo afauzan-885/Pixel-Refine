@@ -5,7 +5,7 @@ Dilate and Erode operations with configurable structuring elements.
 Equivalent to cv2.dilate() and cv2.erode().
 
 Usage (JIT):
-    from taichi_library.taichi_algorithm import dilate, erode
+    from taichi_vision.taichi_algorithm import dilate, erode
     result = dilate(src, kernel=None, iterations=1)
     result = erode(src, kernel=None, iterations=1)
 """

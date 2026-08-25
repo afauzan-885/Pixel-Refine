@@ -26,7 +26,7 @@ def _dispatch_native_raw(graph: str, *, inputs, outputs, scalars):
     """
 
     try:
-        from taichi_library.taichi_algorithm.aot_api.research import _dispatch
+        from taichi_vision.taichi_algorithm.aot_api.research import _dispatch
 
         return _dispatch(
             "compression_raw",
@@ -508,7 +508,7 @@ def raw_optical_flow(
     current_guide = guide(current)
     default_runner = flow_runner is None
     if flow_runner is None:
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
 
         flow_runner = taichi_aot.farneback_flow
     previous_guide, current_guide = _prepare_flow_inputs(
@@ -574,7 +574,7 @@ def raw_optical_flow_dng(
     )
     default_runner = flow_runner is None
     if flow_runner is None:
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
 
         flow_runner = taichi_aot.farneback_flow
     previous_guide, current_guide = _prepare_flow_inputs(

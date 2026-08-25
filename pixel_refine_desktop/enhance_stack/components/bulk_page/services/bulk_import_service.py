@@ -18,6 +18,9 @@ from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_thumb
 from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_thumbnail_widget import (
     make_safe_callback,
 )
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    thumbnail_creation_enabled,
+)
 from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
     BatchImageImportThreading,
 )
@@ -203,6 +206,8 @@ def handle_add_image_to_batch(
 
         for path in unique_files:
             try:
+                if not thumbnail_creation_enabled():
+                    break
                 loader = ThumbnailLoader(path)
                 callback = make_safe_callback(path, layout_ref)
                 loader.thumbnail_ready.connect(callback)

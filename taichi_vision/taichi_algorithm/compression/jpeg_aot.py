@@ -13,12 +13,12 @@ import os
 
 import numpy as np
 
-from taichi_library.taichi_algorithm.compression.jpeg_tables import (
+from taichi_vision.taichi_algorithm.compression.jpeg_tables import (
     JPEG_CHROMA_TABLE,
     JPEG_QUALITY_TABLE,
     JPEG_ZIGZAG,
 )
-from taichi_library.taichi_algorithm.compression.jpeg_container import (
+from taichi_vision.taichi_algorithm.compression.jpeg_container import (
     STANDARD_DHT,
     assemble_baseline_jfif,
     assemble_grayscale_jfif,
@@ -26,7 +26,7 @@ from taichi_library.taichi_algorithm.compression.jpeg_container import (
     dht,
 )
 
-from taichi_library.taichi_algorithm.aot_api.research import _as_f32, _dispatch
+from taichi_vision.taichi_algorithm.aot_api.research import _as_f32, _dispatch
 
 from .bitstream import BitWriter
 

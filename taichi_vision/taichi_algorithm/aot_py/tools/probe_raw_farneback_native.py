@@ -11,7 +11,7 @@ Example (PowerShell)::
     $env:AOT_MODE='1'
     $env:BACKEND='vulkan'
     $env:TARGET_VENDOR='nvidia'
-    python -m taichi_library.taichi_algorithm.aot_py.tools.probe_raw_farneback_native
+    python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_raw_farneback_native
 """
 
 from __future__ import annotations
@@ -24,12 +24,12 @@ import time
 
 import numpy as np
 
-from taichi_library import taichi_aot
-from taichi_library.taichi_algorithm.compression.dng_aot import (
+from taichi_vision import taichi_aot
+from taichi_vision.taichi_algorithm.compression.dng_aot import (
     encode_dng_aot,
     read_dng_aot,
 )
-from taichi_library.taichi_algorithm.compression.raw_pipeline import (
+from taichi_vision.taichi_algorithm.compression.raw_pipeline import (
     raw_optical_flow_dng,
 )
 

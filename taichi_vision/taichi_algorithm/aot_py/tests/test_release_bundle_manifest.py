@@ -9,10 +9,10 @@ import tempfile
 import unittest
 import zipfile
 
-from taichi_library.release_bundle import _target_id as release_target_id
-from taichi_library.release_bundle import preflight_manifest_targets
-from taichi_library.release_bundle import cleanup_aot_bundle, plan_runtime_payload
-from taichi_library.validate_native_bundle import (
+from taichi_vision.release_bundle import _target_id as release_target_id
+from taichi_vision.release_bundle import preflight_manifest_targets
+from taichi_vision.release_bundle import cleanup_aot_bundle, plan_runtime_payload
+from taichi_vision.validate_native_bundle import (
     NativeBundleValidationError,
     _target_id as validator_target_id,
     validate_native_bundle,
@@ -309,8 +309,8 @@ class ReleaseBundleManifestTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         root = Path(temp.name)
         target = "cpu_x86_64_windows"
-        tcm_dir = root / "taichi_library" / "taichi_algorithm" / "aot_tcm" / target
-        dll_dir = root / "taichi_library" / "taichi_algorithm" / "aot_py" / "aot_dll" / "cpu"
+        tcm_dir = root / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / target
+        dll_dir = root / "taichi_vision" / "taichi_algorithm" / "aot_py" / "aot_dll" / "cpu"
         tcm_dir.mkdir(parents=True)
         dll_dir.mkdir(parents=True)
         artifact = tcm_dir / f"copy_{target}.tcm"
@@ -350,7 +350,7 @@ class ReleaseBundleManifestTests(unittest.TestCase):
                 ],
             },
         }
-        manifest_path = root / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
+        manifest_path = root / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         return temp, root
 
@@ -373,7 +373,7 @@ class ReleaseBundleManifestTests(unittest.TestCase):
     def test_validator_rejects_orphan_runtime_requirement(self):
         temp, root = self._staged_native_bundle(include_c_api=True)
         try:
-            manifest_path = root / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
+            manifest_path = root / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
             payload["runtime_requirements"]["cpu_x86_64_windows_stale"] = {}
             manifest_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -386,7 +386,7 @@ class ReleaseBundleManifestTests(unittest.TestCase):
         """A release manifest must honor the canonical CUDA vendor gate."""
         temp, root = self._staged_native_bundle(include_c_api=True)
         try:
-            manifest_path = root / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
+            manifest_path = root / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
             payload["target_matrix"] = [
                 {"backend": "cuda", "arch": "x86_64", "os": "windows", "vendor": "amd"}

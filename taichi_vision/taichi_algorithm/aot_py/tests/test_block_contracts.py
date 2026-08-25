@@ -23,13 +23,13 @@ def _load(relative: str, name: str):
     return module
 
 
-BLOCK = _load("taichi_library/taichi_aot/block.py", "pixel_refine_contract_block")
+BLOCK = _load("taichi_vision/taichi_aot/block.py", "pixel_refine_contract_block")
 PIPELINE = _load(
-    "taichi_library/taichi_aot/auto_pipeline.py",
+    "taichi_vision/taichi_aot/auto_pipeline.py",
     "pixel_refine_contract_pipeline",
 )
 RESIDENCY = _load(
-    "taichi_library/taichi_aot/residency.py",
+    "taichi_vision/taichi_aot/residency.py",
     "pixel_refine_contract_residency",
 )
 

@@ -170,7 +170,7 @@ def compute_gaussian_weights(sigma, radius):
 @ti_thread
 def gaussian_blur(src, dst=None, sigma=1.0, kernel_size=None, buffer_provider="pool", **kwargs):
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.gaussian_blur(src, sigma=sigma, kernel_size=kernel_size, return_gpu=True)
 
     if not TAICHI_AVAILABLE: raise ImportError("Taichi not available")

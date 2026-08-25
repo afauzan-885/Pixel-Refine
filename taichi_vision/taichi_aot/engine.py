@@ -37,7 +37,7 @@ from .auto_pipeline import AutoPipelinePlanner
 from .capabilities import classify_device
 from .artifact_cache import artifact_key, get_status, set_status
 from .backend_manager import BackendManager
-from taichi_library.backend_config import (
+from taichi_vision.backend_config import (
     BackendConfig,
     backend_env,
     normalize_backend,
@@ -46,7 +46,7 @@ from taichi_library.backend_config import (
     requested_backend,
     is_android_runtime,
 )
-from taichi_library.device_selection import (
+from taichi_vision.device_selection import (
     is_translation_device,
     make_device_selector,
     query_vulkan_memory_budget,
@@ -299,7 +299,7 @@ def _intel_vulkan_allowed(device_id):
     if _intel_vulkan_probe_override():
         return True
     try:
-        from taichi_library.vulkan_probe import intel_vulkan_is_validated
+        from taichi_vision.vulkan_probe import intel_vulkan_is_validated
 
         return intel_vulkan_is_validated(device_id=int(device_id))
     except Exception:
@@ -311,7 +311,7 @@ def _schedule_intel_vulkan_qualification(device_id):
     if _intel_vulkan_probe_override():
         return None
     try:
-        from taichi_library.intel_vulkan_qualification import (
+        from taichi_vision.intel_vulkan_qualification import (
             schedule_intel_vulkan_qualification,
         )
 
@@ -1155,7 +1155,7 @@ def _init_aot_bridge(backend=None):
     aot_dll_dir = legacy_aot_dll_dir
     staged_bundle = None
     try:
-        from taichi_library.llvm20_runtime_paths import bundle_root
+        from taichi_vision.llvm20_runtime_paths import bundle_root
 
         staged_bundle = bundle_root(target.target_id)
     except (ImportError, OSError, ValueError):

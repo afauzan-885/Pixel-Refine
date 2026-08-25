@@ -66,8 +66,11 @@ class SpatialSplatAOT:
         buffers = []
         try:
             confidence_buf = self.engine.upload(confidence)
-            flow_y_buf = self.engine.upload(flow[..., 0])
-            flow_x_buf = self.engine.upload(flow[..., 1])
+            # The public flow contract is [dx, dy].  The gray AOT graph
+            # receives separate y/x planes, so split them in the graph's
+            # order rather than forwarding the vector channels verbatim.
+            flow_y_buf = self.engine.upload(flow[..., 1])
+            flow_x_buf = self.engine.upload(flow[..., 0])
             result = np.empty((h * int(scale), w * int(scale), channels), np.float32)
             coverage = np.empty((h * int(scale), w * int(scale)), np.float32)
             buffers = [confidence_buf, flow_y_buf, flow_x_buf]

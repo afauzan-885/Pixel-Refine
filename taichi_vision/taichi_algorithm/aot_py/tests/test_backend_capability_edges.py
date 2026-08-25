@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import unittest
 
-from taichi_library.taichi_aot.capabilities import backend_candidates, classify_device
+from taichi_vision.taichi_aot.capabilities import backend_candidates, classify_device
 
 
 class BackendCapabilityEdgeTests(unittest.TestCase):

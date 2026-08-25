@@ -37,12 +37,12 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import algorithm modules (JIT mode)
-color_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.color_convert")
-otsu_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.otsu")
-clahe_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.clahe")
-canny_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.canny")
-hough_mod = importlib.import_module("taichi_library.taichi_algorithm.image_processing.hough")
-gf_mod = importlib.import_module("taichi_library.taichi_algorithm.smoothing.guided_filter")
+color_mod = importlib.import_module("taichi_vision.taichi_algorithm.image_processing.color_convert")
+otsu_mod = importlib.import_module("taichi_vision.taichi_algorithm.image_processing.otsu")
+clahe_mod = importlib.import_module("taichi_vision.taichi_algorithm.image_processing.clahe")
+canny_mod = importlib.import_module("taichi_vision.taichi_algorithm.image_processing.canny")
+hough_mod = importlib.import_module("taichi_vision.taichi_algorithm.image_processing.hough")
+gf_mod = importlib.import_module("taichi_vision.taichi_algorithm.smoothing.guided_filter")
 
 ASSETS_DIR = os.path.join(file_dir, "../aot_tcm")
 

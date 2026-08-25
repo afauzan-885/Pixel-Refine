@@ -16,7 +16,7 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[3]
-BRIDGE_ROOT = ROOT / "taichi_library" / "taichi_algorithm" / "aot_py" / "aot_dll"
+BRIDGE_ROOT = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_py" / "aot_dll"
 DEFAULT_TARGETS = (
     "cpu_arm64_android",
     "cpu_arm64_linux",

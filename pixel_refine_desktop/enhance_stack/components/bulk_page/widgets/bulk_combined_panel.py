@@ -46,8 +46,11 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
     running_similarity as running_mf_similarity,
     running_mf_denoiser,
-    running_similarity as running_similarity_fusion,
 )
+
+# from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.weightnet import (
+#     running_weightnet,
+# )
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.Interpolation import (
     running_interpolation,
@@ -62,6 +65,8 @@ from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_thumb
     ThumbnailLoader,
 )
 from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_thumbnail_widget import (
+    MAX_THUMBNAIL_RETRIES,
+    THUMBNAIL_RETRY_DELAY_MS,
     thumbnail_placeholder,
     show_thumbnail,
 )
@@ -70,7 +75,10 @@ from pixel_refine_desktop.enhance_stack.core.logic.workflow_process import (
     get_last_image,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from config import GENERAL_SETTINGS_FILE
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    ThumbnailPolicy,
+    thumbnail_creation_enabled,
+)
 
 
 def load_json_state(path):
@@ -147,6 +155,8 @@ class CombinedPanel(QWidget):
         self.batch_id = batch_id
         self.preloaded_image_paths = preloaded_image_paths
         self.parent_widget = parent
+        self.thumbnail_policy = ThumbnailPolicy(self)
+        self.thumbnail_policy.changed.connect(self._on_thumbnail_policy_changed)
         self.thumbnail_threads = (
             thumbnail_threads if thumbnail_threads is not None else []
         )
@@ -220,14 +230,12 @@ class CombinedPanel(QWidget):
             self.batch_info_label.setText(batch_label_text)
 
     def get_thumbnail_setting(self):
-        if os.path.exists(GENERAL_SETTINGS_FILE):
-            try:
-                with open(GENERAL_SETTINGS_FILE, "r") as f:
-                    settings = json.load(f)
-                    return settings.get("create_thumbnail", False)
-            except Exception as e:
-                print(f"Error reading thumbnail setting: {e}")
-        return False
+        return thumbnail_creation_enabled(self.thumbnail_policy)
+
+    @Slot(bool)
+    def _on_thumbnail_policy_changed(self, enabled):
+        if not enabled:
+            self.disable_thumbnail_loading()
 
     def init_ui(self):
         create_thumbnail = self.get_thumbnail_setting()
@@ -378,8 +386,15 @@ class CombinedPanel(QWidget):
 
     def delay_thumbnails(self, completion_callback=None):
         """Mulai memuat thumbnail batch secara teratur dengan proteksi inactivity watchdog."""
+        if not self.get_thumbnail_setting():
+            self.disable_thumbnail_loading()
+            if completion_callback:
+                completion_callback()
+            return
+
         self._thumbnail_completion_callback = completion_callback
         self._loading_finished = False
+        self._thumbnail_retry_counts = {}
 
         if not hasattr(self, "_inactivity_timer"):
             self._inactivity_timer = QTimer(self)
@@ -457,6 +472,10 @@ class CombinedPanel(QWidget):
         """
         Jalankan loading thumbnail secara asynchronous hingga semua selesai.
         """
+        if not self.get_thumbnail_setting():
+            self.disable_thumbnail_loading()
+            return
+
         while (
             self.active_thumbnail_loaders < self.max_concurrent_loaders
             and self.pending_thumbnail_paths
@@ -468,15 +487,28 @@ class CombinedPanel(QWidget):
                 self.list_layout, path, self.thumbnail_placeholders
             )
 
-            # Buat loader baru
-            loader = ThumbnailLoader(path)
-            animator = self.animator
             self.active_thumbnail_loaders += 1
+            self._start_thumbnail_loader(path, self.animator)
 
-            # Hubungkan signal thumbnail_ready ke callback on_ready
-            loader.thumbnail_ready.connect(self._make_loader_callback(animator))
-            loader.start()
-            self.thumbnail_threads.append(loader)
+    def _start_thumbnail_loader(self, image_path, animator_ref):
+        """Start one loader while keeping the queue slot alive across retries."""
+        loader = ThumbnailLoader(image_path)
+        loader.thumbnail_ready.connect(self._make_loader_callback(animator_ref))
+        loader.start()
+        self.thumbnail_threads.append(loader)
+
+    def _retry_thumbnail_later(self, image_path, animator_ref):
+        """Retry a failed thumbnail without advancing the batch queue."""
+        if self._loading_finished or not self.get_thumbnail_setting():
+            return
+        QTimer.singleShot(
+            THUMBNAIL_RETRY_DELAY_MS,
+            lambda: (
+                self._start_thumbnail_loader(image_path, animator_ref)
+                if not self._loading_finished and self.get_thumbnail_setting()
+                else None
+            ),
+        )
 
     def _make_loader_callback(self, animator_ref):
         """
@@ -486,18 +518,26 @@ class CombinedPanel(QWidget):
 
         @Slot(object, str)
         def on_ready(image, image_path):
+            if not self.get_thumbnail_setting():
+                return
+
+            displayed = False
             try:
-                show_thumbnail(
+                displayed = show_thumbnail(
                     weakref.ref(self.list_layout), image, image_path, animator_ref
                 )
             except Exception as e:
                 print(f"Error while loading thumbnail: {e}")
-                try:
-                    show_thumbnail(
-                        weakref.ref(self.list_layout), image, image_path, animator_ref
-                    )
-                except:
-                    pass
+
+            if not displayed:
+                retry_count = self._thumbnail_retry_counts.get(image_path, 0)
+                if retry_count < MAX_THUMBNAIL_RETRIES:
+                    self._thumbnail_retry_counts[image_path] = retry_count + 1
+                    self._retry_thumbnail_later(image_path, animator_ref)
+                    return
+                self._thumbnail_retry_counts.pop(image_path, None)
+            else:
+                self._thumbnail_retry_counts.pop(image_path, None)
 
             # 2) Update counters
             self.active_thumbnail_loaders -= 1
@@ -541,6 +581,28 @@ class CombinedPanel(QWidget):
                 self._start_next_thumbnail_loaders()
 
         return on_ready
+
+    def disable_thumbnail_loading(self):
+        """Cancel this panel's thumbnail queue and show lightweight filename labels."""
+        if hasattr(self, "_inactivity_timer") and self._inactivity_timer.isActive():
+            self._inactivity_timer.stop()
+
+        self.pending_thumbnail_paths = []
+        self.thumbnail_loader_queue = []
+        self.active_thumbnail_loaders = 0
+        self._loading_finished = True
+        self._thumbnail_completion_callback = None
+
+        if hasattr(self.thumbnail_placeholders, "clear"):
+            self.thumbnail_placeholders.clear()
+
+        while self.list_layout.count():
+            item = self.list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self.load_text_labels()
 
     def closeEvent(self, event):
         """
@@ -1032,7 +1094,10 @@ class CombinedPanel(QWidget):
             "Average Denoising": "Average",
             "Median Filter": "Median",
             "Similarity Denoising": "Similarity",
-            "Similarity Fusion Denoising": "Similarity Fusion",
+            "Similarity Fusion": "FusionNet",
+            "Spatial AI Denoising": "Spatial AI",
+            "FusionNet Denoising": "FusionNet",
+            "WeightNet": "FusionNet",
         }
         return mapping.get(str(name or "").strip(), str(name or ""))
 
@@ -1216,13 +1281,19 @@ class CombinedPanel(QWidget):
                     stop_callback=stop_callback,
                     alignment_backend=align_algo,
                 ),
-                "Similarity Fusion": lambda: running_similarity_fusion(
+                "Spatial AI": lambda: running_weightnet(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
                     stop_callback=stop_callback,
-                    alignment_backend=align_algo,
+                ),
+                "FusionNet": lambda: running_weightnet(
+                    self,
+                    single_process=False,
+                    batch_id=self.batch_id,
+                    progress_callback=progress_callback,
+                    stop_callback=stop_callback,
                 ),
                 "No Denoising": lambda: None,
                 "None": lambda: None,
@@ -1234,7 +1305,7 @@ class CombinedPanel(QWidget):
         denoising_owns_alignment = denoise_algo in (
             "Average",
             "Similarity",
-            "Similarity Fusion",
+            "Spatial AI",
         )
 
         if denoising_owns_alignment:

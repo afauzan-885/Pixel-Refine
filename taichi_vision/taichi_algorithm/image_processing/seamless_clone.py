@@ -208,7 +208,7 @@ def seamless_clone(src, dst, mask, center=(0, 0), flags=NORMAL_CLONE,
     """
     # --- AOT path ---
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.seamless_clone(src, dst, mask, center=center,
                                           flags=flags, return_gpu=not isinstance(dst, np.ndarray))
 

@@ -119,7 +119,7 @@ class HardwareBackendTestWorker(QObject):
         backend = str(option.get("backend", "cpu")).lower()
         vendor = str(option.get("vendor", "")).lower()
         if self.analysis_mode == "fast":
-            return 8 if backend == "cpu" else 14
+            return 20 if backend == "cpu" else 35
         if backend == "vulkan" and vendor == "intel":
             return 240
         if backend == "opengl" and vendor == "intel":
@@ -154,6 +154,14 @@ class HardwareBackendTestWorker(QObject):
             returncode = -1
             passed = total_tests = 0
             renderer = ""
+            benchmark_width = 1024
+            benchmark_height = 1024
+            benchmark_elapsed_ms = None
+            benchmark_runs = 4
+            benchmark_warmup_runs = 1
+            benchmark_gpu_only = False
+            benchmark_metrics = {}
+            benchmark_skipped = 0
 
             environment = os.environ.copy()
             # A parent process may have pinned an explicit bridge while
@@ -227,8 +235,7 @@ class HardwareBackendTestWorker(QObject):
             test_path = os.path.abspath(
                 os.path.join(
                     os.path.dirname(__file__),
-                    "../../../../../taichi_vision/taichi_algorithm/"
-                    "aot_py/tests/test_comprehensif.py",
+                    "../Perfomance/test_comprehensif.py",
                 )
             )
             command = [
@@ -394,6 +401,39 @@ class HardwareBackendTestWorker(QObject):
                     match = re.search(r"Results:\s*(\d+)\s*/\s*(\d+)", output)
                     if match:
                         passed, total_tests = map(int, match.groups())
+                    benchmark_match = re.search(
+                        r"Benchmark:\s*(\d+)x(\d+)\s*\|\s*"
+                        r"elapsed_ms=([0-9]+(?:\.[0-9]+)?)",
+                        output,
+                    )
+                    if benchmark_match:
+                        benchmark_width = int(benchmark_match.group(1))
+                        benchmark_height = int(benchmark_match.group(2))
+                        benchmark_elapsed_ms = float(benchmark_match.group(3))
+                    benchmark_config_match = re.search(
+                        r"Benchmark:.*?\|\s*runs=(\d+)\s*\|\s*"
+                        r"warmup=(\d+)\s*\|\s*gpu_only=(\d+)",
+                        output,
+                    )
+                    if benchmark_config_match:
+                        benchmark_runs = int(benchmark_config_match.group(1))
+                        benchmark_warmup_runs = int(benchmark_config_match.group(2))
+                        benchmark_gpu_only = bool(int(benchmark_config_match.group(3)))
+                    metrics_match = re.search(
+                        r"Benchmark Metrics:\s*(\{.*\})\s*$",
+                        output,
+                        re.MULTILINE,
+                    )
+                    if metrics_match:
+                        try:
+                            parsed_metrics = json.loads(metrics_match.group(1))
+                            if isinstance(parsed_metrics, dict):
+                                benchmark_metrics = parsed_metrics
+                        except json.JSONDecodeError:
+                            benchmark_metrics = {}
+                    skipped_match = re.search(r"Skipped:\s*(\d+)", output)
+                    if skipped_match:
+                        benchmark_skipped = int(skipped_match.group(1))
                     renderer_match = re.search(
                         r"Runtime initialized on '[^']+'\s*\((.+)\)\s*$",
                         output,
@@ -437,6 +477,14 @@ class HardwareBackendTestWorker(QObject):
                 "total": total_tests,
                 "returncode": returncode,
                 "analysis_mode": self.analysis_mode,
+                "benchmark_width": benchmark_width,
+                "benchmark_height": benchmark_height,
+                "benchmark_elapsed_ms": benchmark_elapsed_ms,
+                "benchmark_runs": benchmark_runs,
+                "benchmark_warmup_runs": benchmark_warmup_runs,
+                "benchmark_gpu_only": benchmark_gpu_only,
+                "benchmark_skipped": benchmark_skipped,
+                "benchmark_metrics": benchmark_metrics,
                 "diagnostic": "\n".join(diagnostic_lines[-12:]),
             }
 
@@ -752,7 +800,10 @@ class GeneralSettingsPage(Container, SyncMixin):
         if hasattr(self, "apply_btn") and self.apply_btn:
             self.apply_btn.setStyleSheet(create_button_style("success"))
         if hasattr(self, "test_btn") and self.test_btn:
-            self.test_btn.setStyleSheet(create_button_style("secondary"))
+            self.test_btn.setStyleSheet(
+                create_button_style("secondary")
+                + "\nQPushButton { font-size: 10.4pt; }"
+            )
         self.update_device_dropdown_style()
 
     def _scan_hardware_backend_options(self):

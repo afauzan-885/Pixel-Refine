@@ -132,7 +132,7 @@ def box_filter(
     src, dst=None, kernel_size: int = 3, buffer_provider="pool", enable_tiling=True
 ):
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.box_filter(src, kernel_size=kernel_size, return_gpu=True)
 
     if not TAICHI_AVAILABLE:

@@ -11,9 +11,20 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.spatial_
     robust_subpixel_splat,
     spatial_rejection_map,
 )
+from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.SplatSR import (
+    SplatSRAlgorithm,
+)
 
 
 class SpatialSplatKnownValueTest(unittest.TestCase):
+    def test_lucas_kanade_warp_flow_is_inverted_for_splat(self):
+        lk_flow = np.asarray([[[0.25, -0.5]]], dtype=np.float32)
+        splat_flow = SplatSRAlgorithm._splat_flow_from_lk_flow(lk_flow)
+        np.testing.assert_array_equal(
+            splat_flow,
+            np.asarray([[[-0.25, 0.5]]], dtype=np.float32),
+        )
+
     @staticmethod
     def _scene(height: int, width: int, scale: int) -> np.ndarray:
         y, x = np.mgrid[0 : height * scale, 0 : width * scale].astype(np.float32)

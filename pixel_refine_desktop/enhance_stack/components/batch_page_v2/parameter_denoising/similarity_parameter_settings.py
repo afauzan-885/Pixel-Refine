@@ -24,11 +24,14 @@ SIMILARITY_DEFAULTS = {
     "similarity_smart_noise_strength": 100.0,
     "equalize_brightness": False,
     "early_exit_threshold": 0.05,
-    "work_resolution_scale": 1.0,
-    "ai_tile_size": 1024,
-    "ai_overlap_percent": 0.10,
+    "work_resolution_scale": 0.5,
+    "ai_tile_size": 256,
+    "ai_overlap_percent": 0.30,
     "ai_batch_size": 4,
     "ai_model_type": "nano fusion v1",
+    # AI WeightNet runtime: GPU prefers DirectML and explicitly falls back to CPU.
+    # NPU is reserved for a future installed NPU execution provider.
+    "ai_runtime": "gpu",
 }
 
 
@@ -85,7 +88,7 @@ PARAMETER_SCHEMA = [
         "key": "work_resolution_scale",
         "label": "Work Scale",
         "type": "dropdown",
-        "default": 1.0,
+        "default": 0.5,
         "options": [1.0, 0.75, 0.5, 0.33, 0.25],
         "value_type": "float",
     },
@@ -107,15 +110,15 @@ PARAMETER_SCHEMA = [
         "key": "ai_tile_size",
         "label": "Block Size (AI)",
         "type": "dropdown",
-        "default": 1024,
-        "options": [512, 1024, 2048],
+        "default": 256,
+        "options": [256, 512, 1024],
         "value_type": "int",
     },
     {
         "key": "ai_overlap_percent",
         "label": "Block Overlap (AI)",
         "type": "slider",
-        "default": 0.10,
+        "default": 0.30,
         "min": 0,
         "max": 50,
         "scale": 0.01,
@@ -136,7 +139,7 @@ PARAMETER_SCHEMA = [
         "label": "Model Type (AI)",
         "type": "dropdown",
         "default": "nano fusion v1",
-        "options": ["nano fusion v1", "fusion v1"],
+        "options": ["nano fusion v1"],
         "value_type": "str",
     },
 ]
@@ -211,6 +214,7 @@ def save_similarity_v1_config(config_to_save):
         "ai_overlap_percent",
         "ai_batch_size",
         "ai_model_type",
+        "ai_runtime",
     ]
 
     for key in spatial_keys:

@@ -174,7 +174,7 @@ def fft_1d_gpu(data_gpu, is_inverse=False, is_col=False):
 @ti_thread
 def fft2(src):
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.fft2(src)
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi is not available")
@@ -191,7 +191,7 @@ def fft2(src):
 @ti_thread
 def ifft2(complex_gpu, target_shape=None):
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.ifft2(complex_gpu, target_shape=target_shape)
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi is not available")

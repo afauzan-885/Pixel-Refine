@@ -1,11 +1,8 @@
-"""Compatibility entry point for the comprehensive AOT test suite.
-
-The implementation lives in :mod:`taichi_library.taichi_algorithm.aot_py.tests`.
-"""
+"""Compatibility entry point for the standalone Performance Settings test."""
 
 import sys
 from pathlib import Path
-from runpy import run_module
+from runpy import run_path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -13,7 +10,15 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 
 if __name__ == "__main__":
-    run_module(
-        "taichi_library.taichi_algorithm.aot_py.tests.test_comprehensif",
+    run_path(
+        str(
+            _PROJECT_ROOT
+            / "pixel_refine_desktop"
+            / "ui"
+            / "views"
+            / "settings"
+            / "Perfomance"
+            / "test_comprehensif.py"
+        ),
         run_name="__main__",
     )

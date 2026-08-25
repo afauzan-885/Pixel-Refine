@@ -4557,7 +4557,7 @@ def register_akaze_block_adapters(
         partition_qualified=True,
     )
     metadata = {
-        "source": "taichi_library.taichi_aot.block_adapters",
+        "source": "taichi_vision.taichi_aot.block_adapters",
         "partition_kind": "multi_stage",
         "pipeline_kind": "hessian_grid_nms",
         "semantic_only": True,
@@ -4946,7 +4946,7 @@ def register_optical_flow_identity_adapters(
             partition_qualified=True,
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "local_identity_specialization",
             "semantic_only": True,
             "identity_input_only": True,
@@ -7925,7 +7925,7 @@ def register_low_risk_block_adapters(*, replace: bool = False) -> Mapping[str, B
                 continue
         contract = _qualified_contract(operation)
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "legacy_executor": evidence["executor"],
             "legacy_partition_evidence": {
                 "operation": operation,
@@ -8013,7 +8013,7 @@ def register_local_stencil_block_adapters(
             partition_strategy=strategies[operation],
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": (
                 "stencil" if operation in halo_overrides else "local"
             ),
@@ -8132,7 +8132,7 @@ def register_legacy_local_block_adapters(
             partition_strategy=strategies[operation],
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "stencil" if halo_overrides[operation] else "local",
             "semantic_only": True,
             "parameter_scope": parameter_scope[operation],
@@ -8306,7 +8306,7 @@ def register_analysis_block_adapters(
             partition_qualified=True,
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "multi_stage",
             "semantic_only": True,
             "stage_contract": stage_contracts[operation],
@@ -8551,7 +8551,7 @@ def register_fft_block_adapters(
             partition_qualified=True,
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "multi_stage",
             "semantic_only": True,
             "custom_executor": _run_fft_partition_tiled,
@@ -8789,7 +8789,7 @@ def register_phase_correlation_block_adapters(
         partition_qualified=True,
     )
     metadata = {
-        "source": "taichi_library.taichi_aot.block_adapters",
+        "source": "taichi_vision.taichi_aot.block_adapters",
         "partition_kind": "map_reduce",
         "pipeline_kind": "multi_stage_frequency",
         "output_domain": True,
@@ -9193,7 +9193,7 @@ def register_global_partition_adapters(
             partition_qualified=True,
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "global_map_reduce",
             "semantic_only": True,
             "custom_executor": _run_global_partition_tiled,
@@ -9274,7 +9274,7 @@ def register_mtb_partition_adapters(
         partition_qualified=True,
     )
     metadata = {
-        "source": "taichi_library.taichi_aot.block_adapters",
+        "source": "taichi_vision.taichi_aot.block_adapters",
         "partition_kind": "staged_map_reduce",
         "semantic_only": True,
         "custom_executor": _run_mtb_partition_tiled,
@@ -9353,7 +9353,7 @@ def register_jblu_partition_adapters(
         partition_qualified=True,
     )
     metadata = {
-        "source": "taichi_library.taichi_aot.block_adapters",
+        "source": "taichi_vision.taichi_aot.block_adapters",
         "partition_kind": "output_domain",
         "semantic_only": True,
         "custom_executor": _run_jblu_partition_tiled,
@@ -9427,7 +9427,7 @@ def register_bilateral_grid_partition_adapters(
         partition_qualified=True,
     )
     metadata = {
-        "source": "taichi_library.taichi_aot.block_adapters",
+        "source": "taichi_vision.taichi_aot.block_adapters",
         "partition_kind": "staged_map_reduce",
         "semantic_only": True,
         "custom_executor": _run_bilateral_grid_partition_tiled,
@@ -9504,7 +9504,7 @@ def register_inpaint_partition_adapters(
         partition_qualified=True,
     )
     metadata = {
-        "source": "taichi_library.taichi_aot.block_adapters",
+        "source": "taichi_vision.taichi_aot.block_adapters",
         "partition_kind": "iterative_snapshot",
         "semantic_only": True,
         "custom_executor": _run_inpaint_partition_tiled,
@@ -9751,7 +9751,7 @@ def register_map_reduce_block_adapters(*, replace: bool = False) -> Mapping[str,
         elif is_stitch:
             validator = _stitch_validator
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "map_reduce",
             "output_grid": bool(is_ncc),
             "sequence_domain": bool(is_stitch),
@@ -9841,7 +9841,7 @@ def register_accumulator_block_adapters(
     """Register semantic CPU adapters for pointwise accumulator finalizers.
 
     ``mean_division`` and ``normalize_accumulator`` are classified as global
-    in :mod:`taichi_library.taichi_aot.block` because their usual call site is
+    in :mod:`taichi_vision.taichi_aot.block` because their usual call site is
     the final stage of a cross-tile fusion.  Once each tile's ``sum_img`` and
     ``sum_weight`` have been produced, the common AOT kernels perform only a
     per-pixel divide (with a fallback/reference value for zero weight).  These
@@ -9890,7 +9890,7 @@ def register_accumulator_block_adapters(
             partition_qualified=True,
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "local_map",
             "source_path": "global",
             "semantic_only": True,
@@ -9944,7 +9944,7 @@ def register_coordinate_block_adapters(
                 continue
         contract = _qualified_contract(operation)
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "local",
             "semantic_only": True,
             "legacy_partition_evidence": None,
@@ -10038,7 +10038,7 @@ def register_coordinate_domain_adapters(
             partition_qualified=True,
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "coordinate_domain",
             "coordinate_domain": True,
             "semantic_only": True,
@@ -10130,7 +10130,7 @@ def register_coordinate_warp_adapters(
             partition_qualified=True,
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "coordinate_warp",
             "coordinate_domain": True,
             "source_window": "full_frame",
@@ -10209,7 +10209,7 @@ def register_output_domain_adapters(
             partition_qualified=True,
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "output_domain",
             "output_domain": True,
             "semantic_only": True,
@@ -10917,7 +10917,7 @@ def register_demosaic_full_adapters(
             partition_qualified=True,
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "cfa_phase_global_source",
             # ``cmatrix`` may be passed as an ndarray alongside the Bayer
             # plane; it is configuration rather than a second image input.
@@ -11081,7 +11081,7 @@ def register_demosaic_half_adapters(
             partition_qualified=True,
         )
         metadata = {
-            "source": "taichi_library.taichi_aot.block_adapters",
+            "source": "taichi_vision.taichi_aot.block_adapters",
             "partition_kind": "cfa_2x2_output_domain",
             # Keep an ndarray colour matrix in adapter params, not as an
             # additional image plane discovered by compute_block.
@@ -11162,7 +11162,7 @@ def register_bounded_semantic_adapters(
         partition_qualified=True,
     )
     metadata = {
-        "source": "taichi_library.taichi_aot.block_adapters",
+        "source": "taichi_vision.taichi_aot.block_adapters",
         "partition_kind": "bounded_identity",
         "semantic_only": True,
         "native_probe_required": True,
@@ -12050,7 +12050,7 @@ def register_flow_map_adapters(
         reason="deterministic CPU flow-map output-domain parity; native proof pending",
     )
     metadata = {
-        "source": "taichi_library.taichi_aot.block_adapters",
+        "source": "taichi_vision.taichi_aot.block_adapters",
         "partition_kind": "flow_map_output_domain",
         "coordinate_domain": True,
         "source_window": "full_frame",
@@ -12103,7 +12103,7 @@ def register_normalization_adapters(
         reason="deterministic CPU normalize_image spatial parity; native proof pending",
     )
     metadata = {
-        "source": "taichi_library.taichi_aot.block_adapters",
+        "source": "taichi_vision.taichi_aot.block_adapters",
         "partition_kind": "normalize_image_spatial",
         "coordinate_domain": True,
         # ``normalize_image_gpu`` preserves the source spatial domain but
@@ -12168,7 +12168,7 @@ def register_brief_pattern_adapters(
         reason="deterministic CPU BRIEF output-domain parity; native proof pending",
     )
     metadata = {
-        "source": "taichi_library.taichi_aot.block_adapters",
+        "source": "taichi_vision.taichi_aot.block_adapters",
         "partition_kind": "output_domain",
         "output_domain": True,
         "semantic_only": True,

@@ -1,6 +1,6 @@
 """Static portability audit for packed Taichi Vulkan AOT artifacts.
 
-This module is deliberately independent of ``taichi_library.taichi_aot`` so
+This module is deliberately independent of ``taichi_vision.taichi_aot`` so
 it can inspect artifacts without constructing a native runtime. It validates
 every embedded SPIR-V module, extracts its declared capabilities/extensions,
 and audits graph descriptor pressure before a driver is allowed to dispatch.
@@ -255,7 +255,7 @@ def audit_tcm(path, target_env="vulkan1.1"):
 def audit_vulkan_inventory(project_root=None, target_env="vulkan1.1"):
     root = Path(project_root or Path(__file__).resolve().parent.parent).resolve()
     artifact_root = (
-        root / "taichi_library" / "taichi_algorithm" / "aot_tcm"
+        root / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
     )
     target_root = artifact_root / "vulkan_x86_64_windows"
     reports = [

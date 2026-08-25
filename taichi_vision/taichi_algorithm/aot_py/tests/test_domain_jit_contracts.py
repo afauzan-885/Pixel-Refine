@@ -16,16 +16,16 @@ class DomainJitContractTests(unittest.TestCase):
             r'''
 import json
 import numpy as np
-from taichi_library.taichi_algorithm.image_processing.tone_mapping import reinhard_tone_map
-from taichi_library.taichi_algorithm.panorama.exposure import (
+from taichi_vision.taichi_algorithm.image_processing.tone_mapping import reinhard_tone_map
+from taichi_vision.taichi_algorithm.panorama.exposure import (
     apply_exposure_compensation,
     estimate_exposure_compensation,
 )
-from taichi_library.taichi_algorithm.sfm.cheirality_check import (
+from taichi_vision.taichi_algorithm.sfm.cheirality_check import (
     check_cheirality_full,
     check_cheirality_minimal,
 )
-from taichi_library.taichi_algorithm.sfm.five_point_solver import solve_five_point
+from taichi_vision.taichi_algorithm.sfm.five_point_solver import solve_five_point
 
 # Constant-field Reinhard oracle.  With lum_white=1 the burn-out factor
 # cancels algebraically for this bounded case.

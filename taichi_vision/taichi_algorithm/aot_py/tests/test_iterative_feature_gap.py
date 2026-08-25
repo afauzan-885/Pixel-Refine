@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from taichi_library.taichi_aot import (
+from taichi_vision.taichi_aot import (
     ITERATIVE_FEATURE_GAP_OPERATIONS,
     iterative_feature_gap_report,
     register_akaze_block_adapters,

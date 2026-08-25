@@ -74,495 +74,495 @@ def encode_rgb_taichi(*args, **kwargs):
 # Import these lazily: the canonical JPEG API reuses compression.kernels, and
 # eager package-level imports would create a circular import during startup.
 def encode_grayscale_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.jpeg_aot import encode_grayscale_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.jpeg_aot import encode_grayscale_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_rgb_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.jpeg_aot import encode_rgb_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.jpeg_aot import encode_rgb_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def jpeg_encode_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.jpeg_aot import jpeg_encode_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.jpeg_aot import jpeg_encode_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_png_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.png_aot import encode_png_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.png_aot import encode_png_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def save_png_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.png_aot import save_png_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.png_aot import save_png_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def parse_png_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.png_aot import parse_png_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.png_aot import parse_png_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_lossless_jpeg(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.jpeg_lossless import encode_lossless_jpeg as _impl
+    from taichi_vision.taichi_algorithm.compression.jpeg_lossless import encode_lossless_jpeg as _impl
     return _impl(*args, **kwargs)
 
 
 def decode_lossless_jpeg(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.jpeg_lossless import decode_lossless_jpeg as _impl
+    from taichi_vision.taichi_algorithm.compression.jpeg_lossless import decode_lossless_jpeg as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_dng_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.dng_aot import encode_dng_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.dng_aot import encode_dng_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_dng_bytes(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.dng_aot import encode_dng_bytes as _impl
+    from taichi_vision.taichi_algorithm.compression.dng_aot import encode_dng_bytes as _impl
     return _impl(*args, **kwargs)
 
 
 def decode_dng_bytes(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.dng_aot import decode_dng_bytes as _impl
+    from taichi_vision.taichi_algorithm.compression.dng_aot import decode_dng_bytes as _impl
     return _impl(*args, **kwargs)
 
 
 def read_dng_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.dng_aot import read_dng_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.dng_aot import read_dng_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def dng_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.dng_aot import dng_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.dng_aot import dng_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def save_dng_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.dng_aot import save_dng_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.dng_aot import save_dng_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_frame_from_dng(*args, **kwargs):
     """Create a semantic pre-demosaic RAW frame from a parsed DNG frame."""
-    from taichi_library.taichi_algorithm.compression.raw_frame import raw_frame_from_dng as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_frame import raw_frame_from_dng as _impl
     return _impl(*args, **kwargs)
 
 
 def fuse_dng_frames_blockwise(*args, **kwargs):
     """Fuse parsed DNG frames directly without a demosaic intermediate."""
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import fuse_dng_frames_blockwise as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import fuse_dng_frames_blockwise as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_mosaic_frame(*args, **kwargs):
     """Compatibility constructor for :class:`RawMosaicFrame`."""
-    from taichi_library.taichi_algorithm.compression.raw_frame import RawMosaicFrame
+    from taichi_vision.taichi_algorithm.compression.raw_frame import RawMosaicFrame
     return RawMosaicFrame(*args, **kwargs)
 
 
 def fuse_raw_frames_blockwise(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import fuse_raw_frames_blockwise as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import fuse_raw_frames_blockwise as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_alignment_guide(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import raw_alignment_guide as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_alignment_guide as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_alignment_guide_dng(*args, **kwargs):
     """Build a streamed pre-demosaic guide directly from a DNG frame."""
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import raw_alignment_guide_dng as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_alignment_guide_dng as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_alignment_guide_native(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import raw_alignment_guide_native as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_alignment_guide_native as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_normalize_headroom_native(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import raw_normalize_headroom_native as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_normalize_headroom_native as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_weight_map(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import raw_weight_map as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_weight_map as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_weight_map_native(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import raw_weight_map_native as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_weight_map_native as _impl
     return _impl(*args, **kwargs)
 
 
 def fuse_raw_pair_native(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import fuse_raw_pair_native as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import fuse_raw_pair_native as _impl
     return _impl(*args, **kwargs)
 
 
 def fuse_raw_accumulate_native(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import fuse_raw_accumulate_native as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import fuse_raw_accumulate_native as _impl
     return _impl(*args, **kwargs)
 
 
 def phase_safe_integer_warp(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import phase_safe_integer_warp as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import phase_safe_integer_warp as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_optical_flow(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import raw_optical_flow as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_optical_flow as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_optical_flow_dng(*args, **kwargs):
     """Run optical flow on streamed pre-demosaic DNG guides."""
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import raw_optical_flow_dng as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_optical_flow_dng as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_flow_tile_contract(*args, **kwargs):
     """Declare an explicit, phase-safe RAW green-guide tile contract."""
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import raw_flow_tile_contract as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_flow_tile_contract as _impl
     return _impl(*args, **kwargs)
 
 
 def raw_flow_tile_parity_report(*args, **kwargs):
     """Run a read-only full-vs-tiled RAW-flow candidate diagnostic."""
-    from taichi_library.taichi_algorithm.compression.raw_pipeline import raw_flow_tile_parity_report as _impl
+    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_flow_tile_parity_report as _impl
     return _impl(*args, **kwargs)
 
 
 def package_heic_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import package_heic_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import package_heic_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def package_heic_image_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import package_heic_image_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import package_heic_image_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def build_heif_payload(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import build_heif_payload as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import build_heif_payload as _impl
     return _impl(*args, **kwargs)
 
 
 def save_heic_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import save_heic_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import save_heic_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def parse_heif_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import parse_heif_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import parse_heif_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def package_heic_vcl_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import package_heic_vcl_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import package_heic_vcl_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def package_heic_ipcm_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import package_heic_ipcm_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import package_heic_ipcm_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def package_heic_neutral_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import package_heic_neutral_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import package_heic_neutral_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def package_heic_flat_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import package_heic_flat_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import package_heic_flat_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def package_heic_ctu_stripes_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import package_heic_ctu_stripes_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import package_heic_ctu_stripes_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def package_heic_ipcm10_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import package_heic_ipcm10_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import package_heic_ipcm10_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def heic_vcl_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import heic_vcl_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import heic_vcl_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def heic_ipcm_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import heic_ipcm_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import heic_ipcm_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def heic_neutral_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import heic_neutral_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import heic_neutral_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def heic_flat_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import heic_flat_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import heic_flat_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def heic_flat10_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import heic_flat10_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import heic_flat10_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def heic_ctu_stripes_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import heic_ctu_stripes_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import heic_ctu_stripes_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def heic_ipcm10_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.heif_aot import heic_ipcm10_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.heif_aot import heic_ipcm10_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def build_hevc_parameter_sets(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_aot import build_hevc_parameter_sets as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_aot import build_hevc_parameter_sets as _impl
     return _impl(*args, **kwargs)
 
 
 def build_hvcc(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_aot import build_hvcc as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_aot import build_hvcc as _impl
     return _impl(*args, **kwargs)
 
 
 def parse_hvcc(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_aot import parse_hvcc as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_aot import parse_hvcc as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_hevc_intra_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_aot import encode_hevc_intra_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_aot import encode_hevc_intra_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def hevc_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_aot import hevc_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_aot import hevc_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_hevc_vcl_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_vcl_aot import encode_hevc_vcl_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_vcl_aot import encode_hevc_vcl_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def build_hevc_vcl_picture(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_vcl_aot import build_hevc_vcl_picture as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_vcl_aot import build_hevc_vcl_picture as _impl
     return _impl(*args, **kwargs)
 
 
 def parse_hevc_vcl_annex_b(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_vcl_aot import parse_hevc_vcl_annex_b as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_vcl_aot import parse_hevc_vcl_annex_b as _impl
     return _impl(*args, **kwargs)
 
 
 def validate_hevc_vcl_annex_b(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_vcl_aot import validate_hevc_vcl_annex_b as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_vcl_aot import validate_hevc_vcl_annex_b as _impl
     return _impl(*args, **kwargs)
 
 
 def hevc_vcl_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_vcl_aot import hevc_vcl_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_vcl_aot import hevc_vcl_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_hevc_ipcm_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_ipcm_aot import encode_hevc_ipcm_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_ipcm_aot import encode_hevc_ipcm_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def build_hevc_ipcm_picture(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_ipcm_aot import build_hevc_ipcm_picture as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_ipcm_aot import build_hevc_ipcm_picture as _impl
     return _impl(*args, **kwargs)
 
 
 def validate_hevc_ipcm_annex_b(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_ipcm_aot import validate_hevc_ipcm_annex_b as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_ipcm_aot import validate_hevc_ipcm_annex_b as _impl
     return _impl(*args, **kwargs)
 
 
 def hevc_ipcm_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_ipcm_aot import hevc_ipcm_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_ipcm_aot import hevc_ipcm_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_hevc_general_aot(*args, **kwargs):
     """Encode the bounded compressed HEVC intra profile."""
-    from taichi_library.taichi_algorithm.compression.hevc_general_aot import encode_hevc_general_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_general_aot import encode_hevc_general_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def build_hevc_general_picture(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_general_aot import build_hevc_general_picture as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_general_aot import build_hevc_general_picture as _impl
     return _impl(*args, **kwargs)
 
 
 def validate_hevc_general_annex_b(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_general_aot import validate_hevc_general_annex_b as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_general_aot import validate_hevc_general_annex_b as _impl
     return _impl(*args, **kwargs)
 
 
 def hevc_general_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_general_aot import hevc_general_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_general_aot import hevc_general_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_hevc_general10_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_general10_aot import encode_hevc_general10_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_general10_aot import encode_hevc_general10_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def build_hevc_general10_picture(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_general10_aot import build_hevc_general10_picture as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_general10_aot import build_hevc_general10_picture as _impl
     return _impl(*args, **kwargs)
 
 
 def hevc_general10_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.hevc_general10_aot import hevc_general10_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.hevc_general10_aot import hevc_general10_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def package_avif_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.avif_aot import package_avif_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.avif_aot import package_avif_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def build_avif_payload(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.avif_aot import build_avif_payload as _impl
+    from taichi_vision.taichi_algorithm.compression.avif_aot import build_avif_payload as _impl
     return _impl(*args, **kwargs)
 
 
 def save_avif_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.avif_aot import save_avif_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.avif_aot import save_avif_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def parse_avif_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.avif_aot import parse_avif_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.avif_aot import parse_avif_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def compression_production_audit(*args, **kwargs):
     """Return the machine-readable release-readiness audit."""
-    from taichi_library.taichi_algorithm.compression.production_audit import run_production_audit as _impl
+    from taichi_vision.taichi_algorithm.compression.production_audit import run_production_audit as _impl
     return _impl(*args, **kwargs)
 
 
 def make_av1_still_profile(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import make_av1_still_profile as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import make_av1_still_profile as _impl
     return _impl(*args, **kwargs)
 
 
 def build_av1_sequence_header(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import build_sequence_header as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import build_sequence_header as _impl
     return _impl(*args, **kwargs)
 
 
 def parse_av1_sequence_header(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import parse_sequence_header as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import parse_sequence_header as _impl
     return _impl(*args, **kwargs)
 
 
 def build_av1_sequence_header_obu(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import build_sequence_header_obu as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import build_sequence_header_obu as _impl
     return _impl(*args, **kwargs)
 
 
 def build_av1_obu(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import build_obu as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import build_obu as _impl
     return _impl(*args, **kwargs)
 
 
 def parse_av1_obus(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import parse_obus as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import parse_obus as _impl
     return _impl(*args, **kwargs)
 
 
 def build_av1c(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import build_av1c as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import build_av1c as _impl
     return _impl(*args, **kwargs)
 
 
 def parse_av1c(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import parse_av1c as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import parse_av1c as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_av1_tiny_constant(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import encode_av1_tiny_constant as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import encode_av1_tiny_constant as _impl
     return _impl(*args, **kwargs)
 
 
 def validate_av1_image_payload(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import validate_av1_image_payload as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import validate_av1_image_payload as _impl
     return _impl(*args, **kwargs)
 
 
 def av1_image_payload_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_aot import av1_image_payload_report as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_aot import av1_image_payload_report as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_av1_intra_constant(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_intra_aot import encode_av1_intra_constant as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_intra_aot import encode_av1_intra_constant as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_av1_intra_constant_16x16(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_intra_aot import encode_av1_intra_constant_16x16 as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_intra_aot import encode_av1_intra_constant_16x16 as _impl
     return _impl(*args, **kwargs)
 
 
 def validate_av1_intra_payload(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_intra_aot import validate_av1_intra_payload as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_intra_aot import validate_av1_intra_payload as _impl
     return _impl(*args, **kwargs)
 
 
 def av1_intra_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_intra_aot import av1_intra_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_intra_aot import av1_intra_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def supported_av1_constant_colors(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_intra_aot import supported_constant_colors as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_intra_aot import supported_constant_colors as _impl
     return _impl(*args, **kwargs)
 
 
 def av1_entropy_encode_symbols(*args, **kwargs):
     """Encode symbols with the native AV1 Q15 range primitive."""
-    from taichi_library.taichi_algorithm.compression.av1_entropy_aot import encode_symbols as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_entropy_aot import encode_symbols as _impl
     return _impl(*args, **kwargs)
 
 
 def av1_entropy_decode_symbols(*args, **kwargs):
     """Decode symbols with the native AV1 Q15 range primitive."""
-    from taichi_library.taichi_algorithm.compression.av1_entropy_aot import decode_symbols as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_entropy_aot import decode_symbols as _impl
     return _impl(*args, **kwargs)
 
 
 def av1_entropy_update_icdf(*args, **kwargs):
     """Apply AV1 CDF adaptation explicitly, without mutating caller state."""
-    from taichi_library.taichi_algorithm.compression.av1_entropy_aot import update_icdf as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_entropy_aot import update_icdf as _impl
     return _impl(*args, **kwargs)
 
 
 def av1_entropy_capability_report(*args, **kwargs):
     """Return the bounded native AV1 entropy-layer capability report."""
-    from taichi_library.taichi_algorithm.compression.av1_entropy_aot import av1_entropy_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.av1_entropy_aot import av1_entropy_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def av1_cdf_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_cdf_aot import (
+    from taichi_vision.taichi_algorithm.compression.av1_cdf_aot import (
         av1_cdf_capability_report as _impl,
     )
 
@@ -570,7 +570,7 @@ def av1_cdf_capability_report(*args, **kwargs):
 
 
 def get_av1_cdf(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_cdf_aot import (
+    from taichi_vision.taichi_algorithm.compression.av1_cdf_aot import (
         get_av1_cdf as _impl,
     )
 
@@ -578,7 +578,7 @@ def get_av1_cdf(*args, **kwargs):
 
 
 def av1_dc_predict_residual_4x4(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_predict_aot import (
+    from taichi_vision.taichi_algorithm.compression.av1_predict_aot import (
         av1_dc_predict_residual_4x4 as _impl,
     )
 
@@ -586,7 +586,7 @@ def av1_dc_predict_residual_4x4(*args, **kwargs):
 
 
 def av1_dc_predict_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.av1_predict_aot import (
+    from taichi_vision.taichi_algorithm.compression.av1_predict_aot import (
         av1_dc_predict_capability_report as _impl,
     )
 
@@ -594,19 +594,19 @@ def av1_dc_predict_capability_report(*args, **kwargs):
 
 
 def prepare_yuv_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.video_prep import prepare_yuv_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.video_prep import prepare_yuv_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def prepare_yuv_native(*args, **kwargs):
     """Run the opt-in NumPy-free native-buffer YUV preparation path."""
-    from taichi_library.taichi_algorithm.compression.native_video_prep import prepare_yuv_native as _impl
+    from taichi_vision.taichi_algorithm.compression.native_video_prep import prepare_yuv_native as _impl
     return _impl(*args, **kwargs)
 
 
 def prepare_av1_dc_residual_native(*args, **kwargs):
     """Run the bounded AV1 DC residual graph through native buffers."""
-    from taichi_library.taichi_algorithm.compression.native_video_prep import (
+    from taichi_vision.taichi_algorithm.compression.native_video_prep import (
         prepare_av1_dc_residual_native as _impl,
     )
 
@@ -614,37 +614,37 @@ def prepare_av1_dc_residual_native(*args, **kwargs):
 
 
 def native_video_prep_capability_report(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.native_video_prep import native_video_prep_capability_report as _impl
+    from taichi_vision.taichi_algorithm.compression.native_video_prep import native_video_prep_capability_report as _impl
     return _impl(*args, **kwargs)
 
 
 def package_webp_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.webp_aot import package_webp_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.webp_aot import package_webp_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def build_webp_payload(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.webp_aot import build_webp_payload as _impl
+    from taichi_vision.taichi_algorithm.compression.webp_aot import build_webp_payload as _impl
     return _impl(*args, **kwargs)
 
 
 def save_webp_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.webp_aot import save_webp_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.webp_aot import save_webp_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def encode_webp_lossless_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.webp_aot import encode_webp_lossless_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.webp_aot import encode_webp_lossless_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def save_webp_lossless_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.webp_aot import save_webp_lossless_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.webp_aot import save_webp_lossless_aot as _impl
     return _impl(*args, **kwargs)
 
 
 def parse_webp_aot(*args, **kwargs):
-    from taichi_library.taichi_algorithm.compression.webp_aot import parse_webp_aot as _impl
+    from taichi_vision.taichi_algorithm.compression.webp_aot import parse_webp_aot as _impl
     return _impl(*args, **kwargs)
 
 

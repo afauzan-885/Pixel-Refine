@@ -3,9 +3,16 @@ Bootstrap-like Button Components for PySide6
 Provides reusable button components with variants and customization
 """
 
-from PySide6.QtWidgets import QPushButton, QWidget, QHBoxLayout, QVBoxLayout
-from PySide6.QtCore import Signal, QSize, Qt
-from PySide6.QtGui import QIcon, QPainter, QColor, QBrush
+from PySide6.QtWidgets import (
+    QPushButton,
+    QWidget,
+    QHBoxLayout,
+    QVBoxLayout,
+    QSizePolicy,
+    QStyle,
+)
+from PySide6.QtCore import Signal, QSize, Qt, QEvent
+from PySide6.QtGui import QIcon, QPainter, QColor, QBrush, QFontMetrics
 from . import theme
 
 
@@ -38,8 +45,17 @@ class Button(QPushButton):
         hover_color=None,
         parent=None,
     ):
-        super().__init__(text, parent)
+        self._full_text = str(text or "")
+        self._content_width_limit = None
+        self._content_width_reference = None
+        self._content_width_margin = 0
+        self._content_min_width = 0
+        self._explicit_tooltip = ""
+        self._refreshing_content = False
+
+        super().__init__("", parent)
         self.variant = variant
+        super().setText(self._full_text)
 
         # Set object name for styling
         if object_name:
@@ -58,6 +74,130 @@ class Button(QPushButton):
         # Apply custom colors if provided (overrides stylesheet)
         if bg_color or text_color or hover_color:
             self._apply_custom_colors(bg_color, text_color, hover_color)
+
+    def setText(self, text):
+        """Keep the full label while displaying a layout-safe elided label."""
+        self._full_text = str(text or "")
+        super().setText(self._full_text)
+        self._refresh_content_presentation()
+
+    def full_text(self):
+        """Return the unmodified label, even when the button is elided."""
+        return self._full_text
+
+    def setToolTip(self, text):
+        """Preserve caller tooltips while appending the full elided label."""
+        self._explicit_tooltip = str(text or "")
+        self._refresh_content_presentation()
+
+    def set_content_width_limit(
+        self, width=None, *, reference=None, margin=0, minimum_width=0
+    ):
+        """Fit the button to content while respecting an optional widget width.
+
+        ``reference`` is observed for resize events, making this useful for a
+        button that must never exceed a sibling input such as a combo box.
+        Long labels are elided and the complete value is exposed by tooltip.
+        """
+        if self._content_width_reference is not None:
+            self._content_width_reference.removeEventFilter(self)
+        self._content_width_reference = reference
+        if reference is not None:
+            reference.installEventFilter(self)
+        self._content_width_limit = width
+        self._content_width_margin = max(0, int(margin or 0))
+        self._content_min_width = max(0, int(minimum_width or 0))
+        self._refresh_content_presentation()
+
+    # Qt-style alias for consumers that use the GenericUILibrary naming style.
+    setContentWidthLimit = set_content_width_limit
+
+    def refresh_content_width(self):
+        """Recalculate the displayed label after a parent layout settles."""
+        self._refresh_content_presentation()
+
+    def _resolved_content_width_limit(self):
+        limit = self._content_width_limit
+        reference = self._content_width_reference
+        if reference is not None:
+            reference_width = int(reference.width() or reference.sizeHint().width())
+            if reference_width > 0:
+                limit = reference_width - self._content_width_margin
+        if limit is None:
+            return None
+        return max(1, int(limit))
+
+    def _refresh_content_presentation(self):
+        if not hasattr(self, "_full_text"):
+            return
+        if self._refreshing_content:
+            return
+        self._refreshing_content = True
+
+        limit = self._resolved_content_width_limit()
+        if limit is None:
+            super().setText(self._full_text)
+            super().setToolTip(self._explicit_tooltip)
+            self._refreshing_content = False
+            return
+
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        # Clear a previous fixed width before asking Qt for the natural size.
+        # This mirrors QComboBox::AdjustToContents and prevents an old,
+        # truncated width from feeding back into the next calculation.
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(16777215)
+        self.setMinimumSize(QSize(0, 0))
+        self.setMaximumSize(QSize(16777215, 16777215))
+        super().setText(self._full_text)
+        self.adjustSize()
+        metrics = QFontMetrics(self.font())
+        button_margin = self.style().pixelMetric(
+            QStyle.PixelMetric.PM_ButtonMargin, None, self
+        )
+        # Include the actual stylesheet padding used by the generic button
+        # (8px on each side) plus a small border/style allowance.  Using only
+        # PM_ButtonMargin made the label width look sufficient numerically but
+        # still clipped visually during painting.
+        horizontal_padding = max(40, int(button_margin) * 2 + 24)
+        content_width = max(
+            metrics.horizontalAdvance(self._full_text) + horizontal_padding,
+            self.sizeHint().width(),
+        )
+        width = min(limit, max(self._content_min_width, content_width))
+        width = max(1, width)
+        self.setFixedWidth(width)
+
+        available_text_width = max(1, width - horizontal_padding)
+        display_text = metrics.elidedText(
+            self._full_text,
+            Qt.TextElideMode.ElideRight,
+            available_text_width,
+        )
+        super().setText(display_text)
+        if display_text != self._full_text:
+            tooltip = self._full_text
+            if self._explicit_tooltip:
+                tooltip = f"{self._explicit_tooltip}\n\n{self._full_text}"
+            super().setToolTip(tooltip)
+        else:
+            super().setToolTip(self._explicit_tooltip)
+        self._refreshing_content = False
+
+    def eventFilter(self, watched, event):
+        if watched is self._content_width_reference and event.type() in (
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.FontChange,
+        ):
+            self._refresh_content_presentation()
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._content_width_limit is not None or self._content_width_reference is not None:
+            self._refresh_content_presentation()
 
     def _apply_custom_colors(self, bg_color=None, text_color=None, hover_color=None):
         """Apply custom colors via inline stylesheet"""

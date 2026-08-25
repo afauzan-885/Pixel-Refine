@@ -10,11 +10,11 @@ import tempfile
 import unittest
 import zipfile
 
-from taichi_library.taichi_aot.artifact_targets import TargetSpec, _artifact_matches_target
+from taichi_vision.taichi_aot.artifact_targets import TargetSpec, _artifact_matches_target
 
 
 ROOT = Path(__file__).resolve().parents[4]
-PATH = ROOT / "taichi_library" / "taichi_algorithm" / "aot_py" / "target_registry.py"
+PATH = ROOT / "taichi_vision" / "taichi_algorithm" / "aot_py" / "target_registry.py"
 SPEC = importlib.util.spec_from_file_location("pixel_refine_target_registry_test", PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)

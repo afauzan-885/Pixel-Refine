@@ -166,6 +166,11 @@ class SpatialFusionProcessor:
         print(f"[SpatialFusion] Processing {num_images} images with GPU AOT...")
         print(f"[SpatialFusion] Work resolution: {work_res_w}x{work_res_h}")
         print(
+            "[SpatialFusion] Analysis buffer: "
+            f"{'naturalTonemapping -> float32 -> grayscale' if is_linear_mode else 'standard normalized grayscale'}; "
+            "fusion buffer: linear normalized float32"
+        )
+        print(
             f"[SpatialFusion] Tile size: {tile_w}x{tile_h}, Rows: {len(row_starts)}, Cols: {len(col_starts)}"
         )
 

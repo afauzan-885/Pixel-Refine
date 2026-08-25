@@ -37,6 +37,10 @@ from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_impor
 from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_thumbnail_service import (
     stop_process_thumbnails,
 )
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    ThumbnailPolicy,
+    thumbnail_creation_enabled,
+)
 
 from resources.GenericUILibrary import ScrollContainer, live_update
 
@@ -170,6 +174,8 @@ class BulkPageLayout(QWidget):
 
     def __init__(self, db_path=None):
         super().__init__()
+        self.thumbnail_policy = ThumbnailPolicy(self)
+        self.thumbnail_policy.changed.connect(self._on_thumbnail_policy_changed)
         self.thumbnail_threads = []
         self.thumbnail_placeholders = weakref.WeakValueDictionary()
         self.active_skeletons = {}
@@ -599,6 +605,9 @@ class BulkPageLayout(QWidget):
 
     def _enqueue_thumbnail_loading(self, panel):
         """Tambahkan panel ke dalam antrean pemuatan thumbnail sekuensial."""
+        if not thumbnail_creation_enabled(self.thumbnail_policy):
+            return
+
         if not hasattr(self, "_thumbnail_batch_queue"):
             self._thumbnail_batch_queue = []
         if panel not in self._thumbnail_batch_queue:
@@ -607,6 +616,11 @@ class BulkPageLayout(QWidget):
 
     def _process_thumbnail_queue(self):
         """Proses antrean thumbnail secara sekuensial per batch (1 batch 100% baru lanjut ke batch berikutnya)."""
+        if not thumbnail_creation_enabled(self.thumbnail_policy):
+            self._thumbnail_batch_queue.clear()
+            self._is_thumbnail_queue_running = False
+            return
+
         if getattr(self, "_is_thumbnail_queue_running", False):
             return
         if not getattr(self, "_thumbnail_batch_queue", None):
@@ -625,6 +639,31 @@ class BulkPageLayout(QWidget):
             )
         else:
             self._on_batch_thumbnail_completed()
+
+    @Slot(bool)
+    def _on_thumbnail_policy_changed(self, enabled):
+        if enabled:
+            return
+
+        self._thumbnail_batch_queue.clear()
+        self._is_thumbnail_queue_running = False
+        # Cancel workers but keep the visible panels in place.  The regular
+        # stop_thumbnail() path also hides/caches panels for mode switching,
+        # which is not appropriate for a settings toggle.
+        stop_process_thumbnails(self.thumbnail_threads)
+
+        panels = list(self.active_batch_panels.values()) + list(
+            self._panel_cache.values()
+        )
+        seen = set()
+        for panel in panels:
+            if panel is None or id(panel) in seen:
+                continue
+            seen.add(id(panel))
+            try:
+                panel.disable_thumbnail_loading()
+            except Exception:
+                pass
 
     def _on_batch_thumbnail_completed(self):
         """Dipanggil ketika satu batch selesai memuat thumbnail 100% atau setelah 6 detik inactivity watchdog."""

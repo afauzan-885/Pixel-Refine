@@ -186,6 +186,7 @@ def create_blending_weights(tile_h, tile_w, overlap_h, overlap_w):
     """
     Membuat peta bobot blending 2D berbasis Hanning agar transisi antar tile halus.
     """
+
     def axis_weights(length, overlap):
         length = int(length)
         overlap = max(0, min(int(overlap), max(0, length // 2)))
@@ -541,6 +542,263 @@ def save_aligned_image(
     print(f"  [Save] {filename} disimpan (Harvest: {harvest_mode}).")
 
 
+# NanoFlow uses a static B=1 ONNX contract.  Keep the session and the small
+# half-resolution inference buffers separate from the original image objects:
+# the AI proxy is disposable, while the source passed to remap remains at its
+# original dtype/bit depth and resolution.
+_FLOW_NET_SESSION_CACHE = {}
+_FLOW_NET_PATCH_SIZE = 256
+
+
+def _flow_net_session():
+    import onnxruntime as ort
+
+    cache_key = "nanoflow_256_gpu_dml_strict"
+    cached = _FLOW_NET_SESSION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if "DmlExecutionProvider" not in ort.get_available_providers():
+        raise RuntimeError(
+            "flow_net requires DmlExecutionProvider; "
+            f"available={ort.get_available_providers()}"
+        )
+
+    model_path = os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "../../../../../../test_algorithm/nanoFlow/GPU/nanoflow_256_gpu.onnx",
+        )
+    )
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError(f"flow_net model not found: {model_path}")
+
+    options = ort.SessionOptions()
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    options.enable_mem_pattern = False
+    options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+    session = ort.InferenceSession(
+        model_path,
+        sess_options=options,
+        providers=["DmlExecutionProvider"],
+    )
+    actual = session.get_providers()
+    if "DmlExecutionProvider" not in actual:
+        raise RuntimeError(f"flow_net did not initialize DirectML: {actual}")
+    _FLOW_NET_SESSION_CACHE[cache_key] = session
+    print(f"[FlowNet] Loaded DirectML model: {model_path}")
+    return session
+
+
+def _flow_net_proxy_uint8(image, ref_dtype):
+    """Create a disposable uint8 BGR/gray proxy without touching ``image``."""
+    if hasattr(image, "to_numpy"):
+        image = image.to_numpy()
+    array = np.asarray(image)
+    if array.ndim not in (2, 3):
+        raise ValueError(f"flow_net expects 2D/3D image, got {array.shape}")
+
+    if np.issubdtype(array.dtype, np.integer):
+        if array.dtype == np.uint8:
+            proxy = array
+        else:
+            max_value = float(np.iinfo(array.dtype).max)
+            if np.issubdtype(array.dtype, np.unsignedinteger):
+                # OpenCV performs the scale-and-round directly into uint8,
+                # avoiding a full-resolution float32 staging buffer.
+                proxy = cv2.convertScaleAbs(array, alpha=255.0 / max_value)
+            else:
+                proxy = np.clip(
+                    array.astype(np.float32) * (255.0 / max_value), 0.0, 255.0
+                ).astype(np.uint8)
+    else:
+        values = array.astype(np.float32, copy=False)
+        # Desktop alignment frames are normalized when floating point.  Keep
+        # the conversion explicit so the proxy never aliases the source.
+        scale = 255.0 if float(np.nanmax(values)) <= 1.00001 else 1.0
+        proxy = np.clip(values * scale, 0.0, 255.0).astype(np.uint8)
+
+    if proxy.ndim == 3:
+        if proxy.shape[2] == 1:
+            proxy = proxy[:, :, 0]
+        elif proxy.shape[2] >= 3:
+            proxy = cv2.cvtColor(proxy[:, :, :3], cv2.COLOR_BGR2GRAY)
+        else:
+            raise ValueError(f"flow_net unsupported channel shape: {proxy.shape}")
+    return np.ascontiguousarray(proxy, dtype=np.uint8)
+
+
+def _flow_net_tiled(session, ref_gray_u8, curr_gray_u8, work_h, work_w):
+    """Run static 256-pixel NanoFlow tiles and stitch half-resolution flow."""
+    patch = _FLOW_NET_PATCH_SIZE
+    overlap = 0.30
+    stride = max(1, patch - int(patch * overlap))
+    ref_work = ref_gray_u8
+    if ref_work.shape[:2] != (work_h, work_w):
+        ref_work = cv2.resize(
+            ref_work, (work_w, work_h), interpolation=cv2.INTER_LINEAR
+        )
+    curr_work = curr_gray_u8
+    if curr_work.shape[:2] != (work_h, work_w):
+        curr_work = cv2.resize(
+            curr_work, (work_w, work_h), interpolation=cv2.INTER_LINEAR
+        )
+    ref_work = np.ascontiguousarray(ref_work, dtype=np.float32) / 255.0
+    curr_work = np.ascontiguousarray(curr_work, dtype=np.float32) / 255.0
+
+    flow_accum = np.zeros((work_h, work_w, 2), dtype=np.float32)
+    weight_accum = np.zeros((work_h, work_w), dtype=np.float32)
+    hann = np.hanning(patch).astype(np.float32)
+    window = np.maximum(np.outer(hann, hann), 1e-4)
+    input_names = [item.name for item in session.get_inputs()]
+    if set(input_names) != {"ref_img", "support_img"}:
+        raise RuntimeError(f"flow_net input contract mismatch: {input_names}")
+
+    for y in range(0, work_h, stride):
+        y_end = min(y + patch, work_h)
+        y_start = max(0, y_end - patch)
+        for x in range(0, work_w, stride):
+            x_end = min(x + patch, work_w)
+            x_start = max(0, x_end - patch)
+            height = y_end - y_start
+            width = x_end - x_start
+
+            ref_patch = ref_work[y_start:y_end, x_start:x_end]
+            curr_patch = curr_work[y_start:y_end, x_start:x_end]
+            if height != patch or width != patch:
+                pad_h = patch - height
+                pad_w = patch - width
+                ref_patch = np.pad(ref_patch, ((0, pad_h), (0, pad_w)), mode="edge")
+                curr_patch = np.pad(curr_patch, ((0, pad_h), (0, pad_w)), mode="edge")
+            ref_input = np.ascontiguousarray(ref_patch[None, None], dtype=np.float32)
+            curr_input = np.ascontiguousarray(curr_patch[None, None], dtype=np.float32)
+            flow = session.run(
+                ["flow"],
+                {"ref_img": ref_input, "support_img": curr_input},
+            )[0]
+            flow = np.asarray(flow, dtype=np.float32)
+            if flow.shape != (1, 2, patch, patch):
+                raise RuntimeError(f"flow_net output contract mismatch: {flow.shape}")
+            flow = np.transpose(flow[0], (1, 2, 0))[:height, :width]
+            local_window = window[:height, :width]
+            flow_accum[y_start:y_end, x_start:x_end] += flow * local_window[..., None]
+            weight_accum[y_start:y_end, x_start:x_end] += local_window
+
+    return flow_accum / np.maximum(weight_accum[..., None], 1e-6)
+
+
+def _flow_net_upscale_flow(flow_work, full_h, full_w):
+    work_h, work_w = flow_work.shape[:2]
+    scale_x = np.float32(full_w / max(1, work_w))
+    scale_y = np.float32(full_h / max(1, work_h))
+    return np.stack(
+        (
+            cv2.resize(
+                flow_work[..., 0], (full_w, full_h), interpolation=cv2.INTER_LINEAR
+            )
+            * scale_x,
+            cv2.resize(
+                flow_work[..., 1], (full_w, full_h), interpolation=cv2.INTER_LINEAR
+            )
+            * scale_y,
+        ),
+        axis=-1,
+    ).astype(np.float32, copy=False)
+
+
+def _perform_alignment_flow_net(
+    images,
+    update_progress,
+    stop_requested,
+    save_align_image,
+    harvest_alignment,
+    progress_start,
+    progress_end,
+    return_format,
+    return_flow,
+    index_offset,
+    save_folder,
+    save_prefix,
+    h5_file_handle=None,
+):
+    """Half-resolution 8-bit NanoFlow inference followed by original-data warp."""
+    import taichi_vision.taichi_aot as taichi_aot
+
+    if len(images) <= 1:
+        return True
+    session = _flow_net_session()
+    reference = images[0]
+    reference_array = (
+        reference.to_numpy()
+        if hasattr(reference, "to_numpy")
+        else np.asarray(reference)
+    )
+    ref_proxy = _flow_net_proxy_uint8(
+        reference_array, getattr(reference_array, "dtype", np.uint8)
+    )
+    full_h, full_w = reference_array.shape[:2]
+    work_h = max(1, (full_h + 1) // 2)
+    work_w = max(1, (full_w + 1) // 2)
+    # Keep only one disposable half-resolution reference proxy for all frames.
+    ref_work_proxy = cv2.resize(
+        ref_proxy, (work_w, work_h), interpolation=cv2.INTER_LINEAR
+    )
+    del ref_proxy
+    flow_results = {}
+    print(
+        f"[FlowNet] half-resolution={work_w}x{work_h} patch=256 "
+        f"source_dtype={reference_array.dtype} warp=original-data"
+    )
+
+    for i in range(1, len(images)):
+        if stop_requested and stop_requested():
+            break
+        original = images[i]
+        curr_proxy = _flow_net_proxy_uint8(
+            original, getattr(original, "dtype", np.uint8)
+        )
+        flow_work = _flow_net_tiled(session, ref_work_proxy, curr_proxy, work_h, work_w)
+        flow_full = _flow_net_upscale_flow(flow_work, full_h, full_w)
+        if not np.isfinite(flow_full).all():
+            raise RuntimeError(f"flow_net produced non-finite flow for frame {i}")
+        if return_flow:
+            flow_results[i] = flow_full
+
+        aligned = taichi_aot.remap_with_flow(
+            original,
+            flow_full,
+            full_h,
+            full_w,
+            return_gpu=(return_format == "ti_ndarray"),
+        )
+        images[i] = aligned
+        if save_align_image and not hasattr(aligned, "to_numpy"):
+            save_aligned_image(
+                aligned,
+                i + index_offset,
+                "FLOW_NET",
+                save_folder=save_folder,
+                save_prefix=save_prefix,
+                harvest_mode=harvest_alignment,
+            )
+        if h5_file_handle is not None and not hasattr(aligned, "to_numpy"):
+            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+                save_to_hdf5,
+            )
+
+            save_to_hdf5(h5_file_handle, f"image_{i}", aligned, {})
+        if update_progress:
+            fraction = i / max(1, len(images) - 1)
+            update_progress(
+                int(progress_start + fraction * (progress_end - progress_start)),
+                f"Alignment gambar {i}/{len(images) - 1} (FlowNet)...",
+            )
+        del curr_proxy, flow_work, flow_full
+
+    return (True, flow_results) if return_flow else True
+
+
 def perform_alignment_gpu(
     images,
     reference_image_float,
@@ -566,6 +824,23 @@ def perform_alignment_gpu(
     Berkomunikasi langsung dengan compute_flow (AOT) via AOTEngine dengan
     suntikan matriks parameter radius_map dinamis per frame.
     """
+    if optical_flow_type == "flow_net" or kwargs.get("flow_backend") == "flow_net":
+        return _perform_alignment_flow_net(
+            images,
+            update_progress,
+            stop_requested,
+            save_align_image,
+            harvest_alignment,
+            progress_start,
+            progress_end,
+            return_format,
+            return_flow,
+            kwargs.get("index_offset", 0),
+            kwargs.get("save_folder", "save_align_image"),
+            kwargs.get("save_prefix"),
+            kwargs.get("h5_file_handle"),
+        )
+
     from taichi_vision.taichi_aot import get_engine
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
         taichi_bridge,
@@ -712,6 +987,55 @@ def perform_alignment_gpu(
                     (h_w // 4, w_w // 4, 2), dtype=np.float32, is_vector=False
                 )
 
+            def _refresh_frame_flow_buffers():
+                """Allocate flow storage for one frame only.
+
+                The automatic smoothing/remap pipeline may retire a flow
+                wrapper after its native graph sequence completes. Reusing
+                the same wrapper for the next support frame then presents a
+                stale handle to ``align_end_to_end_3layer``. Keep the CUDA
+                runtime shared, but give every frame a fresh flow wrapper.
+                """
+
+                nonlocal flow_l0, flow_l1, flow_l2
+                nonlocal flow_temp_l0, flow_temp_l1, flow_temp_l2
+                for buffer in (
+                    flow_l0,
+                    flow_l1,
+                    flow_l2,
+                    flow_temp_l0,
+                    flow_temp_l1,
+                    flow_temp_l2,
+                ):
+                    try:
+                        if buffer is not None:
+                            buffer.destroy()
+                    except Exception:
+                        pass
+
+                flow_l0 = engine.allocate(
+                    (h_w, w_w, 2), dtype=np.float32, is_vector=False
+                )
+                flow_l1 = engine.allocate(
+                    (h_w // 2, w_w // 2, 2), dtype=np.float32, is_vector=False
+                )
+                flow_l2 = engine.allocate(
+                    (h_w // 4, w_w // 4, 2), dtype=np.float32, is_vector=False
+                )
+                flow_temp_l0 = None
+                flow_temp_l1 = None
+                flow_temp_l2 = None
+                if flow_backend == "horn_schunck":
+                    flow_temp_l0 = engine.allocate(
+                        (h_w, w_w, 2), dtype=np.float32, is_vector=False
+                    )
+                    flow_temp_l1 = engine.allocate(
+                        (h_w // 2, w_w // 2, 2), dtype=np.float32, is_vector=False
+                    )
+                    flow_temp_l2 = engine.allocate(
+                        (h_w // 4, w_w // 4, 2), dtype=np.float32, is_vector=False
+                    )
+
             # Iterative Warping Grayscale Scratch Buffers
             comp_l1_warped = engine.allocate(
                 (h_w // 2, w_w // 2), dtype=np.float32, is_vector=False
@@ -774,6 +1098,12 @@ def perform_alignment_gpu(
                 for i in range(1, num_images):
                     if stop_requested and stop_requested():
                         break
+
+                    # Refresh after every completed frame. The first set was
+                    # allocated above; subsequent frames must not reuse a
+                    # wrapper that a previous smoothing/remap graph retired.
+                    if i > 1:
+                        _refresh_frame_flow_buffers()
 
                     # A. Siapkan Piramida Gambar Kompetitor (Overwrite in place)
                     comp_pyramid = taichi_bridge.prepare_comparison_for_alignment(
@@ -975,7 +1305,9 @@ def perform_alignment_gpu(
                         # expose a full-resolution dense LR flow so consumers
                         # such as SplattingSR can reuse the exact dispatch
                         # instead of estimating motion a second time.
-                        flow_work = np.asarray(smooth_flow_buf.to_numpy(), dtype=np.float32)
+                        flow_work = np.asarray(
+                            smooth_flow_buf.to_numpy(), dtype=np.float32
+                        )
                         full_h_ref = int(kwargs.get("full_h_ref", images[i].shape[0]))
                         full_w_ref = int(kwargs.get("full_w_ref", images[i].shape[1]))
                         if flow_work.shape[:2] != (full_h_ref, full_w_ref):
@@ -983,14 +1315,26 @@ def perform_alignment_gpu(
                             sy = float(full_h_ref) / float(max(1, flow_work.shape[0]))
                             flow_full = np.stack(
                                 [
-                                    cv2.resize(flow_work[..., 0], (full_w_ref, full_h_ref), interpolation=cv2.INTER_LINEAR) * np.float32(sx),
-                                    cv2.resize(flow_work[..., 1], (full_w_ref, full_h_ref), interpolation=cv2.INTER_LINEAR) * np.float32(sy),
+                                    cv2.resize(
+                                        flow_work[..., 0],
+                                        (full_w_ref, full_h_ref),
+                                        interpolation=cv2.INTER_LINEAR,
+                                    )
+                                    * np.float32(sx),
+                                    cv2.resize(
+                                        flow_work[..., 1],
+                                        (full_w_ref, full_h_ref),
+                                        interpolation=cv2.INTER_LINEAR,
+                                    )
+                                    * np.float32(sy),
                                 ],
                                 axis=-1,
                             )
                         else:
                             flow_full = flow_work
-                        flow_results[i] = np.ascontiguousarray(flow_full, dtype=np.float32)
+                        flow_results[i] = np.ascontiguousarray(
+                            flow_full, dtype=np.float32
+                        )
 
                     # Downstream confidence/splat pipelines may request only
                     # the shared flow.  Avoid constructing a second full
@@ -1223,7 +1567,7 @@ def perform_alignment_gpu(
         is_aot = os.environ.get("PIXEL_REFINE_AOT_MODE") == "1"
         if is_aot:
             print(
-                "[GPU Alignment] Running synchronously on caller thread (Pure Vulkan AOT C++)..."
+                f"[GPU Alignment] Running synchronously on caller thread (Pure {active_arch.upper()} AOT C++)..."
             )
             success = _run_gpu_alignment_loop()
         else:
@@ -1266,7 +1610,7 @@ def perform_image_alignment(
 
     """
     Menyelaraskan (align) gambar dengan manajemen sumber daya yang aman.
-    Supported types: 'raft', 'alignment_tile', 'block_align', 'farneback', 'farneback_jit', 'farneback_aot'
+    Supported types: 'raft', 'alignment_tile', 'block_align', 'farneback', 'farneback_jit', 'farneback_aot', 'flow_net'
     """
 
     num_images = len(images)
@@ -1279,7 +1623,7 @@ def perform_image_alignment(
     save_prefix = kwargs.get("save_prefix", None)
     save_folder = kwargs.get("save_folder", "save_align_image")
 
-    # [GPU-AUTO] Redirect to Taichi AOT GPU if type is alignment_tile/block_align/horn_schunck/farneback_jit/farneback_aot
+    # [GPU-AUTO] Redirect to GPU alignment for AOT and NanoFlow backends.
     # This ensures that high-level pipelines (SimilarityMNFR) automatically use GPU acceleration.
     if optical_flow_type in (
         "alignment_tile",
@@ -1287,6 +1631,7 @@ def perform_image_alignment(
         "horn_schunck",
         "farneback_jit",
         "farneback_aot",
+        "flow_net",
     ):
         # print("[Alignment Core] Redirecting to GPU Alignment Pipeline (AOT)...")
         gpu_kwargs = dict(kwargs)

@@ -679,7 +679,7 @@ def compile_demosaic_family(family, backend, target_id=None):
     save_path = _os.path.join(_TCM_DIR, target, f"{artifact}_{target}.tcm")
     _os.makedirs(_os.path.dirname(save_path), exist_ok=True)
     module_name = (
-        f"taichi_library.taichi_algorithm.demosaicing.{FAMILY_COMPILER_MODULE[family]}"
+        f"taichi_vision.taichi_algorithm.demosaicing.{FAMILY_COMPILER_MODULE[family]}"
     )
     mod = importlib.import_module(module_name)
     fn = getattr(mod, FAMILY_COMPILER_FUNC[family])

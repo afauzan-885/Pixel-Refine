@@ -4,6 +4,9 @@ from PySide6.QtCore import QThread, Signal, QMutex, QWaitCondition, QFile, QSema
 from PIL import Image, ImageOps
 import rawpy
 from config import CACHE_DIR, SUPPORTED_FORMATS
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    thumbnail_creation_enabled,
+)
 
 semaphore = QSemaphore(4) # Limit to 4 concurrent thumbnail processing threads
 
@@ -40,7 +43,7 @@ class ThumbnailLoader(QThread):
         result_image = QImage()
         semaphore.acquire()
         try:
-            if self.isInterruptionRequested():
+            if self.isInterruptionRequested() or not thumbnail_creation_enabled():
                 return
 
             self.mutex.lock()
@@ -57,7 +60,7 @@ class ThumbnailLoader(QThread):
                     result_image = cached_image
                     return
 
-            if self.isInterruptionRequested():
+            if self.isInterruptionRequested() or not thumbnail_creation_enabled():
                 return
 
             pil_thumb = None
@@ -88,7 +91,7 @@ class ThumbnailLoader(QThread):
             except Exception as e:
                 print(f"[BulkThumbnailService] Fail to process {self.image_path}: {e}")
 
-            if pil_thumb:
+            if pil_thumb and thumbnail_creation_enabled():
                 if pil_thumb.mode == "RGB":
                     q_image = QImage(pil_thumb.tobytes(), pil_thumb.width, pil_thumb.height, pil_thumb.width * 3, QImage.Format.Format_RGB888)
                 elif pil_thumb.mode == "RGBA":
@@ -104,7 +107,7 @@ class ThumbnailLoader(QThread):
 
         finally:
             semaphore.release()
-            if not self.isInterruptionRequested():
+            if not self.isInterruptionRequested() and thumbnail_creation_enabled():
                 self.thumbnail_ready.emit(result_image, self.image_path)
 
 

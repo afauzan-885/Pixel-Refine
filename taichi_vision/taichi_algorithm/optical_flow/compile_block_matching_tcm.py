@@ -16,10 +16,10 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 import importlib
-bm = importlib.import_module("taichi_library.taichi_algorithm.optical_flow.block_matching")
+bm = importlib.import_module("taichi_vision.taichi_algorithm.optical_flow.block_matching")
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
 except ImportError:  # Direct script execution.
     from aot_artifact import normalize_tcm
 

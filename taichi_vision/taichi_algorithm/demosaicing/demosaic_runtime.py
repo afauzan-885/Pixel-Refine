@@ -9,7 +9,7 @@ backend, register graphs, or change the AOT engine lifecycle.
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-from taichi_library.taichi_aot.engine import (
+from taichi_vision.taichi_aot.engine import (
     InputArray,
     OutputArray,
     engine as default_engine,

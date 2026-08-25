@@ -9,7 +9,7 @@ parity, or native performance.
 Example::
 
     python validate_cuda_tcm_codegen.py --root \
-        taichi_library/taichi_algorithm/aot_tcm/cuda_x86_64_windows_nvidia \
+        taichi_vision/taichi_algorithm/aot_tcm/cuda_x86_64_windows_nvidia \
         --llc path\\to\\llvm\\bin\\llc.exe --targets 52,53,61,120
 """
 
@@ -31,11 +31,11 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from taichi_library.cuda_arch_matrix import CudaTarget, normalize_cuda_target
+from taichi_vision.cuda_arch_matrix import CudaTarget, normalize_cuda_target
 
 
 DEFAULT_ROOT = (
-    ROOT / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "cuda_x86_64_windows_nvidia"
+    ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "cuda_x86_64_windows_nvidia"
 )
 
 

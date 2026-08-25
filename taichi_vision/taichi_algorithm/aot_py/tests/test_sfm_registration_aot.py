@@ -17,7 +17,7 @@ class SfMRegistrationAOTTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[4]
         artifact = (
             root
-            / "taichi_library"
+            / "taichi_vision"
             / "taichi_algorithm"
             / "aot_tcm"
             / "cpu_x86_64_windows"
@@ -29,7 +29,7 @@ class SfMRegistrationAOTTests(unittest.TestCase):
         script = r"""
 import json
 import numpy as np
-from taichi_library.taichi_algorithm.sfm.registration import integrate_tsdf, point_to_plane_icp
+from taichi_vision.taichi_algorithm.sfm.registration import integrate_tsdf, point_to_plane_icp
 
 rng = np.random.default_rng(22)
 target = rng.normal(size=(10, 3)).astype(np.float32)

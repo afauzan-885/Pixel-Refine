@@ -1,7 +1,7 @@
 """Measure NLM block execution and verified cache reuse.
 
 Run with:
-    python -m taichi_library.taichi_algorithm.aot_py.tests.stress_nlm_block
+    python -m taichi_vision.taichi_algorithm.aot_py.tests.stress_nlm_block
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from time import perf_counter
 
 import numpy as np
 
-from taichi_library import taichi_aot
+from taichi_vision import taichi_aot
 
 
 def _run(source):

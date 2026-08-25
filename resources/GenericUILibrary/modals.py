@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFrame,
     QStyle,
+    QSizePolicy,
+    QApplication,
 )
 from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor
@@ -77,7 +79,7 @@ class Modal(QDialog):
 
     def add_footer_button(self, text, variant="secondary", callback=None):
         """Add button to footer"""
-        import buttons
+        from . import buttons
 
         btn = buttons.Button(text, variant=variant)
 
@@ -89,6 +91,27 @@ class Modal(QDialog):
 
         self.footer.add_action(btn)
         return btn
+
+    def fit_to_content(self, max_width=None, max_height=None):
+        """Resize the dialog to its current content without exceeding the screen."""
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.adjustSize()
+        hint = self.sizeHint()
+        width = hint.width()
+        height = hint.height()
+        screen = QApplication.screenAt(self.frameGeometry().center())
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            max_width = min(max_width or available.width() - 40, available.width() - 40)
+            max_height = min(max_height or available.height() - 80, available.height() - 80)
+        if max_width:
+            width = min(width, int(max_width))
+        if max_height:
+            height = min(height, int(max_height))
+        self.resize(max(1, width), max(1, height))
+        return self.size()
 
     def to_qml(self, indent=0):
         tab = "    " * indent

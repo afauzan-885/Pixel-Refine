@@ -10,12 +10,12 @@ does not promote the generic automatic-block registry.
 Examples (repository root)::
 
     $env:BACKEND = "cpu"
-    python -m taichi_library.taichi_algorithm.aot_py.tools.probe_resize_partition --backend cpu
+    python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_resize_partition --backend cpu
 
     $env:BACKEND = "vulkan"
     $env:VULKAN_VENDOR = "nvidia"
-    python -m taichi_library.taichi_algorithm.aot_py.tools.probe_resize_partition --backend vulkan --device 0
-    python -m taichi_library.taichi_algorithm.aot_py.tools.probe_resize_partition --backend opengl --device 0 --expected-vendor NVIDIA
+    python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_resize_partition --backend vulkan --device 0
+    python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_resize_partition --backend opengl --device 0 --expected-vendor NVIDIA
 """
 
 from __future__ import annotations
@@ -314,8 +314,8 @@ def run(
         os.environ.setdefault("TARGET_VENDOR", "nvidia")
 
     # Import only after backend selection variables are set.
-    from taichi_library.taichi_algorithm import aot_api as aot
-    from taichi_library.taichi_aot import engine
+    from taichi_vision.taichi_algorithm import aot_api as aot
+    from taichi_vision.taichi_aot import engine
 
     runtime_backend = str(getattr(engine, "arch", backend) or backend).strip().lower()
     if runtime_backend != str(backend).strip().lower():

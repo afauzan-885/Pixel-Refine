@@ -30,7 +30,7 @@ import importlib
 import os
 import sys
 
-module = importlib.import_module("taichi_library.taichi_algorithm")
+module = importlib.import_module("taichi_vision.taichi_algorithm")
 names = list(getattr(module, "__all__", ()))
 missing = [name for name in names if not hasattr(module, name)]
 star_namespace = {}
@@ -39,7 +39,7 @@ try:
     # Exercise the public import contract itself.  ``exec`` keeps the probe
     # namespace isolated and, importantly, does not invoke any imported
     # callable; it only binds the names selected by ``__all__``.
-    exec("from taichi_library.taichi_algorithm import *", star_namespace)
+    exec("from taichi_vision.taichi_algorithm import *", star_namespace)
 except Exception as exc:
     star_error = f"{type(exc).__name__}: {exc}"
 star_missing = [name for name in names if name not in star_namespace]
@@ -75,7 +75,7 @@ _ADAPTER_PROBE = r"""
 import os
 import sys
 import numpy as np
-import taichi_library.taichi_algorithm as ta
+import taichi_vision.taichi_algorithm as ta
 
 image = np.zeros((16, 16), dtype=np.float32)
 image[8, :] = 1.0
@@ -101,7 +101,7 @@ _JIT_ADAPTER_PROBE = r"""
 import os
 import sys
 import numpy as np
-import taichi_library.taichi_algorithm as ta
+import taichi_vision.taichi_algorithm as ta
 
 image = np.zeros((8, 8), dtype=np.float32)
 image[2:6, 3:5] = 1.0

@@ -8,8 +8,8 @@ qualify block partitioning or GPU overlap.
 Examples::
 
     $env:AOT_MODE = "1"
-    python -m taichi_library.taichi_algorithm.aot_py.tools.probe_build_flow_maps_native --backend cpu
-    python -m taichi_library.taichi_algorithm.aot_py.tools.probe_build_flow_maps_native --backend vulkan --device 0
+    python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_build_flow_maps_native --backend cpu
+    python -m taichi_vision.taichi_algorithm.aot_py.tools.probe_build_flow_maps_native --backend vulkan --device 0
 """
 
 from __future__ import annotations
@@ -104,8 +104,8 @@ def run(backend: str, device: int = 0) -> dict[str, Any]:
     os.environ["AOT_DEVICE"] = str(int(device))
     if backend == "vulkan":
         os.environ.setdefault("TARGET_VENDOR", "nvidia")
-    from taichi_library.taichi_algorithm import aot_api as aot
-    from taichi_library.taichi_aot import engine
+    from taichi_vision.taichi_algorithm import aot_api as aot
+    from taichi_vision.taichi_aot import engine
 
     rng = np.random.default_rng(20260810)
     flow = rng.normal(0.0, 0.25, size=(7, 11, 2)).astype(np.float32)

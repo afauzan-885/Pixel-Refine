@@ -6,13 +6,13 @@ import unittest
 
 import numpy as np
 
-from taichi_library.taichi_aot.block import (
+from taichi_vision.taichi_aot.block import (
     can_auto_block,
     can_auto_partition_dispatch,
     can_partition_block,
     registered_block_adapters,
 )
-from taichi_library.taichi_aot.block_adapters import (
+from taichi_vision.taichi_aot.block_adapters import (
     JBLU_PARTITION_ADAPTER_OPERATIONS,
     register_jblu_partition_adapters,
     run_jblu_partition_tiled,

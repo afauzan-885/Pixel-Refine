@@ -10,15 +10,15 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
 except ImportError:
     from aot_artifact import archive_module
 
 try:
-    from taichi_library.taichi_algorithm.demosaicing.demosaic_aot_builder import (
+    from taichi_vision.taichi_algorithm.demosaicing.demosaic_aot_builder import (
         register_bilinear_graphs,
     )
-    from taichi_library.taichi_algorithm.demosaicing.demosaic_postprocess import (
+    from taichi_vision.taichi_algorithm.demosaicing.demosaic_postprocess import (
         rgb_to_bgr_i32,
     )
 except ImportError:

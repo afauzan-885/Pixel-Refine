@@ -14,11 +14,11 @@ import subprocess
 import sys
 import tempfile
 from typing import Any, Mapping
-from taichi_library.backend_config import (
+from taichi_vision.backend_config import (
     is_android_runtime,
     requested_backend as _requested_backend,
 )
-from taichi_library.cuda_arch_matrix import (
+from taichi_vision.cuda_arch_matrix import (
     bridge_target_status,
     load_bridge_manifest,
     profile_for,
@@ -177,7 +177,7 @@ def classify_device(device: Any, backend: str, driver: str = "unknown"):
         )
     if backend == "vulkan" and vendor == "intel":
         try:
-            from taichi_library.vulkan_probe import intel_vulkan_is_validated
+            from taichi_vision.vulkan_probe import intel_vulkan_is_validated
 
             validated = intel_vulkan_is_validated(int(os.environ.get("AOT_DEVICE", 0)))
         except Exception:
@@ -241,7 +241,7 @@ def backend_candidates(device: Any = "unknown"):
         return ["vulkan", "gles", "cpu"]
     if vendor == "intel":
         try:
-            from taichi_library.vulkan_probe import intel_vulkan_is_validated
+            from taichi_vision.vulkan_probe import intel_vulkan_is_validated
 
             if intel_vulkan_is_validated(int(os.environ.get("AOT_DEVICE", 0))):
                 return ["vulkan", "opengl", "cpu"]
@@ -277,10 +277,10 @@ def opengl_native_probe(operation: str, timeout: float = 8.0) -> bool:
     if cache_key in cache:
         return cache[cache_key]
     snippets = {
-        "guided": "from taichi_library.taichi_aot import guided_filter_aot; guided_filter_aot(a,a,radius=1,epsilon=1e-3)",
-        "inpaint": "from taichi_library.taichi_aot import inpaint; inpaint(a,m,inpaint_radius=1)",
-        "seamless": "from taichi_library.taichi_aot import seamless_clone_aot; seamless_clone_aot(a,a,m,center=(4,4),max_iterations=2)",
-        "median": "from taichi_library.taichi_aot import median_filter, engine; b=engine.upload(a); median_filter(b); engine.sync(); b.destroy()",
+        "guided": "from taichi_vision.taichi_aot import guided_filter_aot; guided_filter_aot(a,a,radius=1,epsilon=1e-3)",
+        "inpaint": "from taichi_vision.taichi_aot import inpaint; inpaint(a,m,inpaint_radius=1)",
+        "seamless": "from taichi_vision.taichi_aot import seamless_clone_aot; seamless_clone_aot(a,a,m,center=(4,4),max_iterations=2)",
+        "median": "from taichi_vision.taichi_aot import median_filter, engine; b=engine.upload(a); median_filter(b); engine.sync(); b.destroy()",
     }
     shape_init = (
         "a=np.ones((8,8,3), np.float32); m=np.ones((8,8), np.float32); "

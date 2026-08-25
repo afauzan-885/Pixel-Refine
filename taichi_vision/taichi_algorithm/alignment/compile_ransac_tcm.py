@@ -10,7 +10,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Impor kernel homography solver dari ransac
-from taichi_library.taichi_algorithm.alignment.ransac import (
+from taichi_vision.taichi_algorithm.alignment.ransac import (
     ransac_homography_kernel,
     find_best_candidate_kernel,
     refine_homography_iterative_kernel,

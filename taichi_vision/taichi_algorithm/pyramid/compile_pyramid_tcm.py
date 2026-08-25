@@ -13,7 +13,7 @@ if project_root not in sys.path:
 
 # Set AOT Mode globally before importing taichi_worker or related scripts
 
-from taichi_library.taichi_algorithm.pyramid import pyramid
+from taichi_vision.taichi_algorithm.pyramid import pyramid
 
 def compile_pyramid_aot(arch=ti.vulkan, save_path="pyramid_vulkan.tcm"):
     print(f"\n>>> Compiling PYRAMID AOT for: {arch}")

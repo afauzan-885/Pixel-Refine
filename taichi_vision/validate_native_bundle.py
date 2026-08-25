@@ -161,7 +161,7 @@ def validate_native_bundle(root: str | Path) -> NativeBundleValidationResult:
     """Validate manifest, checksums, artifact set, and native bridge set.
 
     ``root`` is either the temporary staging root returned by
-    :func:`taichi_library.release_bundle.plan_aot_bundle` or the root of an
+    :func:`taichi_vision.release_bundle.plan_aot_bundle` or the root of an
     extracted release.  Every listed artifact must exist exactly once, match
     its SHA-256/size record, and belong to a listed target.  Target-qualified
     bridge directories are authoritative when present; a generic backend
@@ -169,9 +169,9 @@ def validate_native_bundle(root: str | Path) -> NativeBundleValidationResult:
     """
 
     root = Path(root).resolve()
-    manifest_path = root / "taichi_library" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
+    manifest_path = root / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
     tcm_root = manifest_path.parent
-    dll_root = root / "taichi_library" / "taichi_algorithm" / "aot_py" / "aot_dll"
+    dll_root = root / "taichi_vision" / "taichi_algorithm" / "aot_py" / "aot_dll"
     if not manifest_path.is_file():
         _fail(f"release manifest is missing: {manifest_path}")
     try:

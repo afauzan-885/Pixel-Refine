@@ -6,7 +6,7 @@ in a child process and records progress after every lifecycle gate so an
 access violation or driver abort can be attributed to the last completed
 stage.
 
-This file intentionally lives outside ``taichi_library.taichi_aot``. Importing
+This file intentionally lives outside ``taichi_vision.taichi_aot``. Importing
 that package creates the process-wide AOT singleton, which would defeat probe
 isolation and could route quarantined Intel Vulkan back to OpenGL.
 """
@@ -26,13 +26,13 @@ import tempfile
 import threading
 import time
 
-# Running this file directly makes ``taichi_library`` (rather than its parent)
+# Running this file directly makes ``taichi_vision`` (rather than its parent)
 # sys.path[0]. Add the repository root before importing the shared helpers.
 _IMPORT_ROOT = Path(__file__).resolve().parent.parent
 if str(_IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(_IMPORT_ROOT))
 
-from taichi_library.device_selection import (
+from taichi_vision.device_selection import (
     device_fingerprint,
     is_translation_device,
     make_device_selector,
@@ -42,7 +42,7 @@ from taichi_library.device_selection import (
     resolve_device_selector,
     scan_vulkan_device_records,
 )
-from taichi_library.spirv_compatibility import (
+from taichi_vision.spirv_compatibility import (
     AUDIT_SCHEMA,
     audit_vulkan_inventory,
     evaluate_device_compatibility,
@@ -90,7 +90,7 @@ def _project_root() -> Path:
 def _bridge_path(root: Path) -> Path:
     return (
         root
-        / "taichi_library"
+        / "taichi_vision"
         / "taichi_algorithm"
         / "aot_py"
         / "aot_dll"
@@ -102,7 +102,7 @@ def _bridge_path(root: Path) -> Path:
 def _default_module(root: Path) -> Path:
     return (
         root
-        / "taichi_library"
+        / "taichi_vision"
         / "taichi_algorithm"
         / "aot_tcm"
         / "vulkan_x86_64_windows"
@@ -113,7 +113,7 @@ def _default_module(root: Path) -> Path:
 def _vulkan_artifacts(root: Path):
     """Return target-qualified Vulkan artifacts, excluding legacy root files."""
 
-    artifact_root = root / "taichi_library" / "taichi_algorithm" / "aot_tcm"
+    artifact_root = root / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
     target_root = artifact_root / "vulkan_x86_64_windows"
     return sorted(target_root.glob("*_vulkan_x86_64_windows.tcm"), key=lambda p: p.name)
 
@@ -130,7 +130,7 @@ def vulkan_inventory_digest(project_root=None):
     """Hash every shipped Vulkan artifact and the active bridge binary."""
     root = Path(project_root or _project_root()).resolve()
     artifact_root = (
-        root / "taichi_library" / "taichi_algorithm" / "aot_tcm"
+        root / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
     )
     paths = _vulkan_artifacts(root)
     artifact_count = len(paths)
@@ -138,19 +138,20 @@ def vulkan_inventory_digest(project_root=None):
     if bridge.is_file():
         paths.append(bridge)
     runtime_sources = sorted(
-        (root / "taichi_library" / "taichi_aot").glob("*.py"),
+        (root / "taichi_vision" / "taichi_aot").glob("*.py"),
         key=lambda path: path.name,
     )
     runtime_sources.extend(
         (
-            root / "taichi_library" / "device_selection.py",
-            root / "taichi_library" / "intel_vulkan_qualification.py",
-            root / "taichi_library" / "spirv_compatibility.py",
+            root / "taichi_vision" / "device_selection.py",
+            root / "taichi_vision" / "intel_vulkan_qualification.py",
+            root / "taichi_vision" / "spirv_compatibility.py",
             root
-            / "taichi_library"
-            / "taichi_algorithm"
-            / "aot_py"
-            / "tests"
+            / "pixel_refine_desktop"
+            / "ui"
+            / "views"
+            / "settings"
+            / "Perfomance"
             / "test_comprehensif.py",
             Path(__file__).resolve(),
         )
@@ -569,7 +570,7 @@ def _child_probe(args) -> int:
             artifacts = sorted(
                 (
                     root
-                    / "taichi_library"
+                    / "taichi_vision"
                     / "taichi_algorithm"
                     / "aot_tcm"
                 ).glob("vulkan_x86_64_windows/*_vulkan_x86_64_windows.tcm"),
@@ -847,7 +848,7 @@ def run_intel_vulkan_comprehensive(
 
     bicubic = (
         root
-        / "taichi_library"
+        / "taichi_vision"
         / "taichi_algorithm"
         / "aot_tcm"
         / "bicubic_vulkan.tcm"
@@ -926,10 +927,11 @@ def run_intel_vulkan_comprehensive(
 
     test_script = (
         root
-        / "taichi_library"
-        / "taichi_algorithm"
-        / "aot_py"
-        / "tests"
+        / "pixel_refine_desktop"
+        / "ui"
+        / "views"
+        / "settings"
+        / "Perfomance"
         / "test_comprehensif.py"
     )
     environment = os.environ.copy()

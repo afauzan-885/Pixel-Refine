@@ -9,12 +9,12 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from taichi_library.taichi_algorithm.aot_py.aot_artifact import archive_module
+from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
 
-from taichi_library.taichi_algorithm.demosaicing.demosaic_aot_builder import (
+from taichi_vision.taichi_algorithm.demosaicing.demosaic_aot_builder import (
     register_arm_graphs,
 )
-from taichi_library.taichi_algorithm.demosaicing.demosaic_postprocess import (
+from taichi_vision.taichi_algorithm.demosaicing.demosaic_postprocess import (
     median_filter_3x3_clamp,
     rgb_to_bgr_i32,
 )

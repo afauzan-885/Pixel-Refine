@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from taichi_library.taichi_algorithm.aot_py.arm64_simulator import (
+from taichi_vision.taichi_algorithm.aot_py.arm64_simulator import (
     simulate_arm64_block_plan,
 )
 

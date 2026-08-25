@@ -18,7 +18,7 @@ import numpy as np
 
 
 def _load_modules():
-    # Importing taichi_library.taichi_algorithm normally constructs the AOT
+    # Importing taichi_vision.taichi_algorithm normally constructs the AOT
     # engine.  This benchmark is intentionally a pure semantic oracle, so it
     # loads only the compression modules and their relative dependencies.
     import importlib.util

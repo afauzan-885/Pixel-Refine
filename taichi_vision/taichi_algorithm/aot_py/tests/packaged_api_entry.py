@@ -44,7 +44,7 @@ def main() -> int:
     os.environ.setdefault("AOT_DEVICE", "0")
     os.environ["AOT_STRICT_BACKEND"] = "1"
 
-    from taichi_library import taichi_aot
+    from taichi_vision import taichi_aot
 
     src = np.linspace(0.0, 1.0, 64 * 64 * 3, dtype=np.float32).reshape(64, 64, 3)
     copied = np.asarray(taichi_aot.copy(src))

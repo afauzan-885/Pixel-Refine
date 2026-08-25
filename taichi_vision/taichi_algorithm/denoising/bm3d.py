@@ -633,7 +633,7 @@ def hfcd_denoise(src, sigma, block_size=8, search_radius=15,
 
     # --- AOT path (production) ---
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_library import taichi_aot
+        from taichi_vision import taichi_aot
         return taichi_aot.bm3d(
             src, sigma=sigma, block_size=N,
             search_radius=search_radius, max_matches=K,

@@ -14,10 +14,10 @@ import sys
 import unittest
 
 try:
-    from taichi_library.taichi_aot.auto_pipeline import GraphSpec
+    from taichi_vision.taichi_aot.auto_pipeline import GraphSpec
 except ModuleNotFoundError:  # direct ``python path/to/test_*.py`` invocation
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
-    from taichi_library.taichi_aot.auto_pipeline import GraphSpec
+    from taichi_vision.taichi_aot.auto_pipeline import GraphSpec
 
 
 class _FakeModule:
@@ -74,7 +74,7 @@ class SegmentedPipelineLifecycleTests(unittest.TestCase):
             "cpu_x86_64_windows",
         }:
             self.skipTest("set BACKEND=cpu for lifecycle tests")
-        from taichi_library.taichi_aot.engine import engine as engine_handle
+        from taichi_vision.taichi_aot.engine import engine as engine_handle
 
         self.engine = engine_handle._live()
         self._original = {

@@ -5,6 +5,10 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QTimer
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
+# Keep retry behavior shared by placeholder/display paths and the batch queue.
+THUMBNAIL_RETRY_DELAY_MS = 100
+MAX_THUMBNAIL_RETRIES = 3
+
 
 def thumbnail_placeholder(list_layout, image_path, placeholders, retry_count=0):
     try:
@@ -12,9 +16,9 @@ def thumbnail_placeholder(list_layout, image_path, placeholders, retry_count=0):
             raise RuntimeError("Layout is None")
         parent = list_layout.parent()
     except RuntimeError:
-        if retry_count < 3:
+        if retry_count < MAX_THUMBNAIL_RETRIES:
             QTimer.singleShot(
-                100,
+                THUMBNAIL_RETRY_DELAY_MS,
                 lambda: thumbnail_placeholder(
                     list_layout, image_path, placeholders, retry_count + 1
                 ),
@@ -65,6 +69,9 @@ def make_safe_callback(current_path, layout_ref):
 
 
 def show_thumbnail(ref_layout, image, image_path, animator=None, retry_count=0):
+    if image is None or image.isNull():
+        return False
+
     try:
         list_layout = ref_layout() if callable(ref_layout) else ref_layout
         if list_layout is None:
@@ -89,7 +96,7 @@ def show_thumbnail(ref_layout, image, image_path, animator=None, retry_count=0):
                         and w.pixmap() is not None
                         and not w.pixmap().isNull()
                     ):
-                        return
+                        return True
 
                 thumb_label = QLabel()
                 thumb_label.setPixmap(
@@ -111,13 +118,14 @@ def show_thumbnail(ref_layout, image, image_path, animator=None, retry_count=0):
                     thumb_label.setGraphicsEffect(None)
                     fade_in(animator, thumb_label, widget)
 
-                return
+                return True
 
     except RuntimeError:
-        if retry_count < 3:
+        if retry_count < MAX_THUMBNAIL_RETRIES:
             QTimer.singleShot(
-                100,
+                THUMBNAIL_RETRY_DELAY_MS,
                 lambda: show_thumbnail(
                     ref_layout, image, image_path, animator, retry_count + 1
                 ),
             )
+    return False

@@ -36,10 +36,10 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from taichi_library.taichi_algorithm.optical_flow import horn_schunck as tf
+from taichi_vision.taichi_algorithm.optical_flow import horn_schunck as tf
 
 try:
-    from taichi_library.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
+    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
 except ImportError:  # Direct script execution.
     from aot_artifact import normalize_tcm
 

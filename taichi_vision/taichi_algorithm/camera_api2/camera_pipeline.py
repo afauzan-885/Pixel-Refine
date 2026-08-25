@@ -563,7 +563,7 @@ class AOTCameraPipeline:
 
     Queueing, adaptive frame dropping, timestamps, and worker lifecycle are
     shared with the legacy pipeline.  The frame conversion and optional
-    unsharp stage use ``taichi_library.taichi_aot`` and return NumPy frames at
+    unsharp stage use ``taichi_vision.taichi_aot`` and return NumPy frames at
     the display boundary.  This keeps the ownership rule explicit: the
     legacy ``FrameBufferPool`` is never used for native AOT buffers.
     """

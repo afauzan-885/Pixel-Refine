@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from taichi_library.taichi_aot import (
+from taichi_vision.taichi_aot import (
     GLOBAL_REDUCTION_CONTRACT_OPERATIONS,
     global_reduction_partition_gap_report,
 )
-from taichi_library.taichi_aot.block import registered_block_adapters
+from taichi_vision.taichi_aot.block import registered_block_adapters
 
 
 class GlobalReductionContractTests(unittest.TestCase):

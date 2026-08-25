@@ -5,7 +5,7 @@ from pathlib import Path
 import unittest
 from unittest import mock
 
-from taichi_library import llvm20_runtime_paths as paths
+from taichi_vision import llvm20_runtime_paths as paths
 
 
 class LLVM20RuntimePathTests(unittest.TestCase):

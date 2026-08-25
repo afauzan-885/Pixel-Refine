@@ -157,6 +157,42 @@ def to_gamma_proxy_gpu(
     return dst_gpu
 
 
+def _natural_tonemap_analysis_gpu(image, *, input_dtype=None):
+    """Create the RAW-only tone-mapped analysis buffer.
+
+    The returned buffer is deliberately separate from the source buffer.  RAW
+    alignment/spatial analysis may use the display-like tone-mapped values,
+    while fusion must continue to consume the original linear samples.
+    """
+    from taichi_vision.taichi_aot import TaichiGPUBuffer
+
+    if isinstance(image, TaichiGPUBuffer):
+        source = image.to_numpy()
+    else:
+        source = np.asarray(image)
+
+    source = np.asarray(source)
+    if np.issubdtype(source.dtype, np.integer):
+        dtype = input_dtype if input_dtype is not None else source.dtype
+        if np.issubdtype(dtype, np.integer):
+            source = source.astype(np.float32) / float(np.iinfo(dtype).max)
+        else:
+            source = source.astype(np.float32)
+    else:
+        source = source.astype(np.float32, copy=False)
+
+    source = np.ascontiguousarray(source)
+    from config import CALCULATION_TONE_MAPPING_PARAMS
+
+    mapped = taichi_aot.naturalTonemapping(
+        source,
+        return_gpu=False,
+        **CALCULATION_TONE_MAPPING_PARAMS,
+    )
+    mapped = np.ascontiguousarray(np.clip(np.asarray(mapped, dtype=np.float32), 0.0, 1.0))
+    return taichi_aot.upload(mapped, force_8bit=False)
+
+
 def prepare_pyramid_aot(image_gpu, num_layers=3):
     """Creates a multi-layer pyramid (L0, L1, ...). L0=full res, L1=1/2, L2=1/4, etc."""
     layers = [image_gpu]
@@ -227,12 +263,18 @@ def prepare_reference_for_alignment(
         )
         if ref_gpu is not ref_final:
             ref_gpu.release()
+        if is_linear_mode:
+            analysis = _natural_tonemap_analysis_gpu(ref_final)
+            ref_final.destroy()
+            ref_final = analysis
     else:
         ref_gpu = taichi_aot.upload(reference_image_float, force_8bit=True)
         ref_final = ref_gpu
 
         if is_linear_mode:
-            ref_final = to_gamma_proxy_gpu(ref_gpu, scale=proxy_scale)
+            ref_final = _natural_tonemap_analysis_gpu(
+                reference_image_float, input_dtype=getattr(reference_image_float, "dtype", None)
+            )
             if ref_gpu is not ref_final:
                 ref_gpu.release()
 
@@ -317,6 +359,10 @@ def prepare_comparison_for_alignment(
         )
         if comp_gpu is not comp_final:
             comp_gpu.release()
+        if is_linear_mode:
+            analysis = _natural_tonemap_analysis_gpu(comp_final)
+            comp_final.destroy()
+            comp_final = analysis
     else:
         comp_input = taichi_aot.upload(comp_image, force_8bit=True)
         comp_normalized = normalize_image_gpu(comp_input, dtype=ref_dtype)
@@ -325,7 +371,9 @@ def prepare_comparison_for_alignment(
 
         comp_final = comp_normalized
         if is_linear_mode:
-            comp_final = to_gamma_proxy_gpu(comp_normalized, scale=proxy_scale)
+            comp_final = _natural_tonemap_analysis_gpu(
+                comp_image, input_dtype=getattr(comp_image, "dtype", ref_dtype)
+            )
             if comp_normalized is not comp_final:
                 comp_normalized.release()
 
@@ -360,7 +408,10 @@ def prepare_reference_aot(
     ref_final = ref_gpu
 
     if is_linear_mode:
-        ref_final = to_gamma_proxy_gpu(ref_gpu, scale=proxy_scale)
+        ref_final = _natural_tonemap_analysis_gpu(
+            reference_image_float,
+            input_dtype=getattr(reference_image_float, "dtype", None),
+        )
         if ref_gpu is not ref_final:
             ref_gpu.destroy()
 
@@ -410,18 +461,13 @@ def prepare_frame_aot(
     uploaded = taichi_aot.upload(img_orig)
     we_own_uploaded = not input_is_gpu_buf
 
-    # FUSED OPTIMIZATION: Combine normalization scale and gamma proxy scale together.
-    # We directly apply scale (combined with normalizer inverse scale) inside gamma curve kernel if linear mode.
     if is_linear_mode:
-        inv_scale = 1.0
-        buf_dtype = getattr(uploaded, "dtype", ref_dtype)
-        if np.issubdtype(buf_dtype, np.integer):
-            inv_scale = 1.0 / float(np.iinfo(buf_dtype).max)
-
-        # We pass combined scale (proxy_scale * inv_scale) directly to gamma_proxy
-        # to process raw uint16 -> gamma scale in one step!
-        curr_final = to_gamma_proxy_gpu(uploaded, scale=proxy_scale * inv_scale)
-        curr_full_gpu = curr_final  # For linear merging we use gamma proxy space
+        # RAW-only split: fusion keeps normalized linear data; only the
+        # independent analysis buffer receives naturalTonemapping.
+        curr_full_gpu = normalize_image_gpu(uploaded, dtype=ref_dtype)
+        curr_final = _natural_tonemap_analysis_gpu(
+            img_orig, input_dtype=getattr(img_orig, "dtype", ref_dtype)
+        )
     else:
         # Non-linear: directly normalize image
         curr_full_gpu = normalize_image_gpu(uploaded, dtype=ref_dtype)

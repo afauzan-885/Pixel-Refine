@@ -10,20 +10,20 @@ import numpy as np
 
 os.environ.setdefault("AOT_MODE", "1")
 
-from taichi_library.taichi_algorithm.sfm.reconstruction_pipeline import (  # noqa: E402
+from taichi_vision.taichi_algorithm.sfm.reconstruction_pipeline import (  # noqa: E402
     PairwiseSfMConfig,
     reconstruct_pair,
     reconstruct_sequence,
     run_plane_sweep_mvs,
     run_point_cloud_pipeline,
 )
-from taichi_library.taichi_algorithm.sfm.registration import (  # noqa: E402
+from taichi_vision.taichi_algorithm.sfm.registration import (  # noqa: E402
     integrate_tsdf,
     point_to_plane_icp,
     project_points,
     solve_pnp_checked,
 )
-from taichi_library.taichi_algorithm.sfm.poisson_recon import poisson_reconstruct  # noqa: E402
+from taichi_vision.taichi_algorithm.sfm.poisson_recon import poisson_reconstruct  # noqa: E402
 
 
 def _project(points, K, R, t):

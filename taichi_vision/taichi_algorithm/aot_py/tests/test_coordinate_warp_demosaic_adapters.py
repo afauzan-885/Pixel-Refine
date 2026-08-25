@@ -11,7 +11,7 @@ import unittest
 
 import numpy as np
 
-import taichi_library.taichi_aot as taichi_aot
+import taichi_vision.taichi_aot as taichi_aot
 
 
 class CoordinateWarpDemosaicAdapterTests(unittest.TestCase):

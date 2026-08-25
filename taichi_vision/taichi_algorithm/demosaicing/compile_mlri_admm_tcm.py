@@ -11,7 +11,7 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from taichi_library.taichi_algorithm.demosaicing.demosaic_aot_builder import (
+from taichi_vision.taichi_algorithm.demosaicing.demosaic_aot_builder import (
     register_mlri_graphs,
 )
 
