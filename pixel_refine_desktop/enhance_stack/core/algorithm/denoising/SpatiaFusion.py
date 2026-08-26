@@ -196,6 +196,20 @@ class SpatialFusionDenoisingAlgorithm:
 
         if result is None or processed_count <= 0:
             return None
+
+        # Apply AutoEnhance for RAW linear mode before saving / restoring dtype
+        if bool(getattr(ctx, "is_linear_mode", False)):
+            res_f32 = result.astype(np.float32)
+            if float(np.nanmax(res_f32)) > 1.5:
+                res_f32 = res_f32 / 65535.0
+            auto_params = taichi_aot.analyze_auto_enhance_params(res_f32)
+            print(
+                f"[SpatialFusion AutoEnhance] Analyzed result -> "
+                f"gain={auto_params['gain']:.4f}, white={auto_params['white_level']:.4f}, "
+                f"shadow={auto_params['shadow_lift']:.4f}, contrast={auto_params['global_contrast']:.2f}"
+            )
+            result = taichi_aot.AutoEnhance(res_f32, params=auto_params)
+
         result = _restore_output_dtype(result, ref_dtype)
         print(
             f"[SpatialFusion] finished backend={backend} frames={processed_count} "

@@ -1,8 +1,8 @@
 """
 WeightNet ONNX Inference Engine.
-Handles loading images (Taichi AOT Hamilton demosaic + naturalTonemapping for RAW/DNG, PIL RGB for standard images),
+Handles loading images (Taichi AOT Hamilton demosaic for RAW/DNG, Taichi AOT imread for standard images),
 converting burst to NumPy array [1, N, 3, H, W] float32 in [0.0, 1.0],
-tiled ONNX inference (256x256 tiles, Hann overlap-add blending),
+tiled ONNX inference (512x512 tiles, Hann overlap-add blending),
 and full-resolution weighted average fusion.
 Returns raw uncompressed float32 RGB array [H, W, 3] in range [0.0, 1.0].
 """
@@ -17,7 +17,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 DEFAULT_WEIGHTNET_ONNX = Path(
-    "database/Learning_Model/weightNet/GPU/weightnet_256_gpu_fp32.onnx"
+    "database/Learning_Model/weightNet/GPU/weightnet_512_gpu_fp32.onnx"
 )
 RAW_EXTENSIONS = {
     ".dng",
@@ -33,116 +33,165 @@ RAW_EXTENSIONS = {
 }
 
 
-def _load_raw_rgb_linear(path: Path) -> np.ndarray:
-    """Decode RAW through Taichi AOT Hamilton demosaic to linear RGB float32."""
+def _read_image_orientation(image_path: Path) -> int:
     try:
-        from taichi_vision import taichi_aot
-    except ImportError as exc:
-        raise RuntimeError("DNG/RAW input requires taichi_vision AOT package.") from exc
+        with Image.open(image_path) as image:
+            exif = image.getexif()
+            return int(exif.get(0x0112, 1))
+    except Exception:
+        return 1
 
-    try:
-        rgb_linear = taichi_aot.demosaic(
+
+def _apply_orientation(image: np.ndarray, orientation: int) -> np.ndarray:
+    if orientation == 2:
+        return np.fliplr(image)
+    if orientation == 3:
+        return np.rot90(image, 2)
+    if orientation == 4:
+        return np.flipud(image)
+    if orientation == 5:
+        return np.rot90(np.fliplr(image), -1)
+    if orientation == 6:
+        return np.rot90(image, -1)
+    if orientation == 7:
+        return np.rot90(np.fliplr(image), 1)
+    if orientation == 8:
+        return np.rot90(image, 1)
+    return image
+
+
+def load_rgb_linear_image(path: str | Path) -> np.ndarray:
+    """
+    Loads an image in pure linear [0.0, 1.0] RGB float32.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Image not found: {path}")
+
+    from taichi_vision import taichi_aot
+
+    if path.suffix.lower() in RAW_EXTENSIONS:
+        demosaiced = taichi_aot.demosaic(
             str(path),
             method="hamilton",
             return_gpu=False,
         )
-        if rgb_linear is None:
-            raise RuntimeError("Taichi AOT Hamilton demosaic returned None")
-
-        rgb_linear = np.asarray(rgb_linear)
-        if rgb_linear.ndim != 3 or rgb_linear.shape[2] != 3:
+        img_np = np.asarray(demosaiced, dtype=np.float32)
+        if img_np.ndim != 3 or img_np.shape[2] != 3:
             raise ValueError(
-                f"Taichi AOT demosaic returned unexpected shape {rgb_linear.shape}"
+                f"Raw decoding failed for {path}, got shape {img_np.shape}"
             )
-        if not np.issubdtype(rgb_linear.dtype, np.floating):
-            rgb_linear = rgb_linear.astype(np.float32)
-        else:
-            rgb_linear = rgb_linear.astype(np.float32, copy=False)
+        max_v = float(np.max(img_np)) if img_np.size > 0 else 1.0
+        if max_v > 1.5:
+            scale = 65535.0 if max_v > 255.0 else 255.0
+            img_np /= scale
+        return np.ascontiguousarray(np.clip(img_np, 0.0, 1.0), dtype=np.float32)
 
-        return np.ascontiguousarray(rgb_linear, dtype=np.float32)
-    except Exception as exc:
-        raise RuntimeError(
-            f"Taichi AOT RAW pipeline failed for {path.name}: {exc}"
-        ) from exc
+    image_bgr = taichi_aot.imread(path, cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise ValueError(f"Failed to read image: {path}")
 
+    image_rgb = taichi_aot.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    del image_bgr
+    orientation = _read_image_orientation(path)
+    image_rgb = _apply_orientation(image_rgb, orientation)
 
-def load_rgb_linear_image(path: str | Path) -> np.ndarray:
-    """Load one standard image or DNG/RAW as linear RGB float32 in [0, 1]."""
-    path = Path(path)
-    if path.suffix.lower() in RAW_EXTENSIONS:
-        image = _load_raw_rgb_linear(path)
-    else:
-        with Image.open(path) as pil_image:
-            image = np.asarray(ImageOps.exif_transpose(pil_image).convert("RGB"))
-
-    image = np.asarray(image)
-    if image.ndim != 3 or image.shape[2] != 3:
-        raise ValueError(f"Expected RGB image at {path}, got shape {image.shape}")
-    if np.issubdtype(image.dtype, np.integer):
-        scale = 65535.0 if image.dtype.itemsize > 1 else 255.0
-    elif np.issubdtype(image.dtype, np.floating):
-        scale = 1.0
-    else:
-        raise TypeError(f"Unsupported image dtype at {path}: {image.dtype}")
-    return np.ascontiguousarray(image.astype(np.float32) / scale, dtype=np.float32)
+    if np.issubdtype(image_rgb.dtype, np.integer):
+        scale = 65535.0 if image_rgb.dtype.itemsize > 1 else 255.0
+        return np.ascontiguousarray(
+            image_rgb.astype(np.float32) / scale, dtype=np.float32
+        )
+    return np.ascontiguousarray(image_rgb.astype(np.float32), dtype=np.float32)
 
 
 def load_burst_images(paths: Sequence[str | Path]) -> list[np.ndarray]:
     """
-    Loads burst images:
-    - For RAW/DNG: Analyzes histogram metrics ONCE on reference frame (paths[0])
-      and applies AutoEnhance to reference and all support frames.
-    - For Non-RAW (TIFF, PNG, JPEG, etc.): Loads images directly without AutoEnhance
-      to preserve existing tone and color.
+    Loads burst images and applies AutoEnhance:
+    - Analyzes histogram metrics ONCE on reference frame (paths[0]).
+    - Applies AutoEnhance with the derived parameters to reference and all support frames.
     """
     if not paths:
         raise ValueError("Burst is empty.")
 
-    is_raw = any(Path(p).suffix.lower() in RAW_EXTENSIONS for p in paths)
+    from taichi_vision import taichi_aot
 
     # 1. Load Reference Frame
-    ref_image = load_rgb_linear_image(paths[0])
-    target_h, target_w = ref_image.shape[:2]
+    ref_linear = load_rgb_linear_image(paths[0])
+    target_h, target_w = ref_linear.shape[:2]
 
-    if is_raw:
-        from taichi_vision import taichi_aot
+    # 2. Analyze Reference Frame ONCE
+    params = taichi_aot.analyze_auto_enhance_params(ref_linear)
+    print(
+        f"[AutoEnhance Burst] Analyzed ref={Path(paths[0]).name} -> "
+        f"gain={params['gain']:.4f}, white={params['white_level']:.4f}, "
+        f"shadow={params['shadow_lift']:.4f}, contrast={params['global_contrast']:.2f}"
+    )
 
-        params = taichi_aot.analyze_auto_enhance_params(ref_image)
-        print(
-            f"[AutoEnhance Burst] Analyzed RAW ref={Path(paths[0]).name} -> "
-            f"gain={params['gain']:.4f}, white={params['white_level']:.4f}, "
-            f"shadow={params['shadow_lift']:.4f}, contrast={params['global_contrast']:.2f}"
-        )
-        ref_image = taichi_aot.AutoEnhance(ref_image, params=params)
-    else:
-        params = None
-        print(f"[WeightNet Burst] Non-RAW mode: bypass AutoEnhance for {Path(paths[0]).name}")
+    # 3. Apply AutoEnhance to Reference Frame
+    ref_enhanced = taichi_aot.AutoEnhance(ref_linear, params=params)
+    normalized = [np.ascontiguousarray(ref_enhanced, dtype=np.float32)]
 
-    normalized = [np.ascontiguousarray(ref_image, dtype=np.float32)]
-
-    # 2. Load Support Frames
+    # 4. Apply AutoEnhance to Support Frames
     for source_path in paths[1:]:
-        supp_image = load_rgb_linear_image(source_path)
-        if is_raw and params is not None:
+        supp_linear = load_rgb_linear_image(source_path)
+        supp_enhanced = taichi_aot.AutoEnhance(supp_linear, params=params)
+
+        if supp_enhanced.shape[:2] != (target_h, target_w):
+            supp_enhanced = taichi_aot.resize(
+                supp_enhanced,
+                (target_w, target_h),
+                interpolation=taichi_aot.INTER_LINEAR,
+            )
+
+        normalized.append(np.ascontiguousarray(supp_enhanced, dtype=np.float32))
+
+    return normalized
+
+
+def normalize_burst_frames(
+    frames: Sequence[np.ndarray],
+    is_raw: bool = False,
+) -> list[np.ndarray]:
+    """
+    Normalizes a list of in-memory image frames (e.g. from FlowNet alignment):
+    - Scales integer types (uint8, uint16) to float32 in [0.0, 1.0].
+    """
+    if not frames:
+        raise ValueError("Frames list is empty.")
+
+    target_h, target_w = frames[0].shape[:2]
+
+    def _to_f32(img):
+        img_arr = np.asarray(img)
+        if np.issubdtype(img_arr.dtype, np.integer):
+            scale = 65535.0 if img_arr.dtype.itemsize > 1 else 255.0
+            return np.ascontiguousarray(
+                img_arr.astype(np.float32) / scale, dtype=np.float32
+            )
+        elif np.issubdtype(img_arr.dtype, np.floating):
+            max_v = float(np.max(img_arr)) if img_arr.size > 0 else 1.0
+            if max_v > 1.5:
+                scale = 65535.0 if max_v > 255.0 else 255.0
+                return np.ascontiguousarray(
+                    img_arr.astype(np.float32) / scale, dtype=np.float32
+                )
+            return np.ascontiguousarray(
+                img_arr.astype(np.float32, copy=False), dtype=np.float32
+            )
+        return np.ascontiguousarray(img_arr.astype(np.float32), dtype=np.float32)
+
+    normalized = []
+    for f in frames:
+        f32 = _to_f32(f)
+        if f32.shape[:2] != (target_h, target_w):
             from taichi_vision import taichi_aot
 
-            supp_image = taichi_aot.AutoEnhance(supp_image, params=params)
-
-        if supp_image.shape[:2] != (target_h, target_w):
-            if Path(source_path).suffix.lower() in RAW_EXTENSIONS:
-                supp_image = cv2.resize(
-                    supp_image,
-                    (target_w, target_h),
-                    interpolation=cv2.INTER_LANCZOS4,
-                ).astype(np.float32, copy=False)
-            else:
-                image_u8 = np.clip(supp_image * 255.0 + 0.5, 0, 255).astype(np.uint8)
-                resized = Image.fromarray(image_u8, mode="RGB").resize(
-                    (target_w, target_h), Image.Resampling.LANCZOS
-                )
-                supp_image = np.asarray(resized).astype(np.float32) / 255.0
-
-        normalized.append(np.ascontiguousarray(supp_image, dtype=np.float32))
+            f32 = taichi_aot.resize(
+                f32,
+                (target_w, target_h),
+                interpolation=taichi_aot.INTER_LINEAR,
+            )
+        normalized.append(np.ascontiguousarray(f32, dtype=np.float32))
 
     return normalized
 
@@ -158,7 +207,7 @@ def burst_images_to_array(images: Sequence[np.ndarray]) -> np.ndarray:
 def load_weightnet_onnx(
     model_path: str | Path,
     runtime: str = "auto",
-    patch_size: int = 256,
+    patch_size: int = 512,
 ):
     try:
         import onnxruntime as ort
@@ -195,18 +244,6 @@ def load_weightnet_onnx(
         str(model_path), sess_options=options, providers=providers
     )
 
-    inputs = {item.name: tuple(item.shape) for item in session.get_inputs()}
-    outputs = {item.name for item in session.get_outputs()}
-    expected_shape = (1, 1, int(patch_size), int(patch_size))
-    if set(inputs) != {"ref_img", "support_img"}:
-        raise RuntimeError(f"Unexpected WeightNet inputs: {inputs}")
-    if any(shape != expected_shape for shape in inputs.values()):
-        raise RuntimeError(
-            f"Selected ONNX expects {inputs}, but tile size is {patch_size}."
-        )
-    if not {"weight_map", "alpha"}.issubset(outputs):
-        raise RuntimeError(f"Unexpected WeightNet outputs: {sorted(outputs)}")
-
     print(
         f"[WeightNet ONNX] runtime={runtime} model={model_path.name} "
         f"providers={session.get_providers()} patch={patch_size}"
@@ -214,15 +251,160 @@ def load_weightnet_onnx(
     return session
 
 
+def infer_single_support_weight_map(
+    session,
+    ref_work: np.ndarray,
+    supp_work: np.ndarray,
+    *,
+    tile_size: int = 512,
+    overlap: float = 0.30,
+    ghost_penalty: float = 1.0,
+    ghost_cutoff: float = 0.05,
+    stop_event: Optional[threading.Event] = None,
+    progress: Optional[Callable[[int, str], None]] = None,
+) -> tuple[np.ndarray, float]:
+    """
+    Computes 3-channel fusion weight map for a single (ref, support) pair at work resolution.
+    Inputs: ref_work [3, work_h, work_w], supp_work [3, work_h, work_w]
+    Output: weight_map_work [3, work_h, work_w], mean_alpha
+    """
+    channels, work_h, work_w = ref_work.shape
+    try:
+        model_in_shape = session.get_inputs()[0].shape
+        if (
+            len(model_in_shape) >= 4
+            and isinstance(model_in_shape[2], int)
+            and model_in_shape[2] > 0
+        ):
+            tile_size = int(model_in_shape[2])
+    except Exception:
+        pass
+
+    overlap_size = int(tile_size * float(overlap))
+    stride = max(1, tile_size - overlap_size)
+    hann_1d = np.hanning(tile_size).astype(np.float32)
+    window_2d = np.outer(hann_1d, hann_1d).reshape(1, 1, tile_size, tile_size)
+
+    total_tiles = len(range(0, work_h, stride)) * len(range(0, work_w, stride))
+    tile_index = 0
+    alpha_total = 0.0
+
+    weight_map_work = np.zeros((channels, work_h, work_w), dtype=np.float32)
+    weight_stitch_work = np.zeros((1, 1, work_h, work_w), dtype=np.float32)
+
+    for y in range(0, work_h, stride):
+        for x in range(0, work_w, stride):
+            if stop_event is not None and stop_event.is_set():
+                raise RuntimeError("Inference cancelled.")
+            y_end, x_end = min(y + tile_size, work_h), min(x + tile_size, work_w)
+            y_start, x_start = max(0, y_end - tile_size), max(0, x_end - tile_size)
+            current_h, current_w = y_end - y_start, x_end - x_start
+            current_window = window_2d[:, :, :current_h, :current_w]
+
+            # [3, current_h, current_w] -> [3, 1, current_h, current_w]
+            ref_patch = np.ascontiguousarray(
+                ref_work[:, y_start:y_end, x_start:x_end],
+                dtype=np.float32,
+            )[:, None, :, :]
+            support_patch = np.ascontiguousarray(
+                supp_work[:, y_start:y_end, x_start:x_end],
+                dtype=np.float32,
+            )[:, None, :, :]
+
+            if current_h != tile_size or current_w != tile_size:
+                ref_pad = np.zeros(
+                    (channels, 1, tile_size, tile_size), dtype=np.float32
+                )
+                supp_pad = np.zeros(
+                    (channels, 1, tile_size, tile_size), dtype=np.float32
+                )
+                ref_pad[:, :, :current_h, :current_w] = ref_patch
+                supp_pad[:, :, :current_h, :current_w] = support_patch
+                ref_in, supp_in = ref_pad, supp_pad
+            else:
+                ref_in, supp_in = ref_patch, support_patch
+
+            # 1-pass 3-channel batch execution (B=3)
+            weight_np, alpha_np = session.run(
+                ["weight_map", "alpha"],
+                {"ref_img": ref_in, "support_img": supp_in},
+            )
+            weight = np.asarray(weight_np, dtype=np.float32)[
+                :, 0, :current_h, :current_w
+            ]
+
+            weight_map_work[:, y_start:y_end, x_start:x_end] += (
+                weight * current_window[0, 0]
+            )
+            weight_stitch_work[:, :, y_start:y_end, x_start:x_end] += current_window
+
+            alpha_values = np.asarray(alpha_np, dtype=np.float32)
+            if np.isfinite(alpha_values).all():
+                alpha_total += float(alpha_values.mean())
+
+            tile_index += 1
+            if progress:
+                progress(
+                    int(tile_index * 100 / max(1, total_tiles)),
+                    f"FusionNet tile {tile_index}/{total_tiles} (RGB 3-Channel 1-Pass)",
+                )
+
+    weight_map_work = np.clip(weight_map_work / (weight_stitch_work[0] + 1e-8), 0.0, 1.0)
+
+    # Apply ghost penalty & cutoff
+    if ghost_penalty != 1.0:
+        weight_map_work = np.power(weight_map_work, float(ghost_penalty))
+
+    if ghost_cutoff > 0.0:
+        weight_map_work = np.clip(
+            (weight_map_work - float(ghost_cutoff)) / (1.0 - float(ghost_cutoff)),
+            0.0,
+            1.0,
+        )
+
+    mean_alpha = alpha_total / max(1, total_tiles * channels)
+    return weight_map_work, mean_alpha
+
+
+def fuse_support_frame_inplace(
+    sum_img: np.ndarray,
+    weight_sum: np.ndarray,
+    supp_full_chw: np.ndarray,
+    weight_map_work: np.ndarray,
+    full_h: int,
+    full_w: int,
+):
+    """
+    Upsamples single-support weight map to full resolution and blends in-place into sum_img and weight_sum.
+    All inputs and outputs are [3, full_h, full_w] float32 arrays.
+    """
+    import cv2
+
+    channels, work_h, work_w = weight_map_work.shape
+    if (work_h, work_w) != (full_h, full_w):
+        for c in range(channels):
+            w_full_c = cv2.resize(
+                weight_map_work[c],
+                (full_w, full_h),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            sum_img[c] += supp_full_chw[c] * w_full_c
+            weight_sum[c] += w_full_c
+            del w_full_c
+    else:
+        sum_img += supp_full_chw * weight_map_work
+        weight_sum += weight_map_work
+
+
 def run_collab_onnx_inference(
     session,
     burst_full: np.ndarray,
     *,
-    tile_size: int = 256,
+    tile_size: int = 512,
     work_scale: float = 0.50,
     overlap: float = 0.30,
     ghost_penalty: float = 1.0,
-    ghost_cutoff: float = 0.0,
+    ghost_cutoff: float = 0.05,
     stop_event: Optional[threading.Event] = None,
     progress: Optional[Callable[[int, str], None]] = None,
 ) -> tuple[np.ndarray, float]:
@@ -230,16 +412,7 @@ def run_collab_onnx_inference(
     Run core ONNX inference on burst array [1, N, 3, H, W] and return
     uncompressed fused float32 RGB array [H, W, 3] in range [0.0, 1.0].
     """
-    if (
-        not isinstance(burst_full, np.ndarray)
-        or burst_full.ndim != 5
-        or burst_full.shape[0] != 1
-    ):
-        raise ValueError(
-            f"Expected burst [1,N,3,H,W], got {getattr(burst_full, 'shape', type(burst_full))}"
-        )
-    if tile_size not in (256, 512, 1024):
-        raise ValueError("tile_size must be 256, 512, or 1024")
+    from taichi_vision import taichi_aot
 
     burst_full = np.ascontiguousarray(burst_full, dtype=np.float32)
     _, frame_count, channels, full_h, full_w = burst_full.shape
@@ -249,127 +422,80 @@ def run_collab_onnx_inference(
     work_scale = float(work_scale)
     work_h = max(1, int(full_h * work_scale))
     work_w = max(1, int(full_w * work_scale))
+
+    # Reference work frame
     if (work_h, work_w) != (full_h, full_w):
-        burst_work = np.zeros(
-            (1, frame_count, channels, work_h, work_w), dtype=np.float32
+        ref_hwc = np.transpose(burst_full[0, 0], (1, 2, 0))
+        ref_work = np.transpose(
+            taichi_aot.resize(ref_hwc, (work_w, work_h), interpolation=taichi_aot.INTER_AREA),
+            (2, 0, 1),
         )
-        for i in range(frame_count):
-            for c in range(channels):
-                burst_work[0, i, c] = cv2.resize(
-                    burst_full[0, i, c],
-                    (work_w, work_h),
-                    interpolation=cv2.INTER_LINEAR,
-                )
     else:
-        burst_work = burst_full
-
-    burst_gray = (
-        0.299 * burst_work[:, :, 0:1]
-        + 0.587 * burst_work[:, :, 1:2]
-        + 0.114 * burst_work[:, :, 2:3]
-    )
-    overlap_size = int(tile_size * float(overlap))
-    stride = max(1, tile_size - overlap_size)
-    weight_maps_work = np.zeros((frame_count - 1, 1, work_h, work_w), dtype=np.float32)
-    weight_stitch_work = np.zeros((1, 1, work_h, work_w), dtype=np.float32)
-    hann_1d = np.hanning(tile_size).astype(np.float32)
-    window_2d = np.outer(hann_1d, hann_1d).reshape(1, 1, tile_size, tile_size)
-
-    total_tiles = len(range(0, work_h, stride)) * len(range(0, work_w, stride))
-    tile_index = 0
-    alpha_total = 0.0
-    for y in range(0, work_h, stride):
-        for x in range(0, work_w, stride):
-            if stop_event is not None and stop_event.is_set():
-                raise RuntimeError("Inference cancelled.")
-            y_end, x_end = min(y + tile_size, work_h), min(x + tile_size, work_w)
-            y_start, x_start = max(0, y_end - tile_size), max(0, x_end - tile_size)
-            current_h, current_w = y_end - y_start, x_end - x_start
-            ref_patch = np.ascontiguousarray(
-                burst_gray[:, 0, :, y_start:y_end, x_start:x_end],
-                dtype=np.float32,
-            )
-            current_window = window_2d[:, :, :current_h, :current_w]
-            for index in range(1, frame_count):
-                support_patch = np.ascontiguousarray(
-                    burst_gray[:, index, :, y_start:y_end, x_start:x_end],
-                    dtype=np.float32,
-                )
-                if current_h != tile_size or current_w != tile_size:
-                    ref_pad = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
-                    supp_pad = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
-                    ref_pad[:, :, :current_h, :current_w] = ref_patch
-                    supp_pad[:, :, :current_h, :current_w] = support_patch
-                    ref_in, supp_in = ref_pad, supp_pad
-                else:
-                    ref_in, supp_in = ref_patch, support_patch
-
-                weight_np, alpha_np = session.run(
-                    ["weight_map", "alpha"],
-                    {"ref_img": ref_in, "support_img": supp_in},
-                )
-                weight = np.asarray(weight_np, dtype=np.float32)[
-                    :, :, :current_h, :current_w
-                ]
-                weight_maps_work[
-                    index - 1 : index, :, y_start:y_end, x_start:x_end
-                ] += (weight * current_window)
-                alpha_values = np.asarray(alpha_np, dtype=np.float32)
-                if np.isfinite(alpha_values).all():
-                    alpha_total += float(alpha_values.mean())
-
-            weight_stitch_work[:, :, y_start:y_end, x_start:x_end] += current_window
-            tile_index += 1
-            if progress:
-                progress(
-                    int(tile_index * 80 / max(1, total_tiles)),
-                    f"FusionNet tile {tile_index}/{total_tiles}",
-                )
-
-    weight_maps_work = np.clip(weight_maps_work / (weight_stitch_work + 1e-8), 0.0, 1.0)
-
-    # Apply Ghost Penalty (Power scaling) & Soft Thresholding Cutoff
-    if ghost_penalty != 1.0:
-        weight_maps_work = np.power(weight_maps_work, float(ghost_penalty))
-
-    if ghost_cutoff > 0.0:
-        weight_maps_work = np.clip(
-            (weight_maps_work - float(ghost_cutoff)) / (1.0 - float(ghost_cutoff)),
-            0.0,
-            1.0,
-        )
-
-    if (work_h, work_w) != (full_h, full_w):
-        weight_maps_full = np.zeros(
-            (frame_count - 1, 1, full_h, full_w), dtype=np.float32
-        )
-        for i in range(frame_count - 1):
-            weight_maps_full[i, 0] = cv2.resize(
-                weight_maps_work[i, 0], (full_w, full_h), interpolation=cv2.INTER_LINEAR
-            )
-    else:
-        weight_maps_full = weight_maps_work
+        ref_work = burst_full[0, 0]
 
     sum_img = burst_full[0, 0].copy()
-    weight_sum = np.ones((1, full_h, full_w), dtype=np.float32)
-    for index in range(1, frame_count):
-        current_weight = weight_maps_full[index - 1, 0:1]
-        sum_img += burst_full[0, index] * current_weight
-        weight_sum += current_weight
-    result = np.clip(sum_img / (weight_sum + 1e-8), 0.0, 1.0)
-    mean_alpha = alpha_total / max(1, total_tiles * (frame_count - 1))
+    weight_sum = np.ones((channels, full_h, full_w), dtype=np.float32)
+    alpha_total = 0.0
 
-    result_hwc = np.transpose(result, (1, 2, 0))  # [H, W, 3] float32
+    for idx in range(1, frame_count):
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("Inference cancelled.")
+
+        if (work_h, work_w) != (full_h, full_w):
+            supp_hwc = np.transpose(burst_full[0, idx], (1, 2, 0))
+            supp_work = np.transpose(
+                taichi_aot.resize(supp_hwc, (work_w, work_h), interpolation=taichi_aot.INTER_AREA),
+                (2, 0, 1),
+            )
+        else:
+            supp_work = burst_full[0, idx]
+
+        def pair_prog(p_val, p_msg):
+            if progress:
+                mapped = int(((idx - 1) + p_val / 100.0) / (frame_count - 1) * 100)
+                progress(mapped, f"Frame {idx}/{frame_count - 1}: {p_msg}")
+
+        weight_work, alpha_mean = infer_single_support_weight_map(
+            session,
+            ref_work,
+            supp_work,
+            tile_size=tile_size,
+            overlap=overlap,
+            ghost_penalty=ghost_penalty,
+            ghost_cutoff=ghost_cutoff,
+            stop_event=stop_event,
+            progress=pair_prog,
+        )
+        alpha_total += alpha_mean
+
+        fuse_support_frame_inplace(
+            sum_img,
+            weight_sum,
+            burst_full[0, idx],
+            weight_work,
+            full_h,
+            full_w,
+        )
+        del weight_work
+        if (work_h, work_w) != (full_h, full_w):
+            del supp_work
+
+    result = np.clip(sum_img / (weight_sum + 1e-8), 0.0, 1.0)
+    del sum_img, weight_sum
+    mean_alpha = alpha_total / max(1, frame_count - 1)
+    result_hwc = np.transpose(result, (1, 2, 0))
     if progress:
         progress(100, f"Finished ONNX; alpha={mean_alpha:.4f}")
     return result_hwc, mean_alpha
 
 
 def run_weightnet_inference(
-    image_paths: Sequence[str | Path],
+    image_paths: Optional[Sequence[str | Path]] = None,
+    frames: Optional[Sequence[np.ndarray]] = None,
+    is_raw: Optional[bool] = None,
     model_path: str | Path = DEFAULT_WEIGHTNET_ONNX,
     work_scale: float = 0.50,
-    tile_size: int = 256,
+    tile_size: int = 512,
     overlap: float = 0.30,
     ghost_penalty: Optional[float] = None,
     ghost_cutoff: Optional[float] = None,
@@ -378,14 +504,22 @@ def run_weightnet_inference(
 ) -> tuple[np.ndarray, float]:
     """
     Self-contained inference engine:
-    Accepts list of image paths -> loads burst -> executes tiled ONNX inference ->
-    returns raw uncompressed float32 RGB array [H, W, 3] and mean alpha.
+    Accepts list of image paths OR list of in-memory NumPy frames ->
+    executes tiled ONNX inference -> returns raw uncompressed float32 RGB array [H, W, 3] and mean alpha.
     """
+    if frames is None and image_paths is None:
+        raise ValueError("Either image_paths or frames must be provided.")
+
     if progress_callback:
         progress_callback(5, "Loading FusionNet ONNX model...")
     session = load_weightnet_onnx(model_path, runtime="auto", patch_size=tile_size)
 
-    is_raw = any(Path(p).suffix.lower() in RAW_EXTENSIONS for p in image_paths)
+    if is_raw is None:
+        if image_paths:
+            is_raw = any(Path(p).suffix.lower() in RAW_EXTENSIONS for p in image_paths)
+        else:
+            is_raw = False
+
     if ghost_penalty is None:
         ghost_penalty = 1.30 if is_raw else 1.0
     if ghost_cutoff is None:
@@ -397,11 +531,15 @@ def run_weightnet_inference(
     )
 
     if progress_callback:
-        progress_callback(10, f"Loading {len(image_paths)} burst images...")
-    images = load_burst_images(image_paths)
+        progress_callback(10, "Loading and preparing burst frames...")
 
-    burst = burst_images_to_array(images)
-    del images
+    if frames is not None and len(frames) > 0:
+        norm_images = normalize_burst_frames(frames, is_raw=is_raw)
+    else:
+        norm_images = load_burst_images(image_paths)
+
+    burst = burst_images_to_array(norm_images)
+    del norm_images
 
     def internal_progress(val, msg):
         if progress_callback:
@@ -411,8 +549,8 @@ def run_weightnet_inference(
     result_fp32, alpha = run_collab_onnx_inference(
         session,
         burst,
-        work_scale=work_scale,
         tile_size=tile_size,
+        work_scale=work_scale,
         overlap=overlap,
         ghost_penalty=ghost_penalty,
         ghost_cutoff=ghost_cutoff,

@@ -1,44 +1,373 @@
-"""
-WeightNet / FusionNet Desktop Orchestrator.
-Delegates image list to weightnet_engine/weightnet_inference.py, receives uncompressed float32 array,
-and saves the final result.
-"""
-
+import gc
 import os
 import threading
-import traceback
+from contextlib import contextmanager
 from pathlib import Path
 
 import cv2
+import h5py
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QProgressBar, QVBoxLayout
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-    extract_all_metadata,
-    get_all_image_paths_for_single_process,
-    get_all_image_paths_for_batch_process,
-)
-from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
-    BaseAlgorithmWorker,
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.weightnet_engine.flownet_inference import (
+    AOTOpticalFlowAligner,
+    align_support_frame,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.weightnet_engine.weightnet_inference import (
+    DEFAULT_WEIGHTNET_ONNX,
+    RAW_EXTENSIONS,
+    fuse_support_frame_inplace,
+    infer_single_support_weight_map,
+    load_rgb_linear_image,
+    load_weightnet_onnx,
     run_weightnet_inference,
 )
-from resources.styles.stylesheet import PROGRESS_BAR
-from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 
 class FusionNetDenoisingAlgorithm:
-    """WeightNet ONNX-based deep multi-frame fusion denoising adapter."""
+    """WeightNet ONNX-based deep multi-frame fusion denoising adapter with compute_flow.tcm AOT alignment."""
 
     NAME = "FusionNet"
     KIND = "denoising"
-    DESCRIPTION = "Deep learning multi-frame burst fusion using WeightNet ONNX."
+    DESCRIPTION = "Deep learning multi-frame burst fusion with compute_flow.tcm AOT alignment and WeightNet 512."
+
+    @staticmethod
+    def _sorted_image_keys(h5f):
+        return sorted(
+            (key for key in h5f.keys() if key.startswith("image_")),
+            key=lambda item: int(item.split("_", 1)[1]),
+        )
+
+    def _load_inputs(self, ctx, frames):
+        """Return a concrete frame list from HDF5 or memory, or path list."""
+        use_hdf5 = bool(getattr(ctx, "hdf5_path", None)) and os.path.exists(
+            ctx.hdf5_path
+        )
+        if use_hdf5:
+            with h5py.File(ctx.hdf5_path, "r") as h5f:
+                keys = self._sorted_image_keys(h5f)
+                return [h5f[key][:] for key in keys], "hdf5"
+        if frames:
+            return list(frames), "memory"
+        if getattr(ctx, "image_paths", None):
+            return list(ctx.image_paths), "paths"
+        return [], "none"
 
     def run(self, ctx, frames, batch_plan=None):
-        raise RuntimeError("FusionNet must be launched through running_weightnet.")
+        """
+        Execute FlowNet 512 streaming alignment followed by WeightNet 512 ONNX fusion.
+        """
+        inputs, source = self._load_inputs(ctx, frames)
+        if not inputs:
+            print("[FusionNet] No input images/frames available.")
+            return None
+
+        # Resolve parameters
+        params_cfg = getattr(ctx, "params", {}) or {}
+        work_scale = float(params_cfg.get("work_scale", 0.50))
+        tile_size = int(
+            params_cfg.get(
+                "fusionnet_tile_size", params_cfg.get("weightnet_tile_size", 512)
+            )
+        )
+        if tile_size < 512:
+            tile_size = 512
+        overlap = float(params_cfg.get("tile_overlap", params_cfg.get("overlap", 0.30)))
+
+        # Detect RAW mode
+        is_raw = bool(getattr(ctx, "is_linear_mode", False))
+        if not is_raw and getattr(ctx, "image_paths", None):
+            is_raw = any(
+                Path(p).suffix.lower() in RAW_EXTENSIONS for p in ctx.image_paths
+            )
+
+        print(
+            f"[FusionNet] Starting FlowNet 512 + WeightNet 512 pipeline: "
+            f"source={source} frames={len(inputs)} is_raw={is_raw} "
+            f"tile_size={tile_size} work_scale={work_scale}"
+        )
+
+        update_prog = getattr(ctx, "update_progress", None)
+        stop_req = getattr(ctx, "stop_requested", None)
+
+        stop_ev = None
+        if stop_req is not None:
+            stop_ev = threading.Event()
+            if callable(stop_req) and stop_req():
+                return None
+
+        # Helper to convert array to float32 [0, 1]
+        def _to_f32(img):
+            img_arr = np.asarray(img)
+            if np.issubdtype(img_arr.dtype, np.integer):
+                scale = 65535.0 if img_arr.dtype.itemsize > 1 else 255.0
+                return np.ascontiguousarray(
+                    img_arr.astype(np.float32) / scale, dtype=np.float32
+                )
+            elif np.issubdtype(img_arr.dtype, np.floating):
+                max_v = float(np.max(img_arr)) if img_arr.size > 0 else 1.0
+                if max_v > 1.5:
+                    scale = 65535.0 if max_v > 255.0 else 255.0
+                    return np.ascontiguousarray(
+                        img_arr.astype(np.float32) / scale, dtype=np.float32
+                    )
+                return np.ascontiguousarray(
+                    img_arr.astype(np.float32, copy=False), dtype=np.float32
+                )
+            return np.ascontiguousarray(img_arr.astype(np.float32), dtype=np.float32)
+
+        # -------------------------------------------------------------
+        # STEP 1: Process Reference Linear Frame (Anchor) & AutoEnhance Analysis
+        # -------------------------------------------------------------
+        if update_prog:
+            update_prog(2, "Loading reference linear frame...")
+
+        if source == "paths":
+            ref_linear = load_rgb_linear_image(inputs[0])
+        else:
+            ref_linear = _to_f32(inputs[0])
+            inputs[0] = None
+
+        target_h, target_w = ref_linear.shape[:2]
+        ref_linear = np.ascontiguousarray(ref_linear, dtype=np.float32)
+
+        # Analyze AutoEnhance params from reference anchor once
+        auto_params = None
+        if is_raw:
+            from taichi_vision import taichi_aot
+
+            auto_params = taichi_aot.analyze_auto_enhance_params(ref_linear)
+            print(
+                f"[FusionNet AutoEnhance] Analyzed linear ref -> "
+                f"gain={auto_params['gain']:.4f}, white={auto_params['white_level']:.4f}, "
+                f"shadow={auto_params['shadow_lift']:.4f}, contrast={auto_params['global_contrast']:.2f}"
+            )
+            ref_enhanced = np.ascontiguousarray(
+                taichi_aot.AutoEnhance(ref_linear, params=auto_params), dtype=np.float32
+            )
+        else:
+            ref_enhanced = ref_linear
+
+        # Store aligned frames in compact uint16 (75MB per frame) to minimize RAM
+        ref_u16 = np.ascontiguousarray(
+            np.clip(ref_enhanced * 65535.0 + 0.5, 0.0, 65535.0).astype(np.uint16)
+        )
+        aligned_burst_u16 = [ref_u16]
+        del ref_enhanced
+
+        # -------------------------------------------------------------
+        # STEP 2: Persistent AOT Optical Flow Alignment & Direct AutoEnhance
+        # -------------------------------------------------------------
+        total_supp = len(inputs) - 1
+
+        if total_supp > 0:
+            with AOTOpticalFlowAligner(
+                ref_linear,
+                work_scale=work_scale,
+                tile_size=16,
+            ) as aligner:
+                del ref_linear
+                gc.collect()
+
+                for idx, item in enumerate(inputs[1:], start=1):
+                    if stop_ev and stop_ev.is_set():
+                        return None
+
+                    supp_name = Path(item).name if source == "paths" else f"frame_{idx}"
+                    if update_prog:
+                        base_p = 5 + int((idx - 1) / total_supp * 40)
+                        update_prog(
+                            base_p,
+                            f"Taichi AOT optical flow alignment for {supp_name} ({idx}/{total_supp})...",
+                        )
+
+                    # 1. Load support frame
+                    if source == "paths":
+                        supp_linear = load_rgb_linear_image(item)
+                    else:
+                        supp_linear = _to_f32(item)
+                        inputs[idx] = None
+
+                    # 2. Resize support if necessary
+                    if supp_linear.shape[:2] != (target_h, target_w):
+                        from taichi_vision import taichi_aot
+
+                        supp_linear = taichi_aot.resize(
+                            supp_linear,
+                            (target_w, target_h),
+                            interpolation=taichi_aot.INTER_LINEAR,
+                        )
+                    supp_linear = np.ascontiguousarray(supp_linear, dtype=np.float32)
+
+                    # 3. GPU Optical Flow Alignment (compute_flow.tcm)
+                    supp_aligned = aligner.align_frame(
+                        supp_linear,
+                        stop_event=stop_ev,
+                    )
+                    del supp_linear
+
+                    # 4. Direct AutoEnhance
+                    if is_raw and auto_params is not None:
+                        from taichi_vision import taichi_aot
+
+                        supp_enhanced = np.ascontiguousarray(
+                            taichi_aot.AutoEnhance(supp_aligned, params=auto_params),
+                            dtype=np.float32,
+                        )
+                        del supp_aligned
+                    else:
+                        supp_enhanced = supp_aligned
+
+                    # Compact uint16 store
+                    supp_u16 = np.ascontiguousarray(
+                        np.clip(supp_enhanced * 65535.0 + 0.5, 0.0, 65535.0).astype(np.uint16)
+                    )
+                    del supp_enhanced
+                    aligned_burst_u16.append(supp_u16)
+                    gc.collect()
+
+        else:
+            del ref_linear
+            gc.collect()
+
+        # -------------------------------------------------------------
+        # STEP 3: Streaming Pair-by-Pair WeightNet Fusion & Accumulation
+        # -------------------------------------------------------------
+        from taichi_vision import taichi_aot
+
+        if update_prog:
+            update_prog(48, "Loading FusionNet ONNX model & preparing fusion...")
+
+        session = load_weightnet_onnx(
+            DEFAULT_WEIGHTNET_ONNX, runtime="dml", patch_size=tile_size
+        )
+        ghost_pen = 1.30 if is_raw else 1.0
+        ghost_cut = 0.05 if is_raw else 0.0
+
+        # Work Resolution Downscale for WeightNet
+        work_scale = float(work_scale)
+        work_h = max(1, int(target_h * work_scale))
+        work_w = max(1, int(target_w * work_scale))
+
+        import cv2
+
+        # Convert Reference to Float32 CHW
+        ref_f32_hwc = aligned_burst_u16[0].astype(np.float32) / 65535.0
+        ref_full_chw = np.ascontiguousarray(
+            np.transpose(ref_f32_hwc, (2, 0, 1)), dtype=np.float32
+        )
+        sum_img = ref_full_chw.copy()
+        weight_sum = np.ones((3, target_h, target_w), dtype=np.float32)
+
+        if (work_h, work_w) != (target_h, target_w):
+            ref_work_hwc = cv2.resize(
+                ref_f32_hwc, (work_w, work_h), interpolation=cv2.INTER_AREA
+            )
+            ref_work = np.ascontiguousarray(
+                np.transpose(ref_work_hwc, (2, 0, 1)), dtype=np.float32
+            )
+            del ref_work_hwc
+        else:
+            ref_work = ref_full_chw
+        del ref_f32_hwc
+
+        alpha_total = 0.0
+        if total_supp > 0:
+            for idx in range(1, total_supp + 1):
+                if stop_ev and stop_ev.is_set():
+                    return None
+
+                if update_prog:
+                    base_p = 50 + int((idx - 1) / total_supp * 45)
+                    update_prog(
+                        base_p,
+                        f"FusionNet tile weighting & blending for frame {idx}/{total_supp}...",
+                    )
+
+                # 1. Load support frame from compact uint16
+                supp_f32_hwc = aligned_burst_u16[idx].astype(np.float32) / 65535.0
+                aligned_burst_u16[idx] = None  # Free uint16 slot immediately
+
+                supp_full_chw = np.ascontiguousarray(
+                    np.transpose(supp_f32_hwc, (2, 0, 1)), dtype=np.float32
+                )
+
+                # 2. Work Resolution Downscale
+                if (work_h, work_w) != (target_h, target_w):
+                    supp_work_hwc = cv2.resize(
+                        supp_f32_hwc, (work_w, work_h), interpolation=cv2.INTER_AREA
+                    )
+                    supp_work = np.ascontiguousarray(
+                        np.transpose(supp_work_hwc, (2, 0, 1)), dtype=np.float32
+                    )
+                    del supp_work_hwc
+                else:
+                    supp_work = supp_full_chw
+                del supp_f32_hwc
+
+                # 3. Single-Support WeightNet Tile Inference
+                weight_work, alpha_mean = infer_single_support_weight_map(
+                    session,
+                    ref_work,
+                    supp_work,
+                    tile_size=tile_size,
+                    overlap=overlap,
+                    ghost_penalty=ghost_pen,
+                    ghost_cutoff=ghost_cut,
+                    stop_event=stop_ev,
+                )
+                alpha_total += alpha_mean
+                del supp_work
+
+                # 4. In-Place Blending & Instant Purge
+                fuse_support_frame_inplace(
+                    sum_img,
+                    weight_sum,
+                    supp_full_chw,
+                    weight_work,
+                    target_h,
+                    target_w,
+                )
+                del supp_full_chw, weight_work
+                gc.collect()
+
+        del aligned_burst_u16, ref_work
+        gc.collect()
+
+        # -------------------------------------------------------------
+        # STEP 4: Normalize Final Fused Accumulator
+        # -------------------------------------------------------------
+        if update_prog:
+            update_prog(96, "Finalizing deep fusion output...")
+
+        res_chw = np.clip(sum_img / (weight_sum + 1e-8), 0.0, 1.0)
+        del sum_img, weight_sum
+        gc.collect()
+
+        res_fp32 = np.ascontiguousarray(
+            np.transpose(res_chw, (1, 2, 0)), dtype=np.float32
+        )
+        del res_chw
+        gc.collect()
+
+        mean_alpha = alpha_total / max(1, total_supp)
+
+        if res_fp32 is None:
+            return None
+
+        ref_dtype = getattr(ctx, "ref_dtype", np.uint16)
+        if np.issubdtype(ref_dtype, np.integer):
+            info = np.iinfo(ref_dtype)
+            result = np.clip(
+                res_fp32 * float(info.max) + 0.5, info.min, info.max
+            ).astype(ref_dtype)
+        else:
+            result = np.ascontiguousarray(res_fp32, dtype=np.float32)
+
+        print(
+            f"[FusionNet] Pipeline finished successfully: shape={result.shape} dtype={result.dtype} mean_alpha={mean_alpha:.4f}"
+        )
+        return result
 
 
 def save_rgb_result(image_fp32: np.ndarray, output_path: str | Path) -> None:
@@ -65,225 +394,38 @@ def save_rgb_result(image_fp32: np.ndarray, output_path: str | Path) -> None:
             raise RuntimeError(f"Failed to save 16-bit RGB result: {output_path}")
 
 
-def main(
-    db_path,
-    update_progress=None,
-    stop_requested=None,
-    single_process=None,
-    batch_id=None,
-    progress_bar=None,
-    work_scale: float = 0.50,
-    tile_size: int = 256,
-    overlap: float = 0.30,
-):
-    """
-    Orchestrator: resolves image paths -> passes to weightnet_inference ->
-    receives float32 -> saves result to database/stack.
-    """
-    try:
-        if update_progress:
-            update_progress(0, language_config.RUN_IMAGE_PROCESS_STARTED)
-
-        output_folder_stack = "database/stack"
-        os.makedirs(output_folder_stack, exist_ok=True)
-
-        # 1. Mengambil list data gambar dari database
-        if single_process:
-            image_paths = get_all_image_paths_for_single_process(db_path)
-            ref_name = (
-                os.path.splitext(os.path.basename(image_paths[0]))[0]
-                if image_paths
-                else "single_process"
-            )
-        else:
-            if batch_id is None:
-                raise ValueError(
-                    language_config.BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS
-                )
-            image_paths = get_all_image_paths_for_batch_process(db_path, batch_id)
-            ref_name = (
-                os.path.splitext(os.path.basename(image_paths[0]))[0]
-                if image_paths
-                else f"batch_{batch_id}"
-            )
-
-        if not image_paths:
-            if update_progress:
-                update_progress(100, language_config.NO_IMAGE_PATH_PROCESSED_IMAGE)
-            return
-
-        metadata_output_path = os.path.join("database", "align", "metadata.json")
-        try:
-            extract_all_metadata(image_paths, metadata_file=metadata_output_path)
-        except Exception:
-            pass
-
-        output_name_safe = (
-            "".join(c for c in ref_name if c.isalnum() or c in ("_", "-")).rstrip()
-            or "stack_result"
-        )
-        output_path = os.path.join(
-            output_folder_stack, f"{output_name_safe}_weightnet.tif"
-        )
-        print(language_config.OUTPUT_IMAGE_TO_BE_SAVED.format(output_path))
-
-        # 2. Mengumpankan list gambar ke dalam weightnet_inference.py
-        stop_event = threading.Event()
-
-        def progress_bridge(val, msg):
-            if stop_requested and stop_requested():
-                stop_event.set()
-            if update_progress:
-                update_progress(val, msg)
-
-        result_float32, alpha = run_weightnet_inference(
-            image_paths=image_paths,
-            work_scale=work_scale,
-            tile_size=tile_size,
-            overlap=overlap,
-            stop_event=stop_event,
-            progress_callback=progress_bridge,
-        )
-
-        if stop_requested and stop_requested():
-            if update_progress:
-                update_progress(100, "Proses dibatalkan.")
-            return
-
-        # 3. Menerima float32 tak terkompresi & Simpan hasil
-        if update_progress:
-            update_progress(96, "Menyimpan hasil fusi...")
-
-        save_rgb_result(result_float32, output_path)
-
-        final_message = (
-            f"{language_config.IMAGE_PROCESS_FINISHED}: "
-            f"{os.path.basename(output_path)} (alpha={alpha:.4f})"
-        )
-        if update_progress:
-            update_progress(100, final_message)
-
-    except Exception as e:
-        error_message = language_config.RUN_ERROR_MESSAGE.format(error=str(e))
-        traceback.print_exc()
-        if update_progress and not (stop_requested and stop_requested()):
-            update_progress(0, error_message)
-
-
 def running_weightnet(
     parent=None,
     single_process=None,
     batch_id=None,
     progress_callback=None,
     stop_callback=None,
+    merging_mode=None,
+    output_suffix=None,
+    batch_size=None,
+    alignment_backend=None,
+    clear_raw=None,
     db_path=None,
 ):
-    if not db_path:
-        controller = getattr(parent, "controller", None)
-        db_path = getattr(controller, "db_path", None)
-    db_path = (
-        db_path
-        or os.environ.get("PIXEL_REFINE_SESSION_DB")
-        or "pixel_refine_database.db"
+    """Facade delegating to running_mf_denoiser with merging_mode='FusionNet'."""
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
+        running_mf_denoiser,
     )
 
-    # MODE BATCH (TANPA GUI)
-    if batch_id is not None and progress_callback is not None:
-        try:
-            main(
-                db_path=db_path,
-                update_progress=progress_callback,
-                stop_requested=stop_callback,
-                single_process=False,
-                batch_id=batch_id,
-            )
-        except Exception as e:
-            raise e
-        return
-
-    # MODE SINGLE (DENGAN GUI DIALOG)
-    process_finished = False
-    dialog = QDialog(parent)
-    dialog.setWindowTitle(
-        getattr(language_config, "WINDOW_TITLE_WEIGHTNET", "FusionNet Stacking")
-    )
-    dialog.setModal(True)
-    dialog.setFixedSize(300, 90)
-    dialog.setWindowFlags(
-        Qt.WindowType.Window
-        | Qt.WindowType.CustomizeWindowHint
-        | Qt.WindowType.WindowTitleHint
-        | Qt.WindowType.WindowCloseButtonHint
-    )
-
-    layout = QVBoxLayout(dialog)
-    label = QLabel(language_config.WINDOW_START_PROCESSING)
-    layout.addWidget(label)
-
-    progress_bar = QProgressBar()
-    progress_bar.setRange(0, 100)
-    progress_bar.setValue(0)
-    progress_bar.setStyleSheet(PROGRESS_BAR)
-    layout.addWidget(progress_bar)
-
-    worker = BaseAlgorithmWorker(
-        main,
-        db_path,
+    return running_mf_denoiser(
+        parent=parent,
         single_process=single_process,
         batch_id=batch_id,
+        progress_callback=progress_callback,
+        stop_callback=stop_callback,
+        merging_mode=merging_mode or "FusionNet",
+        output_suffix=output_suffix or "weightnet",
+        batch_size=batch_size,
+        alignment_backend=alignment_backend,
+        clear_raw=clear_raw,
+        db_path=db_path,
     )
-    worker.progress_updated.connect(
-        lambda progress, message: (
-            progress_bar.setValue(progress),
-            label.setText(message),
-        )
-    )
-
-    def finish_handler():
-        nonlocal process_finished
-        process_finished = True
-        dialog.close()
-        worker.quit()
-        worker.wait()
-
-    worker.finished.connect(finish_handler)
-
-    def error_handler(error):
-        QMessageBox.critical(
-            dialog, "Error", language_config.RUN_ERROR_STATUS.format(error=error)
-        )
-        dialog.close()
-        worker.quit()
-        worker.wait()
-
-    worker.error_occurred.connect(error_handler)
-
-    def on_dialog_close(event):
-        if process_finished:
-            event.accept()
-        elif worker.isRunning():
-            reply = QMessageBox.question(
-                dialog,
-                "Cancel Process",
-                language_config.CANCEL_PROCESSING,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                worker.stop()
-                worker.quit()
-                worker.wait()
-                event.accept()
-            else:
-                event.ignore()
-        else:
-            event.accept()
-
-    dialog.closeEvent = on_dialog_close
-    worker.start()
-    dialog.exec()
 
 
-if __name__ == "__main__":
-    db_path = "pixel_refine_database.db"
-    main(db_path)
+# Alias
+running_fusionnet = running_weightnet

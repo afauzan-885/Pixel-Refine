@@ -1532,39 +1532,32 @@ class MFDenoiserAlgorithm:
 
         frames = ctx.aligned_frames or ctx.frames
         ctx.result_image = algorithm.run(ctx, frames, batch_plan=batch_plan)
-        if ctx.result_image is not None:
+        if (
+            ctx.result_image is not None
+            and algorithm.NAME not in {"FusionNet", "Similarity", "Similarity Fusion"}
+        ):
             try:
                 from taichi_vision import taichi_aot
-                from config import DEFAULT_TONE_MAPPING_PARAMS
 
-                if ctx.result_image.dtype in (np.float32, np.float64):
+                if bool(getattr(ctx, "is_linear_mode", False)):
                     img_f32 = ctx.result_image.astype(np.float32, copy=False)
-                    max_v = float(np.max(img_f32))
-                    if max_v > 1.0:
+                    max_v = float(np.max(img_f32)) if img_f32.size > 0 else 1.0
+                    if max_v > 1.5:
                         img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
-                    img_tm = taichi_aot.naturalTonemapping(
-                        img_f32, **DEFAULT_TONE_MAPPING_PARAMS
-                    )
-                    if max_v > 255.0:
-                        ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(
+                    auto_params = taichi_aot.analyze_auto_enhance_params(img_f32)
+                    img_tm = taichi_aot.AutoEnhance(img_f32, params=auto_params)
+                    if max_v > 255.0 or ctx.result_image.dtype == np.uint16:
+                        ctx.result_image = np.clip(img_tm * 65535.0 + 0.5, 0, 65535).astype(
                             np.uint16
                         )
                     elif max_v > 1.0:
-                        ctx.result_image = np.clip(img_tm * 255.0, 0, 255).astype(
+                        ctx.result_image = np.clip(img_tm * 255.0 + 0.5, 0, 255).astype(
                             np.uint8
                         )
                     else:
-                        ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(
+                        ctx.result_image = np.clip(img_tm * 65535.0 + 0.5, 0, 65535).astype(
                             np.uint16
                         )
-                elif ctx.result_image.dtype == np.uint16:
-                    img_f32 = ctx.result_image.astype(np.float32) / 65535.0
-                    img_tm = taichi_aot.naturalTonemapping(
-                        img_f32, **DEFAULT_TONE_MAPPING_PARAMS
-                    )
-                    ctx.result_image = np.clip(img_tm * 65535.0, 0, 65535).astype(
-                        np.uint16
-                    )
             except Exception as e_tm:
                 print(f"[MFDenoiser] Tone mapping result image warning: {e_tm}")
         print(f"[MFDenoiser][Merge] result={_frame_info(ctx.result_image)}")
@@ -1870,6 +1863,35 @@ def running_similarity(
         alignment_backend=alignment_backend,
         clear_raw=clear_raw,
     )
+
+
+def running_fusionnet(
+    parent=None,
+    single_process=None,
+    batch_id=None,
+    progress_callback=None,
+    stop_callback=None,
+    merging_mode=None,
+    output_suffix=None,
+    batch_size=None,
+    alignment_backend=None,
+    clear_raw=None,
+):
+    return running_mf_denoiser(
+        parent=parent,
+        single_process=single_process,
+        batch_id=batch_id,
+        progress_callback=progress_callback,
+        stop_callback=stop_callback,
+        merging_mode=merging_mode or "FusionNet",
+        output_suffix=output_suffix or "weightnet",
+        batch_size=batch_size,
+        alignment_backend=alignment_backend,
+        clear_raw=clear_raw,
+    )
+
+
+running_weightnet = running_fusionnet
 
 
 if __name__ == "__main__":

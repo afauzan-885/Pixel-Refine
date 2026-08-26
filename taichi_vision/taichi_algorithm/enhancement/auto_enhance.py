@@ -87,11 +87,30 @@ def analyze_auto_enhance_params(src: Any) -> Dict[str, Any]:
     p_midtone = float(np.percentile(lum_sample, 50.0)) # 50% median
     p_white = float(np.percentile(lum_sample, 99.8))   # 99.8% highlight ceiling
 
-    # Derived parameters
-    target_key = 0.18
-    gain = float(np.clip(target_key / max(log_avg, 1e-3), 0.8, 6.0))
+    # -------------------------------------------------------------------------
+    # Adaptive Key & Low-Key / Night-Scene Awareness:
+    # If histogram is heavily concentrated in the lower shadows (night / low-key scene),
+    # scale target_key smoothly so that dark subjects are brightened and clear,
+    # but the night sky and deep background remain natural and dark (not daylight).
+    # -------------------------------------------------------------------------
+    base_target_key = 0.135
+    if log_avg < 0.075:
+        # Smooth roll-off factor based on geometric mean luminance
+        low_key_factor = float(np.clip(log_avg / 0.075, 0.20, 1.0))
+        target_key = base_target_key * (low_key_factor ** 0.50)
+    else:
+        target_key = base_target_key
+
+    # Clamp maximum gain to prevent over-lifting dark night skies
+    max_gain_cap = float(np.interp(log_avg, [0.005, 0.05, 0.10], [2.4, 3.2, 4.5]))
+    gain = float(np.clip(target_key / max(log_avg, 1e-4), 0.6, max_gain_cap))
     white_level = max(1.2, p_white * gain)
-    shadow_lift = float(np.clip(p_black * 0.5, 0.0, 0.05))
+
+    # In night scenes, prevent shadow pedestal lift from adding milky haze to the black sky
+    if log_avg < 0.04:
+        shadow_lift = float(np.clip(p_black * 0.1, 0.0, 0.005))
+    else:
+        shadow_lift = float(np.clip(p_black * 0.5, 0.0, 0.03))
 
     params = {
         "gain": gain,
@@ -99,7 +118,7 @@ def analyze_auto_enhance_params(src: Any) -> Dict[str, Any]:
         "shadow_lift": shadow_lift,
         "gamma": 2.2,
         "contrast_s_curve": 1.10,
-        "global_contrast": 1.35,  # +35% static contrast boost
+        "global_contrast": 1.40,  # +40% global contrast
         "saturation": 1.05,
         "adaptive_knee": True,
         "metrics": {
