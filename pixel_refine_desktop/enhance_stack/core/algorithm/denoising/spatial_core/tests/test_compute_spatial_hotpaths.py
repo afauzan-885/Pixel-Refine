@@ -3,7 +3,7 @@
 import numpy as np
 import zipfile
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
+from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
     SpatialScratchCache,
     _tcm_graph_available,
 )

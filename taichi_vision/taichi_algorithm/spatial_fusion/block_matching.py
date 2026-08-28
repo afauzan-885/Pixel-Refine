@@ -1,5 +1,5 @@
 """
-Block Matching - Taichi GPU
+Block Matching — Taichi GPU
 ===========================
 Mathematical functions for similarity calculation (1:1 parity with C++ block_matching.cpp).
 """
@@ -17,6 +17,12 @@ if os.environ.get("AOT_MODE", "1") == "0":
         TAICHI_AVAILABLE = True
     except ImportError:
         pass
+
+# Keep the names importable in AOT (non-JIT) mode so package imports and
+# graph compilation helpers work without a live Taichi interpreter.
+fast_tanh = None
+calculate_match_confidence = None
+calculate_hybrid_gradient_optimized = None
 
 if TAICHI_AVAILABLE:
 
@@ -69,7 +75,7 @@ if TAICHI_AVAILABLE:
         """
         weighted_sum = 0.0
         total_weight = 0.0
-        
+
         grad_sensitivity = 202.5
         # Adaptive Vision Boost: increase sensitivity dynamically on low-contrast tiles
         adaptive_grad_sensitivity = grad_sensitivity * (1.0 + 3.0 * flat_weight)
@@ -85,21 +91,21 @@ if TAICHI_AVAILABLE:
             img_y = r + 1 + y * 2
             for x in range((curr_w - 1) // 2):
                 img_x = c + 1 + x * 2
-                
+
                 p1_val = current_img[img_y, img_x]
                 p2_val = reference_img[img_y, img_x]
                 pixel_diff = ti.abs(p1_val - p2_val)
-                
+
                 # --- Read Precomputed Gradients directly ---
                 gx1 = curr_grad_x[img_y, img_x]
                 gy1 = curr_grad_y[img_y, img_x]
                 gx2 = ref_grad_x[img_y, img_x]
                 gy2 = ref_grad_y[img_y, img_x]
-                
+
                 mag1_sq = gx1 * gx1 + gy1 * gy1
                 mag2_sq = gx2 * gx2 + gy2 * gy2
                 min_mag_sq = ti.min(mag1_sq, mag2_sq)
-                
+
                 # Adaptive to local intensity (p2_val): dark areas get higher noise tolerance scale, highlights get stricter.
                 # Linear scaling maps p2_val=0 to scale=3.0 and p2_val=1.0 to scale=1.0. Extremely cheap on GPU.
                 tolerance_scale = ti.max(1.0, ti.min(3.0, 3.0 - 2.0 * p2_val))
@@ -127,20 +133,20 @@ if TAICHI_AVAILABLE:
                             if ratio > 1.0:
                                 ratio = 1.0
                             noise_weight = 0.3 + 0.4 * (1.0 - ratio)
-                
+
                 # --- structure weight & deghosting penalty ---
                 structure_weight = 1.0
                 if min_mag_sq > stab_epsilon and mag1_sq > stab_epsilon and mag2_sq > stab_epsilon:
                     dot = gx1 * gx2 + gy1 * gy2
                     cos_sim = dot / ti.sqrt(mag1_sq * mag2_sq)
-                    
+
                     if min_mag_sq > structure_min_threshold_sq and cos_sim < 0.2:
                         # Mismatched structure orientations: scale up pixel_diff to penalize mismatch and prevent ghosting
                         pixel_diff = pixel_diff * (1.5 - cos_sim)
                     else:
                         score = ti.max(0.0, cos_sim) * ti.sqrt(min_mag_sq)
                         structure_weight = 1.0 + grad_weight_factor * fast_tanh(score * adaptive_grad_sensitivity)
-                    
+
                 final_weight = structure_weight * noise_weight
                 weighted_sum += pixel_diff * final_weight
                 total_weight += final_weight

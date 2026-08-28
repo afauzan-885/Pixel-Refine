@@ -1866,6 +1866,91 @@ def normalize_accumulator(
     return dst
 
 
+# ---------------------------------------------------------------------------
+# Spatial Merging — Ghost Reduction & Multi-Frame Fusion
+# ---------------------------------------------------------------------------
+# Canonical implementation lives in taichi_vision.taichi_algorithm.spatial_fusion.
+# These wrappers expose the public API as ``taichi_aot.spatial_merging`` and
+# related low-level helpers.
+
+
+def spatial_merging(*args, **kwargs):
+    """Ghost-reduction spatial merging for multi-frame burst fusion.
+
+    Exposed as ``taichi_aot.spatial_merging``.  See
+    ``taichi_vision.taichi_algorithm.spatial_fusion.spatial_merging`` for the
+    full signature.  Two modes:
+
+        mode="weights"  → frame-by-frame: one weight map per support frame
+                          (ghost rejection baked in).
+        mode="fuse"     → batch: fused RGB result from all support frames.
+
+    Noise & motion thresholds auto-estimate from the reference when not given.
+    """
+    from taichi_vision.taichi_algorithm.spatial_fusion.spatial_merging import (
+        spatial_merging as _spatial_merging,
+    )
+
+    return _spatial_merging(*args, **kwargs)
+
+
+def generate_spatial_weights(*args, **kwargs):
+    """Generate a ghost-rejection weight map for one frame (low-level)."""
+    from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
+        generate_spatial_weights_taichi,
+    )
+
+    return generate_spatial_weights_taichi(*args, **kwargs)
+
+
+def accumulate_spatial_merging(*args, **kwargs):
+    """Accumulate one frame into a fusion sum with its weight map (low-level).
+
+    Auto-dispatches to the vec3 per-channel kernel when the weight map is 3D.
+    """
+    from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
+        accumulate_spatial_merging_taichi,
+    )
+
+    return accumulate_spatial_merging_taichi(*args, **kwargs)
+
+
+def mean_division_vec3_weight(*args, **kwargs):
+    """Per-channel GPU mean division with reference fallback (low-level)."""
+    from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
+        mean_division_vec3_weight_taichi,
+    )
+
+    return mean_division_vec3_weight_taichi(*args, **kwargs)
+
+
+def SpatialScratchCache(*args, **kwargs):
+    """Reusable per-batch GPU scratch buffers for spatial analysis (low-level)."""
+    from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
+        SpatialScratchCache as _SpatialScratchCache,
+    )
+
+    return _SpatialScratchCache(*args, **kwargs)
+
+
+def estimate_spatial_noise_sigma(*args, **kwargs):
+    """Estimate image noise sigma via Laplacian MAD (low-level)."""
+    from taichi_vision.taichi_algorithm.spatial_fusion.noise_estimation import (
+        estimate_noise_sigma,
+    )
+
+    return estimate_noise_sigma(*args, **kwargs)
+
+
+def compile_spatial_merging_tcm(*args, **kwargs):
+    """Compile and package the spatial-merging AOT TCM (build-time helper)."""
+    from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
+        compile_spatial_tcm,
+    )
+
+    return compile_spatial_tcm(*args, **kwargs)
+
+
 def stitch_tile(
     tile: TaichiGPUBuffer,
     tile_weight: TaichiGPUBuffer,
@@ -5015,7 +5100,7 @@ def smooth_flow_gpu(flow, sigma=1.0, kernel_size=5, dst=None):
             "hazard_policy": "ordered",
         },
         module_keys=("remap", "remap"),
-        retain_buffers=(out_buf,),
+        retain_buffers=(out_buf, flow, flow_src),
     )
 
     engine.sync()

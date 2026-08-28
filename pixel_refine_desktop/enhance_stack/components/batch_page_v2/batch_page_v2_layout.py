@@ -53,8 +53,8 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser impo
     running_similarity as running_mf_similarity,
 )
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.weightnet import (
-    running_weightnet,
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
+    running_fusionnet,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
@@ -550,7 +550,7 @@ class BatchPageV2Layout(QWidget):
                 )
                 denoising_executed = True
             elif denoising_choice in ("Spatial AI", "FusionNet"):
-                running_weightnet(
+                running_fusionnet(
                     self,
                     single_process=True,
                 )

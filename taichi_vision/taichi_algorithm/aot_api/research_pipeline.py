@@ -129,9 +129,16 @@ def _prepare_frames(frames):
 
 
 def _estimate_noise_sigma(gray):
-    highpass = _laplacian_abs(gray)
-    sigma = float(np.std(highpass))
-    return max(sigma, 1e-3)
+    try:
+        from taichi_vision.taichi_algorithm.enhancement.estimate_noise import (
+            estimate_noise,
+        )
+
+        return max(float(estimate_noise(gray)), 1e-3)
+    except Exception:
+        highpass = _laplacian_abs(gray)
+        sigma = float(np.std(highpass))
+        return max(sigma, 1e-3)
 
 
 def hdr_fuse_aot(

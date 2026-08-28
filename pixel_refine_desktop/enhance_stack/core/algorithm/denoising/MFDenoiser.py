@@ -219,10 +219,10 @@ def get_denoising_registry():
         merge_average_from_hdf5,
         merge_average_from_paths,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.SpatiaFusion import (
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.SpatialFusion import (
         SpatialFusionDenoisingAlgorithm,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.weightnet import (
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
         FusionNetDenoisingAlgorithm,
     )
 
@@ -1043,6 +1043,9 @@ class MFDenoiserAlgorithm:
                 ctx.params.get("alignment_plan", "No Alignment"),
             )
         )
+        # FusionNet and Average manage their own zero-copy GPU resident streaming loaders directly from paths!
+        if merge_name in ("fusionnet", "average"):
+            return True
         return merge_name == "average" and alignment_name == "no alignment"
 
     def _is_no_alignment_requested(self, ctx):
@@ -1884,14 +1887,11 @@ def running_fusionnet(
         progress_callback=progress_callback,
         stop_callback=stop_callback,
         merging_mode=merging_mode or "FusionNet",
-        output_suffix=output_suffix or "weightnet",
+        output_suffix=output_suffix or "fusionet",
         batch_size=batch_size,
         alignment_backend=alignment_backend,
         clear_raw=clear_raw,
     )
-
-
-running_weightnet = running_fusionnet
 
 
 if __name__ == "__main__":

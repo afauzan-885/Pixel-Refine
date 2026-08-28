@@ -14,6 +14,11 @@ from .flownet_inference import (
     load_compute_flow_module,
     align_support_frame,
 )
+from .gpu_resident_pipeline import (
+    run_gpu_resident_pipeline,
+    load_frame_to_gpu,
+    GPUResidentAligner,
+)
 
 __all__ = [
     "run_weightnet_inference",
@@ -28,4 +33,7 @@ __all__ = [
     "AOTOpticalFlowAligner",
     "load_compute_flow_module",
     "align_support_frame",
+    "run_gpu_resident_pipeline",
+    "load_frame_to_gpu",
+    "GPUResidentAligner",
 ]

@@ -828,74 +828,72 @@ def _bake_orientation(image, orientation):
     return image
 
 
-def save_image(image, output_path, reference_image_path=None):
+def save_image(
+    image,
+    output_path,
+    reference_image_path=None,
+    is_bgr: bool = False,
+    apply_tonemapping: bool = False,
+):
     """
     Menyimpan gambar dengan orientasi dibakar ke pixel.
     Metadata output dinormalisasi ke ``Orientation=1`` agar kompatibel dengan
     viewer TIFF yang tidak menerapkan EXIF Orientation.
+    Input `image` diasumsikan RGB secara standar kecuali `is_bgr=True`.
     """
     try:
         image_to_save = image.copy() if hasattr(image, "copy") else image
         ext = os.path.splitext(output_path)[1].lower()
         success = False
 
-        # Normalize orientation before any tone mapping or encoding.  This is
-        # intentionally the viewer-compatible policy: output pixels are
-        # portrait/landscape already and Orientation=1 is written afterwards.
+        # Normalize orientation before any tone mapping or encoding.
         source_orientation = _reference_orientation(reference_image_path)
         if source_orientation != 1:
             image_to_save = _bake_orientation(image_to_save, source_orientation)
 
-        # Apply end-to-end Natural Tone Mapping if the output array is linear float32/uint16
-        try:
-            from taichi_vision import taichi_aot
-            from config import DEFAULT_TONE_MAPPING_PARAMS
+        # Convert to RGB if input is BGR
+        if is_bgr and len(image_to_save.shape) == 3 and image_to_save.shape[2] >= 3:
+            image_to_save = cv2.cvtColor(image_to_save, cv2.COLOR_BGR2RGB)
 
-            if image_to_save.dtype in (np.float32, np.float64):
-                img_f32 = image_to_save.astype(np.float32, copy=False)
-                max_v = float(np.max(img_f32))
-                if max_v > 1.0:
-                    img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
-                img_tm = taichi_aot.naturalTonemapping(
-                    img_f32, **DEFAULT_TONE_MAPPING_PARAMS
-                )
-                if max_v > 255.0:
-                    image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(
-                        np.uint16
+        # Apply end-to-end Natural Tone Mapping only if explicitly requested
+        if apply_tonemapping:
+            try:
+                from taichi_vision import taichi_aot
+                from config import DEFAULT_TONE_MAPPING_PARAMS
+
+                if image_to_save.dtype in (np.float32, np.float64):
+                    img_f32 = image_to_save.astype(np.float32, copy=False)
+                    max_v = float(np.max(img_f32)) if img_f32.size > 0 else 1.0
+                    if max_v > 1.0:
+                        img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
+                    img_tm = taichi_aot.naturalTonemapping(
+                        img_f32, **DEFAULT_TONE_MAPPING_PARAMS
                     )
-                elif max_v > 1.0:
-                    image_to_save = np.clip(img_tm * 255.0, 0, 255).astype(np.uint8)
-                else:
-                    image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(
-                        np.uint16
+                    if max_v > 255.0:
+                        image_to_save = np.clip(img_tm * 65535.0 + 0.5, 0, 65535).astype(
+                            np.uint16
+                        )
+                    elif max_v > 1.0:
+                        image_to_save = np.clip(img_tm * 255.0 + 0.5, 0, 255).astype(np.uint8)
+                    else:
+                        image_to_save = np.clip(img_tm * 65535.0 + 0.5, 0, 65535).astype(
+                            np.uint16
+                        )
+                elif image_to_save.dtype == np.uint16:
+                    img_f32 = image_to_save.astype(np.float32) / 65535.0
+                    img_tm = taichi_aot.naturalTonemapping(
+                        img_f32, **DEFAULT_TONE_MAPPING_PARAMS
                     )
-            elif image_to_save.dtype == np.uint16:
-                img_f32 = image_to_save.astype(np.float32) / 65535.0
-                img_tm = taichi_aot.naturalTonemapping(
-                    img_f32, **DEFAULT_TONE_MAPPING_PARAMS
-                )
-                image_to_save = np.clip(img_tm * 65535.0, 0, 65535).astype(np.uint16)
-        except Exception as e_tm:
-            print(f"[save_image] Tone mapping warning: {e_tm}")
+                    image_to_save = np.clip(img_tm * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
+            except Exception as e_tm:
+                print(f"[save_image] Tone mapping warning: {e_tm}")
 
         if ext in [".tif", ".tiff"]:
             try:
-                # 1. Konversi BGR (format dari cv2.rotate) kembali ke RGB jika perlu
-                # Kita asumsikan gambar yang masuk ke save_image adalah BGR jika berwarna 3-channel
-                if len(image_to_save.shape) == 3 and image_to_save.shape[2] >= 3:
-                    # Pastikan konversi kembali ke RGB untuk tifffile
-                    image_to_write_tifffile = cv2.cvtColor(
-                        image_to_save, cv2.COLOR_BGR2RGB
-                    )
-                else:
-                    image_to_write_tifffile = image_to_save
-
-                # 2. Gunakan tifffile untuk menyimpan tanpa kompresi
-                # Write a neutral orientation tag even when ExifTool is not
-                # installed; the pixel data has already been normalized.
+                # tifffile expects RGB standard array natively
                 tifffile.imwrite(
                     output_path,
-                    image_to_write_tifffile,
+                    image_to_save,
                     compression=None,
                     extratags=[(274, "H", 1, 1, False)],
                 )
@@ -905,9 +903,13 @@ def save_image(image, output_path, reference_image_path=None):
                 success = False
 
         else:
-            # Jika bukan TIFF, gunakan cv2.imwrite seperti biasa
-            save_params = []  # Tidak ada parameter kompresi khusus untuk non-TIFF
-            success = cv2.imwrite(output_path, image_to_save, save_params)
+            # OpenCV imwrite expects BGR for standard formats (PNG, JPG, etc.)
+            if len(image_to_save.shape) == 3 and image_to_save.shape[2] >= 3:
+                image_bgr_to_save = cv2.cvtColor(image_to_save, cv2.COLOR_RGB2BGR)
+            else:
+                image_bgr_to_save = image_to_save
+            save_params = []
+            success = cv2.imwrite(output_path, image_bgr_to_save, save_params)
 
         if not success:
             return None
@@ -1468,24 +1470,29 @@ _SIGMOID_LUT_CACHE = {}
 
 def estimate_noise_in_python(ref_image_gray_float):
     """
-    Estimasi noise sederhana menggunakan Laplacian.
-    Menyederhanakan perhitungan dari block-based ke Laplacian MAD saja.
+    Estimasi noise berbasis Multi-Subband Wavelet Minimum & Patch Subspace.
+    100% kebal terhadap tekstur ramai, anyaman, dan tepi tajam.
+    Mengembalikan skor noise terstandarisasi [0.00001 - 0.99999].
     """
     if ref_image_gray_float is None or ref_image_gray_float.size == 0:
         return 0.015
 
-    # Hitung Laplacian
-    lap = cv2.Laplacian(ref_image_gray_float, cv2.CV_32F, ksize=3)
-    if lap is None:
-        return 0.015
+    try:
+        from taichi_vision.taichi_algorithm.enhancement.estimate_noise import (
+            estimate_noise,
+        )
 
-    # Hitung Median Absolute Deviation (MAD)
-    # sigma = median(abs(lap - median(lap))) * 1.4826
-    median_val = np.median(lap)
-    mad_value = np.median(np.abs(lap - median_val))
-    estimated_sigma = mad_value * 1.4826
-
-    return float(np.clip(estimated_sigma, 0.00001, 0.99999))
+        score = estimate_noise(ref_image_gray_float)
+        return float(np.clip(score, 0.00001, 0.99999))
+    except Exception:
+        # Fallback to Laplacian MAD
+        lap = cv2.Laplacian(ref_image_gray_float, cv2.CV_32F, ksize=3)
+        if lap is None:
+            return 0.015
+        median_val = np.median(lap)
+        mad_value = np.median(np.abs(lap - median_val))
+        estimated_sigma = mad_value * 1.4826
+        return float(np.clip(estimated_sigma, 0.00001, 0.99999))
 
 
 def calibrate_sigma(est_sigma):

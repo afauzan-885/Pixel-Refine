@@ -27,8 +27,8 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser impo
     running_mf_denoiser,
 )
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.weightnet import (
-    running_weightnet,
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
+    running_fusionnet,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.SplatSR import (
     running_splatting_sr,
@@ -253,16 +253,15 @@ class AlgorithmProcessorThread(QThread):
                         stop_callback=get_stop_cb,
                         alignment_backend=alignment_choice,
                     ),
-                    "Spatial AI": lambda: running_weightnet(
-                        self.parent_panel,
+                    "Spatial AI": lambda: running_fusionnet(
+                        parent=self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
                     ),
-                    "FusionNet": lambda: running_weightnet(
-                        self.parent_panel,
-                        single_process=self.single_process,
+                    "FusionNet": lambda: running_fusionnet(
+                        parent=self.parent_panel,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,

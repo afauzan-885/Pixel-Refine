@@ -56,7 +56,7 @@ class SpatialWeightMapGenerator:
         noise_sigma: float = 0.015,
         early_exit_threshold: float = 0.05,
     ):
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
+        from taichi_vision.taichi_algorithm.spatial_fusion import (
             SpatialScratchCache,
         )
         from taichi_vision import taichi_aot
@@ -104,7 +104,7 @@ class SpatialWeightMapGenerator:
         """
         if self._closed:
             raise RuntimeError("SpatialWeightMapGenerator is already closed")
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
+        from taichi_vision.taichi_algorithm.spatial_fusion import (
             generate_spatial_weights_taichi,
         )
 

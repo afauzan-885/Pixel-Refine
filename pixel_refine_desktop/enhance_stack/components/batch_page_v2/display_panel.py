@@ -2356,14 +2356,13 @@ class DisplayPanel(QWidget):
             "Median",
             "Similarity",
             "Spatial AI",
-            "FusionNet",
         }
         if hasattr(self, "param_panel"):
             self.param_panel.apply_algorithm_visibility_fast(settings)
         if parameter_overlay_active:
             self.param_overlay.show()
             self.param_overlay.raise_()
-        elif denoising in {"", "None", "No Denoising"}:
+        else:
             self.param_overlay.hide()
         self.set_start_button_mode(
             parameter_overlay_active

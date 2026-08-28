@@ -772,6 +772,10 @@ def _perform_alignment_flow_net(
             full_w,
             return_gpu=(return_format == "ti_ndarray"),
         )
+        # Free the source frame's GPU residency now that the aligned result
+        # lives in ``aligned``; this keeps VRAM flat across the burst instead
+        # of leaking one full-resolution frame buffer per iteration.
+        _release_taichi_buffer(original)
         images[i] = aligned
         if save_align_image and not hasattr(aligned, "to_numpy"):
             save_aligned_image(
@@ -797,6 +801,77 @@ def _perform_alignment_flow_net(
         del curr_proxy, flow_work, flow_full
 
     return (True, flow_results) if return_flow else True
+
+
+def _release_taichi_buffer(buffer):
+    """Return a Taichi GPU buffer / ndarray back to the engine buffer pool.
+
+    Idempotent and safe on numpy arrays and ``None``. Both ``destroy()`` and
+    ``release()`` hand the underlying allocation back to the engine's buffer
+    pool, so the same VRAM is reused by later frames instead of leaking one
+    full-resolution frame buffer every iteration. ``destroy()`` is preferred
+    because it is terminal from the caller's point of view; ``release()`` is
+    used as a fallback for buffers that only expose that method.
+    """
+    if buffer is None:
+        return
+    destroy = getattr(buffer, "destroy", None)
+    if callable(destroy):
+        try:
+            destroy()
+        except Exception:
+            pass
+        return
+    release = getattr(buffer, "release", None)
+    if callable(release):
+        try:
+            release()
+        except Exception:
+            pass
+
+
+def _reclaim_engine_vram(engine):
+    """Reclaim idle Taichi engine VRAM after a busy frame.
+
+    ``destroy()``/``release()`` do not free a handle immediately: the engine
+    parks it in a *retired* queue and only consolidates it back into the
+    bounded pool once the queue overflows its budget or the watchdog sees a
+    quiet GPU.  During a long alignment burst the GPU is never idle, so those
+    parked allocations keep growing and VRAM appears to climb monotonically
+    on shared/limited GPUs (e.g. NVIDIA + Intel iGPU on a laptop).
+
+    This drains the retired queue into the pool and force-free idle pooled
+    allocations that exceed a small working set, keeping VRAM flat.  It is a
+    no-op while a native pipeline is being recorded.
+    """
+    if engine is None:
+        return
+    # Never reclaim while recording a native graph (would free in-use handles).
+    try:
+        if getattr(engine, "current_pipeline", None) is not None:
+            return
+    except Exception:
+        return
+    try:
+        drain = getattr(engine, "_drain_retired", None)
+        if callable(drain):
+            drain(wait=True)
+    except Exception:
+        pass
+    try:
+        pool = getattr(engine, "buffer_pool", None)
+        if pool is None:
+            return
+        if hasattr(pool, "stats"):
+            pooled = int((pool.stats() or {}).get("pooled_bytes", 0) or 0)
+        else:
+            pooled = int(getattr(pool, "pooled_bytes", 0) or 0)
+        # Keep a small working set (~64 MB) for reuse, free the rest.
+        if pooled > 64 * 1024 * 1024 and hasattr(pool, "clear"):
+            pool.clear()
+            print(f"[GPU Alignment] Reclaimed idle VRAM ({pooled / 1e6:.0f} MB).")
+    except Exception:
+        pass
 
 
 def perform_alignment_gpu(
@@ -1352,6 +1427,7 @@ def perform_alignment_gpu(
                         engine.sync()
                         for buf in comp_pyramid:
                             buf.release()
+                        _reclaim_engine_vram(engine)
                         continue
 
                     if not use_flow_remap:
@@ -1417,6 +1493,7 @@ def perform_alignment_gpu(
                         full_res_img = images[i]
 
                     # Warp image berdasarkan ketersediaan jenis remap
+                    prev_frame = images[i]
                     if h5_file_handle is not None:
                         if use_flow_remap:
                             aligned_np = taichi_aot.remap_with_flow(
@@ -1481,6 +1558,12 @@ def perform_alignment_gpu(
                                 save_prefix=save_prefix,
                                 harvest_mode=harvest_alignment,
                             )
+                        # Release the source frame's GPU residency now that the
+                        # aligned result lives in ``aligned_gpu``. Returning it
+                        # to the pool lets later frames reuse the same VRAM.
+                        _release_taichi_buffer(full_res_img)
+                        if prev_frame is not full_res_img:
+                            _release_taichi_buffer(prev_frame)
                         images[i] = aligned_gpu
                         del full_res_img
                     else:
@@ -1505,6 +1588,12 @@ def perform_alignment_gpu(
                                 save_prefix=save_prefix,
                                 harvest_mode=harvest_alignment,
                             )
+                        # The aligned result is a host numpy array in
+                        # ``images[i]``; return the source frame's GPU buffer
+                        # to the pool so VRAM stays bounded across frames.
+                        _release_taichi_buffer(full_res_img)
+                        if prev_frame is not full_res_img:
+                            _release_taichi_buffer(prev_frame)
                         del full_res_img
 
                     if update_progress:
@@ -1522,6 +1611,11 @@ def perform_alignment_gpu(
 
                     for buf in comp_pyramid:
                         buf.release()
+
+                    # Consolidate retired handles and evict idle reserves so
+                    # VRAM stays flat over a long alignment burst on a
+                    # shared/limited GPU instead of climbing each frame.
+                    _reclaim_engine_vram(engine)
 
             finally:
                 if writer_thread is not None:

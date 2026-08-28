@@ -43,10 +43,18 @@ DEFAULT_AUTO_ENHANCE_PARAMS = {
 }
 
 
-def analyze_auto_enhance_params(src: Any) -> Dict[str, Any]:
+def analyze_auto_enhance_params(
+    src: Any,
+    mode: str = "natural",
+) -> Dict[str, Any]:
     """
     Analyzes luminance histogram of the input image and returns optimal adaptive parameters.
-    Can be run once on a reference frame to apply across all burst support frames.
+
+    Modes:
+    - 'analysis' (Tier 1): Maximizes dynamic range & boosts deep shadow textures so even
+      extremely dark frames become bright and highly contrasted for FlowNet & WeightNet.
+    - 'natural' (Tier 2): Natural perceptual tone mapping, filmic knee, and balanced contrast
+      for the final merged image.
     """
     if hasattr(src, "to_numpy"):
         img = src.to_numpy()
@@ -82,35 +90,81 @@ def analyze_auto_enhance_params(src: Any) -> Dict[str, Any]:
     log_avg = float(np.exp(np.mean(np.log(np.maximum(lum_sample, 0.0) + delta))))
 
     # Percentiles
-    p_black = float(np.percentile(lum_sample, 0.5))    # 0.5% shadow floor
-    p_shadow = float(np.percentile(lum_sample, 5.0))   # 5% deep shadows
-    p_midtone = float(np.percentile(lum_sample, 50.0)) # 50% median
-    p_white = float(np.percentile(lum_sample, 99.8))   # 99.8% highlight ceiling
+    p_black = float(np.percentile(lum_sample, 0.5))  # 0.5% shadow floor
+    p_shadow = float(np.percentile(lum_sample, 5.0))  # 5% deep shadows
+    p_midtone = float(np.percentile(lum_sample, 50.0))  # 50% median
+    p_white = float(np.percentile(lum_sample, 99.8))  # 99.8% highlight ceiling
+
+    if mode == "analysis":
+        # ---------------------------------------------------------------------
+        # TIER 1: Histogram-Driven Full-Dynamic-Range Maximizer (For FlowNet / WeightNet)
+        # Shifts skewed dark histograms towards center/right-center for maximum AI visibility
+        # while Filmic Extended Knee retains 100% highlight & midtone textures.
+        # ---------------------------------------------------------------------
+        # 1. Dynamically boost target key for dark/underexposed images to shift histogram to center
+        if log_avg < 0.08:
+            darkness_ratio = float(np.clip((0.08 - log_avg) / 0.08, 0.0, 1.0))
+            target_key = (
+                0.25 + 0.25 * darkness_ratio
+            )  # Shifts target key from 0.25 up to 0.50
+            gamma = 1.95  # Slightly steeper gamma to lift dark gradients
+            shadow_lift = float(np.clip(0.005 + p_black * 0.8, 0.005, 0.030))
+        else:
+            target_key = 0.25
+            gamma = 2.20
+            shadow_lift = float(np.clip(p_black * 0.5, 0.0, 0.015))
+
+        # 2. Compute dynamic gain
+        gain = float(np.clip(target_key / max(log_avg, 1e-4), 1.0, 45.0))
+
+        # 3. Filmic Extended White Level anchored to high percentiles (zero blown-out highlights)
+        white_level = max(1.8, p_white * gain * 1.25)
+
+        params = {
+            "gain": gain,
+            "white_level": white_level,
+            "shadow_lift": shadow_lift,
+            "gamma": gamma,
+            "contrast_s_curve": 1.20,
+            "global_contrast": 1.30,  # Crisp Sigmoid slope for sharp edge & texture discrimination
+            "saturation": 1.05,
+            "adaptive_knee": True,  # Extended Filmic Knee protects highlights & midtones
+            "metrics": {
+                "min": min_val,
+                "max": max_val,
+                "mean": mean_val,
+                "median": median_val,
+                "log_avg": log_avg,
+                "p_black": p_black,
+                "p_shadow": p_shadow,
+                "p_midtone": p_midtone,
+                "p_white": p_white,
+            },
+        }
+        return params
 
     # -------------------------------------------------------------------------
-    # Adaptive Key & Low-Key / Night-Scene Awareness:
-    # If histogram is heavily concentrated in the lower shadows (night / low-key scene),
-    # scale target_key smoothly so that dark subjects are brightened and clear,
-    # but the night sky and deep background remain natural and dark (not daylight).
+    # TIER 2: Natural Perceptual Tone Mapping (Final Master Output)
+    # Adaptive Key & Low-Key / Night-Scene Awareness
     # -------------------------------------------------------------------------
-    base_target_key = 0.135
+    base_target_key = 0.108  # -20% global brightness reduction
     if log_avg < 0.075:
         # Smooth roll-off factor based on geometric mean luminance
         low_key_factor = float(np.clip(log_avg / 0.075, 0.20, 1.0))
-        target_key = base_target_key * (low_key_factor ** 0.50)
+        target_key = base_target_key * (low_key_factor**0.50)
     else:
         target_key = base_target_key
 
-    # Clamp maximum gain to prevent over-lifting dark night skies
-    max_gain_cap = float(np.interp(log_avg, [0.005, 0.05, 0.10], [2.4, 3.2, 4.5]))
-    gain = float(np.clip(target_key / max(log_avg, 1e-4), 0.6, max_gain_cap))
+    # Clamp maximum gain to prevent over-lifting dark night skies (-20% gain cap)
+    max_gain_cap = float(np.interp(log_avg, [0.005, 0.05, 0.10], [1.9, 2.55, 3.6]))
+    gain = float(np.clip(target_key / max(log_avg, 1e-4), 0.5, max_gain_cap))
     white_level = max(1.2, p_white * gain)
 
-    # In night scenes, prevent shadow pedestal lift from adding milky haze to the black sky
+    # In night scenes, keep shadow_lift zero so the sigmoid asymptote anchors deep black skies
     if log_avg < 0.04:
-        shadow_lift = float(np.clip(p_black * 0.1, 0.0, 0.005))
+        shadow_lift = 0.0
     else:
-        shadow_lift = float(np.clip(p_black * 0.5, 0.0, 0.03))
+        shadow_lift = float(np.clip(p_black * 0.4, 0.0, 0.015))
 
     params = {
         "gain": gain,
@@ -139,6 +193,7 @@ def analyze_auto_enhance_params(src: Any) -> Dict[str, Any]:
 # =========================================================================
 # 2. VECTORIZED NUMPY TRANSFORM (100% BIT-EXACT PARITY)
 # =========================================================================
+
 
 def apply_auto_enhance_np(
     src_np: np.ndarray,
@@ -181,22 +236,17 @@ def apply_auto_enhance_np(
     # 4. Perceptual Gamma
     lum_gamma = np.power(np.maximum(0.0, lum_toned), 1.0 / gamma)
 
-    # 5. S-Curve Contrast Shaping (Midtone Punch)
-    if contrast_s_curve > 1.0:
-        c_strength = float(np.clip(contrast_s_curve - 1.0, 0.0, 0.5))
-        lum_shaped = lum_gamma + c_strength * np.sin(2.0 * np.pi * lum_gamma) * 0.15
-    else:
-        lum_shaped = lum_gamma
+    # 5. Normalized Sigmoid Contrast Curve (Preserves dark clothing without clipping or flat haze)
+    # k controls the contrast slope, x0 is the perceptual midtone anchor (0.38 for +15% deeper blacks)
+    k = float(
+        np.clip(3.5 + (global_contrast - 1.0) * 3.0, 3.0, 6.0)
+    )  # e.g. k=4.7 for contrast=1.40
+    x0 = 0.38
 
-    lum_shaped = np.clip(lum_shaped, 0.0, 1.0)
-
-    # 6. Global Contrast Boost (+35% = 1.35)
-    if global_contrast != 1.0:
-        pivot = 0.5
-        lum_final = pivot + (lum_shaped - pivot) * global_contrast
-        lum_final = np.clip(lum_final, 0.0, 1.0)
-    else:
-        lum_final = lum_shaped
+    s_x = 1.0 / (1.0 + np.exp(-k * (lum_gamma - x0)))
+    s_0 = 1.0 / (1.0 + np.exp(-k * (0.0 - x0)))
+    s_1 = 1.0 / (1.0 + np.exp(-k * (1.0 - x0)))
+    lum_final = np.clip((s_x - s_0) / (s_1 - s_0), 0.0, 1.0)
 
     # 7. Hue-Preserving Chromaticity Ratio Transfer
     ratio = (lum_final / (lum + 1e-6))[:, :, np.newaxis]
@@ -215,10 +265,11 @@ def apply_auto_enhance_np(
 # =========================================================================
 
 if TAICHI_AVAILABLE:
+
     @ti.kernel
     def auto_enhance_kernel(
-        src: ti.types.ndarray(dtype=ti.f32, ndim=3),
-        dst: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        dst: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
         h: ti.i32,
         w: ti.i32,
         gain: ti.f32,
@@ -231,37 +282,38 @@ if TAICHI_AVAILABLE:
         use_adaptive_knee: ti.i32,
     ):
         w2 = white_level * white_level
-        c_strength = contrast_s_curve - 1.0
-        if c_strength < 0.0:
-            c_strength = 0.0
-        elif c_strength > 0.5:
-            c_strength = 0.5
+        k = 3.5 + (global_contrast - 1.0) * 3.0
+        if k < 3.0:
+            k = 3.0
+        elif k > 6.0:
+            k = 6.0
+        x0 = 0.38
+
+        s_0 = 1.0 / (1.0 + tm.exp(-k * (0.0 - x0)))
+        s_1 = 1.0 / (1.0 + tm.exp(-k * (1.0 - x0)))
+        inv_s_range = 1.0 / (s_1 - s_0)
 
         for i, j in ti.ndrange(h, w):
-            r = tm.max(0.0, src[i, j, 0])
-            g = tm.max(0.0, src[i, j, 1])
-            b = tm.max(0.0, src[i, j, 2])
+            v = src[i, j]
+            r = tm.max(0.0, v[0])
+            g = tm.max(0.0, v[1])
+            b = tm.max(0.0, v[2])
 
             lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
             lum_scaled = (lum + shadow_lift) * gain
 
             lum_toned = 0.0
             if use_adaptive_knee != 0:
-                lum_toned = (lum_scaled * (1.0 + (lum_scaled / w2))) / (1.0 + lum_scaled)
+                lum_toned = (lum_scaled * (1.0 + (lum_scaled / w2))) / (
+                    1.0 + lum_scaled
+                )
             else:
                 lum_toned = lum_scaled / (1.0 + lum_scaled)
 
             lum_gamma = tm.pow(tm.max(0.0, lum_toned), inv_gamma)
 
-            lum_shaped = lum_gamma
-            if c_strength > 0.0:
-                lum_shaped = lum_gamma + c_strength * tm.sin(6.283185307179586 * lum_gamma) * 0.15
-            lum_shaped = tm.clamp(lum_shaped, 0.0, 1.0)
-
-            lum_final = lum_shaped
-            if global_contrast != 1.0:
-                lum_final = 0.5 + (lum_shaped - 0.5) * global_contrast
-                lum_final = tm.clamp(lum_final, 0.0, 1.0)
+            s_x = 1.0 / (1.0 + tm.exp(-k * (lum_gamma - x0)))
+            lum_final = tm.clamp((s_x - s_0) * inv_s_range, 0.0, 1.0)
 
             ratio = lum_final / (lum + 1e-6)
             r_out = r * ratio
@@ -273,14 +325,79 @@ if TAICHI_AVAILABLE:
                 g_out = lum_final + (g_out - lum_final) * saturation
                 b_out = lum_final + (b_out - lum_final) * saturation
 
-            dst[i, j, 0] = tm.clamp(r_out, 0.0, 1.0)
-            dst[i, j, 1] = tm.clamp(g_out, 0.0, 1.0)
-            dst[i, j, 2] = tm.clamp(b_out, 0.0, 1.0)
+            dst[i, j] = tm.vec3(
+                tm.clamp(r_out, 0.0, 1.0),
+                tm.clamp(g_out, 0.0, 1.0),
+                tm.clamp(b_out, 0.0, 1.0),
+            )
 
 
 # =========================================================================
-# 4. TOP-LEVEL FACADE API
+# 4. PURE GPU AOT / TCM EXECUTION (ZERO HOST MEMORY ROUNDTRIP)
 # =========================================================================
+
+
+def apply_auto_enhance_gpu(
+    src_gpu: Any,
+    params: Dict[str, Any],
+    dst: Any = None,
+    return_gpu: bool = True,
+) -> Any:
+    """
+    Executes AutoEnhance directly inside GPU VRAM via Taichi AOT / TCM module.
+    Zero PCIe transfer, pure GPU shader performance.
+    """
+    from taichi_vision.taichi_aot import get_engine, TaichiGPUBuffer
+    from taichi_vision.taichi_algorithm.aot_api import _mod
+
+    engine = get_engine()
+    mod = _mod("auto_enhance")
+
+    h, w = src_gpu.shape[:2]
+    if dst is None:
+        dst_buf = engine.allocate((h, w, 3), dtype=np.float32, is_vector=True)
+    else:
+        dst_buf = dst
+
+    src_v = src_gpu
+    if hasattr(src_gpu, "is_vector") and not src_gpu.is_vector:
+        src_v = src_gpu.view_as_vector(True)
+
+    dst_v = dst_buf
+    if hasattr(dst_buf, "is_vector") and not dst_buf.is_vector:
+        dst_v = dst_buf.view_as_vector(True)
+
+    gamma = float(params.get("gamma", 2.2))
+    inv_gamma = 1.0 / max(gamma, 1e-4)
+
+    args = {
+        "src": src_v,
+        "dst": dst_v,
+        "h": int(h),
+        "w": int(w),
+        "gain": float(params.get("gain", 1.0)),
+        "white_level": float(params.get("white_level", 1.5)),
+        "shadow_lift": float(params.get("shadow_lift", 0.02)),
+        "inv_gamma": float(inv_gamma),
+        "contrast_s_curve": float(params.get("contrast_s_curve", 1.10)),
+        "global_contrast": float(params.get("global_contrast", 1.35)),
+        "saturation": float(params.get("saturation", 1.05)),
+        "use_adaptive_knee": 1 if params.get("adaptive_knee", True) else 0,
+    }
+    mod.run("auto_enhance", **args)
+
+    if not return_gpu:
+        res_np = dst_buf.to_numpy()
+        if dst is None:
+            dst_buf.destroy()
+        return res_np
+    return dst_buf
+
+
+# =========================================================================
+# 5. TOP-LEVEL FACADE API
+# =========================================================================
+
 
 def AutoEnhance(
     src: Any,
@@ -294,6 +411,7 @@ def AutoEnhance(
     High-level AutoEnhance API.
     - If `params` is None, analyzes histogram on `src` first.
     - If `params` is provided, applies tone mapping directly using pre-computed parameters.
+    - If `src` is in VRAM (TaichiGPUBuffer) or `return_gpu=True`, executes directly on GPU TCM.
     """
     if params is None:
         computed_params = analyze_auto_enhance_params(src)
@@ -303,22 +421,27 @@ def AutoEnhance(
     if kwargs:
         computed_params.update(kwargs)
 
-    is_gpu = hasattr(src, "to_numpy")
-    src_np = src.to_numpy() if is_gpu else np.asarray(src, dtype=np.float32)
+    is_gpu_in = hasattr(src, "to_numpy")
 
-    enhanced_np = apply_auto_enhance_np(src_np, computed_params)
+    if is_gpu_in or return_gpu:
+        from taichi_vision.taichi_aot import upload, TaichiGPUBuffer
 
-    result = enhanced_np
-    if return_gpu:
+        src_gpu = (
+            src if is_gpu_in else upload(np.ascontiguousarray(src, dtype=np.float32))
+        )
         try:
-            from taichi_vision.taichi_aot import upload, TaichiGPUBuffer
-            if dst is not None and isinstance(dst, TaichiGPUBuffer):
-                dst.copy_from(enhanced_np)
-                result = dst
-            else:
-                result = upload(enhanced_np)
-        except Exception:
-            pass
+            result = apply_auto_enhance_gpu(
+                src_gpu,
+                computed_params,
+                dst=dst,
+                return_gpu=return_gpu,
+            )
+        finally:
+            if not is_gpu_in and hasattr(src_gpu, "destroy"):
+                src_gpu.destroy()
+    else:
+        src_np = np.asarray(src, dtype=np.float32)
+        result = apply_auto_enhance_np(src_np, computed_params)
 
     if return_params:
         return result, computed_params

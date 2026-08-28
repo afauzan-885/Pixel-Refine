@@ -81,7 +81,7 @@ class SpatialFusionProcessor:
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
             taichi_bridge,
         )
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
+        from taichi_vision.taichi_algorithm.spatial_fusion import (
             SpatialScratchCache,
             generate_spatial_weights_taichi,
             accumulate_spatial_merging_taichi,

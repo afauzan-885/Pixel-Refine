@@ -699,29 +699,28 @@ class SwitchableParameterPanel(QWidget):
             self.align_dropdown.blockSignals(False)
 
         # 2. Handle visibility logic for denoising
-        denoising_algo = settings.get(config.KEY_DENOISING, "No Denoising")
+        denoising_algo = str(settings.get(config.KEY_DENOISING, "No Denoising")).strip()
         
-        # If denoising algo changed, collapse panel and reset active tab
+        # If denoising algo changed or is newly loaded, keep parameter panel closed by default
         if denoising_algo != self.current_denoising_algo:
-            if self.active_tab == "denoising" or denoising_algo in [
-                "Average",
-                "Median",
-            ]:
-                self.active_tab = None
-                self.set_expanded(False)
-                self._update_styles("transparent")
+            self.active_tab = None
+            self.set_expanded(False)
+            self._update_styles("transparent")
             
         self.current_denoising_algo = denoising_algo
 
         overlay = self.get_overlay_container()
 
-        if denoising_algo in ["No Denoising", "None", ""]:
-            # Hide the entire overlay panel
+        if denoising_algo in ["No Denoising", "None", "", "FusionNet"]:
+            # Hide the entire overlay panel for No Denoising or FusionNet
             self.collapse_panel()
             if overlay:
                 overlay.hide()
+            self.btn_align_tab.setVisible(False)
+            self.btn_denoise_tab.setVisible(False)
+            self.btn_denoise_tab.setEnabled(False)
         else:
-            # Show the overlay panel
+            # Show the overlay rail (A/D buttons) but keep the content panel closed
             if overlay:
                 overlay.show()
                 overlay.raise_()
@@ -730,9 +729,6 @@ class SwitchableParameterPanel(QWidget):
                 self.btn_align_tab.setVisible(True)
                 self.btn_denoise_tab.setVisible(False)
                 self.btn_denoise_tab.setEnabled(False)
-                if self.content_wrapper.isVisible() and self.active_tab != "alignment":
-                    self.active_tab = None
-                    self.set_expanded(False)
             elif denoising_algo in ["Similarity", "Spatial AI"]:
                 self.btn_align_tab.setVisible(True)
                 self.btn_denoise_tab.setVisible(True)
@@ -745,19 +741,14 @@ class SwitchableParameterPanel(QWidget):
             self._sync_overlay_geometry()
 
     def apply_algorithm_visibility_fast(self, settings):
-        """Update only A/D visibility without rebuilding the overlay.
-
-        This is intentionally side-effect-light and is called before the
-        heavier style/geometry synchronization.  It keeps the algorithm
-        controls responsive while the full parameter panel catches up.
-        """
+        """Update only A/D visibility without rebuilding the overlay."""
         if not isinstance(settings, dict):
             return False
         denoising_algo = str(
             settings.get(config.KEY_DENOISING, "No Denoising")
         ).strip()
         self.current_denoising_algo = denoising_algo
-        if denoising_algo in ("No Denoising", "None", ""):
+        if denoising_algo in ("No Denoising", "None", "", "FusionNet"):
             self.btn_align_tab.setVisible(False)
             self.btn_denoise_tab.setVisible(False)
             self.btn_denoise_tab.setEnabled(False)

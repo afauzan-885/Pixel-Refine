@@ -86,6 +86,7 @@ COLOCATED_COMPILER_PACKAGES = {
     "compile_seamless_clone_tcm": "taichi_vision.taichi_algorithm.image_processing",
     "compile_compression_image_tcm": "taichi_vision.taichi_algorithm.compression",
     "compile_raw_pipeline_tcm": "taichi_vision.taichi_algorithm.compression",
+    "compile_spatial_fusion_tcm": "taichi_vision.taichi_algorithm.spatial_fusion",
 }
 FORK_PYTHON = (
     PROJECT_ROOT
@@ -177,6 +178,12 @@ JOBS = {
     "seamless_clone": (
         "compile_seamless_clone_tcm",
         "compile_seamless_clone_aot",
+        "path",
+        (),
+    ),
+    "spatial_fusion": (
+        "compile_spatial_fusion_tcm",
+        "compile_spatial_fusion_tcm",
         "path",
         (),
     ),

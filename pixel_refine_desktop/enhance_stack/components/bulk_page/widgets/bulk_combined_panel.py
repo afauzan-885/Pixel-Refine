@@ -48,9 +48,9 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser impo
     running_mf_denoiser,
 )
 
-# from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.weightnet import (
-#     running_weightnet,
-# )
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
+    running_fusionnet,
+)
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.Interpolation import (
     running_interpolation,
@@ -1281,14 +1281,14 @@ class CombinedPanel(QWidget):
                     stop_callback=stop_callback,
                     alignment_backend=align_algo,
                 ),
-                "Spatial AI": lambda: running_weightnet(
+                "Spatial AI": lambda: running_fusionnet(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
                     stop_callback=stop_callback,
                 ),
-                "FusionNet": lambda: running_weightnet(
+                "FusionNet": lambda: running_fusionnet(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,

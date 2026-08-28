@@ -261,7 +261,15 @@ def _compute_laplacian(gray_np):
 
 
 def _estimate_noise_sigma(gray_np):
-    """Estimate sensor noise locally without depending on spatial-weight."""
+    """Estimate sensor noise using Taichi Multi-Subband Wavelet & Patch Subspace."""
+    try:
+        from taichi_vision.taichi_algorithm.enhancement.estimate_noise import (
+            estimate_noise,
+        )
+
+        return float(np.clip(estimate_noise(gray_np), 1e-5, 0.99999))
+    except Exception:
+        pass
 
     gray = np.asarray(gray_np, dtype=np.float32)
     if gray.size == 0 or gray.ndim != 2 or min(gray.shape) < 3:

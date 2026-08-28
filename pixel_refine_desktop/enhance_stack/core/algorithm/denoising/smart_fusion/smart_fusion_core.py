@@ -5,9 +5,11 @@ import numpy as np
 import onnxruntime as ort
 import psutil
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-    estimate_noise_in_python,
     normalize_image,
     to_gamma_proxy,
+)
+from taichi_vision.taichi_algorithm.enhancement.estimate_noise import (
+    estimate_noise,
 )
 
 
@@ -156,10 +158,7 @@ class SmartFusionProcessor:
             "similarity_smart_noise_aware_enable", True
         )
         if noise_aware_enable:
-            gray_image = cv2.cvtColor(
-                (reference_image_float * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY
-            )
-            sigma_val = estimate_noise_in_python(gray_image.astype(np.float32) / 255.0)
+            sigma_val = estimate_noise(reference_image_float)
         else:
             sigma_val = 0.0
             print("[Smart Fusion] Noise Awareness disabled: sigma forced to 0.0")

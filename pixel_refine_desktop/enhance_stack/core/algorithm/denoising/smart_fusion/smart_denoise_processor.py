@@ -77,15 +77,11 @@ class SmartDenoiseProcessor(TileProcessor):
         # Estimate noise from reference
         ref_float = ctx.reference_float
         if ref_float is not None:
-            gray = cv2.cvtColor(
-                (ref_float * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY
+            from taichi_vision.taichi_algorithm.enhancement.estimate_noise import (
+                estimate_noise,
             )
-            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-                estimate_noise_in_python,
-            )
-            self._sigma_val = estimate_noise_in_python(
-                gray.astype(np.float32) / 255.0
-            )
+
+            self._sigma_val = estimate_noise(ref_float)
         else:
             self._sigma_val = 0.0
 

@@ -268,20 +268,23 @@ def prepare_reference_for_alignment(
             ref_final.destroy()
             ref_final = analysis
     else:
-        ref_gpu = taichi_aot.upload(reference_image_float, force_8bit=True)
-        ref_final = ref_gpu
+        if input_is_gpu_buf:
+            ref_final = reference_image_float
+        else:
+            ref_gpu = taichi_aot.upload(reference_image_float, force_8bit=True)
+            ref_final = ref_gpu
 
         if is_linear_mode:
             ref_final = _natural_tonemap_analysis_gpu(
                 reference_image_float, input_dtype=getattr(reference_image_float, "dtype", None)
             )
-            if ref_gpu is not ref_final:
+            if not input_is_gpu_buf and ref_gpu is not ref_final:
                 ref_gpu.release()
 
     # Convert ref_final to grayscale 1-channel if it is a 3-channel image
     if not is_raw_sensor:
         ref_gray = taichi_aot.rgb2gray(ref_final)
-        if ref_final is not ref_gray:
+        if ref_final is not ref_gray and ref_final is not reference_image_float:
             ref_final.release()
     else:
         # Already Grayscale 1-channel
@@ -295,7 +298,7 @@ def prepare_reference_for_alignment(
             interpolation=taichi_aot.INTER_LINEAR,
             return_gpu=True,
         )
-        if ref_gray is not final_res_gray:
+        if ref_gray is not final_res_gray and ref_gray is not reference_image_float:
             ref_gray.release()
 
     return prepare_pyramid_aot(final_res_gray, num_layers=num_layers)
@@ -364,23 +367,26 @@ def prepare_comparison_for_alignment(
             comp_final.destroy()
             comp_final = analysis
     else:
-        comp_input = taichi_aot.upload(comp_image, force_8bit=True)
-        comp_normalized = normalize_image_gpu(comp_input, dtype=ref_dtype)
-        if comp_input is not comp_normalized:
-            comp_input.release()
+        if input_is_gpu_buf:
+            comp_normalized = comp_image
+        else:
+            comp_input = taichi_aot.upload(comp_image, force_8bit=True)
+            comp_normalized = normalize_image_gpu(comp_input, dtype=ref_dtype)
+            if comp_input is not comp_normalized:
+                comp_input.release()
 
         comp_final = comp_normalized
         if is_linear_mode:
             comp_final = _natural_tonemap_analysis_gpu(
                 comp_image, input_dtype=getattr(comp_image, "dtype", ref_dtype)
             )
-            if comp_normalized is not comp_final:
+            if comp_normalized is not comp_final and comp_normalized is not comp_image:
                 comp_normalized.release()
 
     # Convert comp_final to grayscale 1-channel if it is a 3-channel image
     if not is_raw_sensor:
         comp_gray = taichi_aot.rgb2gray(comp_final)
-        if comp_final is not comp_gray:
+        if comp_final is not comp_gray and comp_final is not comp_image:
             comp_final.release()
     else:
         # Already Grayscale 1-channel
@@ -394,7 +400,7 @@ def prepare_comparison_for_alignment(
             interpolation=taichi_aot.INTER_LINEAR,
             return_gpu=True,
         )
-        if comp_gray is not final_res_gray:
+        if comp_gray is not final_res_gray and comp_gray is not comp_image:
             comp_gray.release()
 
     return prepare_pyramid_aot(final_res_gray, num_layers=num_layers)
@@ -430,13 +436,12 @@ def prepare_reference_aot(
         if ref_gray is not final_res_gray:
             ref_gray.destroy()
 
-    # Estimate noise on CPU/NumPy
-    ref_gray_np = final_res_gray.to_numpy()
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-        estimate_noise_in_python,
+    # Estimate noise directly on GPU VRAM (zero roundtrip overhead)
+    from taichi_vision.taichi_algorithm.enhancement.estimate_noise import (
+        estimate_noise,
     )
 
-    ref_noise_sigma = estimate_noise_in_python(ref_gray_np)
+    ref_noise_sigma = estimate_noise(final_res_gray)
 
     return final_res_gray, ref_noise_sigma
 
