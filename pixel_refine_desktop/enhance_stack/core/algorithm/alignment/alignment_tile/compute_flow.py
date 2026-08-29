@@ -465,29 +465,9 @@ def search_fine_level_kernel(
     downscale_factor: ti.i32,
 ):
     h, w = ref_layer.shape[0], ref_layer.shape[1]
-    prev_h, prev_w = previous_flow.shape[0], previous_flow.shape[1]
     step_y, step_x = ti.max(1, tile_h // 2), ti.max(1, tile_w // 2)
     tile_area_inv = 1.0 / float(tile_h * tile_w)
-    neighbor_offsets = ti.static(
-        [
-            [-1, 0],
-            [1, 0],
-            [0, -1],
-            [0, 1],
-            [-1, -1],
-            [1, -1],
-            [-1, 1],
-            [1, 1],
-            [-2, 0],
-            [2, 0],
-            [0, -2],
-            [0, 2],
-            [-2, -2],
-            [2, -2],
-            [-2, 2],
-            [2, 2],
-        ]
-    )
+
     for tile_y_idx, tile_x_idx in ti.ndrange(
         (h + step_y - 1) // step_y, (w + step_x - 1) // step_x
     ):
@@ -501,15 +481,10 @@ def search_fine_level_kernel(
         spatial_mean_dx, spatial_mean_dy, spatial_weight = (
             compute_regularization_params(flow, y, x, tile_h, tile_w, grad_energy)
         )
-        init_dx, init_dy = flow[center_y, center_x, 0], flow[center_y, center_x, 1]
-        best_cand_dx, best_cand_dy, best_cand_cost = (
-            ti.round(init_dx, ti.i32),
-            ti.round(init_dy, ti.i32),
-            1e10,
-        )
+        init_dx, init_dy = ti.round(flow[center_y, center_x, 0], ti.i32), ti.round(flow[center_y, center_x, 1], ti.i32)
 
-        # Flat-region fast lock (bypass noise hunting on featureless sky/walls)
-        if grad_energy < 0.001:
+        # Flat-region fast lock (bypass all search on featureless sky/smooth areas)
+        if grad_energy < 0.005:
             final_dx = spatial_mean_dx
             final_dy = spatial_mean_dy
             for r, c in ti.ndrange(tile_h, tile_w):
@@ -517,96 +492,55 @@ def search_fine_level_kernel(
                     refined_flow[y + r, x + c, 0] = -final_dx
                     refined_flow[y + r, x + c, 1] = final_dy
         else:
-            for i in range(18):
-                cand_dx, cand_dy = best_cand_dx, best_cand_dy
-                if i > 0 and i < 17:
-                    for idx in ti.static(range(16)):
-                        if i - 1 == idx:
-                            nx, ny = (
-                                center_x + neighbor_offsets[idx][0] * tile_w,
-                                center_y + neighbor_offsets[idx][1] * tile_h,
-                            )
-                            if 0 <= ny < h and 0 <= nx < w:
-                                cand_dx, cand_dy = ti.round(
-                                    flow[ny, nx, 0], ti.i32
-                                ), ti.round(flow[ny, nx, 1], ti.i32)
-                elif i == 17 and prev_h > 1 and prev_w > 1:
-                    cy, cx = center_y // downscale_factor, center_x // downscale_factor
-                    if cy < prev_h and cx < prev_w:
-                        cand_dx, cand_dy = ti.round(
-                            previous_flow[cy, cx, 0] * downscale_factor, ti.i32
-                        ), ti.round(previous_flow[cy, cx, 1] * downscale_factor, ti.i32)
-                cost = (
-                    compute_alignment_sad(
-                        ref_layer,
-                        comp_layer,
-                        y,
-                        x,
-                        y + cand_dy,
-                        x + cand_dx,
-                        tile_h,
-                        tile_w,
-                        2,
-                    )
-                    * tile_area_inv
+            # 🚀 Step 1: Evaluasi biaya tebakan awal (c0) dari upsampled coarse flow
+            c0 = (
+                compute_alignment_sad(
+                    ref_layer, comp_layer, y, x, y + init_dy, x + init_dx, tile_h, tile_w, 2
                 )
-                if cost < best_cand_cost:
-                    best_cand_cost, best_cand_dx, best_cand_dy = cost, cand_dx, cand_dy
-
-            best_total_cost, final_dx, final_dy = (
-                1e10,
-                float(best_cand_dx),
-                float(best_cand_dy),
+                * tile_area_inv
             )
-            if best_cand_cost >= 0.0001:
+
+            best_cand_dx, best_cand_dy, best_cand_cost = init_dx, init_dy, c0
+
+            # 🚀 Step 2: BOUNDED N-PIXEL RESIDUAL (N=1)
+            # Hanya periksa tetangga lokal terdekat (+/- 1) jika tebakan awal meleset (c0 >= 0.003)
+            if c0 >= 0.003:
                 for dy, dx in ti.ndrange((-1, 2), (-1, 2)):
-                    cur_dx, cur_dy = best_cand_dx + dx, best_cand_dy + dy
+                    if dy == 0 and dx == 0:
+                        continue
+                    cur_dx, cur_dy = init_dx + dx, init_dy + dy
                     visual_cost = (
                         compute_alignment_sad(
-                            ref_layer,
-                            comp_layer,
-                            y,
-                            x,
-                            y + cur_dy,
-                            x + cur_dx,
-                            tile_h,
-                            tile_w,
-                            1,
+                            ref_layer, comp_layer, y, x, y + cur_dy, x + cur_dx, tile_h, tile_w, 1
                         )
                         * tile_area_inv
                     )
-                    dist_sq = (float(cur_dx) - spatial_mean_dx) ** 2 + (
-                        float(cur_dy) - spatial_mean_dy
-                    ) ** 2
+                    dist_sq = (float(cur_dx) - spatial_mean_dx) ** 2 + (float(cur_dy) - spatial_mean_dy) ** 2
                     total_cost = visual_cost + (spatial_weight * dist_sq * 0.05)
-                    if total_cost < best_total_cost:
-                        best_total_cost, final_dx, final_dy = (
-                            total_cost,
-                            float(cur_dx),
-                            float(cur_dy),
-                        )
-            int_dx, int_dy = ti.round(final_dx, ti.i32), ti.round(final_dy, ti.i32)
-            c0 = compute_alignment_sad(
-                ref_layer, comp_layer, y, x, y + int_dy, x + int_dx, tile_h, tile_w, 1
+                    if total_cost < best_cand_cost:
+                        best_cand_cost = total_cost
+                        best_cand_dx, best_cand_dy = cur_dx, cur_dy
+
+            # 🚀 Step 3: Evaluasi 4 Titik Cross untuk Subpixel Parabola Presisi Tinggi
+            c_center = compute_alignment_sad(
+                ref_layer, comp_layer, y, x, y + best_cand_dy, x + best_cand_dx, tile_h, tile_w, 1
             )
             c_m1_x = compute_alignment_sad(
-                ref_layer, comp_layer, y, x, y + int_dy, x + int_dx - 1, tile_h, tile_w, 1
+                ref_layer, comp_layer, y, x, y + best_cand_dy, x + best_cand_dx - 1, tile_h, tile_w, 1
             )
             c_p1_x = compute_alignment_sad(
-                ref_layer, comp_layer, y, x, y + int_dy, x + int_dx + 1, tile_h, tile_w, 1
+                ref_layer, comp_layer, y, x, y + best_cand_dy, x + best_cand_dx + 1, tile_h, tile_w, 1
             )
             c_m1_y = compute_alignment_sad(
-                ref_layer, comp_layer, y, x, y + int_dy - 1, x + int_dx, tile_h, tile_w, 1
+                ref_layer, comp_layer, y, x, y + best_cand_dy - 1, x + best_cand_dx, tile_h, tile_w, 1
             )
             c_p1_y = compute_alignment_sad(
-                ref_layer, comp_layer, y, x, y + int_dy + 1, x + int_dx, tile_h, tile_w, 1
+                ref_layer, comp_layer, y, x, y + best_cand_dy + 1, x + best_cand_dx, tile_h, tile_w, 1
             )
-            final_dx = float(int_dx) + parabolic_refinement_gated(
-                c_m1_x, c0, c_p1_x, 0.00015
-            )
-            final_dy = float(int_dy) + parabolic_refinement_gated(
-                c_m1_y, c0, c_p1_y, 0.00015
-            )
+
+            final_dx = float(best_cand_dx) + parabolic_refinement_gated(c_m1_x, c_center, c_p1_x, 0.00015)
+            final_dy = float(best_cand_dy) + parabolic_refinement_gated(c_m1_y, c_center, c_p1_y, 0.00015)
+
             for r, c in ti.ndrange(tile_h, tile_w):
                 if y + r < h and x + c < w:
                     refined_flow[y + r, x + c, 0], refined_flow[y + r, x + c, 1] = (

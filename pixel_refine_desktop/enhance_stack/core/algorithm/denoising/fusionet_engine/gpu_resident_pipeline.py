@@ -312,43 +312,24 @@ def _compute_weight_onnx(
     )
 
 
-def _upsample_weight_to_fullres(weight_work_np, full_h, full_w):
-    from taichi_vision import taichi_aot
-
-    weight_hwc = np.transpose(weight_work_np, (1, 2, 0)).astype(np.float32)
-    weight_gpu = taichi_aot.upload(np.ascontiguousarray(weight_hwc, dtype=np.float32))
-    weight_full_gpu = taichi_aot.resize(
-        weight_gpu,
-        (full_w, full_h),
-        interpolation=taichi_aot.INTER_LINEAR,
-        return_gpu=True,
-    )
-    weight_gpu.destroy()
-    return weight_full_gpu
-
-
 def _gpu_blend_frame(
-    sum_img_gpu, weight_sum_gpu, supp_aligned_gpu, weight_full_gpu, full_h, full_w
+    sum_img_gpu, weight_sum_gpu, supp_aligned_gpu, weight_work_gpu
 ):
     """Blend one support frame into the GPU-resident accumulator.
 
-    Uses accumulate_spatial_merging_taichi from SpatialFusion which now
+    Uses accumulate_spatial_merging_taichi from SpatialFusion which
     auto-dispatches to the vec3 kernel when given a 3D weight map.
 
-    The vec3 kernel does per-channel bilinear upsample + multiply + accumulate
-    entirely on GPU — no CPU roundtrip for the blend step.
+    The vec3 kernel performs per-channel bilinear upsample + multiply + accumulate
+    entirely on GPU on-the-fly — saving 144 MB VRAM per frame.
     """
-    from taichi_vision import taichi_aot
     from taichi_vision.taichi_algorithm.spatial_fusion import (
         accumulate_spatial_merging_taichi,
     )
 
-    # weight_full_gpu is (full_h, full_w, 3) HWC on GPU but uploaded/resized as
-    # a vector field (auto-detect on the trailing dim). The vec3 graph expects
-    # plain scalar 3D ndarrays, so every argument must be ``view_as_vector(False)``.
     accumulate_spatial_merging_taichi(
         current_image_full=supp_aligned_gpu.view_as_vector(False),
-        weight_map_work=weight_full_gpu.view_as_vector(False),
+        weight_map_work=weight_work_gpu.view_as_vector(False),
         final_image_sum=sum_img_gpu.view_as_vector(False),
         weight_map_sum_full=weight_sum_gpu.view_as_vector(False),
     )
@@ -600,12 +581,23 @@ def run_gpu_resident_pipeline(
                     else:
                         supp_analysis_gpu = supp_linear_gpu
 
-                    # Dual-Warp on GPU
-                    supp_aligned_linear_gpu, supp_aligned_analysis_gpu = (
+                    # Downscale analysis frame to work-res directly before warping
+                    if (work_h, work_w) != (target_h, target_w):
+                        supp_analysis_work_gpu = taichi_aot.resize(
+                            supp_analysis_gpu,
+                            (work_w, work_h),
+                            interpolation=taichi_aot.INTER_AREA,
+                            return_gpu=True,
+                        )
+                    else:
+                        supp_analysis_work_gpu = supp_analysis_gpu
+
+                    # Dual-Warp on GPU (Primary in full-res 12MP, Secondary directly in work-res ~36MB!)
+                    supp_aligned_linear_gpu, supp_aligned_analysis_work_gpu = (
                         aligner.align_frame(
                             supp_linear_gpu,
                             analysis_frame_gpu=supp_analysis_gpu,
-                            secondary_frame_to_warp=supp_analysis_gpu,
+                            secondary_frame_to_warp=supp_analysis_work_gpu,
                             stop_event=stop_event,
                             return_gpu=True,
                         )
@@ -613,25 +605,14 @@ def run_gpu_resident_pipeline(
                     supp_linear_gpu.destroy()
                     if supp_analysis_gpu is not supp_linear_gpu:
                         supp_analysis_gpu.destroy()
-
-                    # Downscale warped analysis frame to work-res directly in VRAM (~2 MB)
-                    if (work_h, work_w) != (target_h, target_w):
-                        supp_work_rgb_hwc_gpu = taichi_aot.resize(
-                            supp_aligned_analysis_gpu,
-                            (work_w, work_h),
-                            interpolation=taichi_aot.INTER_AREA,
-                            return_gpu=True,
-                        )
-                    else:
-                        supp_work_rgb_hwc_gpu = supp_aligned_analysis_gpu
+                    if supp_analysis_work_gpu is not supp_analysis_gpu:
+                        supp_analysis_work_gpu.destroy()
 
                     supp_work_rgb_np = np.transpose(
-                        supp_work_rgb_hwc_gpu.to_numpy(), (2, 0, 1)
+                        supp_aligned_analysis_work_gpu.to_numpy(), (2, 0, 1)
                     ).astype(np.float32)
 
-                    if supp_work_rgb_hwc_gpu is not supp_aligned_analysis_gpu:
-                        supp_work_rgb_hwc_gpu.destroy()
-                    supp_aligned_analysis_gpu.destroy()
+                    supp_aligned_analysis_work_gpu.destroy()
                     engine.sync()
 
                 while not (stop_event is not None and stop_event.is_set()):
@@ -767,23 +748,21 @@ def run_gpu_resident_pipeline(
                 )
 
             with gpu_hardware_lock:
-                # Upsample weight map on GPU & Blend to accumulator
-                weight_full_gpu = _upsample_weight_to_fullres(
-                    weight_work_np, target_h, target_w
+                weight_work_hwc = np.ascontiguousarray(
+                    np.transpose(weight_work_np, (1, 2, 0)), dtype=np.float32
                 )
                 del weight_work_np
+                weight_work_gpu = engine.upload(weight_work_hwc)
 
                 _gpu_blend_frame(
                     sum_img_gpu,
                     weight_sum_gpu,
                     supp_aligned_linear_gpu,
-                    weight_full_gpu,
-                    target_h,
-                    target_w,
+                    weight_work_gpu,
                 )
 
                 supp_aligned_linear_gpu.destroy()
-                weight_full_gpu.destroy()
+                weight_work_gpu.destroy()
                 engine.sync()
 
             print(

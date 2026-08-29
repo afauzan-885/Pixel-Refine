@@ -207,11 +207,13 @@ class AOTOpticalFlowAligner:
 
             # Reuse exact same flow field to warp secondary frame if requested
             if secondary_frame_to_warp is not None:
+                sec_shape = getattr(secondary_frame_to_warp, "shape", (self.full_h, self.full_w))
+                sec_h, sec_w = int(sec_shape[0]), int(sec_shape[1])
                 warped_secondary = taichi_aot.remap_with_flow(
                     secondary_frame_to_warp,
                     smooth_flow_gpu,
-                    self.full_h,
-                    self.full_w,
+                    sec_h,
+                    sec_w,
                     return_gpu=return_gpu,
                 )
 

@@ -209,6 +209,20 @@ def burst_images_to_array(images: Sequence[np.ndarray]) -> np.ndarray:
     return np.ascontiguousarray(array, dtype=np.float32)
 
 
+class DecoupledWeightNetSession:
+    """Encapsulates paired Encoder and Attention ONNX sessions with cached reference features."""
+
+    def __init__(self, encoder_session, attention_session, patch_size: int):
+        self.encoder_session = encoder_session
+        self.attention_session = attention_session
+        self.patch_size = patch_size
+        self._cached_ref_hash = None
+        self._cached_tiles = None
+
+    def get_providers(self):
+        return self.attention_session.get_providers()
+
+
 def load_weightnet_onnx(
     model_path: str | Path,
     runtime: str = "auto",
@@ -220,15 +234,6 @@ def load_weightnet_onnx(
         raise RuntimeError("ONNX inference requires the onnxruntime package.") from exc
 
     model_path = Path(model_path)
-    # Automatically resolve model corresponding to requested patch_size if available
-    if patch_size in (256, 512, 1024):
-        candidate = model_path.parent / f"weightnet_{patch_size}_gpu_fp32.onnx"
-        if candidate.is_file():
-            model_path = candidate
-
-    if not model_path.is_file():
-        raise FileNotFoundError(f"WeightNet ONNX not found: {model_path}")
-
     runtime = str(runtime).strip().lower()
     available = set(ort.get_available_providers())
     if runtime == "auto":
@@ -260,12 +265,41 @@ def load_weightnet_onnx(
         "session.use_device_allocator_for_initializers", "1"
     )
 
+    models_dir = model_path.parent
+    dev_suffix = "gpu" if runtime == "dml" else "cpu"
+
+    # 1. Try to find Decoupled Model Pair first (Encoder + Attention)
+    enc_candidate = models_dir / f"weightnet_encoder_{patch_size}_{dev_suffix}_fp32.onnx"
+    att_candidate = models_dir / f"weightnet_attention_{patch_size}_{dev_suffix}_fp32.onnx"
+
+    if enc_candidate.is_file() and att_candidate.is_file():
+        enc_sess = ort.InferenceSession(
+            str(enc_candidate), sess_options=options, providers=providers
+        )
+        att_sess = ort.InferenceSession(
+            str(att_candidate), sess_options=options, providers=providers
+        )
+        print(
+            f"[WeightNet ONNX Decoupled] runtime={runtime} patch={patch_size} "
+            f"encoder={enc_candidate.name} attention={att_candidate.name}"
+        )
+        return DecoupledWeightNetSession(enc_sess, att_sess, patch_size)
+
+    # 2. Fallback to Coupled Model if decoupled pair is not found
+    if patch_size in (256, 512, 1024):
+        candidate = models_dir / f"weightnet_{patch_size}_{dev_suffix}_fp32.onnx"
+        if candidate.is_file():
+            model_path = candidate
+
+    if not model_path.is_file():
+        raise FileNotFoundError(f"WeightNet ONNX not found: {model_path}")
+
     session = ort.InferenceSession(
         str(model_path), sess_options=options, providers=providers
     )
 
     print(
-        f"[WeightNet ONNX] runtime={runtime} model={model_path.name} "
+        f"[WeightNet ONNX Coupled] runtime={runtime} model={model_path.name} "
         f"providers={session.get_providers()} patch={patch_size}"
     )
     return session
@@ -291,16 +325,21 @@ def infer_single_support_weight_map(
     Output: weight_map_work [3, work_h, work_w], mean_alpha
     """
     channels, work_h, work_w = ref_work.shape
-    try:
-        model_in_shape = session.get_inputs()[0].shape
-        if (
-            len(model_in_shape) >= 4
-            and isinstance(model_in_shape[2], int)
-            and model_in_shape[2] > 0
-        ):
-            tile_size = int(model_in_shape[2])
-    except Exception:
-        pass
+    is_decoupled = isinstance(session, DecoupledWeightNetSession)
+
+    if is_decoupled:
+        tile_size = session.patch_size
+    else:
+        try:
+            model_in_shape = session.get_inputs()[0].shape
+            if (
+                len(model_in_shape) >= 4
+                and isinstance(model_in_shape[2], int)
+                and model_in_shape[2] > 0
+            ):
+                tile_size = int(model_in_shape[2])
+        except Exception:
+            pass
 
     # 1. Compute Luma (Y) for structural & motion evaluation
     ref_luma = (0.299 * ref_work[0] + 0.587 * ref_work[1] + 0.114 * ref_work[2]).astype(
@@ -327,7 +366,27 @@ def infer_single_support_weight_map(
     if total_tiles == 0:
         return np.ones((3, work_h, work_w), dtype=np.float32), 1.0
 
-    # 2. High-throughput single-tile ONNX inference matching model [1, 1, 512, 512]
+    # 2. Extract and cache reference features once per burst if using decoupled architecture
+    if is_decoupled:
+        ref_id = id(ref_work)
+        if session._cached_ref_hash != ref_id:
+            cached_tiles = []
+            for (y_start, y_end, x_start, x_end) in tile_coords:
+                cur_h, cur_w = y_end - y_start, x_end - x_start
+                r_in = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
+                r_in[0, 0, :cur_h, :cur_w] = ref_luma[y_start:y_end, x_start:x_end]
+                try:
+                    feat_np = session.encoder_session.run(
+                        ["ref_feat"],
+                        {"ref_img": r_in},
+                    )[0]
+                except Exception:
+                    feat_np = np.zeros((1, 16, tile_size, tile_size), dtype=np.float32)
+                cached_tiles.append((r_in, feat_np))
+            session._cached_ref_hash = ref_id
+            session._cached_tiles = cached_tiles
+
+    # 3. High-throughput single-tile ONNX inference matching model
     weight_map_luma = np.zeros((1, work_h, work_w), dtype=np.float32)
     weight_stitch_work = np.zeros((1, 1, work_h, work_w), dtype=np.float32)
     alpha_total = 0.0
@@ -341,23 +400,42 @@ def infer_single_support_weight_map(
         cur_h, cur_w = y_end - y_start, x_end - x_start
         cur_win = window_2d[:, :, :cur_h, :cur_w]
 
-        ref_in[0, 0, :cur_h, :cur_w] = ref_luma[y_start:y_end, x_start:x_end]
         supp_in[0, 0, :cur_h, :cur_w] = supp_luma[y_start:y_end, x_start:x_end]
 
-        try:
-            weight_np, alpha_np = session.run(
-                ["weight_map", "alpha"],
-                {"ref_img": ref_in, "support_img": supp_in},
-            )
-            weight_tile = np.asarray(weight_np, dtype=np.float32)[0, 0, :cur_h, :cur_w]
-            alpha_values = np.asarray(alpha_np, dtype=np.float32)
-            if np.isfinite(alpha_values).all():
-                alpha_total += float(alpha_values.mean())
-        except Exception:
-            # Fallback for transient GPU DML device timeouts
-            diff = np.abs(ref_in[0, 0, :cur_h, :cur_w] - supp_in[0, 0, :cur_h, :cur_w])
-            weight_tile = np.clip(1.0 - diff * 3.0, 0.0, 1.0)
-            alpha_total += 0.5
+        if is_decoupled:
+            ref_in_tile, ref_feat_tile = session._cached_tiles[i]
+            try:
+                weight_np, alpha_np = session.attention_session.run(
+                    ["weight_map", "alpha"],
+                    {
+                        "ref_feat": ref_feat_tile,
+                        "ref_img": ref_in_tile,
+                        "support_img": supp_in,
+                    },
+                )
+                weight_tile = np.asarray(weight_np, dtype=np.float32)[0, 0, :cur_h, :cur_w]
+                alpha_values = np.asarray(alpha_np, dtype=np.float32)
+                if np.isfinite(alpha_values).all():
+                    alpha_total += float(alpha_values.mean())
+            except Exception:
+                diff = np.abs(ref_in_tile[0, 0, :cur_h, :cur_w] - supp_in[0, 0, :cur_h, :cur_w])
+                weight_tile = np.clip(1.0 - diff * 3.0, 0.0, 1.0)
+                alpha_total += 0.5
+        else:
+            ref_in[0, 0, :cur_h, :cur_w] = ref_luma[y_start:y_end, x_start:x_end]
+            try:
+                weight_np, alpha_np = session.run(
+                    ["weight_map", "alpha"],
+                    {"ref_img": ref_in, "support_img": supp_in},
+                )
+                weight_tile = np.asarray(weight_np, dtype=np.float32)[0, 0, :cur_h, :cur_w]
+                alpha_values = np.asarray(alpha_np, dtype=np.float32)
+                if np.isfinite(alpha_values).all():
+                    alpha_total += float(alpha_values.mean())
+            except Exception:
+                diff = np.abs(ref_in[0, 0, :cur_h, :cur_w] - supp_in[0, 0, :cur_h, :cur_w])
+                weight_tile = np.clip(1.0 - diff * 3.0, 0.0, 1.0)
+                alpha_total += 0.5
 
         weight_map_luma[:, y_start:y_end, x_start:x_end] += weight_tile * cur_win[0, 0]
         weight_stitch_work[:, :, y_start:y_end, x_start:x_end] += cur_win
