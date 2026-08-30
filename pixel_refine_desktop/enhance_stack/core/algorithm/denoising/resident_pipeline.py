@@ -35,15 +35,15 @@ Architecture:
     │  Download final fused result (one frame)                │
     └─────────────────────────────────────────────────────────┘
 """
-
 import gc
 import os
 import queue
+import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional, Sequence, Tuple, Union
-
-import h5py
 import numpy as np
 
 from taichi_vision.taichi_aot import TaichiGPUBuffer, get_engine
@@ -524,6 +524,24 @@ def _compute_weight_onnx(
     )
 
 
+def _destroy_work_item(item):
+    """Safely destroy GPU buffers or nested tuples of GPU buffers."""
+    if item is None:
+        return
+    if isinstance(item, tuple):
+        for el in item:
+            if el is not None and hasattr(el, "destroy"):
+                try:
+                    el.destroy()
+                except Exception:
+                    pass
+    elif hasattr(item, "destroy"):
+        try:
+            item.destroy()
+        except Exception:
+            pass
+
+
 def _gpu_blend_frame(
     sum_img_gpu, weight_sum_gpu, supp_aligned_gpu, weight_work_gpu
 ):
@@ -568,7 +586,6 @@ def run_gpu_resident_pipeline(
     chroma_sensitivity: float = 6.0,
     is_raw: bool = False,
     storage_mode: str = "direct",
-    hdf5_path: Optional[Union[str, Path]] = None,
     alignment_only: bool = False,
     batch_queue: int = 3,
     auto_params: Optional[dict] = None,
@@ -578,17 +595,17 @@ def run_gpu_resident_pipeline(
     """Execute the full GPU-resident FusionNet / SpatialFusion / Streaming Burst pipeline.
 
     Modes:
-    - storage_mode="direct": Pure VRAM-resident zero-copy pipeline (0 disk I/O, fastest).
-    - storage_mode="disk": Parallel streaming pipeline with Asynchronous HDF5 Disk Writer.
+    - Pure VRAM/RAM-resident zero-copy pipeline (0 disk I/O, fastest).
 
     Engines:
     - weight_engine="fusionet": AI WeightNet inference via DirectML ONNX.
     - weight_engine="spatial_fusion": Native Taichi AOT TCM GPU Similarity Weighting.
+    - weight_engine="average": Uniform fast averaging.
 
     Args:
         image_paths: List of image file paths (burst).
         session: WeightNet ONNX session (optional if alignment_only or spatial_fusion).
-        weight_engine: "fusionet" (AI) or "spatial_fusion" (AOT TCM).
+        weight_engine: "fusionet" (AI), "spatial_fusion" (AOT TCM), or "average".
         spatial_config: Parameters dict for spatial fusion weighting.
         work_scale: Downscale factor for WeightNet/Spatial weight computation.
         tile_size: Tile size for weight computation.
@@ -597,9 +614,8 @@ def run_gpu_resident_pipeline(
         ghost_cutoff: Ghost cutoff threshold.
         chroma_sensitivity: Color deviation protection scale.
         is_raw: Whether images are RAW/DNG.
-        storage_mode: "direct" (RAM/VRAM stream) or "disk" (async HDF5 cache).
-        hdf5_path: Target HDF5 file path if storage_mode="disk".
-        alignment_only: If True, executes pure alignment & disk caching without blending.
+        storage_mode: "direct" (RAM/VRAM stream).
+        alignment_only: If True, executes pure alignment without blending.
         auto_params: Pre-computed auto_enhance params (analyzed on first frame if None).
         stop_event: Cancellation signal.
         progress_callback: Progress reporting callback.
@@ -760,25 +776,36 @@ def run_gpu_resident_pipeline(
         # SpatialFusion analyzes via AutoEnhance v2 (Natural Tone Mapping)
         if is_raw and natural_params is not None:
             ref_enhanced_v2_gpu = apply_auto_enhance_on_gpu(ref_gpu, natural_params)
-            ref_gray_full_gpu = taichi_aot.cvtColor(
-                ref_enhanced_v2_gpu, taichi_aot.COLOR_RGB2GRAY
-            )
-            ref_enhanced_v2_gpu.destroy()
+            if (work_h, work_w) != (target_h, target_w):
+                ref_work_v2_gpu = taichi_aot.resize(
+                    ref_enhanced_v2_gpu,
+                    (work_w, work_h),
+                    interpolation=taichi_aot.INTER_AREA,
+                    return_gpu=True,
+                )
+                ref_enhanced_v2_gpu.destroy()
+            else:
+                ref_work_v2_gpu = ref_enhanced_v2_gpu
         else:
-            ref_gray_full_gpu = taichi_aot.cvtColor(
-                ref_gpu, taichi_aot.COLOR_RGB2GRAY
-            )
+            if (work_h, work_w) != (target_h, target_w):
+                ref_work_v2_gpu = taichi_aot.resize(
+                    ref_gpu,
+                    (work_w, work_h),
+                    interpolation=taichi_aot.INTER_AREA,
+                    return_gpu=True,
+                )
+            else:
+                ref_work_v2_gpu = ref_gpu
 
-        if (work_h, work_w) != (target_h, target_w):
-            ref_spatial_gray_gpu = taichi_aot.resize(
-                ref_gray_full_gpu,
-                (work_w, work_h),
-                interpolation=taichi_aot.INTER_AREA,
-                return_gpu=True,
-            )
-            ref_gray_full_gpu.destroy()
-        else:
-            ref_spatial_gray_gpu = ref_gray_full_gpu
+        ref_spatial_gray_gpu = taichi_aot.cvtColor(
+            ref_work_v2_gpu, taichi_aot.COLOR_RGB2GRAY
+        )
+        ref_work_rgb_np = np.transpose(
+            ref_work_v2_gpu.to_numpy(), (2, 0, 1)
+        ).astype(np.float32)  # [3, work_h, work_w]
+
+        if ref_work_v2_gpu is not ref_gpu:
+            ref_work_v2_gpu.destroy()
 
         # Estimasi noise versi lama (Laplacian MAD klasik) pada gambar referensi AutoEnhance v2
         ref_gray_np = ref_spatial_gray_gpu.to_numpy()
@@ -862,41 +889,11 @@ def run_gpu_resident_pipeline(
     total_supp = num_images - 1
 
     # ------------------------------------------------------------------
-    # Storage Mode Initialization (direct vs disk with async writer)
-    # ------------------------------------------------------------------
-    is_disk_mode = str(storage_mode).strip().lower() == "disk"
-    h5_file = None
-    disk_writer_queue = None
-
-    if is_disk_mode:
-        if hdf5_path is None or str(hdf5_path).strip() in ("", "."):
-            hdf5_target = Path("database/align/aligned_images.h5")
-        else:
-            hdf5_target = Path(hdf5_path)
-            if hdf5_target.is_dir() or str(hdf5_target).endswith(("/", "\\")):
-                hdf5_target = hdf5_target / "aligned_images.h5"
-
-        hdf5_target.parent.mkdir(parents=True, exist_ok=True)
-        h5_file = h5py.File(str(hdf5_target), "w")
-        ref_host_np = ref_gpu.to_numpy()
-        h5_file.create_dataset(
-            "image_0",
-            data=ref_host_np,
-            compression="gzip" if is_disk_mode else None,
-        )
-        h5_file.attrs["reference_path"] = str(image_paths[0])
-        h5_file.attrs["total_images"] = num_images
-        h5_file.flush()
-        disk_writer_queue = queue.Queue(maxsize=max(2, int(batch_queue)))
-        print(f"[ResidentPipeline] Parallel async disk writer initialized -> {hdf5_target}")
-
-    # ------------------------------------------------------------------
     # PHASE 6: Asynchronous Multi-Stage Flow Coordinator Pipeline
     # ------------------------------------------------------------------
     # Stage 1: Preloader Thread   -> preloaded_queue (maxsize=batch_queue)
     # Stage 2: Alignment Thread   -> aligned_queue   (maxsize=batch_queue)
-    # Stage 2B: Async Disk Writer -> disk_writer_queue (maxsize=batch_queue) [disk mode]
-    # Stage 3: ONNX Inference     -> weighted_queue  (maxsize=batch_queue)
+    # Stage 3: Weight Inference   -> weighted_queue  (maxsize=batch_queue)
     # Stage 4: GPU Blending (Main Thread) consumes weighted_queue
     # ------------------------------------------------------------------
     q_depth = max(1, int(batch_queue))
@@ -1051,38 +1048,36 @@ def run_gpu_resident_pipeline(
                                 supp_aligned_linear_gpu, natural_params
                             )
                             if (work_h, work_w) != (target_h, target_w):
-                                supp_enhanced_v2_work = taichi_aot.resize(
+                                supp_work_v2_gpu = taichi_aot.resize(
                                     supp_enhanced_v2_gpu,
                                     (work_w, work_h),
                                     interpolation=taichi_aot.INTER_AREA,
                                     return_gpu=True,
                                 )
                                 supp_enhanced_v2_gpu.destroy()
-                                supp_work_item = taichi_aot.cvtColor(
-                                    supp_enhanced_v2_work, taichi_aot.COLOR_RGB2GRAY
-                                )
-                                supp_enhanced_v2_work.destroy()
                             else:
-                                supp_work_item = taichi_aot.cvtColor(
-                                    supp_enhanced_v2_gpu, taichi_aot.COLOR_RGB2GRAY
-                                )
-                                supp_enhanced_v2_gpu.destroy()
+                                supp_work_v2_gpu = supp_enhanced_v2_gpu
                         else:
                             if (work_h, work_w) != (target_h, target_w):
-                                supp_aligned_linear_work = taichi_aot.resize(
+                                supp_work_v2_gpu = taichi_aot.resize(
                                     supp_aligned_linear_gpu,
                                     (work_w, work_h),
                                     interpolation=taichi_aot.INTER_AREA,
                                     return_gpu=True,
                                 )
-                                supp_work_item = taichi_aot.cvtColor(
-                                    supp_aligned_linear_work, taichi_aot.COLOR_RGB2GRAY
-                                )
-                                supp_aligned_linear_work.destroy()
                             else:
-                                supp_work_item = taichi_aot.cvtColor(
-                                    supp_aligned_linear_gpu, taichi_aot.COLOR_RGB2GRAY
-                                )
+                                supp_work_v2_gpu = supp_aligned_linear_gpu
+
+                        supp_work_gray_gpu = taichi_aot.cvtColor(
+                            supp_work_v2_gpu, taichi_aot.COLOR_RGB2GRAY
+                        )
+                        supp_work_rgb_np = np.transpose(
+                            supp_work_v2_gpu.to_numpy(), (2, 0, 1)
+                        ).astype(np.float32)
+                        if supp_work_v2_gpu is not supp_aligned_linear_gpu:
+                            supp_work_v2_gpu.destroy()
+
+                        supp_work_item = (supp_work_gray_gpu, supp_work_rgb_np)
                         if supp_aligned_analysis_work_gpu is not None:
                             supp_aligned_analysis_work_gpu.destroy()
                     elif weight_engine == "average":
@@ -1096,15 +1091,9 @@ def run_gpu_resident_pipeline(
                         supp_aligned_analysis_work_gpu.destroy()
                         engine.sync()
 
-                # Stream aligned frame to parallel async disk writer if enabled
-                if is_disk_mode and disk_writer_queue is not None:
-                    aligned_host_np = supp_aligned_linear_gpu.to_numpy()
-                    disk_writer_queue.put((curr_idx, curr_name, aligned_host_np))
-
                 if alignment_only:
                     supp_aligned_linear_gpu.destroy()
-                    if hasattr(supp_work_item, "destroy"):
-                        supp_work_item.destroy()
+                    _destroy_work_item(supp_work_item)
                     if progress_callback:
                         base_p = 5 + int(curr_idx / total_supp * 90)
                         progress_callback(
@@ -1115,8 +1104,7 @@ def run_gpu_resident_pipeline(
                 while not _is_stopped():
                     if pipeline_error is not None:
                         supp_aligned_linear_gpu.destroy()
-                        if hasattr(supp_work_item, "destroy"):
-                            supp_work_item.destroy()
+                        _destroy_work_item(supp_work_item)
                         return
                     try:
                         aligned_queue.put(
@@ -1135,37 +1123,6 @@ def run_gpu_resident_pipeline(
             _set_error(exc)
         finally:
             aligned_queue.put(_SENTINEL)
-
-    # ------------------------------------------------------------------
-    # Worker 2B: Asynchronous Parallel HDF5 Disk Writer
-    # ------------------------------------------------------------------
-    def _disk_writer_worker():
-        try:
-            while not _is_stopped():
-                if pipeline_error is not None:
-                    break
-                try:
-                    item = disk_writer_queue.get(timeout=0.05)
-                except queue.Empty:
-                    continue
-
-                if item is _SENTINEL:
-                    break
-
-                w_idx, w_name, w_aligned_np = item
-                try:
-                    if h5_file is not None:
-                        h5_file.create_dataset(
-                            f"image_{w_idx}",
-                            data=w_aligned_np,
-                            compression="gzip" if is_disk_mode else None,
-                        )
-                        h5_file.flush()
-                finally:
-                    del w_aligned_np
-                    disk_writer_queue.task_done()
-        except Exception as exc:
-            _set_error(exc)
 
     # ------------------------------------------------------------------
     # Worker 3: Weight Inference (DirectML ONNX AI or Native Taichi AOT)
@@ -1188,12 +1145,11 @@ def run_gpu_resident_pipeline(
                 with gpu_hardware_lock:
                     if _is_stopped():
                         supp_aligned_linear_gpu.destroy()
-                        if hasattr(supp_work_item, "destroy"):
-                            supp_work_item.destroy()
+                        _destroy_work_item(supp_work_item)
                         break
 
                     if weight_engine == "spatial_fusion":
-                        supp_work_gray_gpu = supp_work_item
+                        supp_work_gray_gpu, supp_work_rgb_np = supp_work_item
                         weight_work_2d_gpu = engine.allocate(
                             (work_h, work_w), dtype=np.float32, host_accessible=True
                         )
@@ -1219,11 +1175,48 @@ def run_gpu_resident_pipeline(
                         supp_work_gray_gpu.destroy()
                         w_2d_np = weight_work_2d_gpu.to_numpy()
                         weight_work_2d_gpu.destroy()
-                        weight_work_hwc = np.ascontiguousarray(
-                            np.repeat(w_2d_np[:, :, np.newaxis], 3, axis=2),
-                            dtype=np.float32,
+
+                        # Apply ghost penalty & cutoff
+                        if ghost_penalty != 1.0:
+                            w_2d_np = np.power(w_2d_np, float(ghost_penalty))
+                        if ghost_cutoff > 0.0:
+                            w_2d_np = np.clip(
+                                (w_2d_np - float(ghost_cutoff))
+                                / (1.0 - float(ghost_cutoff)),
+                                0.0,
+                                1.0,
+                            )
+
+                        # FusionNet-style Vectorized 3-Channel Chroma Modulation
+                        supp_luma = (
+                            0.299 * supp_work_rgb_np[0]
+                            + 0.587 * supp_work_rgb_np[1]
+                            + 0.114 * supp_work_rgb_np[2]
+                        ).astype(np.float32)
+                        ref_luma = (
+                            0.299 * ref_work_rgb_np[0]
+                            + 0.587 * ref_work_rgb_np[1]
+                            + 0.114 * ref_work_rgb_np[2]
+                        ).astype(np.float32)
+
+                        delta_r = np.abs(
+                            (supp_work_rgb_np[0] - supp_luma)
+                            - (ref_work_rgb_np[0] - ref_luma)
                         )
-                        del w_2d_np
+                        delta_b = np.abs(
+                            (supp_work_rgb_np[2] - supp_luma)
+                            - (ref_work_rgb_np[2] - ref_luma)
+                        )
+
+                        sens = float(chroma_sensitivity)
+                        w_r = w_2d_np * np.clip(1.0 - sens * delta_r, 0.0, 1.0)
+                        w_g = w_2d_np
+                        w_b = w_2d_np * np.clip(1.0 - sens * delta_b, 0.0, 1.0)
+
+                        weight_work_hwc = np.stack(
+                            [w_r, w_g, w_b], axis=2
+                        ).astype(np.float32)
+                        del w_2d_np, supp_work_rgb_np
                         weight_work_item = weight_work_hwc
                         alpha_mean = 1.0
                     elif weight_engine == "average":
@@ -1282,14 +1275,6 @@ def run_gpu_resident_pipeline(
     )
     threads = [t_preloader, t_aligner]
 
-    t_writer = None
-    if is_disk_mode and disk_writer_queue is not None:
-        t_writer = threading.Thread(
-            target=_disk_writer_worker, name="Stage2B_DiskWriter", daemon=True
-        )
-        t_writer.start()
-        threads.append(t_writer)
-
     t_weight = None
     if not alignment_only and (
         session is not None or weight_engine in ("spatial_fusion", "average")
@@ -1307,15 +1292,6 @@ def run_gpu_resident_pipeline(
     if alignment_only:
         t_preloader.join()
         t_aligner.join()
-        if disk_writer_queue is not None:
-            disk_writer_queue.put(_SENTINEL)
-            if t_writer is not None:
-                t_writer.join()
-        if h5_file is not None:
-            try:
-                h5_file.close()
-            except Exception:
-                pass
         ref_out = ref_gpu.to_numpy()
         aligner.close()
         ref_gpu.destroy()
@@ -1398,17 +1374,6 @@ def run_gpu_resident_pipeline(
             )
 
     finally:
-        if disk_writer_queue is not None:
-            try:
-                disk_writer_queue.put(_SENTINEL)
-            except Exception:
-                pass
-        if is_disk_mode and h5_file is not None:
-            try:
-                h5_file.close()
-            except Exception:
-                pass
-
         # Drain and destroy any remaining GPU buffers in queues immediately
         for q in (preloaded_queue, aligned_queue, weighted_queue):
             while not q.empty():
@@ -1428,8 +1393,6 @@ def run_gpu_resident_pipeline(
         t_aligner.join(timeout=0.2)
         if t_weight is not None:
             t_weight.join(timeout=0.2)
-        if t_writer is not None:
-            t_writer.join(timeout=0.2)
 
         if _is_stopped():
             try:

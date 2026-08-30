@@ -38,22 +38,8 @@ class FusionNetDenoisingAlgorithm:
         "chroma_sensitivity": 1.0,  # Color deviation protection sensitivity
     }
 
-    @staticmethod
-    def _sorted_image_keys(h5f):
-        return sorted(
-            (key for key in h5f.keys() if key.startswith("image_")),
-            key=lambda item: int(item.split("_", 1)[1]),
-        )
-
     def _load_inputs(self, ctx, frames):
-        """Return a concrete frame list from HDF5 or memory, or path list."""
-        use_hdf5 = bool(getattr(ctx, "hdf5_path", None)) and os.path.exists(
-            ctx.hdf5_path
-        )
-        if use_hdf5:
-            with h5py.File(ctx.hdf5_path, "r") as h5f:
-                keys = self._sorted_image_keys(h5f)
-                return [h5f[key][:] for key in keys], "hdf5"
+        """Return a concrete frame list from image paths or memory."""
         if getattr(ctx, "image_paths", None) and len(ctx.image_paths) > 0:
             # Free in-memory burst if present to eliminate host RAM pressure
             if hasattr(ctx, "frames") and ctx.frames is not None:
@@ -125,10 +111,10 @@ class FusionNetDenoisingAlgorithm:
         update_prog = getattr(ctx, "update_progress", None)
         stop_req = getattr(ctx, "stop_requested", None)
 
-        stop_ev = None
         if stop_req is not None:
-            stop_ev = threading.Event()
             if callable(stop_req) and stop_req():
+                return None
+            elif hasattr(stop_req, "is_set") and stop_req.is_set():
                 return None
 
         # ── GPU-Resident Pipeline (zero-copy path for file-based bursts) ──
@@ -145,9 +131,12 @@ class FusionNetDenoisingAlgorithm:
                 DEFAULT_WEIGHTNET_ONNX, runtime="dml", patch_size=tile_size
             )
 
-            storage_mode = (
-                getattr(ctx, "storage_mode", None)
-                or ctx.params.get("storage_mode", "direct")
+            alignment_plan = (
+                getattr(ctx, "alignment_selection_name", None)
+                or getattr(ctx, "params", {}).get("alignment_plan", "FlowNet")
+            )
+            alignment_config = getattr(ctx, "params", {}).get(
+                "alignment_params", {}
             )
             batch_queue = int(
                 getattr(ctx, "params", {}).get(
@@ -158,6 +147,9 @@ class FusionNetDenoisingAlgorithm:
             result_fp32, mean_alpha = run_resident_pipeline(
                 inputs,
                 session,
+                weight_engine="fusionet",
+                alignment_plan=alignment_plan,
+                alignment_config=alignment_config,
                 work_scale=work_scale,
                 tile_size=tile_size,
                 overlap=overlap,
@@ -165,10 +157,9 @@ class FusionNetDenoisingAlgorithm:
                 ghost_cutoff=ghost_cut,
                 chroma_sensitivity=chroma_sens,
                 is_raw=is_raw,
-                storage_mode=storage_mode,
-                hdf5_path=hdf5_path,
+                storage_mode="direct",
                 batch_queue=batch_queue,
-                stop_event=stop_ev,
+                stop_event=stop_req,
                 progress_callback=update_prog,
             )
 

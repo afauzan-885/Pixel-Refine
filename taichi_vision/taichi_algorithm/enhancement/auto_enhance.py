@@ -163,9 +163,8 @@ def analyze_auto_enhance_params(
     max_gain_cap = float(np.interp(log_avg, [0.005, 0.05, 0.10], [1.9, 2.55, 3.6]))
     gain = float(np.clip(target_key / max(log_avg, 1e-4), 0.5, max_gain_cap))
 
-    # White Point Anchor: High enough to protect peak highlights from blowing up
-    max_input = max(max_val, p_white, 1.0)
-    white_level = max(3.5, max_input * gain * 1.5)
+    # White Point Anchor: Peak input luminance scales smoothly to EXACTLY 1.0
+    white_level = max(1.0, 1.0 * gain)
 
     # In night scenes, keep shadow_lift zero so the sigmoid asymptote anchors deep black skies
     if log_avg < 0.04:
@@ -256,7 +255,7 @@ def apply_auto_enhance_np(
     s_tone = np.clip((s_x - s_0) / (s_1 - s_0), 0.0, 1.0)
 
     # Highlight protection shoulder: Smoothly blend from contrast curve to soft filmic shoulder
-    hl_weight = np.clip((lum_gamma - 0.40) / 0.60, 0.0, 1.0)
+    hl_weight = np.clip((lum_gamma - 0.35) / 0.65, 0.0, 1.0)
     hl_smooth = hl_weight * hl_weight * (3.0 - 2.0 * hl_weight)  # Hermite smoothstep
     lum_final = np.clip(s_tone * (1.0 - hl_smooth) + lum_gamma * hl_smooth, 0.0, 1.0)
 
@@ -264,10 +263,16 @@ def apply_auto_enhance_np(
     ratio = (lum_final / (lum + 1e-6))[:, :, np.newaxis]
     rgb_out = img * ratio
 
-    # 8. Natural Color Saturation
-    if saturation != 1.0:
-        lum_3d = lum_final[:, :, np.newaxis]
-        rgb_out = lum_3d + (rgb_out - lum_3d) * saturation
+    # 8. Adaptive Highlight Desaturation (Anti-Chromatic Aberration Fringe)
+    desat_factor = np.clip((lum_final - 0.55) / 0.40, 0.0, 1.0)
+    desat_smooth = desat_factor * desat_factor * (3.0 - 2.0 * desat_factor)
+    eff_sat = (
+        (1.0 + (saturation - 1.0) * (1.0 - desat_smooth))
+        * (1.0 - desat_smooth)
+    )[:, :, np.newaxis]
+
+    lum_3d = lum_final[:, :, np.newaxis]
+    rgb_out = lum_3d + (rgb_out - lum_3d) * eff_sat
 
     return np.ascontiguousarray(np.clip(rgb_out, 0.0, 1.0), dtype=np.float32)
 
@@ -328,7 +333,7 @@ if TAICHI_AVAILABLE:
             s_tone = tm.clamp((s_x - s_0) * inv_s_range, 0.0, 1.0)
 
             # Highlight protection shoulder: Smoothly blend from contrast curve to soft filmic shoulder
-            hl_weight = tm.clamp((lum_gamma - 0.40) / 0.60, 0.0, 1.0)
+            hl_weight = tm.clamp((lum_gamma - 0.35) / 0.65, 0.0, 1.0)
             hl_smooth = hl_weight * hl_weight * (3.0 - 2.0 * hl_weight)
             lum_final = tm.clamp(
                 s_tone * (1.0 - hl_smooth) + lum_gamma * hl_smooth, 0.0, 1.0
@@ -339,10 +344,14 @@ if TAICHI_AVAILABLE:
             g_out = g * ratio
             b_out = b * ratio
 
-            if saturation != 1.0:
-                r_out = lum_final + (r_out - lum_final) * saturation
-                g_out = lum_final + (g_out - lum_final) * saturation
-                b_out = lum_final + (b_out - lum_final) * saturation
+            # Adaptive Highlight Desaturation (Anti-Chromatic Aberration Fringe)
+            desat_factor = tm.clamp((lum_final - 0.55) / 0.40, 0.0, 1.0)
+            desat_smooth = desat_factor * desat_factor * (3.0 - 2.0 * desat_factor)
+            eff_sat = (1.0 + (saturation - 1.0) * (1.0 - desat_smooth)) * (1.0 - desat_smooth)
+
+            r_out = lum_final + (r_out - lum_final) * eff_sat
+            g_out = lum_final + (g_out - lum_final) * eff_sat
+            b_out = lum_final + (b_out - lum_final) * eff_sat
 
             dst[i, j] = tm.vec3(
                 tm.clamp(r_out, 0.0, 1.0),

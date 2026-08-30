@@ -112,13 +112,6 @@ class SpatialFusionDenoisingAlgorithm:
     @staticmethod
     def _load_inputs(ctx, frames):
         """Return a concrete frame list for both CPU and GPU lanes."""
-        use_hdf5 = bool(getattr(ctx, "hdf5_path", None)) and os.path.exists(
-            ctx.hdf5_path
-        )
-        if use_hdf5:
-            with h5py.File(ctx.hdf5_path, "r") as h5f:
-                keys = _sorted_image_keys(h5f)
-                return [h5f[key][:] for key in keys], "hdf5"
         if frames:
             return list(frames), "memory"
         return [], "none"
@@ -141,7 +134,6 @@ class SpatialFusionDenoisingAlgorithm:
                 config.get("work_resolution_scale", config.get("proxy_scale", 0.50))
             )
             storage_mode = "direct"
-            hdf5_path = None
 
             stop_req = getattr(ctx, "stop_requested", None)
             if stop_req is not None and callable(stop_req) and stop_req():
@@ -167,6 +159,15 @@ class SpatialFusionDenoisingAlgorithm:
                 )
             )
 
+            ghost_penalty = float(config.get("ghost_penalty", 1.0))
+            ghost_cutoff = float(config.get("ghost_cutoff", 0.05))
+            chroma_sensitivity = float(
+                config.get(
+                    "chroma_sensitivity",
+                    config.get("similarity_chroma_sensitivity", 6.0),
+                )
+            )
+
             result_fp32, _ = run_resident_pipeline(
                 image_paths,
                 session=None,
@@ -177,9 +178,11 @@ class SpatialFusionDenoisingAlgorithm:
                 work_scale=work_scale,
                 tile_size=tile_size,
                 overlap=overlap,
+                ghost_penalty=ghost_penalty,
+                ghost_cutoff=ghost_cutoff,
+                chroma_sensitivity=chroma_sensitivity,
                 is_raw=is_raw,
                 storage_mode=storage_mode,
-                hdf5_path=hdf5_path,
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=getattr(ctx, "update_progress", None),
