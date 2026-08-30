@@ -1077,6 +1077,11 @@ def generate_spatial_weights_taichi(
         if scratch is None and buf is not None:
             buf.destroy()
 
+    if not isinstance(row_starts, taichi_aot.TaichiGPUBuffer):
+        row_starts = taichi_aot.upload(np.asarray(row_starts, dtype=np.int32))
+    if not isinstance(col_starts, taichi_aot.TaichiGPUBuffer):
+        col_starts = taichi_aot.upload(np.asarray(col_starts, dtype=np.int32))
+
     # Load Module (backend-aware)
     tcm_path = _resolve_spatial_tcm(engine)
     mod = engine.load(tcm_path)

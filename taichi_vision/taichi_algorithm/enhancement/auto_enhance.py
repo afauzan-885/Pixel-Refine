@@ -147,6 +147,10 @@ def analyze_auto_enhance_params(
     # TIER 2: Natural Perceptual Tone Mapping (Final Master Output)
     # Adaptive Key & Low-Key / Night-Scene Awareness
     # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # TIER 2: Natural Perceptual Tone Mapping (Final Master Output)
+    # Adaptive Key & Low-Key / Night-Scene Awareness with Highlight Protection
+    # -------------------------------------------------------------------------
     base_target_key = 0.108  # -20% global brightness reduction
     if log_avg < 0.075:
         # Smooth roll-off factor based on geometric mean luminance
@@ -158,7 +162,10 @@ def analyze_auto_enhance_params(
     # Clamp maximum gain to prevent over-lifting dark night skies (-20% gain cap)
     max_gain_cap = float(np.interp(log_avg, [0.005, 0.05, 0.10], [1.9, 2.55, 3.6]))
     gain = float(np.clip(target_key / max(log_avg, 1e-4), 0.5, max_gain_cap))
-    white_level = max(1.2, p_white * gain)
+
+    # White Point Anchor: High enough to protect peak highlights from blowing up
+    max_input = max(max_val, p_white, 1.0)
+    white_level = max(3.5, max_input * gain * 1.5)
 
     # In night scenes, keep shadow_lift zero so the sigmoid asymptote anchors deep black skies
     if log_avg < 0.04:
@@ -236,7 +243,7 @@ def apply_auto_enhance_np(
     # 4. Perceptual Gamma
     lum_gamma = np.power(np.maximum(0.0, lum_toned), 1.0 / gamma)
 
-    # 5. Normalized Sigmoid Contrast Curve (Preserves dark clothing without clipping or flat haze)
+    # 5. Normalized Sigmoid Contrast Curve with Hermite Highlight Protection
     # k controls the contrast slope, x0 is the perceptual midtone anchor (0.38 for +15% deeper blacks)
     k = float(
         np.clip(3.5 + (global_contrast - 1.0) * 3.0, 3.0, 6.0)
@@ -246,7 +253,12 @@ def apply_auto_enhance_np(
     s_x = 1.0 / (1.0 + np.exp(-k * (lum_gamma - x0)))
     s_0 = 1.0 / (1.0 + np.exp(-k * (0.0 - x0)))
     s_1 = 1.0 / (1.0 + np.exp(-k * (1.0 - x0)))
-    lum_final = np.clip((s_x - s_0) / (s_1 - s_0), 0.0, 1.0)
+    s_tone = np.clip((s_x - s_0) / (s_1 - s_0), 0.0, 1.0)
+
+    # Highlight protection shoulder: Smoothly blend from contrast curve to soft filmic shoulder
+    hl_weight = np.clip((lum_gamma - 0.40) / 0.60, 0.0, 1.0)
+    hl_smooth = hl_weight * hl_weight * (3.0 - 2.0 * hl_weight)  # Hermite smoothstep
+    lum_final = np.clip(s_tone * (1.0 - hl_smooth) + lum_gamma * hl_smooth, 0.0, 1.0)
 
     # 7. Hue-Preserving Chromaticity Ratio Transfer
     ratio = (lum_final / (lum + 1e-6))[:, :, np.newaxis]
@@ -313,7 +325,14 @@ if TAICHI_AVAILABLE:
             lum_gamma = tm.pow(tm.max(0.0, lum_toned), inv_gamma)
 
             s_x = 1.0 / (1.0 + tm.exp(-k * (lum_gamma - x0)))
-            lum_final = tm.clamp((s_x - s_0) * inv_s_range, 0.0, 1.0)
+            s_tone = tm.clamp((s_x - s_0) * inv_s_range, 0.0, 1.0)
+
+            # Highlight protection shoulder: Smoothly blend from contrast curve to soft filmic shoulder
+            hl_weight = tm.clamp((lum_gamma - 0.40) / 0.60, 0.0, 1.0)
+            hl_smooth = hl_weight * hl_weight * (3.0 - 2.0 * hl_weight)
+            lum_final = tm.clamp(
+                s_tone * (1.0 - hl_smooth) + lum_gamma * hl_smooth, 0.0, 1.0
+            )
 
             ratio = lum_final / (lum + 1e-6)
             r_out = r * ratio

@@ -1819,6 +1819,7 @@ class MFDenoiserParameterPage(QWidget):
             / 100.0,
         }
         save_similarity_v1_config(config)
+        save_similarity_config_for_active_batch(config)
 
     def _save_akaze(self):
         """Save AKAZE config to backend (realtime)."""

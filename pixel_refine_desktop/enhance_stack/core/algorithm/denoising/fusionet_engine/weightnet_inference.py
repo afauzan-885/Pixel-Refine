@@ -265,41 +265,87 @@ def load_weightnet_onnx(
         "session.use_device_allocator_for_initializers", "1"
     )
 
-    models_dir = model_path.parent
     dev_suffix = "gpu" if runtime == "dml" else "cpu"
+    dev_upper = dev_suffix.upper()
+
+    search_dirs = [
+        model_path.parent,
+        model_path.parent / "decoupled",
+        Path("pixel_refine_desktop/ui/data/models"),
+        Path(f"database/Learning_Model/weightNet/{dev_upper}/decoupled"),
+        Path(f"database/Learning_Model/weightNet/{dev_upper}"),
+        Path("database/Learning_Model/weightNet"),
+    ]
 
     # 1. Try to find Decoupled Model Pair first (Encoder + Attention)
-    enc_candidate = models_dir / f"weightnet_encoder_{patch_size}_{dev_suffix}_fp32.onnx"
-    att_candidate = models_dir / f"weightnet_attention_{patch_size}_{dev_suffix}_fp32.onnx"
+    enc_names = [
+        f"weightnet_encoder_{patch_size}_{dev_suffix}_fp32.onnx",
+        f"encoder_{patch_size}_{dev_suffix}.onnx",
+        f"nano_burst_encoder_{patch_size}_ort_opt.onnx",
+        f"nano_burst_encoder_{patch_size}.onnx",
+    ]
+    att_names = [
+        f"weightnet_attention_{patch_size}_{dev_suffix}_fp32.onnx",
+        f"attention_{patch_size}_{dev_suffix}.onnx",
+        f"nano_burst_attention_{patch_size}_b1_ort_opt.onnx",
+        f"nano_burst_attention_{patch_size}_b1.onnx",
+    ]
 
-    if enc_candidate.is_file() and att_candidate.is_file():
+    enc_file, att_file = None, None
+    for d in search_dirs:
+        for en in enc_names:
+            p = d / en
+            if p.is_file():
+                enc_file = p
+                break
+        for an in att_names:
+            p = d / an
+            if p.is_file():
+                att_file = p
+                break
+        if enc_file and att_file:
+            break
+
+    if enc_file and att_file:
         enc_sess = ort.InferenceSession(
-            str(enc_candidate), sess_options=options, providers=providers
+            str(enc_file), sess_options=options, providers=providers
         )
         att_sess = ort.InferenceSession(
-            str(att_candidate), sess_options=options, providers=providers
+            str(att_file), sess_options=options, providers=providers
         )
         print(
             f"[WeightNet ONNX Decoupled] runtime={runtime} patch={patch_size} "
-            f"encoder={enc_candidate.name} attention={att_candidate.name}"
+            f"encoder={enc_file.name} attention={att_file.name}"
         )
         return DecoupledWeightNetSession(enc_sess, att_sess, patch_size)
 
     # 2. Fallback to Coupled Model if decoupled pair is not found
-    if patch_size in (256, 512, 1024):
-        candidate = models_dir / f"weightnet_{patch_size}_{dev_suffix}_fp32.onnx"
-        if candidate.is_file():
-            model_path = candidate
+    coupled_names = [
+        f"weightnet_{patch_size}_{dev_suffix}_fp32.onnx",
+        f"weightnet_{patch_size}_{dev_suffix}.onnx",
+        model_path.name,
+    ]
+    found_coupled = None
+    for d in search_dirs:
+        for cn in coupled_names:
+            p = d / cn
+            if p.is_file():
+                found_coupled = p
+                break
+        if found_coupled:
+            break
 
-    if not model_path.is_file():
-        raise FileNotFoundError(f"WeightNet ONNX not found: {model_path}")
+    if not found_coupled:
+        raise FileNotFoundError(
+            f"WeightNet ONNX not found for patch {patch_size} in {search_dirs}"
+        )
 
     session = ort.InferenceSession(
-        str(model_path), sess_options=options, providers=providers
+        str(found_coupled), sess_options=options, providers=providers
     )
 
     print(
-        f"[WeightNet ONNX Coupled] runtime={runtime} model={model_path.name} "
+        f"[WeightNet ONNX Coupled] runtime={runtime} model={found_coupled.name} "
         f"providers={session.get_providers()} patch={patch_size}"
     )
     return session
@@ -395,8 +441,11 @@ def infer_single_support_weight_map(
     supp_in = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
 
     for i, (y_start, y_end, x_start, x_end) in enumerate(tile_coords):
-        if stop_event is not None and stop_event.is_set():
-            raise RuntimeError("Inference cancelled.")
+        if stop_event is not None:
+            if hasattr(stop_event, "is_set") and stop_event.is_set():
+                raise RuntimeError("Inference cancelled.")
+            elif callable(stop_event) and stop_event():
+                raise RuntimeError("Inference cancelled.")
         cur_h, cur_w = y_end - y_start, x_end - x_start
         cur_win = window_2d[:, :, :cur_h, :cur_w]
 

@@ -133,8 +133,8 @@ class FusionNetDenoisingAlgorithm:
 
         # ── GPU-Resident Pipeline (zero-copy path for file-based bursts) ──
         if source == "paths":
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.gpu_resident_pipeline import (
-                run_gpu_resident_pipeline,
+            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.resident_pipeline import (
+                run_resident_pipeline,
             )
             from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
                 load_weightnet_onnx as _load_wn_onnx,
@@ -145,7 +145,17 @@ class FusionNetDenoisingAlgorithm:
                 DEFAULT_WEIGHTNET_ONNX, runtime="dml", patch_size=tile_size
             )
 
-            result_fp32, mean_alpha = run_gpu_resident_pipeline(
+            storage_mode = (
+                getattr(ctx, "storage_mode", None)
+                or ctx.params.get("storage_mode", "direct")
+            )
+            batch_queue = int(
+                getattr(ctx, "params", {}).get(
+                    "batch_queue", getattr(ctx, "params", {}).get("batch_size", 3)
+                )
+            )
+
+            result_fp32, mean_alpha = run_resident_pipeline(
                 inputs,
                 session,
                 work_scale=work_scale,
@@ -155,6 +165,9 @@ class FusionNetDenoisingAlgorithm:
                 ghost_cutoff=ghost_cut,
                 chroma_sensitivity=chroma_sens,
                 is_raw=is_raw,
+                storage_mode=storage_mode,
+                hdf5_path=hdf5_path,
+                batch_queue=batch_queue,
                 stop_event=stop_ev,
                 progress_callback=update_prog,
             )

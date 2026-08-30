@@ -262,9 +262,6 @@ class SwitchableParameterPanel(QWidget):
         print(f"[{algorithm_name}Settings] Saved params for batch_id={batch_id}")
 
     def set_expanded(self, expanded):
-        if self.content_wrapper.isVisible() == expanded:
-            return
-
         self.content_wrapper.setVisible(expanded)
         if expanded:
             width, height = self._expanded_size()
@@ -274,6 +271,7 @@ class SwitchableParameterPanel(QWidget):
             if window:
                 window.installEventFilter(self)
         else:
+            self.content_wrapper.hide()
             # Keep the collapsed tab rail deterministic so OverlayContainer does
             # not reuse a stale expanded geometry during rapid setting changes.
             self.setMinimumSize(50, self._collapsed_height())
@@ -295,6 +293,16 @@ class SwitchableParameterPanel(QWidget):
         self.active_tab = None
         self.set_expanded(False)
         self._update_styles("transparent")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.active_tab is None:
+            self.content_wrapper.hide()
+            self.content_wrapper.setVisible(False)
+            self.setMinimumSize(50, self._collapsed_height())
+            self.setMaximumSize(50, self._collapsed_height())
+            self.adjustSize()
+            self._sync_overlay_geometry()
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.MouseButtonPress and self.content_wrapper.isVisible():
@@ -347,6 +355,9 @@ class SwitchableParameterPanel(QWidget):
                 width, height = self._expanded_size()
                 self.setMinimumSize(width, height)
                 self.setMaximumSize(width, height)
+            else:
+                self.setMinimumSize(50, self._collapsed_height())
+                self.setMaximumSize(50, self._collapsed_height())
             self.adjustSize()
             overlay.content_wrapper.adjustSize()
             overlay.adjustSize()
@@ -364,6 +375,8 @@ class SwitchableParameterPanel(QWidget):
         # 1. Content Wrapper (Left)
         self.content_wrapper = QWidget()
         self.content_wrapper.setObjectName("ParamContentWrapper")
+        self.content_wrapper.setVisible(False)
+        self.content_wrapper.hide()
         self.content_layout = QVBoxLayout(self.content_wrapper)
         self.content_layout.setContentsMargins(14, 14, 14, 14)
         self.content_layout.setSpacing(8)
@@ -735,7 +748,9 @@ class SwitchableParameterPanel(QWidget):
                 self.btn_denoise_tab.setEnabled(True)
 
             self._update_styles("transparent" if self.active_tab is None else (COLOR_ALIGNMENT_RED if self.active_tab == "alignment" else COLOR_DENOISING_GREEN))
-            if not self.content_wrapper.isVisible():
+            if not self.content_wrapper.isVisible() or self.active_tab is None:
+                self.content_wrapper.hide()
+                self.content_wrapper.setVisible(False)
                 self.setMinimumSize(50, self._collapsed_height())
                 self.setMaximumSize(50, self._collapsed_height())
             self._sync_overlay_geometry()
@@ -752,12 +767,19 @@ class SwitchableParameterPanel(QWidget):
             self.btn_align_tab.setVisible(False)
             self.btn_denoise_tab.setVisible(False)
             self.btn_denoise_tab.setEnabled(False)
+            self.collapse_panel()
             return False
 
         self.btn_align_tab.setVisible(True)
         show_denoise = denoising_algo in ("Similarity", "Spatial AI")
         self.btn_denoise_tab.setVisible(show_denoise)
         self.btn_denoise_tab.setEnabled(show_denoise)
+        if self.active_tab is None:
+            self.content_wrapper.hide()
+            self.content_wrapper.setVisible(False)
+            self.setMinimumSize(50, self._collapsed_height())
+            self.setMaximumSize(50, self._collapsed_height())
+            self._update_styles("transparent")
         return True
 
     def _normalize_alignment_name(self, value):

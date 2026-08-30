@@ -854,39 +854,31 @@ def save_image(
         # Convert to RGB if input is BGR
         if is_bgr and len(image_to_save.shape) == 3 and image_to_save.shape[2] >= 3:
             image_to_save = cv2.cvtColor(image_to_save, cv2.COLOR_BGR2RGB)
-
-        # Apply end-to-end Natural Tone Mapping only if explicitly requested
+        # Apply end-to-end Natural Tone Mapping (AutoEnhance v2)
         if apply_tonemapping:
             try:
                 from taichi_vision import taichi_aot
-                from config import DEFAULT_TONE_MAPPING_PARAMS
 
-                if image_to_save.dtype in (np.float32, np.float64):
-                    img_f32 = image_to_save.astype(np.float32, copy=False)
-                    max_v = float(np.max(img_f32)) if img_f32.size > 0 else 1.0
-                    if max_v > 1.0:
-                        img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
-                    img_tm = taichi_aot.naturalTonemapping(
-                        img_f32, **DEFAULT_TONE_MAPPING_PARAMS
+                img_f32 = image_to_save.astype(np.float32, copy=False)
+                max_v = float(np.max(img_f32)) if img_f32.size > 0 else 1.0
+                if max_v > 1.5:
+                    img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
+
+                auto_params = taichi_aot.analyze_auto_enhance_params(
+                    img_f32, mode="natural"
+                )
+                img_tm = taichi_aot.AutoEnhance(img_f32, params=auto_params)
+
+                if image_to_save.dtype == np.uint8 and max_v <= 255.0 and max_v > 1.0:
+                    image_to_save = np.clip(img_tm * 255.0 + 0.5, 0, 255).astype(
+                        np.uint8
                     )
-                    if max_v > 255.0:
-                        image_to_save = np.clip(img_tm * 65535.0 + 0.5, 0, 65535).astype(
-                            np.uint16
-                        )
-                    elif max_v > 1.0:
-                        image_to_save = np.clip(img_tm * 255.0 + 0.5, 0, 255).astype(np.uint8)
-                    else:
-                        image_to_save = np.clip(img_tm * 65535.0 + 0.5, 0, 65535).astype(
-                            np.uint16
-                        )
-                elif image_to_save.dtype == np.uint16:
-                    img_f32 = image_to_save.astype(np.float32) / 65535.0
-                    img_tm = taichi_aot.naturalTonemapping(
-                        img_f32, **DEFAULT_TONE_MAPPING_PARAMS
+                else:
+                    image_to_save = np.clip(img_tm * 65535.0 + 0.5, 0, 65535).astype(
+                        np.uint16
                     )
-                    image_to_save = np.clip(img_tm * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
             except Exception as e_tm:
-                print(f"[save_image] Tone mapping warning: {e_tm}")
+                print(f"[save_image] AutoEnhance v2 tone mapping warning: {e_tm}")
 
         if ext in [".tif", ".tiff"]:
             try:

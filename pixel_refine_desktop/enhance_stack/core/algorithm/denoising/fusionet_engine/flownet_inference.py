@@ -149,8 +149,11 @@ class AOTOpticalFlowAligner:
             taichi_bridge,
         )
 
-        if stop_event is not None and stop_event.is_set():
-            raise RuntimeError("AOT Optical Flow alignment cancelled.")
+        if stop_event is not None:
+            if hasattr(stop_event, "is_set") and stop_event.is_set():
+                raise RuntimeError("AOT Optical Flow alignment cancelled.")
+            elif callable(stop_event) and stop_event():
+                raise RuntimeError("AOT Optical Flow alignment cancelled.")
 
         # Use analysis frame if provided, otherwise fallback to supp_rgb_f32
         src_for_pyramid = analysis_frame_gpu if analysis_frame_gpu is not None else supp_rgb_f32

@@ -7187,13 +7187,13 @@ def AutoEnhance(
     )
 
 
-def analyze_auto_enhance_params(src):
+def analyze_auto_enhance_params(src, mode: str = "natural"):
     """Analyze luminance histogram metrics and return adaptive tone mapping parameters."""
     from taichi_vision.taichi_algorithm.enhancement.auto_enhance import (
         analyze_auto_enhance_params as _analyze,
     )
 
-    return _analyze(src)
+    return _analyze(src, mode=mode)
 
 
 @ti_thread

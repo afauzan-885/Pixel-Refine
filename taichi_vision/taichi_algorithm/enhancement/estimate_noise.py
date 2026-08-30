@@ -91,10 +91,12 @@ def estimate_noise_numpy(src_np: np.ndarray) -> Tuple[float, float]:
         # Select bottom 35% cleanest blocks to reject edge crossings
         block_mads = np.sort(block_mads)
         best_mad = np.median(block_mads[:max(4, len(block_mads) // 3)])
-        raw_sigma = float(1.4826 * best_mad * 1.55)
+        # Multi-subband minimum MAD scaling factor to true Gaussian sigma (8.20x)
+        raw_sigma = float(best_mad * 8.20)
 
     # Calibrated non-linear normalization [0.0, 1.0]
-    normalized_score = float(np.clip(np.power(raw_sigma / 0.120, 0.75), 0.0, 1.0))
+    # In float32 [0, 1] images, raw_sigma >= 0.021 is heavy noise, ~0.011 is moderate, <= 0.005 is clean.
+    normalized_score = float(np.clip(raw_sigma / 0.032, 0.0, 1.0))
     return normalized_score, raw_sigma
 
 
@@ -204,9 +206,9 @@ def estimate_noise_gpu(src_gpu: Any) -> Tuple[float, float]:
 
     mads = np.sort(mads)
     best_mad = float(np.median(mads[:max(4, len(mads) // 3)]))
-    raw_sigma = float(1.4826 * best_mad * 1.55)
+    raw_sigma = float(best_mad * 8.20)
 
-    normalized_score = float(np.clip(np.power(raw_sigma / 0.120, 0.75), 0.0, 1.0))
+    normalized_score = float(np.clip(raw_sigma / 0.032, 0.0, 1.0))
     return normalized_score, raw_sigma
 
 
