@@ -210,7 +210,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QWidget,
     QStackedWidget,
-    QLabel,
     QProxyStyle,
     QStyle,
     QToolTip,
@@ -436,7 +435,25 @@ class PixelRefineMain(QMainWindow):
         return super().eventFilter(watched, event)
 
     def setup_ui_and_logic(self, splash: SplashScreen):
-        """Setup UI and application logic with progress updates."""
+        """Setup UI and application logic with friendly progress updates."""
+        # Initialize core components
+        self._initialize_core_components(splash)
+
+        # Configure window properties
+        self._configure_window(splash)
+
+        # Load UI based on architecture
+        self._load_ui_components(splash)
+
+        # Assemble final layout
+        self._assemble_layout(splash)
+
+    def setup_ui_and_logic(self, splash: SplashScreen):
+        """Setup UI and application logic with friendly progress updates."""
+        from pixel_refine_desktop.ui.views.settings.General.Language import (
+            language_config,
+        )
+
         # Initialize core components
         self._initialize_core_components(splash)
 
@@ -450,41 +467,83 @@ class PixelRefineMain(QMainWindow):
         self._assemble_layout(splash)
 
         # Finalize
-        splash.update_status("Finalizing...", 100)
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_FINALIZING", "Menyiapkan workspace..."),
+            100,
+        )
         self.switch_page(0)
 
     def _initialize_core_components(self, splash: SplashScreen):
         """Initialize core application components."""
+        from pixel_refine_desktop.ui.views.settings.General.Language import (
+            language_config,
+        )
+
         # Application manager
-        splash.update_status("Initializing application...", 10)
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_CHECKING_APP", "Memeriksa aplikasi..."),
+            3,
+        )
         self.app_manager = ApplicationManager(self)
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_APP_ACTIVE", "Aplikasi aktif"),
+            10,
+        )
 
         # Database
-        splash.update_status("Loading database...", 20)
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_CHECKING_PROJECT", "Memeriksa data proyek..."),
+            15,
+        )
         self.app_manager.initialize_database()
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_PROJECT_READY", "Data proyek siap"),
+            20,
+        )
 
         # Animator
-        splash.update_status("Initializing animations...", 30)
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_PREPARING_EFFECTS", "Menyiapkan efek visual..."),
+            25,
+        )
         self.app_manager.setup_animator()
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_EFFECTS_READY", "Efek visual siap"),
+            30,
+        )
 
         # Algorithms
-        splash.update_status("Loading algorithms...", 40)
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_PREPARING_MODULES", "Menyiapkan modul proses..."),
+            35,
+        )
         algo_summary = self.app_manager.load_algorithms()
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_MODULES_READY", "Modul siap"),
+            40,
+        )
         print(f"Loaded algorithms: {algo_summary}")
 
     def _configure_window(self, splash: SplashScreen):
         """Configure window properties and settings."""
-        splash.update_status("Setting up main window...", 50)
+        from pixel_refine_desktop.ui.views.settings.General.Language import (
+            language_config,
+        )
+
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_LOADING_WINDOW", "Memuat tampilan jendela..."),
+            48,
+        )
 
         # Window icon and title
-        # Use the canonical application logo for the title bar, taskbar,
-        # About dialog, and .prf file association.  ICO contains the native
-        # multi-resolution Windows variants and avoids scaling the PNG at
-        # every window creation.
         self.setWindowIcon(QIcon("resources/assets/images/Logo_Pixel_Refine.ico"))
         self.setWindowTitle(f"Pixel Refine - Version {config.APP_VERSION}")
 
         # Window configuration
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_ADJUSTING_SCREEN", "Menyesuaikan resolusi layar..."),
+            52,
+        )
         self.window_config = WindowConfig(
             app_aspect_ratio=config.WINDOW_CONFIG["app_aspect_ratio"],
             min_screen_ratio=config.WINDOW_CONFIG["min_screen_ratio"],
@@ -492,68 +551,100 @@ class PixelRefineMain(QMainWindow):
             abs_min_height=config.WINDOW_CONFIG["abs_min_height"],
         )
         self.window_config.apply_to_window(self)
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_SCREEN_READY", "Tampilan siap"),
+            56,
+        )
 
         # Prepare folders
-        splash.update_status("Preparing temporary folders...", 60)
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_PREPARING_WORKSPACE", "Menyiapkan ruang kerja..."),
+            58,
+        )
         if self.app_manager:
             self.app_manager.initialize_folders()
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_WORKSPACE_READY", "Ruang kerja siap"),
+            62,
+        )
 
     def _load_ui_components(self, splash: SplashScreen):
         """Load UI components."""
-        splash.update_status("Loading UI components...", 70)
+        from pixel_refine_desktop.ui.views.settings.General.Language import (
+            language_config,
+        )
+
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_LOADING_UI", "Memuat UI utama..."),
+            65,
+        )
         self._load_mvc_architecture(splash)
 
     def _load_mvc_architecture(self, splash: SplashScreen):
         """Load MVC architecture components."""
+        from pixel_refine_desktop.ui.views.settings.General.Language import (
+            language_config,
+        )
+
         # Create main content stack
         self.main_content = QStackedWidget()
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_PREPARING_PAGE", "Menyiapkan halaman kerja..."),
+            68,
+        )
 
         # Enhance Stack View
-        splash.update_status("Initializing Enhance Stack View...", 75)
         if self.app_manager is None or self.app_manager.database_manager is None:
             raise RuntimeError("App Manager or Database Manager not initialized")
 
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_OPENING_MAIN_WORKSPACE", "Membuka workspace utama..."),
+            72,
+        )
         enhance_stack_view = EnhanceStackView(
             db_path=self.app_manager.database_manager.db_path,
             parent=self.main_content,
         )
         self.enhance_stack_view = enhance_stack_view
         self.main_content.addWidget(enhance_stack_view)
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_MAIN_WORKSPACE_READY", "Workspace siap digunakan"),
+            80,
+        )
 
         # Connect navigation signal from EnhanceStackView
         enhance_stack_view.page_changed.connect(self.switch_page)
 
-        # Panorama Page
-        # splash.update_status("Initializing Panorama Page...", 80)
-        # panorama_page = PanoramaPage(
-        #     database_manager=self.app_manager.database_manager,
-        # )
-        # self.main_content.addWidget(panorama_page)
-
         # Settings View
-        splash.update_status("Initializing Settings View...", 85)
         if self.app_manager is None or self.app_manager.database_manager is None:
             raise RuntimeError("App Manager or Database Manager not initialized")
 
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_LOADING_SETTINGS", "Memuat panel pengaturan..."),
+            82,
+        )
         settings_view = SettingsView(
             db_path=self.app_manager.database_manager.db_path,
             parent=self.main_content,
         )
         self.main_content.addWidget(settings_view)
-
-        # Sidebar - REMOVED (Now internal to EnhanceStackView/DisplayPanel)
-        # splash.update_status("Initializing Sidebar...", 90)
-        # self.sidebar = self._create_sidebar()
-
-        # Print architecture info
-        # self._print_info()
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_SETTINGS_READY", "Pengaturan siap"),
+            86,
+        )
 
     def _assemble_layout(self, splash: SplashScreen):
         """Assemble the final UI layout."""
-        splash.update_status("Assembling UI layout...", 95)
+        from pixel_refine_desktop.ui.views.settings.General.Language import (
+            language_config,
+        )
+
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_ASSEMBLING_LAYOUT", "Menyusun tata letak aplikasi..."),
+            90,
+        )
 
         self.main_layout = QHBoxLayout()
-        # self.main_layout.addWidget(self.sidebar) # Removed global sidebar
         if self.main_content is None:
             raise RuntimeError("Main content stack not initialized")
 
@@ -563,6 +654,10 @@ class PixelRefineMain(QMainWindow):
 
         container = QWidget()
         container.setLayout(self.main_layout)
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_FINISHING_SETUP", "Menyelesaikan persiapan awal..."),
+            94,
+        )
         self.setCentralWidget(container)
 
     def closeEvent(self, event):
@@ -573,14 +668,18 @@ class PixelRefineMain(QMainWindow):
         )
         project_exit_decided = False
         if not skip_confirmation and not self._close_confirmation_accepted:
-            from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+            from pixel_refine_desktop.ui.views.settings.General.Language import (
+                language_config,
+            )
 
             project_view = self.enhance_stack_view
             if project_view and project_view.project_has_unsaved_changes():
                 save_dialog = QMessageBox(self)
                 save_dialog.setIcon(QMessageBox.Icon.Warning)
                 save_dialog.setWindowTitle(
-                    getattr(language_config, "PROJECT_SAVE_CHANGES_TITLE", "Save Project")
+                    getattr(
+                        language_config, "PROJECT_SAVE_CHANGES_TITLE", "Save Project"
+                    )
                 )
                 save_dialog.setText(
                     getattr(
@@ -594,7 +693,9 @@ class PixelRefineMain(QMainWindow):
                     QMessageBox.ButtonRole.AcceptRole,
                 )
                 discard_button = save_dialog.addButton(
-                    getattr(language_config, "PROJECT_SAVE_CHANGES_DISCARD", "Don't Save"),
+                    getattr(
+                        language_config, "PROJECT_SAVE_CHANGES_DISCARD", "Don't Save"
+                    ),
                     QMessageBox.ButtonRole.DestructiveRole,
                 )
                 cancel_button = save_dialog.addButton(
@@ -623,15 +724,17 @@ class PixelRefineMain(QMainWindow):
                 self._close_confirmation_accepted = True
             else:
                 dialog = modal_confirm(
-                getattr(
-                    language_config,
-                    "EXIT_APPLICATION_MESSAGE",
-                    "Do you want to exit the application?",
-                ),
-                self,
-            )
+                    getattr(
+                        language_config,
+                        "EXIT_APPLICATION_MESSAGE",
+                        "Do you want to exit the application?",
+                    ),
+                    self,
+                )
                 dialog.title_text.setText(
-                    getattr(language_config, "EXIT_APPLICATION_TITLE", "Exit Application")
+                    getattr(
+                        language_config, "EXIT_APPLICATION_TITLE", "Exit Application"
+                    )
                 )
                 dialog.yes_button.setText(
                     getattr(language_config, "EXIT_APPLICATION_YES", "Yes")
@@ -722,7 +825,11 @@ def main():
         else:
             # A new launch starts with an empty, private session.  Persistent
             # batch data now lives only inside an explicit .prf archive.
-            for path in (session_database, session_database + "-wal", session_database + "-shm"):
+            for path in (
+                session_database,
+                session_database + "-wal",
+                session_database + "-shm",
+            ):
                 if os.path.isfile(path):
                     os.remove(path)
             parameter_path = os.path.join("database", "align", "batch_parameter.json")
@@ -738,7 +845,9 @@ def main():
     # Load and apply theme from settings on startup
     try:
         try:
-            from desktop.ui.views.settings.General.general_store import get_general_store
+            from desktop.ui.views.settings.General.general_store import (
+                get_general_store,
+            )
         except ModuleNotFoundError as exc:
             if exc.name != "desktop":
                 raise
@@ -785,10 +894,19 @@ def main():
         splash_width, Qt.TransformationMode.SmoothTransformation
     )
 
+    from pixel_refine_desktop.ui.views.settings.General.Language import (
+        language_config,
+    )
+
     version_text = f"Version {config.APP_VERSION}"
     splash = SplashScreen(scaled_pixmap, version_text)
 
     splash.show()
+    # Show the splash at 0% before any heavy work begins so the user
+    # sees the spinner immediately rather than a blank image.
+    splash.update_status(
+        getattr(language_config, "SPLASH_STATUS_STARTING", "Memulai aplikasi..."), 0
+    )
     app.processEvents()
 
     # Create and setup main window
@@ -798,6 +916,9 @@ def main():
 
     # Load and apply initial stylesheet & theme triggers at startup
     try:
+        splash.update_status(
+            getattr(language_config, "SPLASH_STATUS_PREPARING_THEME", "Menyiapkan tema tampilan..."), 97
+        )
         from resources.styles.stylesheet import stylesheet_global_page
         from resources.GenericUILibrary import trigger_live_update
 
@@ -814,7 +935,8 @@ def main():
     # A .prf opened from Explorer is passed as a command-line argument.
     if project_argument and window.enhance_stack_view:
         QTimer.singleShot(
-            0, lambda path=project_argument: window.enhance_stack_view._open_project(path)
+            0,
+            lambda path=project_argument: window.enhance_stack_view._open_project(path),
         )
 
     # Run application

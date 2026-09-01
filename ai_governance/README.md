@@ -21,6 +21,9 @@ Governance ini adalah sumber aturan portabel untuk Codex, DeepSeek, dan agent la
 - BLOCK_COMPUTE_95_ROADMAP.md: kontrak keselamatan block compute.
 - CUDA_ARCHITECTURE_COVERAGE.md: batas bukti arsitektur CUDA.
 - LEGACY_POLICY.md: kebijakan kompatibilitas dan artefak legacy.
+- LIBRARY_KOTLIN_FIXES.md: laporan bug fixes dan test coverage LibraryKotlin.
+- LIBRARY_KOTLIN_FEATURES.md: laporan penambahan fitur LibraryKotlin (50+ komponen baru).
+- TAICHI_VISION_KOTLIN_MOBILE_INTEGRATION.md: Rencana detail arsitektur & roadmap integrasi Taichi Vision Native.
 - skills/taichi-aot-dev/SKILL.md: workflow kompilasi dan validasi Taichi AOT.
 
 ## Aturan kerja singkat

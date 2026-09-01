@@ -2,15 +2,9 @@ import os
 
 # AOT (Ahead-of-Time) Mode configuration
 # Default: "1" (AOT/Production mode), set to "0" for compile/JIT mode.
-AOT_MODE = os.environ.get("AOT_MODE", os.environ.get("AOT_MODE", "1"))
-os.environ["AOT_MODE"] = AOT_MODE
-os.environ["AOT_MODE"] = AOT_MODE
+os.environ.setdefault("AOT_MODE", "1")
 
 APP_VERSION = "1.0.0"
-MODEL_CONFIG = {
-    "refiner": "database/Learning_Model/mobilenet_refiner.pth",
-    "backbone": "database/Learning_Model/mobilenet_v2_weights.pth",
-}
 # Canonical desktop interpreter for the LLVM20 cutover.  An explicit
 # environment override remains available for packaging/CI without silently
 # falling back to the legacy E: LLVM15 venv.
@@ -116,16 +110,22 @@ KEY_DENOISING = "denoising"
 KEY_SUPER_RESOLUTION = "super_resolution"
 
 KEY_CHECKBOX_ALIGN = "checkbox_align_images"
-KEY_CHECKBOX_SAVE_ALIGN_FOLDER = "checkbox_save_alignment_to_folder"
 KEY_CHECKBOX_DENOISING = "checkbox_denoising"
 KEY_CHECKBOX_SUPER_RES = "checkbox_super_resolution"
-KEY_CHECKBOX_CROP_EDGES = "checkbox_crop_edges"
-KEY_CHECKBOX_KEEP_EDGES = "checkbox_keep_edges"
 
 ALGORITHM_PARAMETER_SETTINGS_FILE = os.path.join(
     CONFIG_DIR, "Parameter_Stack_Enhance.json"
 )
 GENERAL_SETTINGS_FILE = os.path.join(CONFIG_DIR, "app_setting.json")
+# Read by main_desktop._configure_window() at startup to size the main
+# window. WindowConfig dataclass in app_core.window_config carries
+# identical defaults; this dict lets the desktop override them.
+WINDOW_CONFIG = {
+    "app_aspect_ratio": 1200 / 600,
+    "min_screen_ratio": 0.76,
+    "abs_min_width": 800,
+    "abs_min_height": 400,
+}
 SUPPORTED_FORMATS = {
     "jpg": [".jpg", ".jpeg", ".jiff", ".jli"],
     "tiff": [".tif", ".tiff"],
@@ -154,11 +154,4 @@ SUPPORTED_FORMATS = {
         ".mef",
         ".iiq",
     ],
-}
-
-WINDOW_CONFIG = {
-    "app_aspect_ratio": 1200 / 600,
-    "min_screen_ratio": 0.76,
-    "abs_min_width": 800,
-    "abs_min_height": 400,
 }
