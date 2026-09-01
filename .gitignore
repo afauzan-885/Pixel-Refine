@@ -1,4 +1,4 @@
-# Ignore distribution and build directories
+﻿# Ignore distribution and build directories
 dist/
 build/
 test_algorithm/
@@ -11,14 +11,23 @@ main.build/
 main.dist/
 auto_pyd/
 
-# Ignore agent docs
+# Ignore agent and local governance
 agen-docs/
 scratch/
 .qoder/
 .agent/
+.vscode/
+.commandcode/
+ai_governance/
 artifact_implementation_plan/
 .kunsdd/
 save_align_image/
+
+# Ignore project specific toolchain configs & specs
+tier algorithm.txt
+pyinstaller_build.py
+pyrefly.toml
+buildozer.spec
 
 # Ignore specific files
 nuitka-crash-report.xml
@@ -34,57 +43,16 @@ build_android.py
 # Ignore virtual environment directories
 venv/
 database/
+resources/wheels/
+
 # Ignore Python cache
 __pycache__/
 *.pyc
 *.pyo
-# Ignore distribution and build directories
-dist/
-build/
-test_algorithm/
-ai_governance/
-pixel_refine_database.db
-build_instalasi.txt
-syarat.txt
-mingw64/
-ChangeLog.txt
-main.build/
-main.dist/
-auto_pyd/
-# ignore agent docs
-agen-docs/
-scratch/
-.qoder/
-.agent/
-.vscode
-artifact_implementation_plan/
-
-.kunsdd/
-scratch/
-
-save_align_image/
-nuitka-crash-report.xml
-check_db_order_v2.py
-inspect_model.py
-view_images_list.py
-upx_compression.py
-nuitka_build.py
-# Ignore virtual environment directories
-venv/
-database/
-
-__pycache__/
-
-# Local governance and experimental archives
-/ai_governance/
-/taichi_vision copy.rar
-/taichi_vision_experimental_20260628_150822.zip
-
-# Runtime expansion of packed CPU AOT archives (content-addressed cache)
-taichi_vision/taichi_algorithm/aot_tcm/.cpu_aot_cache/
-taichi_vision/taichi_algorithm/aot_tcm/**/.cpu_aot_cache/
 
 # Taichi AOT generated caches, quarantine archives, and compiler intermediates
+taichi_vision/taichi_algorithm/aot_tcm/.cpu_aot_cache/
+taichi_vision/taichi_algorithm/aot_tcm/**/.cpu_aot_cache/
 taichi_vision/**/__pycache__/
 taichi_vision/**/.pytest_cache/
 taichi_vision/taichi_algorithm/aot_tcm/.quarantine*/

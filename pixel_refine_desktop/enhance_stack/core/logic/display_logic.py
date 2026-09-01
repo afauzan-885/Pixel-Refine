@@ -54,19 +54,6 @@ class DisplayLogic:
         self.current_images = images if images else []
         self.grid_items.clear()
 
-    def get_batch_info(self):
-        """
-        Get current batch info.
-
-        Returns:
-            dict: {'batch_id': int, 'images': list, 'count': int}
-        """
-        return {
-            "batch_id": self.current_batch_id,
-            "images": self.current_images,
-            "count": len(self.current_images) if self.current_images else 0,
-        }
-
     def is_batch_empty(self):
         """
         Check if current batch is empty.
@@ -176,14 +163,6 @@ class DisplayLogic:
         if card_id in self.grid_items:
             del self.grid_items[card_id]
 
-    def get_grid_item_count(self):
-        """
-        Get jumlah items di grid.
-
-        Returns:
-            int: Jumlah grid items
-        """
-        return len(self.grid_items)
 
     def clear_all(self):
         """Clear semua state dan stop background tasks."""
@@ -221,18 +200,6 @@ class DisplayLogic:
 
         path = Path(image_path)
         return path.exists() and path.is_file()
-
-    def get_selected_images(self):
-        """
-        Get list of selected images.
-
-        Note: Requires selection tracking in ImageCard.
-        For now returns current batch.
-
-        Returns:
-            list: List of selected image paths
-        """
-        return [img.path for img in self.current_images if hasattr(img, "path")]
 
     def detect_processed_results(self, original_path):
         """

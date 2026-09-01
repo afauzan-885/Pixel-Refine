@@ -1,5 +1,4 @@
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from .quick_batch_dialog import QuickBatchDialog
 from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 from PySide6.QtWidgets import (
     QWidget,
@@ -87,7 +86,13 @@ class RightPanel(QWidget, SyncMixin):
             self.bind_store(store)
 
         self._setup_ui()
-        self._load_batches()
+        # Defer the synchronous batch-list load to the next event-loop
+        # tick so the panel constructor returns to the Qt event loop
+        # immediately. The list_group renders a placeholder until the
+        # tick fires; refresh_after_project_load() stays synchronous so
+        # explicit user-initiated reloads (e.g. Open Project) still
+        # block the calling slot as before.
+        QTimer.singleShot(0, self._load_batches)
 
         if self.controller:
             self.controller.batch_created.connect(self._update_process_all_btn_visibility)
@@ -314,6 +319,27 @@ class RightPanel(QWidget, SyncMixin):
         self.splitter.setCollapsible(0, False)
         self.splitter.setCollapsible(1, False)
 
+        # Re-balance splitter sizes whenever the list of batches changes
+        # or the panel is resized. The algorithm cards (sr_card +
+        # denoise_card) get a guaranteed minimum height; the batch
+        # list takes whatever space remains so the cards are pushed
+        # down as far as possible without ever being clipped.
+        list_widget = getattr(self.list_group, "_list_widget", None)
+        if list_widget is not None:
+            list_model = list_widget.model()
+            if list_model is not None:
+                list_model.rowsInserted.connect(
+                    lambda *_: self._balance_splitter_sizes()
+                )
+                list_model.rowsRemoved.connect(
+                    lambda *_: self._balance_splitter_sizes()
+                )
+                list_model.modelReset.connect(
+                    lambda: self._balance_splitter_sizes()
+                )
+
+        QTimer.singleShot(0, self._balance_splitter_sizes)
+
         main_layout.addWidget(self.splitter)
 
         # Process All Batch Button (Fixed at the very bottom of RightPanel, below splitter)
@@ -330,6 +356,10 @@ class RightPanel(QWidget, SyncMixin):
     def resizeEvent(self, event):
         """Handle resize to adjust splitter ratio based on screen state context."""
         super().resizeEvent(event)
+        # Re-balance so the algorithm cards stay pinned to the bottom
+        # of the right panel regardless of how much vertical room the
+        # list_group happens to need.
+        self._balance_splitter_sizes()
 
         # Dynamic scaling of process_all_btn height and font size
         if hasattr(self, "process_all_btn") and self.process_all_btn:
@@ -347,13 +377,27 @@ class RightPanel(QWidget, SyncMixin):
 
         # If collapsed, force top widget to 100%
         if self._is_collapsed:
+            # Clear any fixed height the splitter may have applied
+            # previously so the bottom can fully collapse.
+            try:
+                self.algo_container.setMinimumHeight(0)
+                self.algo_container.setMaximumHeight(0)
+            except Exception:
+                pass
             self.splitter.setSizes([self.height(), 0])
             return
 
-        # Dynamically set height of algo container based on current layout requirements
-        self.algo_container.setFixedHeight(self._calculate_algo_target_h())
+        # Lift the previous fixed height so the splitter can manage the
+        # bottom container freely. ``_balance_splitter_sizes`` will
+        # honour the algorithm card minimums via the splitter itself.
+        try:
+            self.algo_container.setMinimumHeight(0)
+            self.algo_container.setMaximumHeight(16777215)
+        except Exception:
+            pass
 
-        # Optimization for Large Displays (Maximised)
+        # Optimization for Large Displays (Maximised) — keep the
+        # 3:1 ratio behaviour that the previous implementation had.
         current_height = self.height()
         LARGE_MODE_THRESHOLD = 900
 
@@ -362,9 +406,13 @@ class RightPanel(QWidget, SyncMixin):
             top_h = int(current_height * 0.75)
             bottom_h = current_height - top_h
             self.splitter.setSizes([top_h, bottom_h])
-        else:
-            # For smaller screens, let splitter handle it or force 1:1 if needed
-            pass
+            return
+
+        # Default behaviour: pin the algorithm cards to the bottom and
+        # let the batch list take the rest. Without this, when the list
+        # is short the cards float just below it instead of being
+        # pushed down.
+        self._balance_splitter_sizes()
 
     def _update_cards_mutually_exclusive_state(self):
         """Enforce mutual exclusivity between Super Resolution and Denoising using the disable state."""
@@ -443,6 +491,10 @@ class RightPanel(QWidget, SyncMixin):
         )
         if header_button is not None:
             header_button.setVisible(not batches)
+
+        # Re-pin the algorithm cards to the bottom of the right panel
+        # now that the list size has changed.
+        QTimer.singleShot(0, self._balance_splitter_sizes)
 
     def refresh_after_project_load(self):
         """Refresh project-backed batches and restore panel visibility."""
@@ -543,6 +595,53 @@ class RightPanel(QWidget, SyncMixin):
 
         # Clamp between 150 and 360
         return max(150, min(total_h, 360))
+
+    def _balance_splitter_sizes(self):
+        """Push the algorithm cards (Super Resolution + Denoising) as far
+        down as possible without ever clipping them.
+
+        Rules:
+        * ``algo_container`` (bottom) gets at least the combined
+          sizeHint of ``sr_card`` + ``denoise_card`` plus the scroll
+          area paddings.
+        * ``batch_container`` (top) gets whatever vertical space
+          remains in the splitter, but never less than the height
+          required for the action buttons row.
+        * When the list is short, the top container shrinks and the
+          bottom container expands to fill the gap, pushing the cards
+          down. When the list is long, the bottom container keeps its
+          minimum and the top container takes the rest.
+        """
+        try:
+            if not hasattr(self, "splitter") or self.splitter is None:
+                return
+            if not hasattr(self, "batch_container") or not hasattr(
+                self, "algo_container"
+            ):
+                return
+
+            total_h = self.splitter.height()
+            if total_h <= 0:
+                return
+
+            # Minimum heights that must be preserved.
+            # Action buttons row in batch_container: ~32px (22 + spacing + margins).
+            min_top_h = 60
+            # Algorithm cards combined sizeHint + scroll area overhead.
+            min_bottom_h = 180  # sr_card ~80 + denoise_card ~80 + spacing/padding
+
+            # Allow a small fudge so QSplitter handle (10px) does not
+            # eat into either side.
+            handle = max(0, self.splitter.handleWidth() or 0)
+            available = max(0, total_h - handle)
+
+            top_h = max(min_top_h, available - min_bottom_h)
+            bottom_h = max(min_bottom_h, available - top_h)
+
+            self.splitter.setSizes([top_h, bottom_h])
+        except Exception:
+            # Layout rebalancing must never raise into the event loop.
+            pass
 
     def _update_process_all_btn_visibility(self):
         """Show or hide Process All Batch button depending on if any batch contains images."""

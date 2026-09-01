@@ -87,6 +87,7 @@ class AOTOpticalFlowAligner:
         ref_rgb_f32: np.ndarray,
         *,
         work_scale: float = 0.50,
+        full_shape: Optional[Tuple[int, int]] = None,
         tile_size: int = 16,
         search_dist: int = 2,
         max_search_radius: int = 12,
@@ -99,23 +100,51 @@ class AOTOpticalFlowAligner:
         self.engine = get_engine()
         self.mod = load_compute_flow_module(self.engine)
 
-        self.full_h, self.full_w = ref_rgb_f32.shape[:2]
-        self.work_res_h = max(32, int(self.full_h * float(work_scale)))
-        self.work_res_w = max(32, int(self.full_w * float(work_scale)))
+        if full_shape is not None:
+            self.full_h, self.full_w = int(full_shape[0]), int(full_shape[1])
+            if ref_rgb_f32.shape[:2] != (self.full_h, self.full_w):
+                self.work_res_h, self.work_res_w = ref_rgb_f32.shape[:2]
+            else:
+                self.work_res_h = max(32, int(self.full_h * float(work_scale)))
+                self.work_res_w = max(32, int(self.full_w * float(work_scale)))
+        else:
+            self.full_h, self.full_w = ref_rgb_f32.shape[:2]
+            self.work_res_h = max(32, int(self.full_h * float(work_scale)))
+            self.work_res_w = max(32, int(self.full_w * float(work_scale)))
 
         self.tile_size = int(tile_size)
         self.search_dist = int(search_dist)
         self.max_search_radius = int(max_search_radius)
 
+        # Noise-Aware Analysis Pre-Filter on Reference Frame
+        ref_denoised = None
+        ref_for_pyramid = ref_rgb_f32
+        try:
+            from taichi_vision.taichi_algorithm.enhancement.estimate_noise import estimate_noise
+            ref_noise_score = float(estimate_noise(ref_rgb_f32))
+            if ref_noise_score >= 0.60:
+                ref_denoised = taichi_aot.box_filter(ref_rgb_f32, kernel_size=5, return_gpu=True)
+                ref_for_pyramid = ref_denoised
+            elif ref_noise_score >= 0.30:
+                ref_denoised = taichi_aot.box_filter(ref_rgb_f32, kernel_size=3, return_gpu=True)
+                ref_for_pyramid = ref_denoised
+        except Exception:
+            pass
+
         # Pre-compute Reference Pyramid 100% in GPU Dedicated VRAM
-        self.ref_pyramid = taichi_bridge.prepare_reference_for_alignment(
-            ref_rgb_f32,
-            is_linear_mode=False,
-            proxy_scale=1.0,
-            work_res_h=self.work_res_h,
-            work_res_w=self.work_res_w,
-            num_layers=3,
-        )
+        try:
+            self.ref_pyramid = taichi_bridge.prepare_reference_for_alignment(
+                ref_for_pyramid,
+                is_linear_mode=False,
+                proxy_scale=1.0,
+                work_res_h=self.work_res_h,
+                work_res_w=self.work_res_w,
+                num_layers=3,
+            )
+        finally:
+            if ref_denoised is not None and hasattr(ref_denoised, "destroy"):
+                ref_denoised.destroy()
+
         self.ref_l0 = self.ref_pyramid[0]
         self.ref_l1 = self.ref_pyramid[1]
         self.ref_l2 = self.ref_pyramid[2]
@@ -158,16 +187,34 @@ class AOTOpticalFlowAligner:
         # Use analysis frame if provided, otherwise fallback to supp_rgb_f32
         src_for_pyramid = analysis_frame_gpu if analysis_frame_gpu is not None else supp_rgb_f32
 
+        # Noise-Aware Analysis Pre-Filter for Optical Flow Computation
+        src_denoised = None
+        try:
+            from taichi_vision.taichi_algorithm.enhancement.estimate_noise import estimate_noise
+            noise_score = float(estimate_noise(src_for_pyramid))
+            if noise_score >= 0.60:
+                src_denoised = taichi_aot.box_filter(src_for_pyramid, kernel_size=5, return_gpu=True)
+                src_for_pyramid = src_denoised
+            elif noise_score >= 0.30:
+                src_denoised = taichi_aot.box_filter(src_for_pyramid, kernel_size=3, return_gpu=True)
+                src_for_pyramid = src_denoised
+        except Exception:
+            pass
+
         # Build comparison pyramid 100% in GPU Dedicated VRAM
-        comp_pyramid = taichi_bridge.prepare_comparison_for_alignment(
-            src_for_pyramid,
-            ref_dtype=getattr(src_for_pyramid, "dtype", np.float32),
-            is_linear_mode=False,
-            proxy_scale=1.0,
-            work_res_h=self.work_res_h,
-            work_res_w=self.work_res_w,
-            num_layers=3,
-        )
+        try:
+            comp_pyramid = taichi_bridge.prepare_comparison_for_alignment(
+                src_for_pyramid,
+                ref_dtype=getattr(src_for_pyramid, "dtype", np.float32),
+                is_linear_mode=False,
+                proxy_scale=1.0,
+                work_res_h=self.work_res_h,
+                work_res_w=self.work_res_w,
+                num_layers=3,
+            )
+        finally:
+            if src_denoised is not None and hasattr(src_denoised, "destroy"):
+                src_denoised.destroy()
         comp_l0 = comp_pyramid[0]
         comp_l1 = comp_pyramid[1]
         comp_l2 = comp_pyramid[2]
@@ -194,15 +241,34 @@ class AOTOpticalFlowAligner:
             self.mod.run("align_end_to_end_3layer", **args)
             self.engine.sync()
 
-            # Smooth optical flow field once
+            # Smooth optical flow field and apply median filter to filter outlier vectors
             smooth_flow_gpu = taichi_aot.smooth_flow_gpu(
                 self.flow_l0, sigma=1.0, kernel_size=5
             )
+            # Filter outlier vectors via fast median filtering
+            try:
+                import cv2
+                flow_np = smooth_flow_gpu.to_numpy()
+                flow_u = cv2.medianBlur(flow_np[..., 0], 3)
+                flow_v = cv2.medianBlur(flow_np[..., 1], 3)
+                filtered_flow_np = np.stack([flow_u, flow_v], axis=-1).astype(np.float32)
+                filtered_flow_gpu = self.engine.allocate(
+                    filtered_flow_np.shape, dtype=np.float32, is_vector=False, host_accessible=True
+                )
+                from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
+                _LIB.write_to_gpu_buffer(
+                    _RUNTIME,
+                    filtered_flow_gpu.handle,
+                    np.ascontiguousarray(filtered_flow_np).ctypes.data,
+                    filtered_flow_gpu.nbytes,
+                )
+            except Exception:
+                filtered_flow_gpu = smooth_flow_gpu
 
             # Pure GPU remap for primary image
             warped = taichi_aot.remap_with_flow(
                 supp_rgb_f32,
-                smooth_flow_gpu,
+                filtered_flow_gpu,
                 self.full_h,
                 self.full_w,
                 return_gpu=return_gpu,
@@ -214,11 +280,14 @@ class AOTOpticalFlowAligner:
                 sec_h, sec_w = int(sec_shape[0]), int(sec_shape[1])
                 warped_secondary = taichi_aot.remap_with_flow(
                     secondary_frame_to_warp,
-                    smooth_flow_gpu,
+                    filtered_flow_gpu,
                     sec_h,
                     sec_w,
                     return_gpu=return_gpu,
                 )
+
+            if filtered_flow_gpu is not smooth_flow_gpu and hasattr(filtered_flow_gpu, "destroy"):
+                filtered_flow_gpu.destroy()
 
             if hasattr(smooth_flow_gpu, "destroy"):
                 smooth_flow_gpu.destroy()

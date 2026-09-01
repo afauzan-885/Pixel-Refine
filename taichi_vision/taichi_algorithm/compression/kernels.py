@@ -715,6 +715,91 @@ def hevc_dc_level_kernel(
             levels[index] = -((-numerator + denominator // 2) // denominator)
 
 
+@ti.kernel
+def jpeg_fused_transform_tokens_histogram_2d(
+    src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    quant_table: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    basis: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    order: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    dc_values: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    symbols: ti.types.ndarray(dtype=ti.i32, ndim=2),
+    categories: ti.types.ndarray(dtype=ti.i32, ndim=2),
+    amplitudes: ti.types.ndarray(dtype=ti.i32, ndim=2),
+    token_count: ti.types.ndarray(dtype=ti.i32, ndim=2),
+    dc_histogram: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ac_histogram: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    h_blocks: ti.i32,
+    w_blocks: ti.i32,
+):
+    """Fully fused JPEG pipeline: DCT+quant+zigzag → tokens → histogram.
+
+    This kernel combines all JPEG transform stages into a single GPU dispatch,
+    eliminating intermediate GPU↔CPU round-trips.  Each block processes:
+    1. Forward 8×8 DCT with quantization and zigzag reordering
+    2. Store DC value for host-side differential coding
+    3. AC run-length encoding with symbol generation
+    4. Histogram accumulation for Huffman coding
+
+    The outputs are ready for host-side DC differential coding, Huffman tree
+    construction, and bitstream assembly.  DC differential coding is done on
+    host because it requires sequential processing (each block's DC depends
+    on the previous block's DC).
+    """
+    for by, bx in ti.ndrange(h_blocks, w_blocks):
+        # Stage 1: DCT + quantization + zigzag (fused)
+        # Store zigzag-ordered coefficients in a local array
+        zigzag_block = ti.Vector([0.0] * 64, ti.f32)
+        for k in range(64):
+            natural = order[k]
+            total = 0.0
+            for y, x in ti.ndrange(8, 8):
+                sample = src[by * 8 + y, bx * 8 + x] - 128.0
+                total += sample * basis[natural, y * 8 + x]
+            q = ti.max(quant_table[natural], 1.0)
+            zigzag_block[k] = ti.round(total / q)
+
+        # Stage 2: Store DC value for host-side differential coding
+        linear = by * w_blocks + bx
+        dc_values[linear] = zigzag_block[0]
+
+        # Stage 3: AC RLE + symbol generation
+        run = 0
+        count = 0
+        for k in range(1, 64):
+            value = ti.cast(zigzag_block[k], ti.i32)
+            if value == 0:
+                run += 1
+            else:
+                # Handle ZRL (zero run length >= 16)
+                for _ in range(4):
+                    if run >= 16:
+                        symbols[by, bx * 64 + count] = 0xF0
+                        categories[by, bx * 64 + count] = 0
+                        amplitudes[by, bx * 64 + count] = 0
+                        count += 1
+                        run -= 16
+                # Emit AC coefficient
+                size = jpeg_category(value)
+                symbols[by, bx * 64 + count] = run * 16 + size
+                categories[by, bx * 64 + count] = size
+                amplitudes[by, bx * 64 + count] = jpeg_amplitude(value, size)
+                count += 1
+                run = 0
+        # EOB (End of Block)
+        if run > 0 or count == 0:
+            symbols[by, bx * 64 + count] = 0
+            categories[by, bx * 64 + count] = 0
+            amplitudes[by, bx * 64 + count] = 0
+            count += 1
+        token_count[by, bx] = count
+
+        # Stage 4: Histogram accumulation (AC only, DC histogram done on host)
+        for i in range(64):
+            if i < count:
+                symbol = symbols[by, bx * 64 + i]
+                ti.atomic_add(ac_histogram[symbol], 1)
+
+
 def jpeg_prepare_blocks(src, dst, quality: int):
     """JIT convenience wrapper; AOT callers use the registered graph."""
     h, w = src.shape[:2]

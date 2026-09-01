@@ -146,7 +146,7 @@ class SpatialFusionProcessor:
         image_paths = kwargs.get("image_paths", None)
 
         if isinstance(data_source, str) and data_source.endswith(".h5"):
-            import h5py
+            # (h5py removed)
 
             with h5py.File(data_source, "r") as f:
                 num_images = sum(1 for k in f.keys() if k.startswith("image_"))
@@ -247,7 +247,7 @@ class SpatialFusionProcessor:
                         and isinstance(data_source, str)
                         and data_source.endswith(".h5")
                     ):
-                        import h5py
+                        # (h5py removed)
 
                         with h5py.File(data_source, "r") as h5f:
                             for idx in range(start_idx, end_idx):

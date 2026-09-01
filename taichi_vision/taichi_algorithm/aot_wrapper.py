@@ -2027,38 +2027,39 @@ def calcOpticalFlowBlockMatching(
                         epsilon=float(epsilon),
                         class_threshold=max(1, int(adaptive_threshold)),
                     )
-                if dense_mode_value in (
-                    "blocky_clamped",
-                    "clamped",
-                    "cpu_like_clamped",
-                    "cpu-like-clamped",
-                ):
-                    mod.run(
-                        "flow_lk_dense_blocky_clamped",
-                        grid_flow=grid_flow,
-                        flow_out=flow_out,
-                        grid_step=level_grid_step,
-                        border_margin=level_margin,
-                        max_flow_px=float(max_flow_px),
-                    )
-                elif dense_mode_value in ("blocky", "nearest", "cpu_like", "cpu-like"):
-                    mod.run(
-                        "flow_lk_dense_blocky",
-                        grid_flow=grid_flow,
-                        flow_out=flow_out,
-                        grid_step=level_grid_step,
-                        border_margin=level_margin,
-                    )
-                else:
-                    mod.run(
-                        "flow_lk_dense_interpolate",
-                        grid_flow=grid_flow,
-                        flow_out=flow_out,
-                        grid_step=level_grid_step,
-                        border_margin=level_margin,
-                        overlap=float(overlap),
-                    )
-                current_flow = flow_out
+                if level == 0:
+                    if dense_mode_value in (
+                        "blocky_clamped",
+                        "clamped",
+                        "cpu_like_clamped",
+                        "cpu-like-clamped",
+                    ):
+                        mod.run(
+                            "flow_lk_dense_blocky_clamped",
+                            grid_flow=grid_flow,
+                            flow_out=flow_out,
+                            grid_step=level_grid_step,
+                            border_margin=level_margin,
+                            max_flow_px=float(max_flow_px),
+                        )
+                    elif dense_mode_value in ("blocky", "nearest", "cpu_like", "cpu-like"):
+                        mod.run(
+                            "flow_lk_dense_blocky",
+                            grid_flow=grid_flow,
+                            flow_out=flow_out,
+                            grid_step=level_grid_step,
+                            border_margin=level_margin,
+                        )
+                    else:
+                        mod.run(
+                            "flow_lk_dense_interpolate",
+                            grid_flow=grid_flow,
+                            flow_out=flow_out,
+                            grid_step=level_grid_step,
+                            border_margin=level_margin,
+                            overlap=float(overlap),
+                        )
+                    current_flow = flow_out
 
         if return_gpu:
             if return_diagnostics:

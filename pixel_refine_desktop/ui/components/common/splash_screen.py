@@ -32,14 +32,21 @@ class SplashScreen(QSplashScreen):
         super().__init__(pixmap, flags)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
 
+        # Clip splash window to exact circle matching the logo
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setMask(pixmap.mask())
+
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 15)
+        side = min(pixmap.width(), pixmap.height())
+        # Safe horizontal margins so layout uses the wide middle-lower region of circle
+        main_layout.setContentsMargins(12, 10, 12, int(side * 0.09))
+        main_layout.setSpacing(2)
 
         main_layout.addStretch()
 
         # Custom circular progress widget
         self.progress_indicator = CircularProgress(self)
-        self.progress_indicator.setFixedSize(120, 120)
+        self.progress_indicator.setFixedSize(110, 110)
         main_layout.addWidget(
             self.progress_indicator, alignment=Qt.AlignmentFlag.AlignCenter
         )
@@ -48,32 +55,42 @@ class SplashScreen(QSplashScreen):
             language_config,
         )
 
-        # Label for "LOADING..."
-        # self.status_label = QLabel(language_config.UI_SPLASH_LOADING, self)
-        self.status_label = QLabel("LOADING...", self)
+        # Label for "MEMUAT..." / "LOADING..."
+        loading_text = getattr(language_config, "UI_SPLASH_LOADING", "MEMUAT...").upper()
+        self.status_label = QLabel(loading_text, self)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet(
             """
-            color: white; 
-            font-size: 14px;
-            font-weight: normal;
-            letter-spacing: 4px;
+            color: rgba(255, 255, 255, 0.95); 
+            font-size: 13px;
+            font-weight: bold;
+            letter-spacing: 3px;
             background-color: transparent;
-            padding-top: 5px;
+            padding-top: 4px;
+            padding-bottom: 2px;
         """
         )
         main_layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # Label for detailed messages
+        # Label for detailed friendly messages (comfortably spanning the chord width)
         self.detail_label = QLabel("", self)
         self.detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setMinimumWidth(int(side * 0.78))
+        self.detail_label.setMaximumWidth(int(side * 0.86))
         self.detail_label.setStyleSheet(
-            "color: #DDDDDD; font-size: 11px; background-color: transparent;"
+            """
+            color: #E2E8F0;
+            font-size: 11px;
+            font-weight: 500;
+            background-color: transparent;
+            padding: 0px 4px;
+        """
         )
         main_layout.addWidget(self.detail_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Small spacer for version number
-        main_layout.addSpacing(10)
+        main_layout.addSpacing(6)
 
         # Label for version number
         self.version_label = QLabel(version_string, self)
@@ -81,7 +98,7 @@ class SplashScreen(QSplashScreen):
         # Made smaller and dimmer for elegance
         self.version_label.setStyleSheet(
             """
-            color: #AAAAAA; 
+            color: #94A3B8; 
             font-size: 9px; 
             background-color: transparent;
         """

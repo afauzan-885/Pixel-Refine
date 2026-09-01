@@ -36,15 +36,19 @@ fun Card(
     modifier: Modifier = Modifier,
     padding: Dp = 16.dp,
     spacing: Dp = 8.dp,
+    onClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit = {},
 ) {
     val theme = LocalGenericTheme.current
+    val clickableModifier = if (onClick != null) Modifier.clickable { onClick() } else Modifier
+
     Column(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(theme.radiusLg))
             .background(theme.bgCard)
             .border(1.dp, theme.borderColor, RoundedCornerShape(theme.radiusLg))
+            .then(clickableModifier)
             .padding(padding),
         verticalArrangement = Arrangement.spacedBy(spacing),
     ) {

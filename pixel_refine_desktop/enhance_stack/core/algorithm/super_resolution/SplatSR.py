@@ -1,9 +1,7 @@
 import os
 import gc
-import time
 import traceback
 import sqlite3
-import h5py
 import numpy as np
 import cv2
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
@@ -14,16 +12,14 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
 )
 from resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
-    extract_all_metadata,
     normalize_image,
     save_image,
-    setup_balanced_batching,
     get_all_image_paths_for_single_process,
     load_images_from_paths,
-    resize_all_with_padding,
     cleanup_old_hdf5_files,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+
 
 class SplatSRAlgorithm:
 
@@ -50,7 +46,9 @@ class SplatSRAlgorithm:
             )
             return [row[0] for row in cursor.fetchall()]
 
-    def compute_spatial_weight_maps(self, lr_frames, noise_std=0.015, sensitivity=120.0):
+    def compute_spatial_weight_maps(
+        self, lr_frames, noise_std=0.015, sensitivity=120.0
+    ):
         """
         Computes Spatial Weight Maps (W_k) relative to reference frame Y_ref (lr_frames[0]).
         Matches the concept of tile rejection / ghosting suppression using Local-MSE window calculation.
@@ -69,21 +67,23 @@ class SplatSRAlgorithm:
             ref_frame = lr_frames[0]
             weight_maps = np.ones_like(lr_frames)
             lr_gray = lr_frames
-        
+
         # Calculate local window differences
         for k in range(1, num_frames):
             diff = lr_gray[k] - ref_frame
 
             # Compute Local MSE via Gaussian Blur
-            local_mse = cv2.GaussianBlur((diff * diff).astype(np.float32), (5, 5), sigmaX=1.0)
-            
+            local_mse = cv2.GaussianBlur(
+                (diff * diff).astype(np.float32), (5, 5), sigmaX=1.0
+            )
+
             # Tile rejection mapping formula
             # Areas with high Local-MSE (movement/misalignment) get weights near 0
             w_k = np.exp(-local_mse / (noise_std * noise_std * 2.0))
             # Smooth out and clamp
             w_k = np.clip(w_k * sensitivity, 0.0, 1.0)
             weight_maps[k] = w_k
-            
+
         return weight_maps
 
     def _estimate_internal_block_matching_flow(
@@ -138,7 +138,9 @@ class SplatSRAlgorithm:
         work_w = max(64, int(round(w * proxy_scale)))
         work_h -= work_h % 2
         work_w -= work_w % 2
-        alignment_images = [np.ascontiguousarray(frame, dtype=np.float32) for frame in frames]
+        alignment_images = [
+            np.ascontiguousarray(frame, dtype=np.float32) for frame in frames
+        ]
         result = perform_alignment_gpu(
             alignment_images,
             np.ascontiguousarray(frames[0], dtype=np.float32),
@@ -265,7 +267,9 @@ class SplatSRAlgorithm:
         if matching_scale < 0.999:
             lk_flow = np.stack(
                 [
-                    cv2.resize(lk_flow[..., axis], (w, h), interpolation=cv2.INTER_LINEAR)
+                    cv2.resize(
+                        lk_flow[..., axis], (w, h), interpolation=cv2.INTER_LINEAR
+                    )
                     / np.float32(matching_scale)
                     for axis in range(2)
                 ],
@@ -332,6 +336,7 @@ class SplatSRAlgorithm:
         # CUDA/OpenGL and an explicit override still use the native matcher.
         try:
             from taichi_vision.taichi_aot import engine as active_engine
+
             active_arch = str(getattr(active_engine, "arch", "")).lower()
         except Exception:
             active_arch = ""
@@ -342,10 +347,13 @@ class SplatSRAlgorithm:
         )
         if use_phase_proxy:
             try:
-                if max(
-                    float(np.std(matching_reference)),
-                    float(np.std(matching_target)),
-                ) < 1.0e-5:
+                if (
+                    max(
+                        float(np.std(matching_reference)),
+                        float(np.std(matching_target)),
+                    )
+                    < 1.0e-5
+                ):
                     dx = dy = 0.0
                     response = 0.0
                 else:
@@ -381,7 +389,9 @@ class SplatSRAlgorithm:
             if pair.shape[:2] != (h, w):
                 pair = np.stack(
                     [
-                        cv2.resize(pair[..., axis], (w, h), interpolation=cv2.INTER_LINEAR)
+                        cv2.resize(
+                            pair[..., axis], (w, h), interpolation=cv2.INTER_LINEAR
+                        )
                         / np.float32(matching_scale)
                         for axis in range(2)
                     ],
@@ -464,14 +474,14 @@ class SplatSRAlgorithm:
         # [N,H,W] simultaneously, which can exceed system RAM while leaving
         # VRAM mostly idle during host-side preparation.
         import config as app_config
+
         block_settings = app_config.get_compute_block_settings()
         block_size = int(block_settings.get("block_size", 1024))
         threshold_mp = float(block_settings.get("threshold_mp", 12.0))
         block_mode = str(block_settings.get("mode", "auto")).strip().lower()
         frame_mp = (h * w) / 1.0e6
         block_enabled = bool(block_settings.get("enabled", True)) and (
-            block_mode == "block"
-            or (block_mode == "auto" and frame_mp >= threshold_mp)
+            block_mode == "block" or (block_mode == "auto" and frame_mp >= threshold_mp)
         )
         if block_enabled:
             from .spatial_weight_pipeline import generate_spatial_weight_map_blockwise
@@ -589,12 +599,14 @@ class SplatSRAlgorithm:
                     scale=scale,
                     block_size=block_size,
                     progress_callback=(
-                        lambda done, total: update_progress(
-                            24 + int((done / max(total, 1)) * 72),
-                            f"Native splatting blocks {done}/{total}",
+                        lambda done, total: (
+                            update_progress(
+                                24 + int((done / max(total, 1)) * 72),
+                                f"Native splatting blocks {done}/{total}",
+                            )
+                            if update_progress
+                            else None
                         )
-                        if update_progress
-                        else None
                     ),
                 )
                 print(
@@ -626,12 +638,14 @@ class SplatSRAlgorithm:
                     scale=scale,
                     block_size=block_size,
                     progress_callback=(
-                        lambda done, total: update_progress(
-                            24 + int((done / max(total, 1)) * 72),
-                            f"Splatting blocks {done}/{total}",
+                        lambda done, total: (
+                            update_progress(
+                                24 + int((done / max(total, 1)) * 72),
+                                f"Splatting blocks {done}/{total}",
+                            )
+                            if update_progress
+                            else None
                         )
-                        if update_progress
-                        else None
                     ),
                 )
             cache.clear()
@@ -646,8 +660,12 @@ class SplatSRAlgorithm:
             else:
                 y_hr = np.clip(result[..., 0], 0.0, 1.0).astype(dtype_ref)
             if color:
-                cr = cv2.resize(chroma[0], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
-                cb = cv2.resize(chroma[1], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+                cr = cv2.resize(
+                    chroma[0], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
+                )
+                cb = cv2.resize(
+                    chroma[1], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
+                )
                 return cv2.cvtColor(cv2.merge([y_hr, cr, cb]), cv2.COLOR_YCrCb2RGB)
             return y_hr
 
@@ -694,6 +712,7 @@ class SplatSRAlgorithm:
                     )
         try:
             from .spatial_splat_runtime import SpatialSplatAOT
+
             if update_progress:
                 update_progress(20, "Running native GPU subpixel splatting...")
             result, _ = SpatialSplatAOT().run(
@@ -730,11 +749,14 @@ class SplatSRAlgorithm:
         else:
             y_hr = np.clip(result[..., 0], 0.0, 1.0).astype(dtype_ref)
         if color:
-            cr = cv2.resize(chroma[0], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
-            cb = cv2.resize(chroma[1], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+            cr = cv2.resize(
+                chroma[0], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
+            )
+            cb = cv2.resize(
+                chroma[1], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
+            )
             return cv2.cvtColor(cv2.merge([y_hr, cr, cb]), cv2.COLOR_YCrCb2RGB)
         return y_hr
-
 
     def run_super_resolution(
         self,
@@ -755,13 +777,13 @@ class SplatSRAlgorithm:
             ref_image = images[0]
             dtype_ref = ref_image.dtype
             h_ref, w_ref = ref_image.shape[:2]
-            
+
             is_color = ref_image.ndim == 3 and ref_image.shape[2] == 3
             if is_color:
                 # Convert reference image to YCrCb to extract Cb and Cr channels
                 ref_ycbcr = cv2.cvtColor(ref_image, cv2.COLOR_RGB2YCrCb)
                 _, cr_ref, cb_ref = cv2.split(ref_ycbcr)
-            
+
             # Normalize to float32 range [0.0, 1.0]
             lr_frames = []
             for img in images:
@@ -777,20 +799,23 @@ class SplatSRAlgorithm:
                     if norm_img.ndim == 3:
                         norm_img = norm_img[:, :, 0]
                 lr_frames.append(norm_img)
-                
+
             lr_frames = np.array(lr_frames)
             num_frames = len(lr_frames)
-            
+
             # 1. Estimate real sub-pixel shifts using Taichi AOT Phase Correlation
             from taichi_vision.taichi_aot import phase_correlation
+
             if update_progress:
                 update_progress(3, "Estimating sub-pixel shifts...")
-                
+
             shifts = np.zeros((num_frames, 2), dtype=np.float32)
             for k in range(1, num_frames):
                 if stop_requested and stop_requested():
                     return None
-                dx, dy, _ = phase_correlation(lr_frames[0], lr_frames[k], use_hanning=True)
+                dx, dy, _ = phase_correlation(
+                    lr_frames[0], lr_frames[k], use_hanning=True
+                )
                 shifts[k] = [dy * scale, dx * scale]
 
             # 2. Compute Spatial Weight Maps for Ghosting Rejection
@@ -801,19 +826,19 @@ class SplatSRAlgorithm:
             # 3. Setup Tiling and Accumulators
             lr_h, lr_w = lr_frames[0].shape[:2]
             hr_h, hr_w = lr_h * scale, lr_w * scale
-            
+
             hr_accumulator = np.zeros((hr_h, hr_w), dtype=np.float32)
             weight_accumulator = np.zeros((hr_h, hr_w), dtype=np.float32)
-            
+
             tile_size = 512
             overlap = 0.3
-            
+
             tile_h = min(tile_size, lr_h)
             tile_w = min(tile_size, lr_w)
-            
+
             step_y = int(tile_h * (1.0 - overlap)) if tile_h < lr_h else lr_h
             step_x = int(tile_w * (1.0 - overlap)) if tile_w < lr_w else lr_w
-            
+
             y_starts = []
             y = 0
             while y + tile_h <= lr_h:
@@ -821,7 +846,7 @@ class SplatSRAlgorithm:
                 if y + tile_h == lr_h:
                     break
                 y = min(y + step_y, lr_h - tile_h)
-                
+
             x_starts = []
             x = 0
             while x + tile_w <= lr_w:
@@ -829,7 +854,7 @@ class SplatSRAlgorithm:
                 if x + tile_w == lr_w:
                     break
                 x = min(x + step_x, lr_w - tile_w)
-                
+
             total_tiles = len(y_starts) * len(x_starts)
             processed_tiles = 0
 
@@ -838,13 +863,17 @@ class SplatSRAlgorithm:
                 for x_start in x_starts:
                     if stop_requested and stop_requested():
                         return None
-                        
-                    tile_lr = lr_frames[:, y_start:y_start+tile_h, x_start:x_start+tile_w]
-                    tile_weight = weight_maps[:, y_start:y_start+tile_h, x_start:x_start+tile_w]
-                    
+
+                    tile_lr = lr_frames[
+                        :, y_start : y_start + tile_h, x_start : x_start + tile_w
+                    ]
+                    tile_weight = weight_maps[
+                        :, y_start : y_start + tile_h, x_start : x_start + tile_w
+                    ]
+
                     tile_hr_h = tile_h * scale
                     tile_hr_w = tile_w * scale
-                    
+
                     # Create SR solver (AOT engine handles GPU allocation)
                     solver = TaichiSplatSR(
                         lr_shape=(tile_h, tile_w),
@@ -853,17 +882,21 @@ class SplatSRAlgorithm:
                         scale=scale,
                         alpha=0.7,
                         beta=0.005,
-                        btv_window=2
+                        btv_window=2,
                     )
                     solver.set_lr_data(tile_lr, tile_weight, shifts)
-                            
+
                     # Set initial estimate via bicubic upsampling
-                    init_hr = cv2.resize(tile_lr[0], (tile_hr_w, tile_hr_h), interpolation=cv2.INTER_CUBIC)
+                    init_hr = cv2.resize(
+                        tile_lr[0],
+                        (tile_hr_w, tile_hr_h),
+                        interpolation=cv2.INTER_CUBIC,
+                    )
                     if init_hr.ndim == 3:
                         init_hr = init_hr[:, :, 0]
-                        
+
                     solver.set_initial_hr(init_hr)
-                    
+
                     # Iterative Optimization Loop for Tile
                     for step_idx in range(num_iterations):
                         if stop_requested and stop_requested():
@@ -871,42 +904,55 @@ class SplatSRAlgorithm:
                         if step_idx > 0 and step_idx % 25 == 0:
                             solver.beta *= 0.90
                         solver.step(lam=0.001)
-                        
+
                     tile_hr_res = solver.get_hr_image()
-                    
+
                     # Generate Hanning window for tile stitching
                     win_y = np.hanning(tile_hr_h + 2)[1:-1].astype(np.float32)
                     win_x = np.hanning(tile_hr_w + 2)[1:-1].astype(np.float32)
                     win = np.outer(win_y, win_x)
-                        
+
                     # Accumulate to global high-resolution buffers
                     y_hr_start = y_start * scale
                     x_hr_start = x_start * scale
-                    hr_accumulator[y_hr_start:y_hr_start+tile_hr_h, x_hr_start:x_hr_start+tile_hr_w] += tile_hr_res * win
-                    weight_accumulator[y_hr_start:y_hr_start+tile_hr_h, x_hr_start:x_hr_start+tile_hr_w] += win
-                    
+                    hr_accumulator[
+                        y_hr_start : y_hr_start + tile_hr_h,
+                        x_hr_start : x_hr_start + tile_hr_w,
+                    ] += (
+                        tile_hr_res * win
+                    )
+                    weight_accumulator[
+                        y_hr_start : y_hr_start + tile_hr_h,
+                        x_hr_start : x_hr_start + tile_hr_w,
+                    ] += win
+
                     # Release solver resources
                     del solver
                     del tile_hr_res
                     del win
                     gc.collect()
-                    
+
                     processed_tiles += 1
                     if update_progress:
                         prog_val = 10 + int((processed_tiles / total_tiles) * 85)
-                        update_progress(prog_val, f"Processing super-resolution tile {processed_tiles}/{total_tiles}...")
+                        update_progress(
+                            prog_val,
+                            f"Processing super-resolution tile {processed_tiles}/{total_tiles}...",
+                        )
 
             # 5. Final Stitching normalization and scaling
             if update_progress:
                 update_progress(98, "Stitching and normalizing tiles...")
-                
+
             valid_mask = weight_accumulator > 1e-6
             final_hr = np.zeros_like(hr_accumulator)
-            final_hr[valid_mask] = hr_accumulator[valid_mask] / weight_accumulator[valid_mask]
-            
+            final_hr[valid_mask] = (
+                hr_accumulator[valid_mask] / weight_accumulator[valid_mask]
+            )
+
             max_val = np.iinfo(dtype_ref).max
             final_result = np.clip(final_hr * max_val, 0, max_val).astype(dtype_ref)
-            
+
             if is_color:
                 # Upscale chrominance channels to match high-resolution shape
                 cb_hr = cv2.resize(cb_ref, (hr_w, hr_h), interpolation=cv2.INTER_CUBIC)
@@ -915,7 +961,7 @@ class SplatSRAlgorithm:
                 yuv_hr = cv2.merge([final_result, cr_hr, cb_hr])
                 final_color = cv2.cvtColor(yuv_hr, cv2.COLOR_YCrCb2RGB)
                 return final_color
-                
+
             return final_result
 
         except Exception as e:
@@ -944,7 +990,11 @@ def main(
         if single_process:
             hdf5_path = os.path.join(align_dir, "aligned_images.h5")
             image_paths = get_all_image_paths_for_single_process(db_path)
-            ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else "single_process"
+            ref_name = (
+                os.path.splitext(os.path.basename(image_paths[0]))[0]
+                if image_paths
+                else "single_process"
+            )
             # SplattingSR owns alignment internally.  Never consume an
             # externally aligned HDF5 product here; doing so would align the
             # burst before the internal Lucas-Kanade stage.
@@ -953,8 +1003,14 @@ def main(
             if batch_id is None:
                 raise ValueError("Batch ID must be provided for batch processing.")
             hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
-            image_paths = image_processor.get_all_image_paths_for_batch_process(batch_id)
-            ref_name = os.path.splitext(os.path.basename(image_paths[0]))[0] if image_paths else f"batch_{batch_id}"
+            image_paths = image_processor.get_all_image_paths_for_batch_process(
+                batch_id
+            )
+            ref_name = (
+                os.path.splitext(os.path.basename(image_paths[0]))[0]
+                if image_paths
+                else f"batch_{batch_id}"
+            )
             # Keep the raw/session image order and let the internal
             # Lucas-Kanade stage estimates motion.  The SpatialFusion
             # HDF5 alignment cache is deliberately not an input to SplatSR.
@@ -962,13 +1018,18 @@ def main(
 
         cleanup_old_hdf5_files(hdf5_path)
 
-        output_name_safe = "".join(c for c in ref_name if c.isalnum() or c in ("_", "-")).rstrip() or "sr_result"
-        output_path = os.path.join(output_folder_stack, f"{output_name_safe}_splattingSR.tif")
+        output_name_safe = (
+            "".join(c for c in ref_name if c.isalnum() or c in ("_", "-")).rstrip()
+            or "sr_result"
+        )
+        output_path = os.path.join(
+            output_folder_stack, f"{output_name_safe}_splattingSR.tif"
+        )
 
         # Load images
         if update_progress:
             update_progress(5, "Loading image files...")
-            
+
         if isinstance(data_source, str) and data_source.endswith(".h5"):
             with h5py.File(data_source, "r") as h5f:
                 keys = list(h5f.keys())
@@ -982,12 +1043,20 @@ def main(
             scale=2,
             num_iterations=120,
             update_progress=update_progress,
-            stop_requested=stop_requested
+            stop_requested=stop_requested,
         )
 
         if final_result is not None:
-            save_success = save_image(final_result, output_path, reference_image_path=image_paths[0] if image_paths else None)
-            final_message = f"Process finished successfully: {os.path.basename(output_path)}" if save_success else "Failed to save result image."
+            save_success = save_image(
+                final_result,
+                output_path,
+                reference_image_path=image_paths[0] if image_paths else None,
+            )
+            final_message = (
+                f"Process finished successfully: {os.path.basename(output_path)}"
+                if save_success
+                else "Failed to save result image."
+            )
             if update_progress:
                 update_progress(100, final_message)
         else:
@@ -1031,7 +1100,12 @@ def running_splatting_sr(
     dialog.setWindowTitle("splattingSR")
     dialog.setModal(True)
     dialog.setFixedSize(300, 90)
-    dialog.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowCloseButtonHint)
+    dialog.setWindowFlags(
+        Qt.WindowType.Window
+        | Qt.WindowType.CustomizeWindowHint
+        | Qt.WindowType.WindowTitleHint
+        | Qt.WindowType.WindowCloseButtonHint
+    )
 
     layout = QVBoxLayout(dialog)
     label = QLabel("Starting processing...")
@@ -1049,7 +1123,12 @@ def running_splatting_sr(
         single_process=single_process,
         batch_id=batch_id,
     )
-    worker.progress_updated.connect(lambda progress, message: (progress_bar.setValue(progress), label.setText(message)))
+    worker.progress_updated.connect(
+        lambda progress, message: (
+            progress_bar.setValue(progress),
+            label.setText(message),
+        )
+    )
 
     def finish_handler():
         nonlocal process_finished
@@ -1059,9 +1138,34 @@ def running_splatting_sr(
         worker.wait()
 
     worker.finished.connect(finish_handler)
-    worker.error_occurred.connect(lambda err: (QMessageBox.critical(dialog, "Error", f"Error occurred: {err}"), dialog.close(), worker.quit(), worker.wait()))
+    worker.error_occurred.connect(
+        lambda err: (
+            QMessageBox.critical(dialog, "Error", f"Error occurred: {err}"),
+            dialog.close(),
+            worker.quit(),
+            worker.wait(),
+        )
+    )
 
-    dialog.closeEvent = lambda ev: ev.accept() if process_finished else (ev.accept() if not worker.isRunning() else (worker.stop(), worker.quit(), worker.wait(), ev.accept()) if QMessageBox.question(dialog, "Cancel Process", "Do you want to cancel?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes else ev.ignore())
+    dialog.closeEvent = lambda ev: (
+        ev.accept()
+        if process_finished
+        else (
+            ev.accept()
+            if not worker.isRunning()
+            else (
+                (worker.stop(), worker.quit(), worker.wait(), ev.accept())
+                if QMessageBox.question(
+                    dialog,
+                    "Cancel Process",
+                    "Do you want to cancel?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                == QMessageBox.StandardButton.Yes
+                else ev.ignore()
+            )
+        )
+    )
     worker.start()
     dialog.exec()
 

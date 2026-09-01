@@ -68,6 +68,66 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
         for i in range(n):
             stats[i] = 0.0
 
+    @ti.func
+    def _bm_patch_sad_5point(
+        prev: ti.types.ndarray(),
+        next: ti.types.ndarray(),
+        cy: ti.i32,
+        cx: ti.i32,
+        fy: ti.i32,
+        fx: ti.i32,
+        h: ti.i32,
+        w: ti.i32,
+        win_radius: ti.i32,
+    ) -> ti.types.vector(5, ti.f32):
+        # Single-pass 5-point stencil accumulator in registers:
+        # [0]=center, [1]=left, [2]=right, [3]=up, [4]=down
+        sad_vec = ti.Vector([0.0, 0.0, 0.0, 0.0, 0.0])
+        half_r = win_radius // 2
+        for oy_i in range(-half_r, half_r + 1):
+            oy = oy_i * 2
+            yy_i = cy + oy
+            for ox_i in range(-half_r, half_r + 1):
+                ox = ox_i * 2
+                xx_i = cx + ox
+                p_val = _bm_read_i32(prev, yy_i, xx_i, h, w)
+                
+                # Center
+                sad_vec[0] += ti.abs(_bm_read_i32(next, yy_i + fy, xx_i + fx, h, w) - p_val)
+                # Left (fx - 1)
+                sad_vec[1] += ti.abs(_bm_read_i32(next, yy_i + fy, xx_i + fx - 1, h, w) - p_val)
+                # Right (fx + 1)
+                sad_vec[2] += ti.abs(_bm_read_i32(next, yy_i + fy, xx_i + fx + 1, h, w) - p_val)
+                # Up (fy - 1)
+                sad_vec[3] += ti.abs(_bm_read_i32(next, yy_i + fy - 1, xx_i + fx, h, w) - p_val)
+                # Down (fy + 1)
+                sad_vec[4] += ti.abs(_bm_read_i32(next, yy_i + fy + 1, xx_i + fx, h, w) - p_val)
+        return sad_vec
+
+    @ti.func
+    def _bm_patch_sad(
+        prev: ti.types.ndarray(),
+        next: ti.types.ndarray(),
+        cy: ti.i32,
+        cx: ti.i32,
+        shift_y: ti.i32,
+        shift_x: ti.i32,
+        h: ti.i32,
+        w: ti.i32,
+        win_radius: ti.i32,
+    ) -> ti.f32:
+        sad = 0.0
+        half_r = win_radius // 2
+        for oy_i in range(-half_r, half_r + 1):
+            oy = oy_i * 2
+            yy_i = cy + oy
+            for ox_i in range(-half_r, half_r + 1):
+                ox = ox_i * 2
+                xx_i = cx + ox
+                diff = _bm_read_i32(next, yy_i + shift_y, xx_i + shift_x, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
+                sad += ti.abs(diff)
+        return sad
+
     @ti.kernel
     def _bm_grid_track_kernel(
         prev: ti.types.ndarray(),
@@ -86,8 +146,12 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
         grid_h = grid_flow.shape[0]
         grid_w = grid_flow.shape[1]
 
-        # Use stride to sample window sparsely for speed
-        stride = 2
+        pts_side = (win_radius * 2) // 2 + 1
+        inv_patch_area = 1.0 / ti.cast(pts_side * pts_side, ti.f32)
+        
+        # Adaptive Tri-Tier Thresholds (Normalized to [0.0, 1.0] intensity)
+        tau_low = 0.020    # 2.0% average pixel delta -> Tier 1 (Candidate evaluation only)
+        tau_high = 0.080   # 8.0% average pixel delta -> Tier 2 (Micro 3x3 search) vs Tier 3 (Full bounded)
 
         for gy, gx in ti.ndrange(grid_h, grid_w):
             px = ti.cast(border_margin + gx * grid_step, ti.f32)
@@ -99,122 +163,77 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
             grid_meta[gy, gx, 1] = 0.0
             grid_meta[gy, gx, 2] = 2.0
             grid_meta[gy, gx, 3] = 0.0
+
             if px < ti.cast(w - border_margin, ti.f32) and py < ti.cast(h - border_margin, ti.f32):
+                center_y = border_margin + gy * grid_step
+                center_x = border_margin + gx * grid_step
+
                 init_dx = 0
                 init_dy = 0
                 if has_prev_flow == 1:
-                    cgx = _bm_clamp(gx, 0, prev_grid_flow.shape[1] - 1)
-                    cgy = _bm_clamp(gy, 0, prev_grid_flow.shape[0] - 1)
+                    cgx = _bm_clamp(gx >> 1, 0, prev_grid_flow.shape[1] - 1)
+                    cgy = _bm_clamp(gy >> 1, 0, prev_grid_flow.shape[0] - 1)
                     init_dx = ti.cast(ti.round(prev_grid_flow[cgy, cgx, 0] * 2.0), ti.i32)
                     init_dy = ti.cast(ti.round(prev_grid_flow[cgy, cgx, 1] * 2.0), ti.i32)
 
-                # 1. Coarse Integer Search (Cross Pattern, 5 points)
                 best_cy = init_dy
                 best_cx = init_dx
-                best_coarse_sad = 1e30
+                baseline_sad = _bm_patch_sad(
+                    prev, next, center_y, center_x, init_dy, init_dx, h, w, win_radius
+                )
+                initial_norm_sad = baseline_sad * inv_patch_area
+                best_sad = baseline_sad
 
-                for coy_s, cox_s in ti.static(((0, 0), (-2, 0), (2, 0), (0, -2), (0, 2))):
-                    soy = init_dy + coy_s
-                    sox = init_dx + cox_s
-                    sad = 0.0
-                    
-                    # Loop over win_radius dynamically with stride
-                    oy = -win_radius
-                    while oy <= win_radius:
-                        ox = -win_radius
-                        while ox <= win_radius:
-                            yy_i = border_margin + gy * grid_step + oy
-                            xx_i = border_margin + gx * grid_step + ox
-                            diff = _bm_read_i32(next, yy_i + soy, xx_i + sox, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                            sad += ti.abs(diff)
-                            ox += stride
-                        oy += stride
+                # === ADAPTIVE TRI-TIER SEARCH ===
+                if has_prev_flow == 1 and initial_norm_sad <= tau_low:
+                    # TIER 1: Error Rendah (Tebakan Coarse Sangat Bagus)
+                    # Lewati semua integer search, gunakan langsung tebakan untuk subpixel fit
+                    best_cy = init_dy
+                    best_cx = init_dx
+                elif has_prev_flow == 1 and initial_norm_sad <= tau_high:
+                    # TIER 2: Error Menengah (Mikro Search 3x3 di sekitar tebakan)
+                    for foy_s, fox_s in ti.static(((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1))):
+                        soy = init_dy + foy_s
+                        sox = init_dx + fox_s
+                        sad = _bm_patch_sad(prev, next, center_y, center_x, soy, sox, h, w, win_radius)
+                        if sad < best_sad:
+                            best_sad = sad
+                            best_cy = soy
+                            best_cx = sox
+                else:
+                    # TIER 3: Error Tinggi / Base Level (Full Coarse Diamond Search + Fine Refinement)
+                    for coy_s, cox_s in ti.static(((-2, 0), (2, 0), (0, -2), (0, 2))):
+                        soy = init_dy + coy_s
+                        sox = init_dx + cox_s
+                        sad = _bm_patch_sad(prev, next, center_y, center_x, soy, sox, h, w, win_radius)
+                        if sad < best_sad:
+                            best_sad = sad
+                            best_cy = soy
+                            best_cx = sox
 
-                    if sad < best_coarse_sad:
-                        best_coarse_sad = sad
-                        best_cy = soy
-                        best_cx = sox
+                    # Fine Diamond around best coarse
+                    best_fy_tmp = best_cy
+                    best_fx_tmp = best_cx
+                    for foy_s, fox_s in ti.static(((-1, 0), (1, 0), (0, -1), (0, 1))):
+                        soy = best_cy + foy_s
+                        sox = best_cx + fox_s
+                        sad = _bm_patch_sad(prev, next, center_y, center_x, soy, sox, h, w, win_radius)
+                        if sad < best_sad:
+                            best_sad = sad
+                            best_fy_tmp = soy
+                            best_fx_tmp = sox
+                    best_cy = best_fy_tmp
+                    best_cx = best_fx_tmp
 
-                # 2. Fine Integer Search (Cross Pattern around best coarse, 5 points)
-                best_fy = best_cy
-                best_fx = best_cx
-                best_fine_sad = 1e30
-
-                for foy_s, fox_s in ti.static(((0, 0), (-1, 0), (1, 0), (0, -1), (0, 1))):
-                    soy = best_cy + foy_s
-                    sox = best_cx + fox_s
-                    sad = 0.0
-                    
-                    oy = -win_radius
-                    while oy <= win_radius:
-                        ox = -win_radius
-                        while ox <= win_radius:
-                            yy_i = border_margin + gy * grid_step + oy
-                            xx_i = border_margin + gx * grid_step + ox
-                            diff = _bm_read_i32(next, yy_i + soy, xx_i + sox, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                            sad += ti.abs(diff)
-                            ox += stride
-                        oy += stride
-
-                    if sad < best_fine_sad:
-                        best_fine_sad = sad
-                        best_fy = soy
-                        best_fx = sox
-
-                # 3. 2D Parabolic Fit sub-pixel refinement
-                sad_center = best_fine_sad
-                sad_left = 0.0
-                sad_right = 0.0
-                sad_up = 0.0
-                sad_down = 0.0
-
-                # Evaluate Left (best_fx - 1, best_fy)
-                oy = -win_radius
-                while oy <= win_radius:
-                    ox = -win_radius
-                    while ox <= win_radius:
-                        yy_i = border_margin + gy * grid_step + oy
-                        xx_i = border_margin + gx * grid_step + ox
-                        diff = _bm_read_i32(next, yy_i + best_fy, xx_i + best_fx - 1, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                        sad_left += ti.abs(diff)
-                        ox += stride
-                    oy += stride
-
-                # Evaluate Right (best_fx + 1, best_fy)
-                oy = -win_radius
-                while oy <= win_radius:
-                    ox = -win_radius
-                    while ox <= win_radius:
-                        yy_i = border_margin + gy * grid_step + oy
-                        xx_i = border_margin + gx * grid_step + ox
-                        diff = _bm_read_i32(next, yy_i + best_fy, xx_i + best_fx + 1, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                        sad_right += ti.abs(diff)
-                        ox += stride
-                    oy += stride
-
-                # Evaluate Up (best_fx, best_fy - 1)
-                oy = -win_radius
-                while oy <= win_radius:
-                    ox = -win_radius
-                    while ox <= win_radius:
-                        yy_i = border_margin + gy * grid_step + oy
-                        xx_i = border_margin + gx * grid_step + ox
-                        diff = _bm_read_i32(next, yy_i + best_fy - 1, xx_i + best_fx, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                        sad_up += ti.abs(diff)
-                        ox += stride
-                    oy += stride
-
-                # Evaluate Down (best_fx, best_fy + 1)
-                oy = -win_radius
-                while oy <= win_radius:
-                    ox = -win_radius
-                    while ox <= win_radius:
-                        yy_i = border_margin + gy * grid_step + oy
-                        xx_i = border_margin + gx * grid_step + ox
-                        diff = _bm_read_i32(next, yy_i + best_fy + 1, xx_i + best_fx, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                        sad_down += ti.abs(diff)
-                        ox += stride
-                    oy += stride
+                # === SINGLE-PASS 5-POINT SUB-PIXEL PARABOLIC FIT ===
+                stencil = _bm_patch_sad_5point(
+                    prev, next, center_y, center_x, best_cy, best_cx, h, w, win_radius
+                )
+                sad_center = stencil[0]
+                sad_left = stencil[1]
+                sad_right = stencil[2]
+                sad_up = stencil[3]
+                sad_down = stencil[4]
 
                 dx_offset = 0.0
                 denom_x = sad_right - 2.0 * sad_center + sad_left
@@ -228,17 +247,15 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
                     dy_offset = -0.5 * (sad_down - sad_up) / denom_y
                     dy_offset = ti.max(-0.5, ti.min(0.5, dy_offset))
 
-                dx = ti.cast(best_fx, ti.f32) + dx_offset
-                dy = ti.cast(best_fy, ti.f32) + dy_offset
+                dx = ti.cast(best_cx, ti.f32) + dx_offset
+                dy = ti.cast(best_cy, ti.f32) + dy_offset
 
+                # Parallax & Physical Motion Clamping
                 max_flow = ti.cast(grid_step * 2 + win_radius * 2, ti.f32)
                 dx = ti.max(-max_flow, ti.min(max_flow, dx))
                 dy = ti.max(-max_flow, ti.min(max_flow, dy))
 
-                # Calculate approximate number of points evaluated
-                pts_side = (win_radius * 2) // stride + 1
-                patch_area = ti.cast(pts_side * pts_side, ti.f32)
-                residual = sad_center / patch_area
+                residual = sad_center * inv_patch_area
 
                 grid_flow[gy, gx, 0] = dx
                 grid_flow[gy, gx, 1] = dy
@@ -248,9 +265,9 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
                 med_thr = ti.cast(grid_step * grid_step, ti.f32) * 0.04
                 high_thr = ti.cast(grid_step * grid_step, ti.f32) * 0.20
                 cls = 0.0
-                if motion2 > med_thr or residual > 10.0:
+                if motion2 > med_thr or residual > 0.05:
                     cls = 1.0
-                if motion2 > high_thr or residual > 22.0:
+                if motion2 > high_thr or residual > 0.12:
                     cls = 2.0
                 grid_meta[gy, gx, 0] = residual
                 grid_meta[gy, gx, 1] = 1.0
@@ -274,81 +291,29 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
         w = prev.shape[1]
         grid_h = grid_flow.shape[0]
         grid_w = grid_flow.shape[1]
-        stride = 2
+
+        pts_side = (win_radius * 2) // 2 + 1
+        inv_patch_area = 1.0 / ti.cast(pts_side * pts_side, ti.f32)
 
         for gy, gx in ti.ndrange(grid_h, grid_w):
             cls = ti.cast(grid_meta[gy, gx, 2], ti.i32)
             if cls >= class_threshold and grid_flow[gy, gx, 2] > 0.5:
+                center_y = border_margin + gy * grid_step
+                center_x = border_margin + gx * grid_step
+
                 dx_init = grid_flow[gy, gx, 0]
                 dy_init = grid_flow[gy, gx, 1]
                 best_fx = ti.cast(ti.round(dx_init), ti.i32)
                 best_fy = ti.cast(ti.round(dy_init), ti.i32)
 
-                sad_center = 0.0
-                sad_left = 0.0
-                sad_right = 0.0
-                sad_up = 0.0
-                sad_down = 0.0
-
-                # Evaluate Center
-                oy = -win_radius
-                while oy <= win_radius:
-                    ox = -win_radius
-                    while ox <= win_radius:
-                        yy_i = border_margin + gy * grid_step + oy
-                        xx_i = border_margin + gx * grid_step + ox
-                        diff = _bm_read_i32(next, yy_i + best_fy, xx_i + best_fx, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                        sad_center += ti.abs(diff)
-                        ox += stride
-                    oy += stride
-
-                # Evaluate Left
-                oy = -win_radius
-                while oy <= win_radius:
-                    ox = -win_radius
-                    while ox <= win_radius:
-                        yy_i = border_margin + gy * grid_step + oy
-                        xx_i = border_margin + gx * grid_step + ox
-                        diff = _bm_read_i32(next, yy_i + best_fy, xx_i + best_fx - 1, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                        sad_left += ti.abs(diff)
-                        ox += stride
-                    oy += stride
-
-                # Evaluate Right
-                oy = -win_radius
-                while oy <= win_radius:
-                    ox = -win_radius
-                    while ox <= win_radius:
-                        yy_i = border_margin + gy * grid_step + oy
-                        xx_i = border_margin + gx * grid_step + ox
-                        diff = _bm_read_i32(next, yy_i + best_fy, xx_i + best_fx + 1, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                        sad_right += ti.abs(diff)
-                        ox += stride
-                    oy += stride
-
-                # Evaluate Up
-                oy = -win_radius
-                while oy <= win_radius:
-                    ox = -win_radius
-                    while ox <= win_radius:
-                        yy_i = border_margin + gy * grid_step + oy
-                        xx_i = border_margin + gx * grid_step + ox
-                        diff = _bm_read_i32(next, yy_i + best_fy - 1, xx_i + best_fx, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                        sad_up += ti.abs(diff)
-                        ox += stride
-                    oy += stride
-
-                # Evaluate Down
-                oy = -win_radius
-                while oy <= win_radius:
-                    ox = -win_radius
-                    while ox <= win_radius:
-                        yy_i = border_margin + gy * grid_step + oy
-                        xx_i = border_margin + gx * grid_step + ox
-                        diff = _bm_read_i32(next, yy_i + best_fy + 1, xx_i + best_fx, h, w) - _bm_read_i32(prev, yy_i, xx_i, h, w)
-                        sad_down += ti.abs(diff)
-                        ox += stride
-                    oy += stride
+                stencil = _bm_patch_sad_5point(
+                    prev, next, center_y, center_x, best_fy, best_fx, h, w, win_radius
+                )
+                sad_center = stencil[0]
+                sad_left = stencil[1]
+                sad_right = stencil[2]
+                sad_up = stencil[3]
+                sad_down = stencil[4]
 
                 dx_offset = 0.0
                 denom_x = sad_right - 2.0 * sad_center + sad_left
@@ -369,9 +334,7 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
                 dx = ti.max(-max_flow, ti.min(max_flow, dx))
                 dy = ti.max(-max_flow, ti.min(max_flow, dy))
 
-                pts_side = (win_radius * 2) // stride + 1
-                patch_area = ti.cast(pts_side * pts_side, ti.f32)
-                residual = sad_center / patch_area
+                residual = sad_center * inv_patch_area
 
                 grid_flow[gy, gx, 0] = dx
                 grid_flow[gy, gx, 1] = dy
@@ -407,6 +370,7 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
         border_margin: ti.i32,
         overlap: ti.f32,
     ):
+        # Content-Aware Fast Anisotropic Dense Interpolation
         h = flow_out.shape[0]
         w = flow_out.shape[1]
         grid_h = grid_flow.shape[0]
@@ -420,33 +384,51 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
             gy0 = _bm_clamp(ti.cast(ti.floor(gy_f), ti.i32), 0, grid_h - 1)
             gx1 = _bm_clamp(gx0 + 1, 0, grid_w - 1)
             gy1 = _bm_clamp(gy0 + 1, 0, grid_h - 1)
+            
+            f00_x = grid_flow[gy0, gx0, 0]
+            f00_y = grid_flow[gy0, gx0, 1]
+            f01_x = grid_flow[gy0, gx1, 0]
+            f01_y = grid_flow[gy0, gx1, 1]
+            f10_x = grid_flow[gy1, gx0, 0]
+            f10_y = grid_flow[gy1, gx0, 1]
+            f11_x = grid_flow[gy1, gx1, 0]
+            f11_y = grid_flow[gy1, gx1, 1]
+
             fx_raw = ti.max(0.0, ti.min(gx_f - ti.cast(gx0, ti.f32), 1.0))
             fy_raw = ti.max(0.0, ti.min(gy_f - ti.cast(gy0, ti.f32), 1.0))
 
-            sx = fx_raw * fx_raw * (3.0 - 2.0 * fx_raw)
-            sy = fy_raw * fy_raw * (3.0 - 2.0 * fy_raw)
-            w00 = (1.0 - sx) * (1.0 - sy) * grid_flow[gy0, gx0, 2]
-            w01 = sx * (1.0 - sy) * grid_flow[gy0, gx1, 2]
-            w10 = (1.0 - sx) * sy * grid_flow[gy1, gx0, 2]
-            w11 = sx * sy * grid_flow[gy1, gx1, 2]
-            wt = w00 + w01 + w10 + w11
+            # Variance check across 4 neighbor grid cells
+            diff_max = ti.max(
+                ti.abs(f00_x - f01_x) + ti.abs(f00_y - f01_y),
+                ti.abs(f00_x - f10_x) + ti.abs(f00_y - f10_y),
+                ti.abs(f00_x - f11_x) + ti.abs(f00_y - f11_y)
+            )
 
-            if wt > 1e-6:
-                flow_out[y, x, 0] = (
-                    grid_flow[gy0, gx0, 0] * w00
-                    + grid_flow[gy0, gx1, 0] * w01
-                    + grid_flow[gy1, gx0, 0] * w10
-                    + grid_flow[gy1, gx1, 0] * w11
-                ) / wt
-                flow_out[y, x, 1] = (
-                    grid_flow[gy0, gx0, 1] * w00
-                    + grid_flow[gy0, gx1, 1] * w01
-                    + grid_flow[gy1, gx0, 1] * w10
-                    + grid_flow[gy1, gx1, 1] * w11
-                ) / wt
+            if diff_max < 0.25:
+                # Fast Path: Area homogen / gerakan seragam (Linear Bilinear cepat)
+                w00 = (1.0 - fx_raw) * (1.0 - fy_raw)
+                w01 = fx_raw * (1.0 - fy_raw)
+                w10 = (1.0 - fx_raw) * fy_raw
+                w11 = fx_raw * fy_raw
+                flow_out[y, x, 0] = f00_x * w00 + f01_x * w01 + f10_x * w10 + f11_x * w11
+                flow_out[y, x, 1] = f00_y * w00 + f01_y * w01 + f10_y * w10 + f11_y * w11
             else:
-                flow_out[y, x, 0] = 0.0
-                flow_out[y, x, 1] = 0.0
+                # Anisotropic Smooth Path: Menjaga ketajaman tepi dan kurva kontur
+                sx = fx_raw * fx_raw * (3.0 - 2.0 * fx_raw)
+                sy = fy_raw * fy_raw * (3.0 - 2.0 * fy_raw)
+                w00 = (1.0 - sx) * (1.0 - sy) * grid_flow[gy0, gx0, 2]
+                w01 = sx * (1.0 - sy) * grid_flow[gy0, gx1, 2]
+                w10 = (1.0 - sx) * sy * grid_flow[gy1, gx0, 2]
+                w11 = sx * sy * grid_flow[gy1, gx1, 2]
+                wt = w00 + w01 + w10 + w11
+
+                if wt > 1e-6:
+                    inv_wt = 1.0 / wt
+                    flow_out[y, x, 0] = (f00_x * w00 + f01_x * w01 + f10_x * w10 + f11_x * w11) * inv_wt
+                    flow_out[y, x, 1] = (f00_y * w00 + f01_y * w01 + f10_y * w10 + f11_y * w11) * inv_wt
+                else:
+                    flow_out[y, x, 0] = 0.0
+                    flow_out[y, x, 1] = 0.0
 
     @ti.kernel
     def _bm_dense_blocky_kernel(
@@ -471,24 +453,8 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
                 flow_out[y, x, 0] = grid_flow[gy, gx, 0]
                 flow_out[y, x, 1] = grid_flow[gy, gx, 1]
             else:
-                best_x = 0.0
-                best_y = 0.0
-                found = 0
-                best_dist = 999999.0
-                for oy, ox in ti.static(ti.ndrange((-1, 2), (-1, 2))):
-                    ny = _bm_clamp(gy + oy, 0, grid_h - 1)
-                    nx = _bm_clamp(gx + ox, 0, grid_w - 1)
-                    if grid_flow[ny, nx, 2] > 0.5:
-                        dy = ti.cast(oy, ti.f32)
-                        dx = ti.cast(ox, ti.f32)
-                        dist = dx * dx + dy * dy
-                        if found == 0 or dist < best_dist:
-                            found = 1
-                            best_dist = dist
-                            best_x = grid_flow[ny, nx, 0]
-                            best_y = grid_flow[ny, nx, 1]
-                flow_out[y, x, 0] = best_x
-                flow_out[y, x, 1] = best_y
+                flow_out[y, x, 0] = 0.0
+                flow_out[y, x, 1] = 0.0
 
     @ti.kernel
     def _bm_dense_blocky_clamped_kernel(
@@ -515,27 +481,10 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
             if grid_flow[gy, gx, 2] > 0.5:
                 fx = grid_flow[gy, gx, 0]
                 fy = grid_flow[gy, gx, 1]
-            else:
-                found = 0
-                best_dist = 999999.0
-                for oy, ox in ti.static(ti.ndrange((-1, 2), (-1, 2))):
-                    ny = _bm_clamp(gy + oy, 0, grid_h - 1)
-                    nx = _bm_clamp(gx + ox, 0, grid_w - 1)
-                    if grid_flow[ny, nx, 2] > 0.5:
-                        dy = ti.cast(oy, ti.f32)
-                        dx = ti.cast(ox, ti.f32)
-                        dist = dx * dx + dy * dy
-                        if found == 0 or dist < best_dist:
-                            found = 1
-                            best_dist = dist
-                            fx = grid_flow[ny, nx, 0]
-                            fy = grid_flow[ny, nx, 1]
 
             if max_flow_px > 0.0:
-                mag = ti.sqrt(fx * fx + fy * fy)
-                if mag > max_flow_px:
-                    scale = max_flow_px / ti.max(mag, 1e-6)
-                    fx *= scale
-                    fy *= scale
+                fx = ti.max(-max_flow_px, ti.min(max_flow_px, fx))
+                fy = ti.max(-max_flow_px, ti.min(max_flow_px, fy))
+
             flow_out[y, x, 0] = fx
             flow_out[y, x, 1] = fy

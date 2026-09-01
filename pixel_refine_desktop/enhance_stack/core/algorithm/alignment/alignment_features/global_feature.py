@@ -629,7 +629,7 @@ def load_single_image(
     data_source, index, stop_requested=None, linear_mode=True, capture_ref_proxy=False
 ):
     """Loads a single image at the given index from HDF5 or filesystem."""
-    import h5py
+    # (h5py removed)
 
     ref_proxy = None
 
@@ -2483,7 +2483,7 @@ def is_hdf5_cache_valid(
         True jika cache valid (referensi sama), False jika tidak valid.
     """
     try:
-        import h5py
+        # (h5py removed)
 
         with h5py.File(hdf5_path, "r") as f:
             stored_ref = f.attrs.get("ref_image_path", "")

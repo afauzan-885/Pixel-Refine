@@ -71,12 +71,24 @@ def load_rgb_linear_image(path: str | Path, is_raw: bool = False) -> np.ndarray:
     from taichi_vision import taichi_aot
 
     if is_raw or path.suffix.lower() in RAW_EXTENSIONS:
-        demosaiced = taichi_aot.demosaic(
-            str(path),
-            method="hamilton",
-            return_gpu=False,
-        )
-        img_np = np.asarray(demosaiced, dtype=np.float32)
+        try:
+            demosaiced = taichi_aot.demosaic(
+                str(path),
+                method="hamilton",
+                return_gpu=False,
+            )
+            img_np = np.asarray(demosaiced, dtype=np.float32)
+        except Exception as exc:
+            import rawpy
+            with rawpy.imread(str(path)) as raw:
+                rgb = raw.postprocess(
+                    gamma=(1, 1),
+                    no_auto_bright=True,
+                    output_bps=16,
+                    use_camera_wb=True,
+                    highlight_mode=rawpy.HighlightMode.Blend,
+                )
+            img_np = rgb.astype(np.float32) / 65535.0
         if img_np.ndim != 3 or img_np.shape[2] != 3:
             raise ValueError(
                 f"Raw decoding failed for {path}, got shape {img_np.shape}"

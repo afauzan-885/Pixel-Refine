@@ -86,7 +86,7 @@ fun Stack(
     content: @Composable BoxScope.() -> Unit,
 ) {
     Box(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier,
         contentAlignment = contentAlignment,
         content = content,
     )

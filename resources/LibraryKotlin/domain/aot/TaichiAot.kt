@@ -89,14 +89,23 @@ object TaichiAot {
         val srcBuffer = namedArgs.firstOrNull { it.second is TaichiGpuBuffer }?.second as? TaichiGpuBuffer
             ?: error("Argumen kernel '$graphName' memerlukan setidaknya satu TaichiGpuBuffer")
 
+        // Deteksi output dimensions untuk operasi resize
+        val outWidth = namedArgs.firstOrNull { it.first == "target_w" }?.second as? Int ?: srcBuffer.width
+        val outHeight = namedArgs.firstOrNull { it.first == "target_h" }?.second as? Int ?: srcBuffer.height
+        // Deteksi output channels untuk operasi demosaic (1 channel -> 3 channels)
+        val outChannels = when {
+            graphName.contains("demosaic") -> 3
+            else -> srcBuffer.channels
+        }
+
         if (returnGpu) {
             // Mengembalikan resident GPU buffer baru hasil eksekusi kernel
             val outId = bufferIdCounter.incrementAndGet()
             val outputGpuBuffer = TaichiGpuBuffer(
                 id = outId,
-                width = srcBuffer.width,
-                height = srcBuffer.height,
-                channels = srcBuffer.channels,
+                width = outWidth,
+                height = outHeight,
+                channels = outChannels,
                 dtype = srcBuffer.dtype,
                 onRelease = { releasedId ->
                     synchronized(activeGpuBuffers) {

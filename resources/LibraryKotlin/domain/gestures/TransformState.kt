@@ -39,8 +39,9 @@ class TransformState(
         val newScale = (scale * zoomDelta).coerceIn(minScale, maxScale)
         scale = newScale
 
-        if (newScale <= 1.0f) {
-            // Auto recenter saat zoom <= 1.0x untuk mencegah glitch drift keluar viewport
+        if (newScale < 1.0f) {
+            // Auto recenter saat zoom < 1.0x untuk mencegah glitch drift keluar viewport
+            // Pada zoom tepat 1.0x, pertahankan offset agar tidak reset mendadak
             offsetX = 0f
             offsetY = 0f
         } else {

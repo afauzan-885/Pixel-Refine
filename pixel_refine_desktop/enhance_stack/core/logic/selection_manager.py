@@ -191,14 +191,3 @@ class SelectionManager(QObject):
                 return image_path
 
         return None
-
-    def handle_delete_key(self):
-        """
-        Handle Delete key press.
-
-        Returns:
-            list: List of selected card IDs to delete
-        """
-        if self.selected_thumbnails:
-            return self.get_selected_ids()
-        return []

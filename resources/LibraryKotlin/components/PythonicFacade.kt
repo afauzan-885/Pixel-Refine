@@ -274,7 +274,23 @@ fun progress_bar(
 )
 
 /**
- * 1-line Pythonic alias untuk `BottomActionBar`
+ * 1-line Pythonic alias für `SmallDropdown`
+ */
+@Composable
+fun small_dropdown(
+    selected: String,
+    options: List<String>,
+    on_select: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) = SmallDropdown(
+    selected = selected,
+    options = options,
+    onSelect = on_select,
+    modifier = modifier,
+)
+
+/**
+ * 1-line Pythonic alias für `BottomActionBar`
  */
 @Composable
 fun bottom_action_bar(
@@ -384,3 +400,445 @@ object pixel_refine {
     fun get_checkpoint(id: String) = org.pixelrefine.genericui.get_checkpoint(id)
     fun clear_checkpoint(id: String) = org.pixelrefine.genericui.clear_checkpoint(id)
 }
+
+// ============================================================================
+// 3. PYTHONIC ALIASES FOR NEW COMPONENTS (BATCH 1-11)
+// ============================================================================
+
+// Typography
+@Composable
+fun h1(text: String, modifier: Modifier = Modifier) = H1(text = text, modifier = modifier)
+@Composable
+fun h2(text: String, modifier: Modifier = Modifier) = H2(text = text, modifier = modifier)
+@Composable
+fun h3(text: String, modifier: Modifier = Modifier) = H3(text = text, modifier = modifier)
+@Composable
+fun h4(text: String, modifier: Modifier = Modifier) = H4(text = text, modifier = modifier)
+@Composable
+fun h5(text: String, modifier: Modifier = Modifier) = H5(text = text, modifier = modifier)
+@Composable
+fun h6(text: String, modifier: Modifier = Modifier) = H6(text = text, modifier = modifier)
+@Composable
+fun body_text(text: String, modifier: Modifier = Modifier) = BodyText(text = text, modifier = modifier)
+@Composable
+fun caption_text(text: String, modifier: Modifier = Modifier) = CaptionText(text = text, modifier = modifier)
+@Composable
+fun overline_text(text: String, modifier: Modifier = Modifier) = OverlineText(text = text, modifier = modifier)
+@Composable
+fun code_text(text: String, modifier: Modifier = Modifier) = CodeText(text = text, modifier = modifier)
+@Composable
+fun link_text(text: String, on_click: () -> Unit, modifier: Modifier = Modifier) =
+    LinkText(text = text, onClick = on_click, modifier = modifier)
+
+// Single Slider
+@Composable
+fun slider(
+    value: Float,
+    on_change: (Float) -> Unit,
+    min_val: Float = 0f,
+    max_val: Float = 1f,
+    step: Float = 0f,
+    enabled: Boolean = true,
+    title: String? = null,
+    modifier: Modifier = Modifier,
+) = Slider(
+    value = value,
+    onValueChange = on_change,
+    minVal = min_val,
+    maxVal = max_val,
+    step = step,
+    enabled = enabled,
+    title = title,
+    modifier = modifier,
+)
+
+// Tooltip
+@Composable
+fun tooltip(
+    text: String,
+    position: TooltipPosition = TooltipPosition.TOP,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) = Tooltip(text = text, position = position, modifier = modifier, content = content)
+
+// Divider
+@Composable
+fun divider(modifier: Modifier = Modifier) = HorizontalDivider(modifier = modifier)
+@Composable
+fun divider_with_label(text: String, modifier: Modifier = Modifier) = DividerWithLabel(text = text, modifier = modifier)
+
+// Avatar
+@Composable
+fun avatar(
+    initials: String? = null,
+    size: AvatarSize = AvatarSize.MD,
+    modifier: Modifier = Modifier,
+) = Avatar(initials = initials, size = size, modifier = modifier)
+@Composable
+fun avatar_group(
+    avatars: List<AvatarData>,
+    max_visible: Int = 5,
+    size: AvatarSize = AvatarSize.MD,
+    modifier: Modifier = Modifier,
+) = AvatarGroup(avatars = avatars, maxVisible = max_visible, size = size, modifier = modifier)
+
+// Chips
+@Composable
+fun chip(
+    text: String,
+    variant: Variant = Variant.Primary,
+    selected: Boolean = false,
+    on_click: (() -> Unit)? = null,
+    on_close: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) = Chip(text = text, variant = variant, selected = selected, onClick = on_click, onClose = on_close, modifier = modifier)
+@Composable
+fun tag(text: String, variant: Variant = Variant.Primary, modifier: Modifier = Modifier) =
+    Tag(text = text, variant = variant, modifier = modifier)
+
+// NumberInput
+@Composable
+fun number_input(
+    value: Double,
+    on_change: (Double) -> Unit,
+    min_val: Double = 0.0,
+    max_val: Double = 100.0,
+    step: Double = 1.0,
+    label: String? = null,
+    modifier: Modifier = Modifier,
+) = NumberInput(value = value, onValueChange = on_change, minVal = min_val, maxVal = max_val, step = step, label = label, modifier = modifier)
+
+// TextArea
+@Composable
+fun text_area(
+    value: String,
+    on_change: (String) -> Unit,
+    placeholder: String = "",
+    min_lines: Int = 3,
+    modifier: Modifier = Modifier,
+) = TextArea(value = value, onValueChange = on_change, placeholder = placeholder, minLines = min_lines, modifier = modifier)
+
+// SearchInput
+@Composable
+fun search_input(
+    value: String,
+    on_change: (String) -> Unit,
+    placeholder: String = "Search...",
+    modifier: Modifier = Modifier,
+) = SearchInput(value = value, onValueChange = on_change, placeholder = placeholder, modifier = modifier)
+
+// CheckboxGroup
+@Composable
+fun checkbox_group(
+    options: List<String>,
+    selected: Set<String>,
+    on_change: (Set<String>) -> Unit,
+    modifier: Modifier = Modifier,
+) = CheckboxGroup(options = options, selectedOptions = selected, onSelectionChange = on_change, modifier = modifier)
+
+// DatePicker
+@Composable
+fun date_picker(
+    selected_date: SimpleDate?,
+    on_date_selected: (SimpleDate) -> Unit,
+    modifier: Modifier = Modifier,
+) = DatePicker(selectedDate = selected_date, onDateSelected = on_date_selected, modifier = modifier)
+
+// Alert
+@Composable
+fun success_alert(title: String, description: String? = null, modifier: Modifier = Modifier) =
+    SuccessAlert(title = title, description = description, modifier = modifier)
+@Composable
+fun warning_alert(title: String, description: String? = null, modifier: Modifier = Modifier) =
+    WarningAlert(title = title, description = description, modifier = modifier)
+@Composable
+fun error_alert(title: String, description: String? = null, modifier: Modifier = Modifier) =
+    ErrorAlert(title = title, description = description, modifier = modifier)
+@Composable
+fun info_alert(title: String, description: String? = null, modifier: Modifier = Modifier) =
+    InfoAlert(title = title, description = description, modifier = modifier)
+
+// Snackbar
+fun show_snackbar(
+    message: String,
+    variant: Variant = Variant.Info,
+    duration_ms: Long = 4000L,
+) = SnackbarManager.show(message = message, variant = variant, duration = duration_ms)
+
+// Notification
+fun add_notification(
+    title: String,
+    description: String? = null,
+    variant: Variant = Variant.Info,
+) = NotificationManager.add(NotificationData(title = title, description = description, variant = variant))
+
+// Popover
+@Composable
+fun popover(
+    content: @Composable () -> Unit,
+    trigger_content: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+) = Popover(modifier = modifier, content = content, triggerContent = trigger_content)
+
+// Breadcrumbs
+@Composable
+fun breadcrumbs(
+    items: List<BreadcrumbItem>,
+    separator: BreadcrumbSeparator = BreadcrumbSeparator.Slash,
+    modifier: Modifier = Modifier,
+) = Breadcrumbs(items = items, separator = separator, modifier = modifier)
+
+// Pagination
+@Composable
+fun pagination(
+    current_page: Int,
+    total_pages: Int,
+    on_page_change: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) = Pagination(currentPage = current_page, totalPages = total_pages, onPageChange = on_page_change, modifier = modifier)
+
+// Steps
+@Composable
+fun steps(
+    steps: List<StepItem>,
+    current_step: Int = 0,
+    modifier: Modifier = Modifier,
+) = Steps(steps = steps, currentStep = current_step, modifier = modifier)
+
+// Drawer
+@Composable
+fun drawer(
+    visible: Boolean,
+    on_dismiss: () -> Unit,
+    position: DrawerPosition = DrawerPosition.Left,
+    content: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+) = Drawer(visible = visible, onDismissRequest = on_dismiss, position = position, content = content, modifier = modifier)
+
+// BottomSheet
+@Composable
+fun bottom_sheet(
+    visible: Boolean,
+    on_dismiss: () -> Unit,
+    content: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+) = BottomSheet(visible = visible, onDismissRequest = on_dismiss, content = content, modifier = modifier)
+
+// Resizable
+@Composable
+fun resizable(
+    first: @Composable () -> Unit,
+    second: @Composable () -> Unit,
+    direction: ResizableDirection = ResizableDirection.Horizontal,
+    modifier: Modifier = Modifier,
+) = Resizable(firstContent = first, secondContent = second, direction = direction, modifier = modifier)
+
+// Statistic
+@Composable
+fun statistic(
+    value: String,
+    label: String,
+    trend: StatTrend = StatTrend.Neutral,
+    trend_value: String? = null,
+    modifier: Modifier = Modifier,
+) = Statistic(data = StatData(value = value, label = label, trend = trend, trendValue = trend_value), modifier = modifier)
+
+// Descriptions
+@Composable
+fun descriptions(
+    items: List<DescriptionItem>,
+    columns: Int = 2,
+    modifier: Modifier = Modifier,
+) = Descriptions(items = items, columns = columns, modifier = modifier)
+
+// Timeline
+@Composable
+fun timeline(
+    items: List<TimelineItemData>,
+    modifier: Modifier = Modifier,
+) = Timeline(items = items, modifier = modifier)
+
+// Comment
+@Composable
+fun comment(
+    comment: CommentData,
+    modifier: Modifier = Modifier,
+) = Comment(comment = comment, modifier = modifier)
+
+// Autocomplete
+@Composable
+fun autocomplete(
+    value: String,
+    on_change: (String) -> Unit,
+    options: List<String>,
+    modifier: Modifier = Modifier,
+) = Autocomplete(value = value, onValueChange = on_change, options = options, modifier = modifier)
+
+// Transfer
+@Composable
+fun transfer(
+    source_items: List<TransferItem>,
+    target_items: List<TransferItem>,
+    on_source_change: (List<TransferItem>) -> Unit,
+    on_target_change: (List<TransferItem>) -> Unit,
+    modifier: Modifier = Modifier,
+) = Transfer(
+    sourceItems = source_items,
+    targetItems = target_items,
+    onSourceChange = on_source_change,
+    onTargetChange = on_target_change,
+    modifier = modifier,
+)
+
+// TreeView
+@Composable
+fun tree_view(
+    nodes: List<TreeNode>,
+    on_select: ((String) -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) = SimpleTreeView(nodes = nodes, onSelect = on_select, modifier = modifier)
+
+// ColorPicker
+@Composable
+fun color_picker(
+    selected_color: androidx.compose.ui.graphics.Color,
+    on_color_change: (androidx.compose.ui.graphics.Color) -> Unit,
+    modifier: Modifier = Modifier,
+) = ColorPicker(selectedColor = selected_color, onColorChange = on_color_change, modifier = modifier)
+
+// Image
+@Composable
+fun image(
+    image_url: String? = null,
+    modifier: Modifier = Modifier,
+    width: androidx.compose.ui.unit.Dp? = null,
+    height: androidx.compose.ui.unit.Dp? = null,
+) = ImageComponent(imageUrl = image_url, modifier = modifier, width = width, height = height)
+
+// FileUpload
+@Composable
+fun file_upload(
+    on_file_selected: ((List<String>) -> Unit)? = null,
+    label: String = "Drop files here or click to upload",
+    modifier: Modifier = Modifier,
+) = FileUpload(onFileSelected = on_file_selected, label = label, modifier = modifier)
+
+// QRCode
+@Composable
+fun qr_code(
+    data: String,
+    size: androidx.compose.ui.unit.Dp = 200.dp,
+    modifier: Modifier = Modifier,
+) = QRCode(data = data, size = size, modifier = modifier)
+
+// Rating
+@Composable
+fun rating(
+    value: Float,
+    on_change: ((Float) -> Unit)? = null,
+    max_rating: Int = 5,
+    read_only: Boolean = false,
+    modifier: Modifier = Modifier,
+) = Rating(value = value, onValueChange = on_change, maxRating = max_rating, readOnly = read_only, modifier = modifier)
+
+// FloatButton
+@Composable
+fun float_button(
+    icon: String,
+    on_click: () -> Unit,
+    label: String? = null,
+    modifier: Modifier = Modifier,
+) = FloatButton(icon = icon, onClick = on_click, label = label, modifier = modifier)
+
+// SpeedDial
+@Composable
+fun speed_dial(
+    actions: List<SpeedDialAction>,
+    modifier: Modifier = Modifier,
+) = SpeedDial(actions = actions, modifier = modifier)
+
+// BackToTop
+@Composable
+fun back_to_top(
+    visible: Boolean = true,
+    on_click: () -> Unit,
+    modifier: Modifier = Modifier,
+) = BackToTop(visible = visible, onClick = on_click, modifier = modifier)
+
+// CopyButton
+@Composable
+fun copy_button(
+    text_to_copy: String,
+    label: String = "Copy",
+    modifier: Modifier = Modifier,
+) = CopyButton(textToCopy = text_to_copy, label = label, modifier = modifier)
+
+// Watermark
+@Composable
+fun watermark(
+    text: String,
+    rotation: Float = -22f,
+    opacity: Float = 0.1f,
+    modifier: Modifier = Modifier,
+) = Watermark(text = text, rotation = rotation, opacity = opacity, modifier = modifier)
+
+// VirtualList
+@Composable
+fun virtual_list(
+    item_count: Int,
+    modifier: Modifier = Modifier,
+    content: @Composable (Int) -> Unit,
+) = VirtualList(itemCount = item_count, modifier = modifier, content = content)
+
+// ConfigProvider
+@Composable
+fun config_provider(
+    config: Config,
+    content: @Composable () -> Unit,
+) = ConfigProvider(config = config, content = content)
+@Composable
+fun dark_mode_config(content: @Composable () -> Unit) = DarkModeConfig(content = content)
+
+// Responsive
+@Composable
+fun responsive(
+    modifier: Modifier = Modifier,
+    mobile: @Composable () -> Unit = {},
+    desktop: @Composable () -> Unit = mobile,
+) = Responsive(modifier = modifier, mobile = mobile, desktop = desktop)
+
+// CodeBlock
+@Composable
+fun code_block(
+    code: String,
+    language: String = "kotlin",
+    title: String? = null,
+    modifier: Modifier = Modifier,
+) = CodeBlock(code = code, language = language, title = title, modifier = modifier)
+
+// Markdown
+@Composable
+fun markdown(
+    markdown: String,
+    modifier: Modifier = Modifier,
+) = Markdown(markdown = markdown, modifier = modifier)
+
+// FormValidation
+@Composable
+fun validated_input(
+    value: String,
+    on_change: (String) -> Unit,
+    config: ValidationConfig,
+    label: String? = null,
+    modifier: Modifier = Modifier,
+) = ValidatedInput(value = value, onValueChange = on_change, config = config, label = label, modifier = modifier)
+
+// Skeleton
+@Composable
+fun skeleton_text(lines: Int = 1, modifier: Modifier = Modifier) = SkeletonText(lines = lines, modifier = modifier)
+@Composable
+fun skeleton_circle(size: androidx.compose.ui.unit.Dp = 40.dp, modifier: Modifier = Modifier) = SkeletonCircle(size = size, modifier = modifier)
+@Composable
+fun skeleton_card(modifier: Modifier = Modifier) = SkeletonCard(modifier = modifier)
+@Composable
+fun skeleton_list(count: Int = 5, modifier: Modifier = Modifier) = SkeletonList(count = count, modifier = modifier)

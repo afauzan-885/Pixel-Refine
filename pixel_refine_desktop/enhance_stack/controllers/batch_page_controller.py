@@ -3,6 +3,7 @@ Batch Page Controller.
 Handles business logic for batch processing operations.
 """
 
+from collections import OrderedDict
 from PySide6.QtCore import QObject, Signal
 from typing import List, Optional, Dict
 from pixel_refine_desktop.enhance_stack.models.data_access.batch_repository import (
@@ -48,6 +49,13 @@ class BatchPageController(QObject):
         self.batch_repo = BatchRepository(db_path)
         self.db_path = db_path
 
+        # LRU cache for BatchModel lookups. Eliminates the SQLite hit
+        # when the same batch is re-selected from the right-side list.
+        # Keyed by batch_id; entries are evicted at _BATCH_CACHE_LIMIT
+        # or when invalidated by signals.
+        self._batch_cache: "OrderedDict[int, BatchModel]" = OrderedDict()
+        self._batch_cache_limit: int = 64
+
     def create_batch(self, batch_name: str) -> Optional[int]:
         """
         Create a new batch.
@@ -61,6 +69,9 @@ class BatchPageController(QObject):
         try:
             batch_id = self.batch_repo.create(batch_name)
             if batch_id:
+                # New batch invalidates ordering and any cached batch
+                # list snapshot.
+                self._evict_batch_cache(None)
                 self.batch_created.emit(batch_id, batch_name)
                 return batch_id
             else:
@@ -74,28 +85,36 @@ class BatchPageController(QObject):
         """
         Get all batches with their images.
 
+        Uses a single LEFT JOIN query (replaces the prior N+1 pattern
+        of one query for batch rows + N queries for image rows).
+        Populates the LRU cache as a side effect.
+
         Returns:
             List of BatchModel instances
         """
-        batches = []
-        batch_rows = self.batch_repo.get_all()
+        rows = self.batch_repo.get_all_with_images()
+        if not rows:
+            return []
 
-        for batch_id, batch_name in batch_rows:
-            # Get images for this batch
-            image_rows = self.batch_repo.get_batch_images(batch_id)
+        batches: List[BatchModel] = []
+        for batch_id, batch_name, image_rows in rows:
             images = [
                 ImageModel(id=img_id, path=path, is_reference=bool(is_ref))
                 for img_id, path, is_ref in image_rows
             ]
-
             batch = BatchModel(id=batch_id, name=batch_name, images=images)
+            self._batch_cache[batch_id] = batch
+            self._touch_cache(batch_id)
             batches.append(batch)
-
         return batches
 
     def get_batch(self, batch_id: int) -> Optional[BatchModel]:
         """
         Get a specific batch with its images.
+
+        Cache hit returns the previously-fetched BatchModel without
+        hitting SQLite. Cache miss falls back to a per-batch query
+        and primes the cache.
 
         Args:
             batch_id: Batch ID
@@ -103,20 +122,48 @@ class BatchPageController(QObject):
         Returns:
             BatchModel or None if not found
         """
+        cached = self._batch_cache.get(batch_id)
+        if cached is not None:
+            self._touch_cache(batch_id)
+            return cached
+
         batch_row = self.batch_repo.get_by_id(batch_id)
         if not batch_row:
             return None
 
-        batch_id, batch_name = batch_row
-
-        # Get images
-        image_rows = self.batch_repo.get_batch_images(batch_id)
+        b_id, batch_name = batch_row
+        image_rows = self.batch_repo.get_batch_images(b_id)
         images = [
             ImageModel(id=img_id, path=path, is_reference=bool(is_ref))
             for img_id, path, is_ref in image_rows
         ]
+        batch = BatchModel(id=b_id, name=batch_name, images=images)
+        self._batch_cache[b_id] = batch
+        self._touch_cache(b_id)
+        return batch
 
-        return BatchModel(id=batch_id, name=batch_name, images=images)
+    def _touch_cache(self, batch_id: int) -> None:
+        """Mark *batch_id* as most-recently-used and enforce the LRU cap."""
+        if batch_id in self._batch_cache:
+            self._batch_cache.move_to_end(batch_id)
+        while len(self._batch_cache) > self._batch_cache_limit:
+            self._batch_cache.popitem(last=False)
+
+    def _evict_batch_cache(self, batch_id) -> None:
+        """Evict one batch_id (int) or the entire cache (None)."""
+        if batch_id is None:
+            self._batch_cache.clear()
+        else:
+            self._batch_cache.pop(batch_id, None)
+
+    def invalidate_batch_cache(self, batch_id=None) -> None:
+        """Public alias for :meth:`_evict_batch_cache`.
+
+        Exposed for grid cache wiring in :class:`DisplayPanel` so a
+        stale ``BatchModel`` cannot be served after the underlying
+        ``batch_process`` / ``batch_process_image`` rows change.
+        """
+        self._evict_batch_cache(batch_id)
 
     def delete_batch(self, batch_id: int) -> bool:
         """
@@ -151,6 +198,7 @@ class BatchPageController(QObject):
                     except Exception as e:
                         print(f"[BatchController] Thumbnail cleanup warning: {e}")
 
+                self._evict_batch_cache(batch_id)
                 self.batch_deleted.emit(batch_id)
                 return True
             return False
@@ -164,6 +212,9 @@ class BatchPageController(QObject):
         """
         success = self.batch_repo.update_batch_order(batch_ids)
         if success:
+            # Ordering change affects the cached list view; drop it
+            # so the next ``get_all_batches`` re-reads the new order.
+            self._evict_batch_cache(None)
             # No specific signal needed if view reloads, but good for sync
             self.batch_updated.emit(-1)  # Special ID for global update
         return success
@@ -173,7 +224,7 @@ class BatchPageController(QObject):
         Update the name of a batch.
 
         Args:
-            batch_id: The ID of the batch to update.
+            batch_id: The ID of the batch.
             new_name: The new name for the batch.
 
         Returns:
@@ -190,6 +241,7 @@ class BatchPageController(QObject):
 
             rows = self.batch_repo.update_name(batch_id, new_name.strip())
             if rows > 0:
+                self._evict_batch_cache(batch_id)
                 self.batch_updated.emit(batch_id)
                 return True
             return False
@@ -211,7 +263,30 @@ class BatchPageController(QObject):
         try:
             count = self.batch_repo.add_images(batch_id, image_paths)
             if count > 0:
+                self._evict_batch_cache(batch_id)
                 self.images_added.emit(batch_id, count)
+                self.batch_updated.emit(batch_id)
+            return count
+        except Exception as e:
+            self.batch_error.emit(f"Error adding images: {e}")
+            return 0
+
+    def remove_images_from_batch(self, batch_id: int, image_paths: List[str]) -> int:
+        """
+        Remove images from a batch.
+
+        Args:
+            batch_id: Batch ID
+            image_paths: List of image paths to remove
+
+        Returns:
+            Number of images removed
+        """
+        try:
+            count = self.batch_repo.remove_images(batch_id, image_paths)
+            if count > 0:
+                self._evict_batch_cache(batch_id)
+                self.images_removed.emit(batch_id, count)
                 self.batch_updated.emit(batch_id)
             return count
         except Exception as e:

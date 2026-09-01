@@ -64,7 +64,14 @@ fun Filmstrip(
                     .clip(RoundedCornerShape(theme.radiusSm))
                     .background(theme.bgSecondary)
                     .border(borderWidth, borderColor, RoundedCornerShape(theme.radiusSm))
-                    .clickable { onSelectImage(index) }
+                    .clickable {
+                        onSelectImage(index)
+                        // Long-press-like behavior: jika item sudah selected dan bukan reference,
+                        // set sebagai reference
+                        if (isSelected && !item.isReference && onSetReference != null) {
+                            onSetReference(index)
+                        }
+                    }
                     .padding(4.dp),
                 verticalArrangement = Arrangement.SpaceBetween,
                 horizontalAlignment = Alignment.CenterHorizontally,

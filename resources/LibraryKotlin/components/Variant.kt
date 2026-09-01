@@ -19,6 +19,10 @@ enum class Variant {
     Outline;
 
     companion object {
+        /**
+         * Mengkonversi string ke Variant enum.
+         * @throws IllegalArgumentException jika variant tidak dikenal (typo detection)
+         */
         fun fromString(value: String): Variant = when (value.trim().lowercase()) {
             "primary" -> Primary
             "secondary" -> Secondary
@@ -30,7 +34,20 @@ enum class Variant {
             "dark" -> Dark
             "ghost" -> Ghost
             "outline" -> Outline
-            else -> Secondary
+            else -> throw IllegalArgumentException(
+                "Unknown variant: '$value'. Valid variants: primary, secondary, success, danger, warning, info, light, dark, ghost, outline"
+            )
+        }
+
+        /**
+         * Mengkonversi string ke Variant enum dengan fallback ke default jika tidak dikenal.
+         */
+        fun fromStringOrDefault(value: String, default: Variant = Secondary): Variant {
+            return try {
+                fromString(value)
+            } catch (e: IllegalArgumentException) {
+                default
+            }
         }
     }
 }

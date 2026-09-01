@@ -2,13 +2,16 @@ import json
 import os
 import shutil
 import sqlite3
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QSpacerItem, QSizePolicy, QLabel
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
+    QSpacerItem,
+    QSizePolicy,
+    QLabel,
     QMessageBox,
     QFileDialog,
     QGraphicsOpacityEffect,
+    QFrame,
 )
 from PySide6.QtCore import (
     Signal,
@@ -33,6 +36,9 @@ from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_combin
 from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_import_service import (
     BulkDeleteProcess,
     process_and_start_batch_import,
+)
+from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_drop_processor import (
+    BulkDropProcessor,
 )
 from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_thumbnail_service import (
     stop_process_thumbnails,
@@ -133,32 +139,12 @@ from resources.animations.animation_manager import (
 from resources.animations.fade import fade_out
 from resources.styles import stylesheet
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+from pixel_refine_desktop.enhance_stack.core.logic.batch_parameter_manager import load_json_state
 from config import CACHE_DIR, SUPPORTED_FORMATS
-
-
-def load_json_state(path):
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            return json.load(f)
-    return {}
-
-
-def is_widget_valid(widget):
-    """Cek apakah widget masih valid (belum dihapus)."""
-    if widget is None:
-        return False
-    try:
-        _ = widget.isVisible()  # akses properti sederhana
-        return True
-    except RuntimeError:
-        return False
-    except Exception:
-        return False
-
 
 def safe_hide_widget(widget):
     """Sembunyikan widget jika masih valid, tangani error jika sudah dihapus."""
-    if not is_widget_valid(widget):
+    if not is_widget_alive(widget):
         return
     try:
         widget.hide()
@@ -214,6 +200,20 @@ class BulkPageLayout(QWidget):
         # Cache panel by batch_id for instant mode switching
         # Uses regular dict (strong ref) so panels survive hide/show cycles
         self._panel_cache: dict = {}
+
+        # Cache for os.path.exists per batch_id to avoid re-stat on every
+        # update_batch_view. Value is (timestamp_seconds, list_of_exists_flags).
+        self._file_exists_cache: dict = {}
+        self._file_exists_cache_ttl_seconds: int = 30
+
+        # Active drop validation threads; keep refs so they aren't GC'd.
+        self._active_drop_processors: list = []
+
+        # Drop indicator overlay (created lazily on first drag-enter).
+        self._drop_overlay: QFrame = None
+
+        # Coalesce reorder requests onto a single event-loop tick.
+        self._reorder_pending: bool = False
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 5, 0, 0)
@@ -290,7 +290,7 @@ class BulkPageLayout(QWidget):
                     self.main_panel_container.addWidget(new_panel)
 
             self._start_fade_in_animation(new_panel)
-            self._reorder_visual_batch_numbers()
+            self._schedule_reorder()
             self._manage_placeholder_and_spacer()
             if hasattr(self.main_scroll_area, "update_inner_dimensions"):
                 self.main_scroll_area.update_inner_dimensions()
@@ -401,7 +401,7 @@ class BulkPageLayout(QWidget):
                         self.main_panel_container.addWidget(cached_panel)
                     cached_panel.show()
                     self.active_batch_panels[batch_id] = cached_panel
-                    self._reorder_visual_batch_numbers()
+                    self._schedule_reorder()
                     self._manage_placeholder_and_spacer()
                     continue  # langsung ke batch_id berikutnya, tanpa skeleton
                 except RuntimeError:
@@ -428,7 +428,7 @@ class BulkPageLayout(QWidget):
             QTimer.singleShot(0, self._load_next_batch_incrementally)
 
         # 4. Atur ulang nomor urut visual untuk semua panel yang ada
-        self._reorder_visual_batch_numbers()
+        self._schedule_reorder()
 
         # 5. Kelola tampilan placeholder atau spacer
         self._manage_placeholder_and_spacer()
@@ -687,6 +687,35 @@ class BulkPageLayout(QWidget):
             return self._handle_drop(event)
         return False
 
+    def _ensure_drop_overlay(self):
+        """Create the drop indicator overlay on first use (lazy)."""
+        if self._drop_overlay is not None:
+            return self._drop_overlay
+        overlay = QFrame(self.main_scroll_area)
+        overlay.setObjectName("BulkDropOverlay")
+        overlay.setStyleSheet(
+            "#BulkDropOverlay {"
+            "  background-color: rgba(76, 175, 80, 30);"
+            "  border: 2px dashed #4CAF50;"
+            "  border-radius: 6px;"
+            "}"
+        )
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        overlay.hide()
+        self._drop_overlay = overlay
+        return overlay
+
+    def _show_drop_overlay(self):
+        overlay = self._ensure_drop_overlay()
+        viewport = self.main_scroll_area.viewport()
+        overlay.setGeometry(viewport.rect())
+        overlay.raise_()
+        overlay.show()
+
+    def _hide_drop_overlay(self):
+        if self._drop_overlay is not None:
+            self._drop_overlay.hide()
+
     def _handle_drag_enter(self, event):
         should_accept = False
         if event.mimeData().hasUrls():
@@ -705,10 +734,7 @@ class BulkPageLayout(QWidget):
         if should_accept:
             event.acceptProposedAction()
             self.main_scroll_area.setProperty("acceptingDrop", True)
-            self.main_scroll_area.setStyleSheet(
-                self._original_scroll_stylesheet
-                + " QScrollArea#MainBatchScrollArea { border: 2px dashed #4CAF50; }"
-            )
+            self._show_drop_overlay()
         else:
             event.ignore()
         return True
@@ -716,7 +742,7 @@ class BulkPageLayout(QWidget):
     def _handle_drag_leave(self, event):
         if self.main_scroll_area.property("acceptingDrop"):
             self.main_scroll_area.setProperty("acceptingDrop", False)
-            self.main_scroll_area.setStyleSheet(self._original_scroll_stylesheet)
+            self._hide_drop_overlay()
         event.accept()
         return True
 
@@ -728,27 +754,104 @@ class BulkPageLayout(QWidget):
         return True
 
     def _handle_drop(self, event):
+        # Reset the visual cue immediately so the user gets feedback within
+        # a single frame, regardless of how long validation takes.
         if self.main_scroll_area.property("acceptingDrop"):
             self.main_scroll_area.setProperty("acceptingDrop", False)
-            self.main_scroll_area.setStyleSheet(self._original_scroll_stylesheet)
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            supported_extensions = {
-                ext for fmts in SUPPORTED_FORMATS.values() for ext in fmts
-            }
-            valid_image_paths = [
-                url.toLocalFile()
-                for url in event.mimeData().urls()
-                if url.isLocalFile()
-                and os.path.isfile(url.toLocalFile())
-                and os.path.splitext(url.toLocalFile())[1].lower()
-                in supported_extensions
-            ]
-            if valid_image_paths:
-                process_and_start_batch_import(self, valid_image_paths)
+            self._hide_drop_overlay()
+
+        if not event.mimeData().hasUrls():
+            event.ignore()
             return True
-        event.ignore()
+
+        event.acceptProposedAction()
+
+        # Cheap, extension-only filter. Existence + DB work happens on the
+        # worker thread to keep the drop event non-blocking.
+        supported_extensions = {
+            ext for fmts in SUPPORTED_FORMATS.values() for ext in fmts
+        }
+        candidate_paths = [
+            url.toLocalFile()
+            for url in event.mimeData().urls()
+            if url.isLocalFile()
+            and os.path.splitext(url.toLocalFile())[1].lower()
+            in supported_extensions
+        ]
+
+        if not candidate_paths:
+            return True
+
+        # Invalidate the file-exists cache for every batch because new
+        # paths may now exist on disk; the cache will refill lazily.
+        self._file_exists_cache.clear()
+
+        processor = BulkDropProcessor(candidate_paths, parent=self)
+        processor.prepared.connect(self._on_drop_prepared)
+        processor.finished.connect(
+            lambda p=processor: self._on_drop_processor_finished(p)
+        )
+        if hasattr(processor, "failed"):
+            processor.failed.connect(self._on_drop_failed)
+        self._active_drop_processors.append(processor)
+        processor.start()
         return True
+
+    def _on_drop_prepared(self, valid_image_paths):
+        if valid_image_paths:
+            process_and_start_batch_import(self, valid_image_paths)
+
+    def _on_drop_failed(self, message):
+        print(f"[BulkPageLayout] Drop validation failed: {message}")
+
+    def _on_drop_processor_finished(self, processor):
+        try:
+            self._active_drop_processors.remove(processor)
+        except ValueError:
+            pass
+        processor.deleteLater()
+
+    def _schedule_reorder(self):
+        """Coalesce reorder requests onto a single event-loop tick."""
+        if self._reorder_pending:
+            return
+        self._reorder_pending = True
+        QTimer.singleShot(0, self._run_scheduled_reorder)
+
+    def _run_scheduled_reorder(self):
+        self._reorder_pending = False
+        self._reorder_visual_batch_numbers()
+
+    def invalidate_file_exists_cache(self, batch_id=None):
+        """Drop cached existence flags for one batch (or all)."""
+        if batch_id is None:
+            self._file_exists_cache.clear()
+        else:
+            self._file_exists_cache.pop(batch_id, None)
+
+    def get_cached_file_exists(self, batch_id, raw_paths, now_fn=None):
+        """Return cached existence flags for *raw_paths* or None on miss.
+
+        On miss, callers fall back to the existing os.path.exists loop and
+        may call :meth:`set_cached_file_exists` to populate the cache.
+        """
+        if not raw_paths:
+            return [True]  # empty batch is trivially "all present"
+        entry = self._file_exists_cache.get(batch_id)
+        if entry is None:
+            return None
+        ts, flags = entry
+        import time as _time
+        now = now_fn if now_fn is not None else _time.monotonic
+        if now() - ts > self._file_exists_cache_ttl_seconds:
+            return None
+        if len(flags) != len(raw_paths):
+            return None
+        return flags
+
+    def set_cached_file_exists(self, batch_id, flags):
+        import time as _time
+        self._file_exists_cache[batch_id] = (_time.monotonic(), list(flags))
 
     # --- Batch Processing ---
     def get_files_in_stack_folder(self):
@@ -1005,7 +1108,7 @@ class BulkPageLayout(QWidget):
     def _trigger_single_bulk_fade_out(self, panel_ref):
         """Memulai fade out untuk satu panel dalam proses bulk delete."""
         panel = panel_ref() if panel_ref else None
-        if is_widget_valid(panel):
+        if is_widget_alive(panel):
             fade_out(
                 animator=self.animator,
                 widget=panel,
@@ -1232,7 +1335,7 @@ class BulkPageLayout(QWidget):
     def retranslate_ui(self):
         """Translate bulk page layout and refresh visual themes."""
         for panel in self.active_batch_panels.values():
-            if is_widget_valid(panel) and hasattr(panel, "retranslate_ui"):
+            if is_widget_alive(panel) and hasattr(panel, "retranslate_ui"):
                 try:
                     panel.retranslate_ui()
                 except Exception as e:

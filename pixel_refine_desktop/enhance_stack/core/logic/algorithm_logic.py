@@ -10,8 +10,6 @@ import config
 # Backend logic helper
 from pixel_refine_desktop.enhance_stack.models.algorithm_list import (
     get_algorithm_names,
-    get_algorithm_descriptions,
-    get_algorithm_options,
 )
 
 
@@ -42,9 +40,7 @@ class AlgorithmLogic:
             "denoising": [],
         }
         self.processing_state = {
-            "is_processing": False,
             "progress": 0,
-            "current_task": None,
         }
         self._load_algorithm_names()
 
@@ -70,22 +66,6 @@ class AlgorithmLogic:
             list: List of algorithm names
         """
         return self.algorithm_names.get(category, [])
-
-    def get_algorithm_descriptions(self, category: str) -> Dict[str, str]:
-        """
-        Get algorithm descriptions untuk kategori.
-
-        Args:
-            category: 'alignment', 'super_resolution', atau 'denoising'
-
-        Returns:
-            dict: Mapping of algorithm name -> description
-        """
-        try:
-            options = get_algorithm_options(category)
-            return {name: desc for name, desc in options} if options else {}
-        except Exception:
-            return {}
 
     def get_settings(self) -> Dict[str, Optional[str]]:
         """
@@ -135,38 +115,6 @@ class AlgorithmLogic:
             print(f"Error setting algorithm settings: {e}")
             return False
 
-    def set_algorithm(self, category: str, algorithm_name: Optional[str]) -> bool:
-        """
-        Set single algorithm.
-
-        Args:
-            category: 'alignment', 'super_resolution', atau 'denoising'
-            algorithm_name: Name of algorithm
-
-        Returns:
-            bool: True jika berhasil
-        """
-        if category not in self.settings:
-            return False
-
-        if not self._is_valid_algorithm(category, algorithm_name):
-            return False
-
-        self.settings[category] = algorithm_name
-        return True
-
-    def get_algorithm(self, category: str) -> Optional[str]:
-        """
-        Get current algorithm untuk kategori.
-
-        Args:
-            category: 'alignment', 'super_resolution', atau 'denoising'
-
-        Returns:
-            str: Current algorithm name, atau None
-        """
-        return self.settings.get(category)
-
     def _is_valid_algorithm(self, category: str, algorithm_name: Optional[str]) -> bool:
         """
         Validate if algorithm is valid untuk kategori.
@@ -181,34 +129,9 @@ class AlgorithmLogic:
         available = self.algorithm_names.get(category, [])
         return str_val in available or len(available) == 0  # Allow if list empty
 
-    def start_processing(self) -> bool:
-        """
-        Mark processing as started.
-
-        Returns:
-            bool: True jika berhasil start
-        """
-        if self.processing_state["is_processing"]:
-            return False  # Already processing
-
-        self.processing_state["is_processing"] = True
-        self.processing_state["progress"] = 0
-        return True
-
     def stop_processing(self):
         """Mark processing as stopped."""
-        self.processing_state["is_processing"] = False
         self.processing_state["progress"] = 0
-        self.processing_state["current_task"] = None
-
-    def is_processing(self) -> bool:
-        """
-        Check if currently processing.
-
-        Returns:
-            bool: True jika sedang processing
-        """
-        return self.processing_state["is_processing"]
 
     def set_progress(self, value: int) -> bool:
         """
@@ -224,74 +147,3 @@ class AlgorithmLogic:
             self.processing_state["progress"] = value
             return True
         return False
-
-    def get_progress(self) -> int:
-        """
-        Get current progress.
-
-        Returns:
-            int: Progress value (0-100)
-        """
-        return self.processing_state["progress"]
-
-    def set_current_task(self, task_name: str):
-        """
-        Set current task yang sedang diproses.
-
-        Args:
-            task_name: Name of current task
-        """
-        self.processing_state["current_task"] = task_name
-
-    def get_current_task(self) -> Optional[str]:
-        """
-        Get current task yang sedang diproses.
-
-        Returns:
-            str: Task name, atau None
-        """
-        return self.processing_state["current_task"]
-
-    def get_processing_state(self) -> Dict:
-        """
-        Get complete processing state.
-
-        Returns:
-            dict: Complete processing state
-        """
-        return self.processing_state.copy()
-
-    def validate_settings(self) -> tuple[bool, str]:
-        """
-        Validate if all settings are configured.
-
-        Returns:
-            tuple: (is_valid, error_message)
-        """
-        for category, value in self.settings.items():
-            if not value:
-                return False, f"{category} not selected"
-
-            if not self._is_valid_algorithm(category, value):
-                return False, f"{category}: {value} is invalid"
-
-        return True, "All settings valid"
-
-    def reset_settings(self):
-        """Reset settings ke default (None)."""
-        for key in self.settings:
-            self.settings[key] = None
-
-    def get_settings_summary(self) -> str:
-        """
-        Get human-readable summary dari settings.
-
-        Returns:
-            str: Settings summary
-        """
-        items = []
-        for key, value in self.settings.items():
-            display_key = key.replace("_", " ").title()
-            items.append(f"{display_key}: {value or 'Not Selected'}")
-
-        return "\n".join(items)

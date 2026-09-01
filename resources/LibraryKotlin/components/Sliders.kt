@@ -3,6 +3,7 @@ package org.pixelrefine.genericui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -19,12 +20,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -32,6 +35,9 @@ import org.pixelrefine.genericui.theme.LocalGenericTheme
 
 /**
  * Dual-Thumb Range Slider untuk Min-Max Filter (Gaya Klasik Konsisten).
+ *
+ * Mendukung drag gesture pada kedua thumb, tap pada track untuk jump,
+ * dan keyboard-friendly clamping.
  */
 @Composable
 fun RangeSlider(
@@ -67,14 +73,41 @@ fun RangeSlider(
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(24.dp),
+                .height(32.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
             val totalWidth = constraints.maxWidth.toFloat()
             val span = (maxVal - minVal).coerceAtLeast(1f)
+            val thumbSizePx = 16.dp.value * LocalDensity.current.density
 
-            val startFrac = ((currentRange.start - minVal) / span).coerceIn(0f, 1f)
-            val endFrac = ((currentRange.endInclusive - minVal) / span).coerceIn(0f, 1f)
+            var startFrac by remember(currentRange) {
+                mutableFloatStateOf(((currentRange.start - minVal) / span).coerceIn(0f, 1f))
+            }
+            var endFrac by remember(currentRange) {
+                mutableFloatStateOf(((currentRange.endInclusive - minVal) / span).coerceIn(0f, 1f))
+            }
+
+            // Track yang bisa di-tap untuk jump
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(24.dp)
+                    .pointerInput(Unit) {
+                        detectTapGestures { offset ->
+                            val tapFrac = (offset.x / totalWidth).coerceIn(0f, 1f)
+                            val distToStart = kotlin.math.abs(tapFrac - startFrac)
+                            val distToEnd = kotlin.math.abs(tapFrac - endFrac)
+                            if (distToStart <= distToEnd) {
+                                startFrac = tapFrac.coerceAtMost(endFrac - 0.01f)
+                            } else {
+                                endFrac = tapFrac.coerceAtLeast(startFrac + 0.01f)
+                            }
+                            onRangeChange(
+                                (minVal + startFrac * span)..(minVal + endFrac * span)
+                            )
+                        }
+                    },
+            )
 
             // Background Track
             Box(
@@ -95,24 +128,48 @@ fun RangeSlider(
                     .background(color),
             )
 
-            // Thumb Start
+            // Thumb Start (draggable)
             Box(
                 modifier = Modifier
                     .offset(x = (maxWidth * startFrac) - 8.dp)
                     .size(16.dp)
                     .clip(CircleShape)
                     .background(theme.textWhite)
-                    .border(2.dp, color, CircleShape),
+                    .border(2.dp, color, CircleShape)
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            if (totalWidth > 0) {
+                                val delta = dragAmount.x / totalWidth
+                                startFrac = (startFrac + delta).coerceIn(0f, endFrac - 0.01f)
+                                onRangeChange(
+                                    (minVal + startFrac * span)..(minVal + endFrac * span)
+                                )
+                            }
+                        }
+                    },
             )
 
-            // Thumb End
+            // Thumb End (draggable)
             Box(
                 modifier = Modifier
                     .offset(x = (maxWidth * endFrac) - 8.dp)
                     .size(16.dp)
                     .clip(CircleShape)
                     .background(theme.textWhite)
-                    .border(2.dp, color, CircleShape),
+                    .border(2.dp, color, CircleShape)
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            if (totalWidth > 0) {
+                                val delta = dragAmount.x / totalWidth
+                                endFrac = (endFrac + delta).coerceIn(startFrac + 0.01f, 1f)
+                                onRangeChange(
+                                    (minVal + startFrac * span)..(minVal + endFrac * span)
+                                )
+                            }
+                        }
+                    },
             )
         }
     }

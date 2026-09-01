@@ -18,7 +18,6 @@ from ..resident_pipeline import (
     run_resident_pipeline,
     run_gpu_resident_pipeline,
     load_frame_to_gpu,
-    GPUResidentAligner,
 )
 
 __all__ = [
@@ -37,5 +36,4 @@ __all__ = [
     "run_resident_pipeline",
     "run_gpu_resident_pipeline",
     "load_frame_to_gpu",
-    "GPUResidentAligner",
 ]

@@ -81,14 +81,31 @@ class AlgorithmProcessorThread(QThread):
     def run(self):
         """Execute the selected algorithms."""
         try:
-            # Progress callback to emit signal
+            # Progress callback to emit signal with dual UI & Console messaging:
             def progress_callback(percent, message="", *args, **kwargs):
                 if self._is_running:
-                    if args:
-                        # Forward 3rd argument (like description text) formatted as message||description
-                        self.progress_update.emit(percent, f"{message}||{args[0]}")
+                    # Support dictionary or kwargs if passed: progress_callback(percent, ui=..., console=...)
+                    ui_msg = ""
+                    console_msg = ""
+                    if isinstance(message, dict):
+                        ui_msg = str(message.get("ui", message.get("ui_msg", "")))
+                        console_msg = str(message.get("console", message.get("console_msg", "")))
+                    elif kwargs:
+                        ui_msg = str(kwargs.get("ui", kwargs.get("ui_msg", message)))
+                        console_msg = str(kwargs.get("console", kwargs.get("console_msg", message)))
+                    elif args:
+                        # message=ui_msg, args[0]=console_msg (or vice versa)
+                        ui_msg = str(message)
+                        console_msg = str(args[0])
                     else:
-                        self.progress_update.emit(percent, str(message))
+                        ui_msg = str(message)
+                        console_msg = str(message)
+
+                    if console_msg and console_msg != ui_msg:
+                        print(f"[Pipeline Progress {int(percent)}%] {console_msg}")
+
+                    # Forward as "ui_msg||console_msg"
+                    self.progress_update.emit(int(percent), f"{ui_msg}||{console_msg}")
 
             # Define actions mapping
             def get_stop_cb():
@@ -136,6 +153,7 @@ class AlgorithmProcessorThread(QThread):
                 "Average",
                 "Similarity",
                 "Spatial AI",
+                "FusionNet",
             )
             # SplattingSR performs its own internal Block Matching pass to
             # generate sub-pixel flow/confidence maps.  Never run the
@@ -259,12 +277,15 @@ class AlgorithmProcessorThread(QThread):
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
+                        alignment_backend=alignment_choice,
                     ),
                     "FusionNet": lambda: running_fusionnet(
                         parent=self.parent_panel,
+                        single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
+                        alignment_backend=alignment_choice,
                     ),
                     "No Denoising": lambda: None,
                     "None": lambda: None,

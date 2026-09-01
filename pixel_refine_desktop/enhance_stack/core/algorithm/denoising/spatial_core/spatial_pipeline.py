@@ -98,7 +98,7 @@ def process_in_gpu(
 
     data_source = kwargs.get("data_source")
     if not images and data_source:
-        import h5py
+        # (h5py removed)
 
         with h5py.File(data_source, "r") as f:
             num_images = sum(1 for k in f.keys() if k.startswith("image_"))
@@ -246,7 +246,7 @@ def process_in_gpu(
         def _load_chunk(start, end):
             chunk = []
             if data_source is not None:
-                import h5py
+                # (h5py removed)
 
                 with h5py.File(data_source, "r") as h5f:
                     for idx in range(start, end):

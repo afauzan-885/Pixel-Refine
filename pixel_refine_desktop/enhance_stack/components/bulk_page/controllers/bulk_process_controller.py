@@ -26,23 +26,14 @@ from resources.styles.stylesheet import (
     stylesheet_global_page,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+from pixel_refine_desktop.enhance_stack.core.logic.batch_parameter_manager import (
+    load_json_state,
+)
 from resources.GenericUILibrary import (
     ModalDialog,
     ProgressBar,
     Button,
 )
-
-
-def load_json_state(path, default=None):
-    if default is None:
-        default = {}
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return default
-    return default
 
 
 def save_json_state(path, data):

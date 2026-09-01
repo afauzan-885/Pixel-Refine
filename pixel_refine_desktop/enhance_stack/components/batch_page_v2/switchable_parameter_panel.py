@@ -27,9 +27,7 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
 )
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.lucas_kanade_parameter_settings import (
     load_lucas_kanade_config,
-    load_lucas_kanade_gpu_config,
     save_lucas_kanade_config_for_active_batch,
-    save_lucas_kanade_gpu_config_for_active_batch,
 )
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.block_matching_parameter_settings import (
     load_block_matching_gpu_config,
@@ -109,11 +107,10 @@ class SwitchableParameterPanel(QWidget):
     _CPU_HIDDEN_ALIGNMENT = {"RAFT"}
 
     def _repopulate_alignment_combo(self):
-        """Rebuild the alignment combo items based on current backend arch.
+        """Rebuild the alignment combo items based on current backend arch & denoising algorithm.
 
-        Completely removes hidden items (e.g. Block Matching GPU on CPU mode)
-        so they never appear in the dropdown. The page stack is untouched so
-        we can re-add items if the user switches to GPU mode later.
+        For FusionNet: Only offers 'Block Flow' and 'Block Matching GPU'.
+        For others: Offers the full list of compatible algorithms.
         """
         from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import get_backend_arch
         if not hasattr(self, "align_dropdown"):
@@ -128,17 +125,31 @@ class SwitchableParameterPanel(QWidget):
         # Rebuild item list
         combo.blockSignals(True)
         combo.clear()
-        for name in self.alignment_algorithm_names:
-            if backend_arch == "opengl" and name in self._VULKAN_ONLY_ALIGNMENT:
-                continue
-            if backend_arch == "cpu" and name in self._CPU_HIDDEN_ALIGNMENT:
-                continue
-            combo.addItem(name)
 
-        # Restore selection if still available, else fall back to No Alignment
+        if getattr(self, "current_denoising_algo", "") == "FusionNet":
+            fusionet_options = ["Block Flow", "Block Matching GPU"]
+            for name in fusionet_options:
+                if name not in self.alignment_algorithm_names:
+                    # Dynamically add page if not yet present
+                    if hasattr(self, "alignment_pages") and name not in self.alignment_pages:
+                        page = get_alignment_settings_page(name)
+                        self.alignment_pages[name] = page
+                        self.align_param_stack.addWidget(page)
+                combo.addItem(name)
+            fallback_default = "Block Flow"
+        else:
+            for name in self.alignment_algorithm_names:
+                if backend_arch == "opengl" and name in self._VULKAN_ONLY_ALIGNMENT:
+                    continue
+                if backend_arch == "cpu" and name in self._CPU_HIDDEN_ALIGNMENT:
+                    continue
+                combo.addItem(name)
+            fallback_default = "No Alignment"
+
+        # Restore selection if still available, else fall back
         idx = combo.findText(current_text)
         if idx < 0:
-            idx = combo.findText("No Alignment")
+            idx = combo.findText(fallback_default)
         combo.setCurrentIndex(max(0, idx))
         combo.blockSignals(False)
 
@@ -164,7 +175,7 @@ class SwitchableParameterPanel(QWidget):
 
         if selected_text == "Farneback":
             save_farneback_config_for_active_batch(load_farneback_config())
-        elif selected_text == "ORB":
+        elif selected_text in ("OFB", "ORB"):
             save_orb_config_for_active_batch(load_orb_config())
         elif selected_text == "AKAZE":
             save_akaze_config_for_active_batch(load_akaze_config())
@@ -172,7 +183,6 @@ class SwitchableParameterPanel(QWidget):
             save_light_glue_config_for_active_batch(load_light_glue_config())
         elif selected_text == "Lucas Kanade":
             save_lucas_kanade_config_for_active_batch(load_lucas_kanade_config())
-            save_lucas_kanade_gpu_config_for_active_batch(load_lucas_kanade_gpu_config())
         elif selected_text == "Block Matching GPU":
             save_block_matching_gpu_config_for_active_batch(load_block_matching_gpu_config())
         elif selected_text == "RAFT":
@@ -724,8 +734,8 @@ class SwitchableParameterPanel(QWidget):
 
         overlay = self.get_overlay_container()
 
-        if denoising_algo in ["No Denoising", "None", "", "FusionNet"]:
-            # Hide the entire overlay panel for No Denoising or FusionNet
+        if denoising_algo in ["No Denoising", "None", ""]:
+            # Hide the entire overlay panel for No Denoising
             self.collapse_panel()
             if overlay:
                 overlay.hide()
@@ -738,7 +748,7 @@ class SwitchableParameterPanel(QWidget):
                 overlay.show()
                 overlay.raise_()
 
-            if denoising_algo in ["Average", "Median"]:
+            if denoising_algo in ["Average", "Median", "FusionNet"]:
                 self.btn_align_tab.setVisible(True)
                 self.btn_denoise_tab.setVisible(False)
                 self.btn_denoise_tab.setEnabled(False)
@@ -762,8 +772,12 @@ class SwitchableParameterPanel(QWidget):
         denoising_algo = str(
             settings.get(config.KEY_DENOISING, "No Denoising")
         ).strip()
+        old_denoising_algo = self.current_denoising_algo
         self.current_denoising_algo = denoising_algo
-        if denoising_algo in ("No Denoising", "None", "", "FusionNet"):
+        if old_denoising_algo != denoising_algo:
+            self._repopulate_alignment_combo()
+
+        if denoising_algo in ("No Denoising", "None", ""):
             self.btn_align_tab.setVisible(False)
             self.btn_denoise_tab.setVisible(False)
             self.btn_denoise_tab.setEnabled(False)
@@ -788,6 +802,9 @@ class SwitchableParameterPanel(QWidget):
             "Lucas Kanade Optical Flow": "Lucas Kanade",
             "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
             "Block Matching GPU Optical Flow": "Block Matching GPU",
+            "Dense Optical Flow": "Block Flow",
+            "compute_flow": "Block Flow",
+            "FlowNet": "Block Flow",
             "RAFT Optical Flow": "RAFT",
         }
         return mapping.get(str(value or "").strip(), str(value or "No Alignment"))

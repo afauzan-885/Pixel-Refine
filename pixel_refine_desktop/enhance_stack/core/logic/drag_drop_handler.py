@@ -41,11 +41,6 @@ class DragDropHandler:
 
         return False, 0
 
-    def handle_drag_leave(self):
-        """Handle drag leave event."""
-        # Logic handled by DisplayPanel's drop_overlay
-        pass
-
     def handle_drop(self, mime_data: QMimeData) -> Tuple[bool, List[str]]:
         """
         Handle drop event and filter valid image files.

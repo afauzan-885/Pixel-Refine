@@ -324,3 +324,103 @@ TaichiAot.resize(sourceBuffer, destBuffer, newWidth = 1920, newHeight = 1080)
 1. **Performa Native C++ Tanpa Beban**: Operasi berat dieksekusi di GPU/C++ binary; Kotlin bertindak sebagai *thin declarator* yang sangat lincah.
 2. **Resilience & Zero-Crash**: Imun terhadap $NaN$, drift viewport, memory leaks, dan race conditions.
 3. **Pengalaman Pengguna Kelas Pro**: Setara dengan tool fotografi RAW standar industri (Lightroom & Capture One).
+
+---
+
+## 7. API Baru & Perbaikan (Agustus 2026)
+
+### 7.1 ThemeShadow
+
+Representasi shadow dari design tokens:
+
+```kotlin
+data class ThemeShadow(
+    val offsetX: Dp,
+    val offsetY: Dp,
+    val blur: Dp,
+    val spread: Dp = 0.dp,
+    val color: Color,
+)
+
+// Akses melalui theme:
+val theme = LocalGenericTheme.current
+val shadow = theme.shadowMd  // ThemeShadow(offsetX=0.dp, offsetY=2.dp, blur=4.dp, ...)
+```
+
+### 7.2 Card dengan onClick
+
+```kotlin
+Card(
+    title = "My Card",
+    onClick = { /* handle click */ },
+    content = { /* card content */ }
+)
+```
+
+### 7.3 Variant.fromString Error Handling
+
+```kotlin
+// Throws IllegalArgumentException untuk typo detection
+try {
+    val variant = Variant.fromString("primery") // typo!
+} catch (e: IllegalArgumentException) {
+    println(e.message) // "Unknown variant: 'primery'. Valid variants: primary, secondary, ..."
+}
+
+// Fallback ke default jika tidak dikenal
+val variant = Variant.fromStringOrDefault("invalid", Variant.Secondary)
+```
+
+### 7.4 GenericUILibrary Facade
+
+Import semua komponen dalam satu baris:
+
+```kotlin
+import org.pixelrefine.genericui.*
+
+// Semua komponen, tema, animasi, domain logic tersedia
+Button(text = "Click", variant = Variant.Primary, onClick = { ... })
+val batch = BatchStateManager()
+TaichiAot.init(arch = "cuda")
+```
+
+### 7.5 RangeSlider dengan Drag Gesture
+
+```kotlin
+RangeSlider(
+    minVal = 0f,
+    maxVal = 100f,
+    currentRange = 20f..80f,
+    onRangeChange = { newRange ->
+        println("Range: ${newRange.start} - ${newRange.endInclusive}")
+    },
+    title = "ISO Range",
+    variant = Variant.Primary
+)
+```
+
+### 7.6 Magnifier dengan Position Tracking
+
+```kotlin
+Magnifier(
+    zoomFactor = 4.0f,
+    loupeSize = 120.dp
+) {
+    // Content yang akan di-magnify
+    Image(bitmap = imageBitmap, contentDescription = "Photo")
+}
+// Drag untuk menggeser area inspeksi
+```
+
+### 7.7 GridContainer dengan Parameter Order yang Diperbaiki
+
+```kotlin
+// itemsCount sekarang di posisi pertama (required)
+GridContainer(
+    itemsCount = 10,
+    columns = 3,
+    spacing = 8.dp
+) { index ->
+    // Render item
+}
+```

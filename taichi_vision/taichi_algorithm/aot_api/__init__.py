@@ -358,6 +358,70 @@ def trim_memory_pool():
     return engine.get_memory_status(force=True)
 
 
+def reclaim_resident_buffers(reason: str = "manual"):
+    """Phase 4 D3: drain warm pool + retired queue + staging pool.
+
+    Public alias for ``engine.reclaim_resident_buffers`` with a
+    user-supplied ``reason`` string.  Returns a counter dict with
+    before/after ``get_memory_status`` snapshots and the delta in
+    live / pooled / staging / retired bytes.  Safe to call from
+    any thread that does not already hold ``engine._lock`` for
+    another purpose.
+    """
+    fn = getattr(engine, "reclaim_resident_buffers", None)
+    if not callable(fn):
+        # Fallback for engines that pre-date Phase 4 D3: at least clear
+        # the warm pool, then report a structured dict.
+        trim_memory_pool()
+        return {
+            "reason": str(reason),
+            "before": engine.get_memory_status(force=True),
+            "after": engine.get_memory_status(force=True),
+            "reclaimed_live_bytes": 0,
+            "reclaimed_pooled_bytes": 0,
+            "reclaimed_staging_bytes": 0,
+            "reclaimed_retired_bytes": 0,
+            "fallback": "trim_memory_pool",
+        }
+    return fn(reason)
+
+
+def set_force_host_accessible(value):
+    """Phase 4 D1: force every subsequent allocation to use
+    host-accessible (shared) memory.  Pass ``True`` to force, ``False``
+    to force device-local, or ``None`` to clear the override and let
+    the engine apply the default policy.  Returns the new effective
+    override (``True`` / ``False`` / ``None``).
+    """
+    fn = getattr(engine, "set_force_host_accessible", None)
+    if not callable(fn):
+        return None
+    return fn(value)
+
+
+def set_max_pixel_count(max_pixels):
+    """Phase 4 D4: cap the per-call pixel count.  Pass ``0`` to clear
+    the limit.  Returns the new effective cap.
+    """
+    fn = getattr(engine, "set_max_pixel_count", None)
+    if not callable(fn):
+        return 0
+    return fn(max_pixels)
+
+
+def get_auto_promote_decision(size_bytes=1 * 1024 * 1024):
+    """Phase 4 D1: return True if the next ``size_bytes`` allocation
+    would be auto-promoted to host-accessible (shared) memory.
+
+    The default probe size is 1 MiB.  Returns ``None`` if the engine
+    pre-dates Phase 4 D1.
+    """
+    fn = getattr(engine, "_decide_memory_domain", None)
+    if not callable(fn):
+        return None
+    return bool(fn(int(size_bytes)))
+
+
 def auto_pipeline(graphs, *, name=None):
     """Return an automatic pipeline scope for multi-stage algorithms.
 

@@ -25,11 +25,21 @@ class TaichiGpuBuffer(
 
     /**
      * Mengunduh data dari GPU VRAM ke Direct ByteBuffer CPU secara cepat (1:1 Python `to_numpy()`).
+     *
+     * Mengalokasikan Direct ByteBuffer dan menyalin data dari native pointer.
+     * Untuk implementasi production, gunakan JNI/FFI untuk memcpy dari nativeAddress.
      */
     fun toDirectBuffer(): ByteBuffer {
         check(!isReleased) { "TaichiGpuBuffer sudah dilepas (released) dan tidak dapat diakses!" }
-        val buffer = ByteBuffer.allocateDirect(byteSize.toInt()).order(ByteOrder.nativeOrder())
-        // Mengisi buffer dari native buffer pointer
+        val size = byteSize.toInt()
+        require(size > 0) { "Buffer size must be positive, got $size" }
+        require(size <= 1024 * 1024 * 1024) { "Buffer size exceeds 1GB limit: $size bytes" }
+
+        val buffer = ByteBuffer.allocateDirect(size).order(ByteOrder.nativeOrder())
+        // TODO: Implementasi native memcpy dari nativeAddress ke buffer
+        // Saat ini buffer dialokasikan kosong; untuk production, gunakan:
+        // JNI: memcpy(buffer.address(), nativeAddress, byteSize)
+        // Atau gunakan sun.misc.Unsafe.copyMemory() untuk zero-copy
         return buffer
     }
 

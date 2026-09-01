@@ -266,6 +266,91 @@ def _quantize_plane(plane, quality, chroma=False, resident=False):
     return ordered
 
 
+def _quantize_plane_gpu_chained(plane, quality, chroma=False):
+    """GPU-resident JPEG pipeline: DCT+quant+zigzag → tokens → histogram.
+
+    This function chains multiple GPU dispatches while keeping intermediate
+    results on GPU (using return_gpu=True), minimizing GPU↔CPU round-trips.
+    Returns (dc_diff, symbols, categories, amplitudes, token_count,
+    dc_histogram, ac_histogram) ready for host-side Huffman coding.
+
+    This is the optimized path for 12MP realtime compression on GPU.
+    """
+    h, w = plane.shape
+    hb, wb = h // 8, w // 8
+    base_table = JPEG_CHROMA_TABLE if chroma else JPEG_QUALITY_TABLE
+    scale = 5000 // quality if quality < 50 else 200 - 2 * quality
+    quant_table = np.asarray([max(1, min(255, (value * scale + 50) // 100)) for value in base_table], dtype=np.float32)
+    source = np.ascontiguousarray(plane)
+
+    # Stage 1: DCT + quantization + zigzag (GPU resident)
+    ordered_gpu = _dispatch(
+        "compression_image",
+        "compression_jpeg_dct_quantize_zigzag_2d",
+        inputs={"src": source, "quant_table": quant_table, "basis": _DCT_BASIS, "order": _JPEG_ZIGZAG},
+        outputs={"dst": ((hb, wb * 64), np.float32)},
+        scalars={"h_blocks": hb, "w_blocks": wb},
+        plain_ndarray=False,
+        return_gpu=True,
+    )
+
+    # Stage 2: Token preparation (GPU resident)
+    prepared_gpu = _dispatch(
+        "compression_image",
+        "compression_jpeg_prepare_tokens_2d",
+        inputs={"ordered": ordered_gpu},
+        outputs={
+            "dc_diff": ((hb * wb,), np.float32),
+            "symbols": ((hb, wb * 64), np.int32),
+            "categories": ((hb, wb * 64), np.int32),
+            "amplitudes": ((hb, wb * 64), np.int32),
+            "token_count": ((hb, wb), np.int32),
+        },
+        scalars={"h_blocks": hb, "w_blocks": wb},
+        plain_ndarray=False,
+        return_gpu=True,
+    )
+
+    # Stage 3: Histogram (GPU resident)
+    histogram_gpu = _dispatch(
+        "compression_image",
+        "compression_jpeg_symbol_histogram_2d",
+        inputs={
+            "dc_diff": prepared_gpu["dc_diff"],
+            "symbols": prepared_gpu["symbols"],
+            "token_count": prepared_gpu["token_count"],
+        },
+        outputs={
+            "dc_histogram": np.zeros(16, dtype=np.int32),
+            "ac_histogram": np.zeros(256, dtype=np.int32),
+        },
+        scalars={"h_blocks": hb, "w_blocks": wb},
+        plain_ndarray=False,
+        return_gpu=True,
+    )
+
+    # Read back results from GPU to CPU (only once at the end)
+    dc_diff = np.asarray(prepared_gpu["dc_diff"].to_numpy(), dtype=np.float32)
+    symbols = np.asarray(prepared_gpu["symbols"].to_numpy(), dtype=np.int32)
+    categories = np.asarray(prepared_gpu["categories"].to_numpy(), dtype=np.int32)
+    amplitudes = np.asarray(prepared_gpu["amplitudes"].to_numpy(), dtype=np.int32)
+    token_count = np.asarray(prepared_gpu["token_count"].to_numpy(), dtype=np.int32)
+    dc_histogram = np.asarray(histogram_gpu["dc_histogram"].to_numpy(), dtype=np.int64)
+    ac_histogram = np.asarray(histogram_gpu["ac_histogram"].to_numpy(), dtype=np.int64)
+
+    # Release GPU buffers
+    ordered_gpu.destroy()
+    prepared_gpu["dc_diff"].destroy()
+    prepared_gpu["symbols"].destroy()
+    prepared_gpu["categories"].destroy()
+    prepared_gpu["amplitudes"].destroy()
+    prepared_gpu["token_count"].destroy()
+    histogram_gpu["dc_histogram"].destroy()
+    histogram_gpu["ac_histogram"].destroy()
+
+    return dc_diff, symbols, categories, amplitudes, token_count, dc_histogram, ac_histogram
+
+
 def _materialize_ordered(value):
     if hasattr(value, "to_numpy"):
         try:
@@ -376,8 +461,9 @@ def _pack_plane_bits(ordered, dc_table, ac_table, prepared=None):
     # The temporary i32 graph output is bounded per chunk.  A larger default
     # amortizes graph-dispatch and host-copy overhead on 12 MP frames while
     # allowing low-VRAM deployments to select a smaller deterministic tile.
+    # Default to processing all rows at once for maximum throughput.
     try:
-        requested_chunk_rows = int(os.environ.get("JPEG_PACK_CHUNK_ROWS", "64"))
+        requested_chunk_rows = int(os.environ.get("JPEG_PACK_CHUNK_ROWS", str(hb)))
     except ValueError as exc:
         raise ValueError("JPEG_PACK_CHUNK_ROWS must be a positive integer") from exc
     if requested_chunk_rows <= 0:

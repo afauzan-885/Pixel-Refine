@@ -45,6 +45,7 @@ from taichi_vision.taichi_algorithm.compression.kernels import (
     jpeg_bits_to_bytes_kernel,
     jpeg_quantize_dct_zigzag_flat2d_kernel,
     jpeg_prepare_tokens_flat2d_kernel,
+    jpeg_fused_transform_tokens_histogram_2d,
     png_filter_rows_kernel,
     dng_delta_rows_kernel,
     dng_undelta_rows_kernel,
@@ -403,6 +404,30 @@ def compile_compression(arch=ti.cpu, output: str | None = None) -> str:
     builder = ti.graph.GraphBuilder()
     builder.dispatch(_jpeg_symbol_histogram_flat2d_kernel, dc_diff_2d, symbols_2d, counts_2d, dc_histogram_2d, ac_histogram_2d, hb, wb)
     module.add_graph("compression_jpeg_symbol_histogram_2d", builder.compile())
+
+    # Fully fused JPEG pipeline: DCT+quant+zigzag → tokens → histogram
+    # This eliminates all intermediate GPU↔CPU round-trips by combining
+    # all transform stages into a single GPU dispatch.
+    fused_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
+    fused_quant = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "quant_table", ti.f32, ndim=1)
+    fused_basis = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "basis", ti.f32, ndim=2)
+    fused_order = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "order", ti.i32, ndim=1)
+    fused_dc_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dc_values", ti.f32, ndim=1)
+    fused_symbols = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "symbols", ti.i32, ndim=2)
+    fused_categories = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "categories", ti.i32, ndim=2)
+    fused_amplitudes = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "amplitudes", ti.i32, ndim=2)
+    fused_token_count = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "token_count", ti.i32, ndim=2)
+    fused_dc_histogram = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dc_histogram", ti.i32, ndim=1)
+    fused_ac_histogram = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ac_histogram", ti.i32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        jpeg_fused_transform_tokens_histogram_2d,
+        fused_src, fused_quant, fused_basis, fused_order,
+        fused_dc_values, fused_symbols, fused_categories, fused_amplitudes,
+        fused_token_count, fused_dc_histogram, fused_ac_histogram,
+        hb, wb,
+    )
+    module.add_graph("compression_jpeg_fused_transform_tokens_histogram_2d", builder.compile())
 
     dc = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "zigzag", ti.f32, ndim=3)
     differences = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dc_diff", ti.f32, ndim=1)

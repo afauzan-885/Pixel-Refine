@@ -1,6 +1,5 @@
 import threading
 import queue
-import h5py
 import numpy as np
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     load_images_from_paths,
@@ -27,12 +26,7 @@ class ImageStreamer:
         self.total_images = 0
 
         # --- TAHAP 1: Hitung total foto ---
-        if isinstance(self.data_source, str) and self.data_source.endswith(".h5"):
-            self.is_hdf5 = True
-            with h5py.File(self.data_source, "r") as f:
-                self.keys = list(f.keys())
-                self.total_images = len(self.keys)
-        elif isinstance(self.data_source, list):
+        if isinstance(self.data_source, list):
             self.total_images = len(self.data_source)
 
     def __len__(self):
@@ -42,10 +36,7 @@ class ImageStreamer:
         return self.total_images > 0
 
     def __getitem__(self, idx):
-        if self.is_hdf5 and self.keys:
-            with h5py.File(self.data_source, "r") as h5f:
-                return np.array(h5f[self.keys[idx]])
-        elif not self.is_hdf5 and self.data_source:
+        if self.data_source:
             item = self.data_source[idx]
             if isinstance(item, np.ndarray):
                 return item
@@ -56,14 +47,7 @@ class ImageStreamer:
 
     def _image_loader_worker(self):
         try:
-            if self.is_hdf5 and self.keys:
-                with h5py.File(self.data_source, "r") as h5f:
-                    for i, key in enumerate(self.keys):
-                        if self.stop_requested and self.stop_requested():
-                            break
-                        img = np.array(h5f[key])
-                        self.job_queue.put((i, img))
-            elif not self.is_hdf5 and self.data_source:
+            if self.data_source:
                 for i, item in enumerate(self.data_source):
                     if self.stop_requested and self.stop_requested():
                         break

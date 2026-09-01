@@ -16,21 +16,17 @@ from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
     load_raw_as_8bit_rgb_half_res,
 )
 import os
-from PySide6.QtWidgets import QLabel, QStackedWidget
+from PySide6.QtWidgets import QLabel
 from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtCore import (
     Qt,
+    QCoreApplication,
     QThread,
     Signal,
-    QMutex,
-    QWaitCondition,
-    QFile,
-    QSemaphore,
     QTimer,
     QObject,
     QRunnable,
     QThreadPool,
-    QCoreApplication,
 )
 import cv2
 import numpy as np
@@ -38,18 +34,10 @@ import rawpy
 from PIL import Image, ImageOps
 import weakref
 
-from config import CACHE_DIR, SUPPORTED_FORMATS
-from resources.animations.fade import fade_in
-from pixel_refine_desktop.enhance_stack.core.logic.display_manager import (
-    DisplayThreadManager,
-)
-
+from config import SUPPORTED_FORMATS
 from pixel_refine_desktop.enhance_stack.models.data_access.thumbnail_repository import (
     ThumbnailRepository,
 )
-
-# Max worker threads (standard 4 for balanced I/O and CPU)
-MAX_THUMBNAIL_WORKERS = 4
 
 # ---------------------------------------------------------------------------
 # GLOBAL THUMBNAIL CACHE (L0) — RAM cache lintas batch, survive switch batch
@@ -269,17 +257,6 @@ class ThumbnailWorker(QRunnable):
                 except (RuntimeError, AttributeError):
                     pass
 
-    def _convert_to_qimage(self, pil_img):
-        """Helper to convert PIL Image to QImage safely."""
-        if pil_img is None:
-            return QImage()
-        return convert_pil_to_qimage(pil_img)
-
-    def _process_image(self):
-        """Image processing logic for single worker."""
-        return process_thumbnail_logic(self.image_path, self.thumbnail_size)
-
-
 class ThumbnailBulkWorker(QRunnable):
     """
     Worker QRunnable untuk memproses SEKELOMPOK (Chunk) thumbnail gambar.
@@ -485,105 +462,6 @@ def convert_pil_to_qimage(pil_img):
     # Removed old _convert_to_qimage method to avoid duplication
 
 
-def create_thumbnail_placeholder(thumbnail_size=(80, 80)):
-    """
-    Create a placeholder widget untuk menampilkan loading state.
-
-    Args:
-        thumbnail_size: Tuple (width, height) untuk ukuran placeholder
-
-    Returns:
-        QLabel widget dengan styling placeholder
-    """
-    placeholder = QLabel("Loading...")
-    placeholder.setFixedSize(*thumbnail_size)
-    placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    placeholder.setStyleSheet(
-        "background-color: lightgray; "
-        "border: 1px solid gray; "
-        "font-size: 10px; "
-        "color: gray;"
-    )
-    return placeholder
-
-
-def display_thumbnail_in_layout(
-    layout, q_image, image_path, display_size=(80, 80), animator=None
-):
-    """
-    Display thumbnail image dalam layout.
-
-    Args:
-        layout: QLayout yang akan menampung thumbnail
-        q_image: QImage object untuk ditampilkan
-        image_path: Path ke file gambar (untuk tracking)
-        display_size: Tuple (width, height) untuk display
-        animator: Optional animator untuk fade effect
-    """
-    if q_image.isNull():
-        return
-
-    # Create label dengan thumbnail
-    thumb_label = QLabel()
-    pixmap = QPixmap.fromImage(q_image)
-    scaled_pixmap = pixmap.scaledToHeight(
-        display_size[1], Qt.TransformationMode.SmoothTransformation
-    )
-
-    thumb_label.setPixmap(scaled_pixmap)
-    thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    thumb_label.setScaledContents(False)
-    thumb_label.setMaximumHeight(display_size[1])
-    thumb_label.setStyleSheet("background-color: lightgray; border: 1px solid gray;")
-
-    # Store image path for reference
-    thumb_label.setProperty("image_path", image_path)
-
-    # Add to layout
-    try:
-        if hasattr(layout, "addWidget"):
-            layout.addWidget(thumb_label)
-        elif hasattr(layout, "addItem"):
-            layout.addItem(thumb_label)
-    except Exception as e:
-        print(f"Error adding thumbnail to layout: {e}")
-        return
-
-    # Apply fade animation if provided
-    if animator:
-        fade_in(animator, thumb_label)
-
-
-def stop_thumbnail_threads(threads):
-    """
-    Stop semua thumbnail threads dengan aman dan sinkron.
-    """
-    if not threads:
-        return
-
-    for thread in threads:
-        try:
-            if thread is None:
-                continue
-            if thread.isRunning():
-                try:
-                    thread.thumbnail_ready.disconnect()
-                except (TypeError, RuntimeError):
-                    pass
-                thread.requestInterruption()
-        except Exception:
-            pass
-
-    for thread in threads:
-        try:
-            if thread and thread.isRunning():
-                thread.wait(timeout=500)
-        except Exception:
-            pass
-
-    threads.clear()
-
-
 class ThumbnailBatchProcessor(QObject):
     """
     Utility class untuk memproses batch thumbnail images.
@@ -640,12 +518,6 @@ class ThumbnailBatchProcessor(QObject):
             # Set to CPU logical core count, min 4 and max 12 to balance I/O and CPU
             max_concurrent = max(4, min(12, os.cpu_count() or 4))
         QThreadPool.globalInstance().setMaxThreadCount(max_concurrent)
-
-    def add_to_stats(self, count):
-        """Tambah jumlah total gambar yang diproses secara dinamis (incremental)."""
-        self.total_to_process += count
-        self.total_to_save += count
-        self._emit_progress()
 
     def process_image(self, image_path, callback=None):
         """

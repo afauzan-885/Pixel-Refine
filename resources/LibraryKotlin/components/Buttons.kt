@@ -70,6 +70,8 @@ fun Button(
             internalLoading = true
             try {
                 onClick()
+                // Reset setelah onClick() selesai (untuk synchronous callback)
+                internalLoading = false
             } catch (e: Throwable) {
                 internalLoading = false // Langsung pulihkan jika ada synchronous crash
             }

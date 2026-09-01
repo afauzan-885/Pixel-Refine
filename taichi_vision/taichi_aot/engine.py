@@ -270,10 +270,10 @@ _DEVICE_CACHE_PATH = os.path.join(
 # Lifecycle pools are intentionally small and bounded.  The limits are
 # process-level safety valves; the adaptive memory governor supplies the
 # byte budgets for the active device/pressure state.
-_MAX_STAGING_POOL_ENTRIES = max(1, _env_int("AOT_MAX_STAGING_ENTRIES", 8))
-_MAX_RETIRED_BUFFERS = max(1, _env_int("AOT_MAX_RETIRED_BUFFERS", 64))
-_DEFAULT_STAGING_POOL_BUDGET = max(0, _env_int("AOT_STAGING_BUDGET", 256 * 1024**2))
-_DEFAULT_RETIRED_BUFFER_BUDGET = max(0, _env_int("AOT_RETIRED_BUDGET", 256 * 1024**2))
+_MAX_STAGING_POOL_ENTRIES = max(1, _env_int("AOT_MAX_STAGING_ENTRIES", 4))
+_MAX_RETIRED_BUFFERS = max(1, _env_int("AOT_MAX_RETIRED_BUFFERS", 16))
+_DEFAULT_STAGING_POOL_BUDGET = max(0, _env_int("AOT_STAGING_BUDGET", 64 * 1024**2))
+_DEFAULT_RETIRED_BUFFER_BUDGET = max(0, _env_int("AOT_RETIRED_BUDGET", 64 * 1024**2))
 # ``ThreadPoolExecutor`` itself has an unbounded submission queue.  A native
 # AOT call retains every Python argument (and often a GPU buffer handle) until
 # its future starts, so an unbounded queue can defeat the memory governor even
@@ -1862,8 +1862,13 @@ class BufferPool:
             size = key.size_bytes
             if self.max_bytes <= 0 or self.pooled_bytes + size > self.max_bytes:
                 runtime = self.engine.runtime if self.engine else _RUNTIME
+                if self.engine and getattr(self.engine, "arch", "").lower() == "cuda":
+                    ensure_cuda_context(getattr(self.engine, "device_id", 0))
                 if _LIB and runtime:
-                    _LIB.free_gpu_buffer(runtime, handle)
+                    try:
+                        _LIB.free_gpu_buffer(runtime, handle)
+                    except Exception:
+                        pass
                 self._stats["evictions"] += 1
                 return
             if key not in self.free_buffers:
@@ -1877,6 +1882,8 @@ class BufferPool:
         with self._lock:
             self.max_bytes = max(0, int(max_bytes))
             runtime = self.engine.runtime if self.engine else _RUNTIME
+            if self.engine and getattr(self.engine, "arch", "").lower() == "cuda":
+                ensure_cuda_context(getattr(self.engine, "device_id", 0))
             for key in sorted(
                 tuple(self.free_buffers),
                 key=lambda item: item.size_bytes,
@@ -1886,7 +1893,10 @@ class BufferPool:
                 while handles and self.pooled_bytes > self.max_bytes:
                     handle = handles.pop()
                     if _LIB and runtime:
-                        _LIB.free_gpu_buffer(runtime, handle)
+                        try:
+                            _LIB.free_gpu_buffer(runtime, handle)
+                        except Exception:
+                            pass
                     self.pooled_bytes = max(0, self.pooled_bytes - key.size_bytes)
                     self._stats["evictions"] += 1
                 if not handles:
@@ -1906,10 +1916,15 @@ class BufferPool:
                 pass
         with self._lock:
             runtime = self.engine.runtime if self.engine else _RUNTIME
+            if self.engine and getattr(self.engine, "arch", "").lower() == "cuda":
+                ensure_cuda_context(getattr(self.engine, "device_id", 0))
             if _LIB and runtime:
                 for handles in self.free_buffers.values():
                     for h in handles:
-                        _LIB.free_gpu_buffer(runtime, h)
+                        try:
+                            _LIB.free_gpu_buffer(runtime, h)
+                        except Exception:
+                            pass
             self.free_buffers = {}
             self.pooled_bytes = 0
 
@@ -2332,27 +2347,32 @@ class AOTModuleWrapper:
         # dispatch.  A later graph gets a fresh call, preserving adaptive
         # pressure updates for long-running scopes.
         memory_decision = engine._refresh_memory_policy()
-        with engine._lock:
-            active_recording = next(
-                (
-                    item
-                    for item in tuple(
-                        getattr(engine, "_pipeline_recordings", {}).values()
-                    )
-                    if item.get("active", False)
-                ),
-                None,
-            )
-            current_pipeline = engine.current_pipeline
-        if (
-            active_recording is not None
-            and current_pipeline is None
-            and active_recording.get("owner_thread") != threading.get_ident()
-        ):
-            raise RuntimeError(
-                "AOT graph dispatch cannot overlap a pipeline recording owned "
-                "by another thread"
-            )
+        start_wait = time.perf_counter()
+        while True:
+            with engine._lock:
+                active_recording = next(
+                    (
+                        item
+                        for item in tuple(
+                            getattr(engine, "_pipeline_recordings", {}).values()
+                        )
+                        if item.get("active", False)
+                    ),
+                    None,
+                )
+                current_pipeline = engine.current_pipeline
+            if (
+                active_recording is None
+                or current_pipeline is not None
+                or active_recording.get("owner_thread") == threading.get_ident()
+            ):
+                break
+            if time.perf_counter() - start_wait > 5.0:
+                raise RuntimeError(
+                    "AOT graph dispatch cannot overlap a pipeline recording owned "
+                    "by another thread (timed out waiting for recording to complete)"
+                )
+            time.sleep(0.005)
         engine._auto_pipeline_before_run(graph_name, kwargs)
         if engine.current_pipeline:
             pipeline_name = engine.current_pipeline
@@ -2961,9 +2981,14 @@ class AOTEngine:
         """Free one native handle while the engine lock is already held."""
         if handle is None:
             return
+        if getattr(self, "arch", "").lower() == "cuda":
+            ensure_cuda_context(getattr(self, "device_id", 0))
         runtime = getattr(self, "runtime", None)
         if _LIB and runtime:
-            _LIB.free_gpu_buffer(runtime, handle)
+            try:
+                _LIB.free_gpu_buffer(runtime, handle)
+            except Exception:
+                pass
 
     def _invalidate_live_buffers(self, runtime=None):
         """Invalidate every wrapper before its native runtime is replaced.
@@ -3170,8 +3195,12 @@ class AOTEngine:
                 if not selected:
                     return
                 remaining = [item for item in self._retired_buffers if item[0] != key]
+            backend = str(getattr(self, "arch", "")).lower()
+            owner = getattr(self, "_native_context_owner_thread_id", None)
+            is_non_owner_opengl = backend in {"opengl", "gles"} and owner is not None and threading.get_ident() != owner
+
             sync_failed = False
-            if wait and not already_synchronized:
+            if wait and not already_synchronized and not is_non_owner_opengl:
                 _op_begin("sync_runtime:retired_buffers")
                 try:
                     if _LIB is not None and getattr(self, "runtime", None):
@@ -3866,6 +3895,18 @@ class AOTEngine:
         host_accessible=False,
         vector_dim=None,
     ):
+        # Phase 4 D4: refuse pixel counts above the configured cap.
+        self._check_max_pixel_count(shape)
+        # Phase 4 D1: caller passed the default sentinel; let the
+        # engine pick device-local vs host-accessible based on
+        # current pressure.  An explicit True/False is honored.
+        if host_accessible is False:
+            try:
+                _size = int(np.prod(shape) * np.dtype(dtype).itemsize)
+            except Exception:  # noqa: BLE001
+                _size = 0
+            if _size > 0 and self._decide_memory_domain(_size):
+                host_accessible = True
         self._assert_native_context_owner("allocate")
         if not host_accessible and hasattr(self, "_memory_governor"):
             self._refresh_memory_policy()
@@ -3931,6 +3972,23 @@ class AOTEngine:
                 handle = self.buffer_pool.acquire(pool_key)
             if not handle:
                 _op_begin("allocate_gpu_buffer")
+                try:
+                    handle = _LIB.allocate_gpu_buffer(
+                        self.runtime, size, 1 if host_accessible else 0
+                    )
+                except Exception:
+                    _record_error()
+                    raise
+                finally:
+                    _op_end()
+
+            if handle is None or handle == 0:
+                # Automatic emergency memory reclamation and retry
+                self._drain_retired(wait=True)
+                self.buffer_pool.clear()
+                import gc
+                gc.collect()
+                _op_begin("allocate_gpu_buffer_retry")
                 try:
                     handle = _LIB.allocate_gpu_buffer(
                         self.runtime, size, 1 if host_accessible else 0
@@ -4309,6 +4367,15 @@ class AOTEngine:
                 return None
             return consumer(entry)
 
+    def _log_warning(self, message):
+        """Phase 4 D2 telemetry sink.  Default falls back to ``print`` so
+        warnings are visible without wiring a logger.
+        """
+        try:
+            print(f"[AOTEngine][warn] {message}")
+        except Exception:  # noqa: BLE001
+            pass
+
     def get_memory_status(self, force=False):
         """Return the current adaptive host-memory decision as plain data."""
         self._refresh_memory_policy(force=force)
@@ -4385,7 +4452,9 @@ class AOTEngine:
                 getattr(self, "_pipeline_recordings", {}).values()
             )
             pending_snapshot = tuple(getattr(self, "_async_futures", ()))
-            reservations_snapshot = int(getattr(self, "_async_reservations", 0) or 0)
+            reservations_snapshot = int(
+                getattr(self, "_async_reservations", 0) or 0
+            )
         status["recording_active"] = sum(
             1 for item in recordings_snapshot if item.get("active", False)
         )
@@ -4398,7 +4467,151 @@ class AOTEngine:
             getattr(self, "_async_pending_limit", _MAX_ASYNC_PENDING)
             or _MAX_ASYNC_PENDING
         )
+
+        # Phase 4 D5: surface pressure indicators so callers (MFDenoiser,
+        # stress tests) can observe the engine's pressure model without
+        # reading private state.  Read-only, no allocation.
+        try:
+            _shared_budget = int(
+                getattr(
+                    status,
+                    "shared_device_budget",
+                    status.get("shared_device_budget", 0) or 0,
+                )
+                or 0
+            )
+            _dev_heap_budget = int(
+                getattr(
+                    status,
+                    "device_heap_budget",
+                    status.get("device_heap_budget", 0) or 0,
+                )
+                or 0
+            )
+            _dev_heap_avail = int(
+                getattr(
+                    status,
+                    "device_heap_available",
+                    status.get("device_heap_available", 0) or 0,
+                )
+                or 0
+            )
+            status["device_heap_pressure_ratio"] = (
+                round(_dev_heap_avail / max(1, _dev_heap_budget), 4)
+                if _dev_heap_budget > 0
+                else 0.0
+            )
+            status["shared_budget_consumed_ratio"] = (
+                round(1.0 - (_dev_heap_avail / max(1, _shared_budget)), 4)
+                if _shared_budget > 0
+                else 0.0
+            )
+            # What the auto-promotion policy would do for a 1 MiB probe.
+            status["auto_promote_next_allocation"] = bool(
+                self._decide_memory_domain(1 * 1024 * 1024)
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         return status
+
+    def _decide_memory_domain(self, size_bytes):
+        """Phase 4 D1: return True if the next ``size_bytes`` allocation
+        should use host-accessible (shared) memory.
+
+        Policy:
+          1. Caller is allowed to opt in/out via ``set_force_host_accessible``
+             or per-call ``host_accessible=``; this helper only decides
+             when the caller passed the sentinel default.
+          2. CPU backend (no device heap) -> True.
+          3. Device backend:
+             - If ``shared_device_budget`` is 0 -> True (no budget info).
+             - If size > 0.5 * device_heap_available -> True.
+             - If shared_device_budget < 1.5 * size -> True (prefer host
+               over risking OOM).
+             - Otherwise -> False (device-local).
+        """
+        try:
+            # Caller override takes precedence.
+            force = getattr(self, "_force_host_accessible", None)
+            if force is True:
+                return True
+            if force is False:
+                return False
+            _arch = str(getattr(self, "arch", "")).lower()
+            if _arch in {"", "cpu"}:
+                return True
+            try:
+                _status = self.get_memory_status(force=True)
+            except Exception:  # noqa: BLE001
+                _status = {}
+            _shared = int(_status.get("shared_device_budget", 0) or 0)
+            _dev_budget = int(_status.get("device_heap_budget", 0) or 0)
+            _dev_avail = int(_status.get("device_heap_available", 0) or 0)
+            if _dev_budget <= 0:
+                # Backend did not report a device heap; treat as shared.
+                return True
+            if _dev_avail <= 0:
+                return True
+            if int(size_bytes) > int(0.5 * _dev_avail):
+                return True
+            if _shared > 0 and int(size_bytes) > int(_shared / 1.5):
+                return True
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+
+    def set_force_host_accessible(self, value):
+        """Phase 4 D1: force every subsequent allocation to use
+        host-accessible memory (value=True) or device-local (value=False).
+        Pass None to clear the override and let ``_decide_memory_domain``
+        apply the default policy.
+        """
+        if value is None:
+            if hasattr(self, "_force_host_accessible"):
+                try:
+                    delattr(self, "_force_host_accessible")
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            self._force_host_accessible = bool(value)
+        return getattr(self, "_force_host_accessible", None)
+
+    def set_max_pixel_count(self, max_pixels):
+        """Phase 4 D4: cap the per-call pixel count.  Pass ``0`` to clear
+        the limit.  Returns the new effective cap.
+        """
+        if max_pixels is None or int(max_pixels) <= 0:
+            if hasattr(self, "_max_pixel_count"):
+                try:
+                    delattr(self, "_max_pixel_count")
+                except Exception:  # noqa: BLE001
+                    pass
+            return getattr(self, "_max_pixel_count", 0)
+        self._max_pixel_count = int(max_pixels)
+        return self._max_pixel_count
+
+    def _check_max_pixel_count(self, shape):
+        """Phase 4 D4: raise ``RuntimeError`` when the requested shape
+        exceeds the configured pixel cap.
+        """
+        cap = getattr(self, "_max_pixel_count", 0)
+        if not cap:
+            return
+        try:
+            _n = int(np.prod(shape))
+        except Exception:  # noqa: BLE001
+            return
+        if _n > cap:
+            raise RuntimeError(
+                f"\n[AOTEngine Pixel Cap] Requested shape {tuple(shape)!r} "
+                f"has {_n:,} pixels, exceeding the configured cap of "
+                f"{cap:,} pixels.\n"
+                "  HINT: enable block mode via "
+                "`taichi_aot.set_block_mode(enabled=True, size=512)` "
+                "or raise the cap with "
+                "`engine.set_max_pixel_count(0)` (0 = unlimited)."
+            )
 
     def recommend_block_batch_size(self, tile_bytes=0, *, extra_bytes=0, cap=4):
         """Choose a bounded number of resident tiles for batched block work.
@@ -4656,6 +4869,62 @@ class AOTEngine:
         with self._lock:
             self._block_cache.clear()
             self._device_block_cache.clear()
+
+    def reclaim_resident_buffers(self, reason: str = "manual"):
+        """Drain the warm pool and retired queue, returning reclaimed counters.
+
+        Additive public API introduced in Phase 4.  Safe to call from any
+        thread that does not already hold ``self._lock`` for another
+        purpose (the engine uses an RLock so the same thread can re-enter).
+        The caller is expected to invoke ``engine.sync()`` first if GPU
+        work is in flight, otherwise in-flight kernels may reuse the
+        retired handle.
+
+        Returns a counter dict with before/after ``get_memory_status()``
+        snapshots and the delta in live / pooled / staging bytes.
+        """
+        with self._lock:
+            before = self.get_memory_status()
+            try:
+                self._drain_retired(wait=True)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.buffer_pool.clear()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self._trim_staging_pool()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                import gc as _gc
+
+                _gc.collect()
+            except Exception:  # noqa: BLE001
+                pass
+            after = self.get_memory_status()
+        return {
+            "reason": str(reason),
+            "before": dict(before),
+            "after": dict(after),
+            "reclaimed_live_bytes": int(
+                (before.get("live_bytes", 0) or 0)
+                - (after.get("live_bytes", 0) or 0)
+            ),
+            "reclaimed_pooled_bytes": int(
+                (before.get("pooled_bytes", 0) or 0)
+                - (after.get("pooled_bytes", 0) or 0)
+            ),
+            "reclaimed_staging_bytes": int(
+                (before.get("staging_bytes", 0) or 0)
+                - (after.get("staging_bytes", 0) or 0)
+            ),
+            "reclaimed_retired_bytes": int(
+                (before.get("retired_bytes", 0) or 0)
+                - (after.get("retired_bytes", 0) or 0)
+            ),
+        }
 
     def _record_block_plan(self, bucket):
         self._ensure_memory_cache_runtime()
@@ -5154,11 +5423,45 @@ class AOTEngine:
                     vector_dim = 2
 
         arr = np.ascontiguousarray(data)
+        # Phase 4 D4: refuse pixel counts above the configured cap.
+        self._check_max_pixel_count(arr.shape)
+        # Phase 4 D2: surface a soft warning when an upload would push
+        # ``live + pooled + retired`` past the adaptive
+        # ``pipeline_resident_limit``.  We do not raise here because
+        # legacy callers (notably MFDenoiser / resident_pipeline.py)
+        # intentionally commit full-res accumulators that exceed the
+        # 1 GiB default; raising here would break them.  Callers that
+        # want strict enforcement can use ``engine.allocate`` instead.
+        try:
+            _sz = int(arr.nbytes)
+            _status = self.get_memory_status(force=True)
+            _live = int(_status.get("live_bytes", 0) or 0)
+            _pooled = int(_status.get("pooled_bytes", 0) or 0)
+            _retired = int(_status.get("retired_bytes", 0) or 0)
+            _limit = int(_status.get("resident_limit", 0) or 0)
+            if _limit > 0 and (_live + _pooled + _retired + _sz) > _limit:
+                _print_fn = getattr(self, "_log_warning", None)
+                if callable(_print_fn):
+                    _print_fn(
+                        f"upload({tuple(arr.shape)!r}, {arr.dtype}) requests "
+                        f"{_sz / (1024 * 1024):.1f} MiB but live+pooled+retired "
+                        f"({(_live + _pooled + _retired) / (1024 * 1024):.1f} MiB) "
+                        f"plus this upload ({_sz / (1024 * 1024):.1f} MiB) "
+                        f"exceeds pipeline_resident_limit "
+                        f"({_limit / (1024 * 1024):.1f} MiB). "
+                        "Consider engine.reclaim_resident_buffers() or "
+                        "engine.allocate(host_accessible=True) for this size."
+                    )
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Phase 4 D1: pass the sentinel default; let ``allocate`` apply
+        # the auto-promote policy.  The historical ``host_accessible=True``
+        # hard-code is preserved when the caller passes it explicitly.
         buf = self.allocate(
             arr.shape,
             arr.dtype,
             is_vector=is_vector,
-            host_accessible=True,
             vector_dim=vector_dim,
         )
         _op_begin("write_to_gpu_buffer")
@@ -5374,6 +5677,10 @@ class AOTEngine:
             raise RuntimeError(f"Failed to save image: {path}")
 
     def sync(self):
+        backend = str(getattr(self, "arch", "")).lower()
+        owner = getattr(self, "_native_context_owner_thread_id", None)
+        if backend in {"opengl", "gles"} and owner is not None and threading.get_ident() != owner:
+            return
         _lock_wait_begin("sync")
         with self._lock:
             _lock_wait_end()

@@ -5,7 +5,7 @@ Manages right-click menu creation and actions like set reference and delete.
 
 from PySide6.QtWidgets import QMenu
 from PySide6.QtGui import QAction
-from typing import Optional, Dict, Any
+from typing import Optional, Any
 from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
     is_widget_alive,
 )

@@ -459,3 +459,73 @@ class BatchRepository(BaseRepository):
         query = "SELECT COUNT(*) FROM batch_process_image WHERE batch_id = ?"
         result = self.execute_query(query, (batch_id,), fetch_one=True)
         return result[0] if result else 0
+
+    def get_all_with_image_counts(self) -> List[Tuple[int, str, int]]:
+        """
+        Get all batches with their image counts in a single query.
+
+        Replaces the N+1 pattern of ``get_all`` followed by a per-batch
+        ``count_images_in_batch`` call. The result preserves the same
+        ordering as :py:meth:`get_all`.
+
+        Returns:
+            List of tuples ``(batch_id, batch_name, image_count)``.
+        """
+        query = """
+            SELECT bp.id, bp.batch_name,
+                   (SELECT COUNT(*) FROM batch_process_image bpi
+                    WHERE bpi.batch_id = bp.id) AS image_count
+            FROM batch_process bp
+            ORDER BY bp.order_index ASC, bp.id ASC
+        """
+        try:
+            rows = self.execute_query(query, fetch_one=False)
+            return [(r[0], r[1], int(r[2] or 0)) for r in rows]
+        except Exception as e:
+            print(f"Error in get_all_with_image_counts: {e}")
+            return []
+
+    def get_all_with_images(self) -> List[Tuple[int, str, List[Tuple[int, str, bool]]]]:
+        """
+        Get all batches with their images in a single query.
+
+        Replaces the N+1 pattern of ``get_all`` + N calls to
+        :py:meth:`get_batch_images`. Grouping happens in Python after a
+        single LEFT JOIN fetch.
+
+        Returns:
+            List of tuples ``(batch_id, batch_name, images)`` where
+            ``images`` is a list of ``(image_id, path, is_reference)``.
+        """
+        query = """
+            SELECT bp.id, bp.batch_name,
+                   i.id AS image_id, i.path, bpi.is_reference_batch
+            FROM batch_process bp
+            LEFT JOIN batch_process_image bpi ON bpi.batch_id = bp.id
+            LEFT JOIN images i ON i.id = bpi.image_id_batch
+            ORDER BY bp.order_index ASC, bp.id ASC,
+                     bpi.is_reference_batch DESC, bpi.id ASC
+        """
+        try:
+            rows = self.execute_query(query, fetch_one=False)
+        except Exception as e:
+            print(f"Error in get_all_with_images: {e}")
+            return []
+
+        grouped: List[Tuple[int, str, List[Tuple[int, str, bool]]]] = []
+        current_id: Optional[int] = None
+        current_name: Optional[str] = None
+        current_images: List[Tuple[int, str, bool]] = []
+        for row in rows:
+            batch_id, batch_name, image_id, path, is_ref = row
+            if batch_id != current_id:
+                if current_id is not None:
+                    grouped.append((current_id, current_name, current_images))
+                current_id = batch_id
+                current_name = batch_name
+                current_images = []
+            if image_id is not None and path is not None:
+                current_images.append((int(image_id), path, bool(is_ref)))
+        if current_id is not None:
+            grouped.append((current_id, current_name, current_images))
+        return grouped

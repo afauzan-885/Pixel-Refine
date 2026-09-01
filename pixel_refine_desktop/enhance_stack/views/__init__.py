@@ -16,10 +16,6 @@ _LAZY_IMPORTS = {
         "pixel_refine_desktop.enhance_stack.views.batch_page_view",
         "BatchPageView",
     ),
-    "TopBar": (
-        "pixel_refine_desktop.enhance_stack.views.top_bar",
-        "TopBar",
-    ),
 }
 
 __all__ = list(_LAZY_IMPORTS)

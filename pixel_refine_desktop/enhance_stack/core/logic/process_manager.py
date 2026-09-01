@@ -1,6 +1,5 @@
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Any
 from PySide6.QtCore import QObject, QTimer, QThread
-import weakref
 
 
 class ProcessManager(QObject):
@@ -62,13 +61,6 @@ class ProcessManager(QObject):
                 except RuntimeError:
                     pass
             self._threads[context_id].clear()
-
-    def clear_all(self):
-        """Emergency stop for everything."""
-        for context in list(self._timers.keys()):
-            self.cancel_context(context)
-        for context in list(self._threads.keys()):
-            self.cancel_context(context)
 
 
 def is_widget_alive(widget):

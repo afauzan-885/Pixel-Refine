@@ -223,6 +223,7 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
 
     params_key_map = {
         "AKAZE": "akaze_params",
+        "OFB": "ofb_params",
         "ORB": "orb_params",
         "Light Glue": "light_glue_params",
         "Farneback": "farneback_params",

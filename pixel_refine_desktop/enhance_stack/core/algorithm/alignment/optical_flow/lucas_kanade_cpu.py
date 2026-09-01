@@ -257,7 +257,7 @@ class LucasKanadeCPU:
             os.remove(ctx.hdf5_path)
 
         import gc
-        import h5py
+        # (h5py removed)
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
             extract_exif,
             save_to_hdf5,

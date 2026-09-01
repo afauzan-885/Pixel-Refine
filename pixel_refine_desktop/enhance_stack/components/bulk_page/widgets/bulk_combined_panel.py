@@ -70,6 +70,9 @@ from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_thumbn
     thumbnail_placeholder,
     show_thumbnail,
 )
+from pixel_refine_desktop.enhance_stack.core.logic.batch_parameter_manager import (
+    load_json_state,
+)
 from pixel_refine_desktop.enhance_stack.core.logic.workflow_process import (
     ImageViewer,
     get_last_image,
@@ -79,13 +82,6 @@ from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
     ThumbnailPolicy,
     thumbnail_creation_enabled,
 )
-
-
-def load_json_state(path):
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            return json.load(f)
-    return {}
 
 
 def save_json_state(path, state):
@@ -198,7 +194,8 @@ class CombinedPanel(QWidget):
             try:
                 raw_paths = self.database_manager.get_images_by_batch(self.batch_id)
                 # Cek keberadaan file di disk secara sangat efisien
-                missing_paths = [p for p in raw_paths if not os.path.exists(p)]
+                exists_flags = self._exists_flags(raw_paths)
+                missing_paths = [p for p, ok in zip(raw_paths, exists_flags) if not ok]
                 if missing_paths:
                     self.database_manager.batch_process_delete_selected_images(
                         self.batch_id, missing_paths
@@ -217,6 +214,27 @@ class CombinedPanel(QWidget):
         self.batch_info_label = None
 
         self.init_ui()
+
+    def _exists_flags(self, paths):
+        """Return a list of booleans for each path with cache reuse when possible.
+
+        Falls back to ``os.path.exists`` per file and populates the parent
+        :class:`BulkPageLayout` cache so the next call within the TTL window
+        is a dict lookup instead of a stat syscall per image.
+        """
+        if not paths:
+            return []
+        parent = self.parent_widget
+        get_cached = getattr(parent, "get_cached_file_exists", None)
+        set_cached = getattr(parent, "set_cached_file_exists", None)
+        if self.batch_id is not None and get_cached is not None and set_cached is not None:
+            flags = get_cached(self.batch_id, paths)
+            if flags is not None:
+                return flags
+            flags = [os.path.exists(p) for p in paths]
+            set_cached(self.batch_id, flags)
+            return flags
+        return [os.path.exists(p) for p in paths]
 
     def update_sequential_number(self, new_number):
         """Memperbarui nomor urut batch yang ditampilkan di UI."""
@@ -409,7 +427,8 @@ class CombinedPanel(QWidget):
                 if self.batch_id is not None
                 else []
             )
-        self.pending_thumbnail_paths = [p for p in raw_paths if os.path.exists(p)]
+        exists_flags = self._exists_flags(raw_paths)
+        self.pending_thumbnail_paths = [p for p, ok in zip(raw_paths, exists_flags) if ok]
         self.total_images = len(self.pending_thumbnail_paths)
         self.thumbnails_loaded = 0
         self.active_thumbnail_loaders = 0
@@ -1120,7 +1139,8 @@ class CombinedPanel(QWidget):
         try:
             raw_paths = self.database_manager.get_images_by_batch(self.batch_id)
             # Validasi cepat keberadaan file fisik di disk
-            missing_paths = [p for p in raw_paths if not os.path.exists(p)]
+            exists_flags = self._exists_flags(raw_paths)
+            missing_paths = [p for p, ok in zip(raw_paths, exists_flags) if not ok]
             if missing_paths:
                 self.database_manager.batch_process_delete_selected_images(
                     self.batch_id, missing_paths
@@ -1375,11 +1395,8 @@ class CombinedPanel(QWidget):
         # --- Single Source of Truth key mapping using config.py ---
         self.label_to_key_map = {
             language_config.PARAMETER_BATCH_ALIGNMENT: config.KEY_CHECKBOX_ALIGN,
-            language_config.PARAMETER_BATCH_ALIGNMENT_TO_FOLDER: config.KEY_CHECKBOX_SAVE_ALIGN_FOLDER,
             language_config.PARAMETER_BATCH_DENOISING: config.KEY_CHECKBOX_DENOISING,
             language_config.PARAMETER_BATCH_SUPER_RESOLUTION: config.KEY_CHECKBOX_SUPER_RES,
-            language_config.PARAMETER_BATCH_CROP_EDGE: config.KEY_CHECKBOX_CROP_EDGES,
-            language_config.PARAMETER_BATCH_KEEP_EDGE: config.KEY_CHECKBOX_KEEP_EDGES,
         }
 
         # Gunakan keys dari map untuk iterasi agar konsisten

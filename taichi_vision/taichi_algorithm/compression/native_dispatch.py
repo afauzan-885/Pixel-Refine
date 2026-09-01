@@ -581,6 +581,33 @@ class NativeAOTEngine:
             )
         return token
 
+    def allocate_buffer(self, nbytes: int) -> int:
+        """Allocate a persistent GPU buffer that the caller must free."""
+        with self._lock:
+            self._ensure_open()
+            return self._allocate(nbytes)
+
+    def free_buffer(self, handle: int) -> None:
+        """Free a previously allocated GPU buffer handle."""
+        with self._lock:
+            self._ensure_open()
+            try:
+                self._lib.free_gpu_buffer(self.runtime, handle)
+            except (OSError, ValueError):
+                pass
+
+    def write_buffer(self, handle: int, tensor: NativeTensor) -> None:
+        """Write NativeTensor data to an existing GPU buffer."""
+        with self._lock:
+            self._ensure_open()
+            self._write(handle, tensor)
+
+    def read_buffer(self, handle: int, tensor: NativeTensor) -> None:
+        """Read GPU buffer data into a NativeTensor."""
+        with self._lock:
+            self._ensure_open()
+            self._read(handle, tensor)
+
     def _write(self, handle: int, tensor: NativeTensor) -> None:
         view = tensor.buffer
         if view.readonly:
@@ -600,7 +627,36 @@ class NativeAOTEngine:
             self.runtime, handle, ctypes.cast(holder, ctypes.c_void_p), view.nbytes
         )
 
-    def run_native_graph(self, request: NativeGraphRequest) -> Any:
+    def run_native_graph(
+        self,
+        request: NativeGraphRequest,
+        *,
+        input_handles: Optional[Sequence[int]] = None,
+        output_handles: Optional[Sequence[int]] = None,
+        free_inputs: bool = True,
+        free_outputs: bool = True,
+        sync: bool = True,
+    ) -> Any:
+        """Run a native AOT graph with optional persistent GPU buffers.
+
+        When ``input_handles`` and ``output_handles`` are provided, the method
+        reuses pre-allocated GPU buffers instead of allocating/freeing per call.
+        This enables GPU-resident pipeline chaining: output handles from one
+        graph can be passed as input handles to the next, eliminating all
+        intermediate CPU readbacks.
+
+        Args:
+            request: Graph request describing the graph to run.
+            input_handles: Pre-allocated GPU buffer handles for inputs.
+                If None, buffers are allocated and written from request.inputs.
+            output_handles: Pre-allocated GPU buffer handles for outputs.
+                If None, buffers are allocated and results are read back.
+            free_inputs: If True and input_handles was allocated internally,
+                free the input handles after the call.
+            free_outputs: If True and output_handles was allocated internally,
+                free the output handles and read back results.
+            sync: If True, synchronize the runtime after dispatch.
+        """
         if not isinstance(request, NativeGraphRequest):
             raise NativeDispatchContractError("request must be a NativeGraphRequest")
         if request.backend is not None and _native_backend_name(request.backend) != self.backend:
@@ -610,23 +666,24 @@ class NativeAOTEngine:
         with self._lock:
             self._ensure_open()
             module_ptr = self.load_module(request.module_name)
-            handles: list[int] = []
-            output_handles: list[int] = []
-            try:
-                for tensor in request.inputs:
-                    handle = self._allocate(tensor.nbytes)
-                    handles.append(handle)
-                    self._write(handle, tensor)
-                for tensor in request.outputs:
-                    handle = self._allocate(tensor.nbytes)
-                    handles.append(handle)
-                    output_handles.append(handle)
 
+            owns_inputs = input_handles is None
+            owns_outputs = output_handles is None
+
+            if owns_inputs:
+                input_handles = [self._allocate(t.nbytes) for t in request.inputs]
+                for handle, tensor in zip(input_handles, request.inputs):
+                    self._write(handle, tensor)
+            if owns_outputs:
+                output_handles = [self._allocate(t.nbytes) for t in request.outputs]
+
+            handles: list[int] = list(input_handles) + list(output_handles)
+            try:
                 names: list[bytes] = []
                 total_args = len(request.inputs) + len(request.outputs) + len(request.scalars)
                 args = (_NativeDynamicArg * total_args)()
                 index = 0
-                for name, tensor, handle in zip(request.input_names, request.inputs, handles[: len(request.inputs)]):
+                for name, tensor, handle in zip(request.input_names, request.inputs, list(input_handles)):
                     encoded = name.encode("utf-8")
                     names.append(encoded)
                     self._fill_tensor_arg(args[index], encoded, tensor, handle)
@@ -635,7 +692,7 @@ class NativeAOTEngine:
                 for output_index, (name, tensor) in enumerate(zip(request.output_names, request.outputs)):
                     encoded = name.encode("utf-8")
                     names.append(encoded)
-                    self._fill_tensor_arg(args[index], encoded, tensor, handles[output_offset + output_index])
+                    self._fill_tensor_arg(args[index], encoded, tensor, output_handles[output_index])
                     index += 1
                 for name, value in request.scalars.items():
                     encoded = name.encode("utf-8")
@@ -651,21 +708,27 @@ class NativeAOTEngine:
                     args,
                     total_args,
                 )
-                self._lib.sync_runtime(self.runtime)
+                if sync:
+                    self._lib.sync_runtime(self.runtime)
                 error = self.last_error()
                 if error:
                     raise NativeDispatchError(
                         f"native graph {request.graph_name!r} failed: {error}"
                     )
-                for handle, tensor in zip(output_handles, request.outputs):
-                    self._read(handle, tensor)
+                # Only read back outputs when we own the handles
+                if owns_outputs:
+                    for handle, tensor in zip(output_handles, request.outputs):
+                        self._read(handle, tensor)
             finally:
                 if getattr(self, "runtime", None):
                     for handle in handles:
-                        try:
-                            self._lib.free_gpu_buffer(self.runtime, handle)
-                        except (OSError, ValueError):
-                            pass
+                        if (owns_inputs and handle in input_handles) or (owns_outputs and handle in output_handles):
+                            try:
+                                self._lib.free_gpu_buffer(self.runtime, handle)
+                            except (OSError, ValueError):
+                                pass
+            if not owns_outputs:
+                return output_handles
             if len(request.outputs) == 1:
                 return request.outputs[0]
             return request.outputs

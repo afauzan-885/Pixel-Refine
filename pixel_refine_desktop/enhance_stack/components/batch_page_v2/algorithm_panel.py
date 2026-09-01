@@ -342,74 +342,23 @@ class AlgorithmPanel(QWidget, SyncMixin):
                 continue  # Widget might be deleted
 
     def _on_progress_update(self, percent, message):
-        # Determine active category name based on settings
-        settings = self.logic.get_settings()
-        active_stages = []
-        if settings.get("alignment") and settings.get("alignment") != "No Alignment":
-            active_stages.append("alignment")
-        if settings.get("denoising") and settings.get("denoising") != "No Denoising":
-            active_stages.append("denoising")
-        if settings.get("super_resolution") and settings.get("super_resolution") != "No Super Resolution":
-            active_stages.append("super_resolution")
-            
-        total_stages = len(active_stages) if active_stages else 1
-
-        # We can track the current stage index
-        current_stage_idx = 0
-        display_msg = "Memproses"
-        stage_percent = percent
-
-        if "||" in message:
-            # Format: message||description
-            parts = message.split("||")
-            total_img_str = parts[0]
-            desc_text = parts[1] if len(parts) > 1 else ""
-            
-            # Since this is alignment:
-            current_stage_idx = active_stages.index("alignment") if "alignment" in active_stages else 0
-            
-            try:
-                total_imgs = int(total_img_str)
-                completed_imgs = percent
-                stage_percent = int((completed_imgs / total_imgs) * 100)
-                display_msg = f"Menyelaraskan gambar {completed_imgs}/{total_imgs}"
-            except Exception:
-                display_msg = desc_text if desc_text else "Menyelaraskan gambar"
+        # The backend pipelines emit a true normalized 0-100% progress
+        # formatted with dual UI/Console tokens: "ui_msg||console_msg" (or plain string).
+        actual_percent = max(0, min(100, int(percent)))
+        
+        raw_msg = str(message or "Memproses...").strip()
+        if "||" in raw_msg:
+            parts = raw_msg.split("||")
+            ui_msg = parts[0].strip() if parts[0].strip() else "Memproses..."
         else:
-            # Determine stage based on message text
-            if "super-resolution" in message.lower() or "super" in message.lower():
-                current_stage_idx = active_stages.index("super_resolution") if "super_resolution" in active_stages else 0
-                display_msg = "Super resolusi"
-            else:
-                current_stage_idx = active_stages.index("denoising") if "denoising" in active_stages else 0
-                display_msg = "Mengurangi noise gambar"
-
-            # Parse processed tiles from tile message if possible to show e.g. "Denoising 3/4"
-            # format: "Merging tile 73354/103788..." or "Processing super-resolution tile 5/10..."
-            import re
-            tile_match = re.search(r"(\d+)/(\d+)", message)
-            if tile_match:
-                # We show the progress of tiles
-                display_msg = f"{display_msg} (tile {tile_match.group(1)}/{tile_match.group(2)})"
-            else:
-                # Fallback to image counts
-                total_imgs = 0
-                if hasattr(self, "display_panel") and self.display_panel and hasattr(self.display_panel, "logic") and self.display_panel.logic.current_images:
-                    total_imgs = len(self.display_panel.logic.current_images)
-                if total_imgs > 0:
-                    display_msg = f"{display_msg} {total_imgs}/{total_imgs}"
-
-        # Global percentage calculation
-        stage_percent = max(0, min(100, stage_percent))
-        actual_percent = int((current_stage_idx * 100 + stage_percent) / total_stages)
-        actual_percent = max(0, min(100, actual_percent))
+            ui_msg = raw_msg
 
         self.show_progress(actual_percent)
         
         if hasattr(self, "display_panel") and self.display_panel and hasattr(self.display_panel, "toast"):
             from resources.animations.toast.toast_manager import ToastPosition
             self.display_panel.toast.show_progress(
-                message=f"{display_msg} ({actual_percent}%)",
+                message=f"{ui_msg} ({actual_percent}%)",
                 category="process_loading",
                 position=ToastPosition.BOTTOM_LEFT,
                 priority="HIGH"

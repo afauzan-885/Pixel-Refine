@@ -147,6 +147,20 @@ def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
         layout_instance.batch_panel
     )
 
+    # Keep the grid cache fresh: when the controller reports that a
+    # batch's image set changed, drop the corresponding cache entry so
+    # the next switch rebuilds the grid with the new images.
+    display_panel = layout_instance.workspace_panel.display_panel
+    layout_instance.controller.images_added.connect(
+        lambda bid, _count: display_panel.invalidate_grid_cache(bid)
+    )
+    layout_instance.controller.images_removed.connect(
+        lambda bid, _count: display_panel.invalidate_grid_cache(bid)
+    )
+    layout_instance.controller.batch_deleted.connect(
+        lambda bid: display_panel.invalidate_grid_cache(bid)
+    )
+
     # Connect Interactions
     # Saat batch dipilih di panel batch -> load di workspace
     layout_instance.batch_panel.batch_selected.connect(
@@ -221,6 +235,8 @@ def _load_batch_content(layout_instance, batch_id):
     # We no longer cancel batch_import here to allow background completion
     # ProcessManager.instance().cancel_context("batch_import")
 
+    # ``BatchPageController.get_batch`` is LRU-cached (Edit 3) so a
+    # repeat visit costs a dict lookup, not a SQLite round-trip.
     batch = layout_instance.controller.get_batch(batch_id)
     if batch:
         layout_instance.workspace_panel.load_batch(batch_id, batch.images, batch.name)

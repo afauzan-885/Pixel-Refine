@@ -15,6 +15,8 @@ from typing import Optional
 
 import numpy as np
 
+from ._common_helpers import frame_info as _frame_info
+
 from config import GENERAL_SETTINGS_FILE
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     extract_exif,
@@ -36,17 +38,55 @@ def _lang():
     return language_config
 
 
-def _progress(callback, percent, message):
+def _progress(callback, percent, message="", **kwargs):
     if callback:
-        callback(int(percent), str(message))
+        if kwargs:
+            callback(int(percent), message=message, **kwargs)
+        else:
+            callback(int(percent), str(message))
 
 
-def _frame_info(frame):
-    if frame is None:
-        return "None"
-    shape = getattr(frame, "shape", None)
-    dtype = getattr(frame, "dtype", None)
-    return f"shape={shape}, dtype={dtype}"
+# ---------------------------------------------------------------------------
+# Progress stage constants
+# ---------------------------------------------------------------------------
+# Every progress callback in MFDenoiser + resident_pipeline must report a
+# monotonically non-decreasing percentage from these bands so the user
+# sees a clean, ordered, accurate progress bar instead of jumps.
+#
+#   0  – 2   pipeline start (caller MFDenoiser)
+#   2  – 5   memuat gambar (resident_pipeline phase 1)
+#   5  – 25  alignment (resident_pipeline phase 2-4, plus per-frame updates)
+#  25  – 90  weightmap + merging (resident_pipeline frame loop)
+#  90  – 95  finalisasi GPU-resident fusion
+#  95  – 100 save result + done
+# ---------------------------------------------------------------------------
+PROGRESS_PIPELINE_START = 0
+PROGRESS_LOAD_IMAGES_MIN = 2
+PROGRESS_LOAD_IMAGES_MAX = 5
+PROGRESS_ALIGN_MIN = 5
+PROGRESS_ALIGN_MAX = 25
+PROGRESS_MERGE_MIN = 25
+PROGRESS_MERGE_MAX = 90
+PROGRESS_FINALIZE_MIN = 90
+PROGRESS_FINALIZE_MAX = 95
+PROGRESS_SAVE = 96
+PROGRESS_DONE = 100
+
+
+def _align_percent(i: int, total: int) -> int:
+    """Map a frame index *i* / *total* (alignment loop) to the 5-25 band."""
+    if total <= 0:
+        return PROGRESS_ALIGN_MIN
+    ratio = max(0.0, min(1.0, i / total))
+    return int(PROGRESS_ALIGN_MIN + ratio * (PROGRESS_ALIGN_MAX - PROGRESS_ALIGN_MIN))
+
+
+def _merge_percent(i: int, total: int) -> int:
+    """Map a frame index *i* / *total* (merge / fusion loop) to the 25-90 band."""
+    if total <= 0:
+        return PROGRESS_MERGE_MIN
+    ratio = max(0.0, min(1.0, i / total))
+    return int(PROGRESS_MERGE_MIN + ratio * (PROGRESS_MERGE_MAX - PROGRESS_MERGE_MIN))
 
 
 class NoAlignmentAlgorithm:
@@ -76,6 +116,9 @@ def get_alignment_registry():
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
         LightGlueAlgorithm,
     )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.OFB import (
+        OFBAlgorithm,
+    )
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
         ORBAlgorithm,
     )
@@ -97,6 +140,7 @@ def get_alignment_registry():
 
     algorithms = [
         NoAlignmentAlgorithm(),
+        OFBAlgorithm(),
         ORBAlgorithm(),
         AKAZEAlgorithm(),
         LightGlueAlgorithm(),
@@ -145,6 +189,7 @@ def get_algorithm_options(category):
         }
         ordered_names = [
             "No Alignment",
+            "OFB",
             "ORB",
             "AKAZE",
             "Light Glue",
@@ -162,18 +207,8 @@ def get_algorithm_options(category):
 
 
 def get_algorithm_names(category):
-    if category == "alignment":
-        return [
-            "No Alignment",
-            "ORB",
-            "AKAZE",
-            "Light Glue",
-            "Farneback",
-            "Lucas Kanade",
-            "Block Matching GPU",
-            "RAFT",
-        ]
-    return list(get_available_algorithms(category).keys())
+    """Derive the display order from :func:`get_algorithm_options`."""
+    return [name for name, _ in get_algorithm_options(category)]
 
 
 def _normalize_algorithm_name(name):
@@ -191,7 +226,8 @@ def _resolve_algorithm(registry, requested_name, fallback_name):
 
     # Common aliases
     aliases = {
-        "orb": "ORB",
+        "ofb": "OFB",
+        "orb": "OFB",
         "akaze": "AKAZE",
         "light glue": "Light Glue",
         "lightglue": "Light Glue",
@@ -413,7 +449,15 @@ class MFDenoiserAlgorithm:
         return ctx.batch_plan
 
     def align_process(self, ctx, batch_plan=None):
-        """Alignment stage coordinator."""
+        """Alignment stage coordinator.
+
+        The actual alignment work and per-frame progress callbacks live
+        inside ``resident_pipeline.run_gpu_resident_pipeline`` (which
+        already reports percentages in the 5-25 band). This method
+        only records the selected algorithm on the context and emits a
+        single announcement on the same band so the user immediately
+        sees *which* alignment algorithm is about to run.
+        """
         alignment_name = ctx.params.get("alignment_plan", "No Alignment")
         registry = get_alignment_registry()
         algorithm = _resolve_algorithm(registry, alignment_name, "No Alignment")
@@ -425,7 +469,6 @@ class MFDenoiserAlgorithm:
             f"effective={algorithm.NAME} resolved={algorithm.NAME} "
             f"input_frames={len(ctx.frames)} batch_plan={batch_plan}"
         )
-        _progress(ctx.update_progress, 25, f"Running alignment: {algorithm.NAME}")
         print(
             f"[MFDenoiser][Align] Streaming GPU-Resident pipeline active (alignment={algorithm.NAME}); "
             "bypassing legacy HDF5 alignment cache."
@@ -433,7 +476,11 @@ class MFDenoiserAlgorithm:
         return ctx
 
     def merge_process(self, ctx, batch_plan=None):
-        """Execute the selected denoising/merging algorithm."""
+        """Execute the selected denoising/merging algorithm.
+
+        The heavy per-frame progress is emitted by
+        ``resident_pipeline.run_gpu_resident_pipeline`` (band 5-90).
+        """
         denoising_name = ctx.params.get("merge_plan", "No Denoising")
         registry = get_denoising_registry()
         algorithm = _resolve_algorithm(registry, denoising_name, "No Denoising")
@@ -441,7 +488,6 @@ class MFDenoiserAlgorithm:
             f"[MFDenoiser][Merge] selected={denoising_name} resolved={algorithm.NAME} "
             f"input_frames={len(ctx.aligned_frames or ctx.frames)} batch_plan={batch_plan}"
         )
-        _progress(ctx.update_progress, 60, f"Running denoising: {algorithm.NAME}")
 
         if algorithm.NAME == "No Denoising":
             if ctx.image_paths:
@@ -490,11 +536,21 @@ class MFDenoiserAlgorithm:
                 reference_image_path=ctx.image_paths[0] if ctx.image_paths else None,
             )
 
+        # Apply tone mapping only on RAW input (linear sensor data).
+        # For standard non-RAW images (JPG, PNG, sRGB TIFF), tone mapping is already baked in,
+        # so we disable tone mapping to prevent double tone mapping (oversaturation / blown highlights).
+        is_raw_input = False
+        if ctx.image_paths:
+            _, ext = os.path.splitext(ctx.image_paths[0])
+            is_raw_input = ext.lower() in (
+                ".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2", ".pef", ".raf"
+            )
+
         save_image(
             ctx.result_image,
             output_path,
             reference_image_path=ctx.image_paths[0] if ctx.image_paths else None,
-            apply_tonemapping=True,
+            apply_tonemapping=is_raw_input,
         )
         return output_path
 
@@ -549,18 +605,35 @@ class MFDenoiserAlgorithm:
             f"output_suffix={ctx.params.get('output_suffix')}"
         )
 
+        # Stage 0: pipeline start
+        _progress(
+            update_progress,
+            PROGRESS_PIPELINE_START,
+            ui="Memulai proses...",
+            console=f"MFDenoiser start: alignment={ctx.params.get('alignment_plan')}, denoising={ctx.params.get('merge_plan')}",
+        )
+
         ctx = self.prepare_input_paths(ctx)
         if not ctx.total_images:
             _progress(
                 update_progress,
-                100,
-                getattr(
-                    _lang(), "NO_IMAGE_PATH_PROCESSED_IMAGE", "No image to process."
-                ),
+                PROGRESS_DONE,
+                ui="Tidak ada gambar.",
+                console=getattr(_lang(), "NO_IMAGE_PATH_PROCESSED_IMAGE", "No image to process."),
             )
             return None
         if stop_requested and stop_requested():
             return None
+
+        # Stage 1: announce that we are about to enumerate the
+        # comparison batch plan. Real image loading happens inside the
+        # GPU-resident pipeline (band 2-5).
+        _progress(
+            update_progress,
+            PROGRESS_LOAD_IMAGES_MIN,
+            ui="Memuat daftar gambar...",
+            console=f"Memuat {ctx.total_images} gambar untuk pemrosesan batch...",
+        )
 
         batch_plan = self.build_batch_plan(ctx)
         ctx = self.align_process(ctx, batch_plan=batch_plan)
@@ -572,11 +645,24 @@ class MFDenoiserAlgorithm:
             print("[MFDenoiser][Pipeline] Execution aborted (cancelled or no output).")
             return None
 
-        _progress(update_progress, 95, "Saving MFDenoiser result...")
+        # Stage 5: save the merged result. We move the bar to the
+        # ``PROGRESS_SAVE`` slot (96%) and let ``save_process`` complete
+        # before the final 100% announcement below.
+        _progress(
+            update_progress,
+            PROGRESS_SAVE,
+            ui="Menyimpan gambar...",
+            console="Menyimpan hasil rekonstruksi MFDenoiser...",
+        )
         output_path = self.save_process(ctx)
         self._report_compute_runtime(ctx)
         print(f"[MFDenoiser][Pipeline] finished output_path={output_path}")
-        _progress(update_progress, 100, "MFDenoiser pipeline finished.")
+        _progress(
+            update_progress,
+            PROGRESS_DONE,
+            ui="Selesai.",
+            console=f"MFDenoiser selesai: {output_path}",
+        )
         return output_path
 
 

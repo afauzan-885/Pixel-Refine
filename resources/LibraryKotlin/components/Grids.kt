@@ -27,10 +27,10 @@ import org.pixelrefine.genericui.theme.LocalGenericTheme
  */
 @Composable
 fun GridContainer(
+    itemsCount: Int,
     columns: Int = 2,
     spacing: Dp = 10.dp,
     modifier: Modifier = Modifier,
-    itemsCount: Int,
     itemContent: @Composable (Int) -> Unit,
 ) {
     val rows = (itemsCount + columns - 1) / columns
@@ -104,9 +104,9 @@ fun Gallery(
     imageRenderer: @Composable (Int) -> Unit,
 ) {
     GridContainer(
+        itemsCount = imagesCount,
         columns = columns,
         spacing = spacing,
-        itemsCount = imagesCount,
         modifier = modifier,
         itemContent = imageRenderer,
     )
@@ -124,9 +124,9 @@ fun ThumbnailGrid(
     thumbnailRenderer: @Composable (Int) -> Unit,
 ) {
     GridContainer(
+        itemsCount = itemsCount,
         columns = columns,
         spacing = spacing,
-        itemsCount = itemsCount,
         modifier = modifier,
         itemContent = thumbnailRenderer,
     )

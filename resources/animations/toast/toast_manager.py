@@ -31,6 +31,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QFont, QColor
 from resources.animations.animation_manager import (
     WidgetLifecycleAnimator,
+    WidthAnimator,
 )
 
 
@@ -162,14 +163,29 @@ class ToastWidget(QFrame):
         content_layout.addWidget(self.label, 1)
         wrapper_layout.addWidget(self.content_frame)
 
-        # self.setFixedSize(self.sizeHint()) # Initial size
-
     def text(self) -> str:
         return self.label.text()
 
     def setText(self, text: str):
         self.label.setText(text)
+        self.label.adjustSize()
+        if self.content_frame.layout():
+            self.content_frame.layout().invalidate()
+            self.content_frame.layout().activate()
+        self.content_frame.adjustSize()
+        if self.layout():
+            self.layout().invalidate()
+            self.layout().activate()
         self.adjustSize()
+
+    def sizeHint(self) -> QSize:
+        # Compute exact bounding size using QFontMetrics to ensure 0-tick synchronous precision
+        font_metrics = self.label.fontMetrics()
+        text_rect = font_metrics.boundingRect(self.label.text())
+        # Width: text width + accent line (4) + spacing (15) + content right margin (10) + wrapper margins (20+20) + safety padding (12)
+        exact_w = text_rect.width() + 4 + 15 + 10 + 40 + 12
+        exact_h = max(38, text_rect.height() + 20)
+        return QSize(exact_w, exact_h)
 
     # Blinking support (simplified)
     def set_blinking(self, active: bool):
@@ -186,6 +202,7 @@ class ToastManager(QObject):
         self.max_toasts = 5
         self.spacing = 5
         self.lifecycle_animator = WidgetLifecycleAnimator(self)
+        self.width_animator = WidthAnimator(self)
         if parent:
             parent.installEventFilter(self)
 
@@ -279,25 +296,34 @@ class ToastManager(QObject):
                     child.hide()
                     child.deleteLater()
 
-            # 2. CAPTURE GEOMETRY (For Smooth Resize)
-            old_geo = target_toast.geometry()
+            # NOTE: User requested to DISABLE visible snapshot overlay to
+            # prevent ghosting ("overlaynya tidak terlihat agar tidak
+            # menimbulkan ghosting"). The previous implementation also
+            # froze the geometry to the OLD size and animated the
+            # resize, which made the toast visually lag behind the new
+            # text for 400 ms — long enough for the new content to
+            # appear clipped or pressed against the old frame.
+            #
+            # Fix: update the text, let adjustSize() recompute the
+            # sizeHint, then reposition the whole stack without
+            # animation. The new geometry is applied on the very next
+            # paint, so the toast is sized to its new content
+            # immediately.
 
-            # NOTE: User requested to DISABLE visible snapshot overlay to prevent ghosting.
-            # "overlaynya tidak terlihat agar tidak menimbulkan ghosting"
-            # We skip creating the SnapshotOverlay but keep the geometry freeze-and-animate
-            # so the box still resizes smoothly (just updated text appears instantly).
-
-            # 3. Update Content & Recalculate SizeHint
+            # 2. Update Content & Recalculate SizeHint
             target_toast.setText(message)
             target_toast.adjustSize()
 
-            # 4. Freeze Visual State (paksakan tetap di ukuran lama utk awal animasi)
-            target_toast.setGeometry(old_geo)
+            # 3. Force the inner content_frame to relayout so the
+            # label's new width is reflected in the sizeHint we read
+            # during reposition.
+            inner_layout = target_toast.layout()
+            if inner_layout is not None:
+                inner_layout.invalidate()
+                inner_layout.activate()
 
-            # 5. Trigger Global Reposition (animates resize/move)
-            self._reposition_toasts()
-
-            # No fade animation needed since overlay is gone.
+            # 4. Reposition and smoothly slide the width/geometry (horizontal slide transition)
+            self._reposition_toasts(animate=True, duration=220)
         else:
             self.show_message(
                 message,
@@ -367,10 +393,9 @@ class ToastManager(QObject):
             for t in self._active_toasts:
                 if t.category == category:
                     t.setText(message)
-                    # Reset timer to extend duration? Or keep as is?
-                    # Generally new message = reset duration.
                     if t in self._timers:
                         self._timers[t].start(duration)
+                    self._reposition_toasts(animate=False)
                     return
 
         # 1. Create Widget
@@ -434,8 +459,8 @@ class ToastManager(QObject):
         # Shift sisanya
         self._reposition_toasts()
 
-    def _reposition_toasts(self, animate: bool = True):
-        """Mengatur ulang posisi semua toast berdasarkan urutan di list."""
+    def _reposition_toasts(self, animate: bool = True, duration: int = 240):
+        """Mengatur ulang posisi dan ukuran semua toast berdasarkan urutan di list."""
         parent = self.parent_widget
         if not parent:
             return
@@ -453,8 +478,7 @@ class ToastManager(QObject):
 
         # Iterate sorted list (Index 0 = Bottom-most / Prime)
         for i, toast in enumerate(self._active_toasts):
-            # FIX TRUNCATION: Use sizeHint() because actual width() might be
-            # frozen to old size by geometry animation logic in show_progress.
+            # Read exact target dimensions
             hint = toast.sizeHint()
             t_width = hint.width()
             t_height = hint.height()
@@ -473,19 +497,6 @@ class ToastManager(QObject):
             target_geo = QRect(int(target_x), int(target_y), t_width, t_height)
 
             if not animate:
-                # Stop any existing geometry animations to avoid conflicts
-                for attr_name in list(toast.__dict__.keys()):
-                    if attr_name.startswith("_pos_anim_"):
-                        anim = getattr(toast, attr_name)
-                        if anim:
-                            try:
-                                anim.stop()
-                            except Exception:
-                                pass
-                        try:
-                            delattr(toast, attr_name)
-                        except AttributeError:
-                            pass
                 toast.setGeometry(target_geo)
                 continue
 
@@ -494,23 +505,22 @@ class ToastManager(QObject):
                 toast.setGeometry(int(target_x), int(target_y) + 50, t_width, t_height)
                 toast.setWindowOpacity(0)
 
-            # Create animation for smooth stack shift & resize
-            anim = QPropertyAnimation(toast, b"geometry", self)
-            anim.setDuration(400)
-            anim.setStartValue(toast.geometry())
-            anim.setEndValue(target_geo)
-            # Menggunakan Curve OutExpo seperti di slide.py
-            anim.setEasingCurve(QEasingCurve.Type.OutExpo)
+            # 1. Update position Y/X
+            toast.move(int(target_x), int(target_y))
+            toast.setFixedHeight(t_height)
 
-            # Animasi Opacity untuk entry
+            # 2. Delegate horizontal width expansion/contraction to WidthAnimator from AnimationManager
+            self.width_animator.animate_width(
+                toast,
+                end_width=t_width,
+                duration=duration,
+                curve=QEasingCurve.Type.OutCubic,
+            )
+
+            # 3. Entry Opacity Animation if newly showing
             if toast.windowOpacity() == 0:
                 anim_op = QPropertyAnimation(toast, b"windowOpacity", self)
-                anim_op.setDuration(300)
+                anim_op.setDuration(duration)
                 anim_op.setStartValue(0.0)
                 anim_op.setEndValue(1.0)
                 anim_op.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
-
-            anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
-
-            # Keep ref to prevent GC if needed, though parent ownership helps
-            setattr(toast, f"_pos_anim_{time.time()}", anim)

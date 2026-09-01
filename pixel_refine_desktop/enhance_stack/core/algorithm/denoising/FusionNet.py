@@ -1,9 +1,6 @@
 import gc
 import os
-import threading
 from pathlib import Path
-
-import h5py
 import numpy as np
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.flownet_inference import (
@@ -131,13 +128,10 @@ class FusionNetDenoisingAlgorithm:
                 DEFAULT_WEIGHTNET_ONNX, runtime="dml", patch_size=tile_size
             )
 
-            alignment_plan = (
-                getattr(ctx, "alignment_selection_name", None)
-                or getattr(ctx, "params", {}).get("alignment_plan", "FlowNet")
-            )
-            alignment_config = getattr(ctx, "params", {}).get(
-                "alignment_params", {}
-            )
+            alignment_plan = getattr(ctx, "alignment_selection_name", None) or getattr(
+                ctx, "params", {}
+            ).get("alignment_plan", "FlowNet")
+            alignment_config = getattr(ctx, "params", {}).get("alignment_params", {})
             batch_queue = int(
                 getattr(ctx, "params", {}).get(
                     "batch_queue", getattr(ctx, "params", {}).get("batch_size", 3)

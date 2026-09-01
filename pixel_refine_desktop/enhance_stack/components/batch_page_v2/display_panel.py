@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 import shutil
+from collections import OrderedDict
 
 from pixel_refine_desktop.ui.views.settings.views.settings_view import SettingsView
 
@@ -116,235 +117,6 @@ from config import SUPPORTED_FORMATS
 from .multiple_batch_delete_widget import MultipleBatchDeleteWidget
 from resources.GenericUILibrary import live_update
 import numpy as np
-
-
-class BurstCacheWorker(QThread):
-    """
-    Background worker yang men-decode seluruh gambar dalam burst sequence
-    secara paralel dan mengirimnya ke playback_cache satu per satu.
-
-    Strategi decoding:
-    - JPEG / PNG / TIFF : ThreadPoolExecutor (full CPU paralel, bebas lock)
-    - RAW / DNG         : serial + GPU pipeline — GPU (taichi_lock) hanya menahan
-                          satu frame sekaligus, tapi I/O rawpy read frame
-                          berikutnya bisa overlap di thread lain (dibatasi maks 2
-                          via RawDemosaicThrottle agar tidak menghantam VRAM).
-
-    Semua hasil yang sudah siap di-emit satu per satu via image_cached signal
-    sehingga UI (playback_cache) langsung terisi secara streaming tanpa harus
-    menunggu seluruh batch selesai.
-    """
-
-    image_cached = Signal(str, QImage)  # (path, q_image)
-
-    # Jumlah thread CPU paralel untuk format non-RAW
-    _CPU_WORKERS = max(2, min(6, (os.cpu_count() or 4)))
-
-    def __init__(self, paths, parent=None):
-        super().__init__(parent)
-        self.paths = paths
-        self._is_cancelled = False
-        self._lock = __import__("threading").Lock()
-
-    # ------------------------------------------------------------------
-    # Internal helpers (called from worker threads, must be thread-safe)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _decode_non_raw(path: str):
-        """Decode JPEG/PNG/TIFF → RGB uint8 numpy array (CPU only, fully parallel)."""
-        from PIL import Image, ImageOps
-        import cv2 as _cv2
-
-        ext = os.path.splitext(path)[1].lower()
-        with Image.open(path) as img:
-            img = ImageOps.exif_transpose(img)
-            if img.mode not in ("RGB",):
-                img = img.convert("RGB")
-            arr = np.array(img)
-        h, w = arr.shape[:2]
-        # half-res for consistency with RAW preview quality
-        arr = _cv2.resize(arr, (w // 2, h // 2), interpolation=_cv2.INTER_AREA)
-        return arr  # RGB uint8
-
-    @staticmethod
-    def _decode_raw(path: str):
-        """Decode RAW/DNG → RGB uint8 numpy array using Taichi GPU (serial, locked)."""
-        from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
-            load_raw_as_8bit_rgb_half_res,
-        )
-
-        return load_raw_as_8bit_rgb_half_res(path)  # RGB uint8
-
-    @staticmethod
-    def _arr_to_qimage(rgb_arr: np.ndarray) -> QImage:
-        """Convert RGB uint8 numpy array → QImage (safe copy)."""
-        h, w = rgb_arr.shape[:2]
-        bpl = 3 * w
-        return QImage(
-            rgb_arr.data.tobytes(), w, h, bpl, QImage.Format.Format_RGB888
-        ).copy()
-
-    # ------------------------------------------------------------------
-    # QThread entry point
-    # ------------------------------------------------------------------
-
-    def run(self):
-        if not self.paths:
-            return
-
-        from config import SUPPORTED_FORMATS
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import rawpy
-
-        raw_exts = set(SUPPORTED_FORMATS.get("raw", []))
-        cpu_exts = (
-            set(SUPPORTED_FORMATS.get("jpg", []))
-            | set(SUPPORTED_FORMATS.get("png", []))
-            | set(SUPPORTED_FORMATS.get("tiff", []))
-        )
-
-        raw_paths = [
-            p for p in self.paths if os.path.splitext(p)[1].lower() in raw_exts
-        ]
-        cpu_paths = [
-            p for p in self.paths if os.path.splitext(p)[1].lower() in cpu_exts
-        ]
-
-        # ── Phase 1: CPU-parallel decode for JPEG/PNG/TIFF & Parallel Disk I/O for RAW ──
-        # Kita menggunakan ThreadPoolExecutor untuk membaca disk secara bersamaan di awal.
-        # Untuk RAW, kita hanya membaca (rawpy.imread) tanpa demosaic di thread pool.
-        loaded_raws = {}
-
-        def _load_raw_io(path):
-            try:
-                # Membaca file RAW ke memori RAM (Disk I/O 100% paralel di awal)
-                return path, rawpy.imread(path)
-            except Exception as e:
-                print(f"[BurstCacheWorker] RAW I/O read error {path}: {e}")
-                return path, None
-
-        with ThreadPoolExecutor(max_workers=self._CPU_WORKERS) as pool:
-            # Submit job loading non-raw dan RAW read
-            cpu_futures = {pool.submit(self._decode_non_raw, p): p for p in cpu_paths}
-            raw_futures = {pool.submit(_load_raw_io, p): p for p in raw_paths}
-
-            # Ambil hasil non-raw (JPEG/PNG) secara asinkron
-            for fut in as_completed(cpu_futures):
-                if self._is_cancelled:
-                    break
-                path = cpu_futures[fut]
-                try:
-                    arr = fut.result()
-                    if arr is not None:
-                        self.image_cached.emit(path, self._arr_to_qimage(arr))
-                except Exception as e:
-                    print(f"[BurstCacheWorker] CPU decode error {path}: {e}")
-
-            # Ambil hasil RAW read (rawpy objek di RAM)
-            for fut in as_completed(raw_futures):
-                if self._is_cancelled:
-                    break
-                path, raw_obj = fut.result()
-                if raw_obj is not None:
-                    loaded_raws[path] = raw_obj
-
-        # ── Phase 2: High-speed GPU Feed from RAM with Parallel 2-Workers ────
-        # Sekarang objek rawpy sudah menumpuk di RAM. Kita umpan ke GPU Taichi
-        # secara paralel (maksimal 2 paralel agar tidak overload VRAM).
-        # Kita memanfaatkan dynamic reuse buffer: GC/clear VRAM pool hanya dipicu
-        # jika terdeteksi perbedaan ukuran gambar (size mismatch) pada gambar berikutnya.
-        from taichi_vision import taichi_aot
-        from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
-            taichi_lock,
-        )
-        import gc
-
-        # Thread-safe tracker untuk melacak resolusi gambar terakhir yang sukses diproses
-        last_image_shape = None
-        shape_lock = __import__("threading").Lock()
-
-        def _process_single_raw(path, raw_obj):
-            nonlocal last_image_shape
-            try:
-                # Dapatkan metadata ukuran gambar secara cepat tanpa demosaic penuh
-                h, w = raw_obj.sizes.raw_height, raw_obj.sizes.raw_width
-                current_shape = (h, w)
-
-                # Cek apakah ada perubahan ukuran (size mismatch) dibanding gambar sebelumnya
-                trigger_cleanup = False
-                with shape_lock:
-                    if (
-                        last_image_shape is not None
-                        and last_image_shape != current_shape
-                    ):
-                        trigger_cleanup = True
-                    last_image_shape = current_shape
-
-                engine = getattr(taichi_aot, "engine", None)
-
-                # Jika ukuran berubah, bersihkan buffer lama di VRAM terlebih dahulu
-                if (
-                    trigger_cleanup
-                    and engine
-                    and hasattr(engine, "buffer_pool")
-                    and engine.buffer_pool
-                ):
-                    try:
-                        engine.buffer_pool.clear()
-                    except Exception:
-                        pass
-                    gc.collect()
-
-                with raw_obj:
-                    with taichi_lock:
-                        rgb_f32 = taichi_aot.demosaic(
-                            raw_obj, method="bilinear"
-                        )
-
-                    if rgb_f32 is not None:
-                        rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
-                        arr = np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
-                        q_img = self._arr_to_qimage(arr)
-                        self.image_cached.emit(path, q_img)
-                    else:
-                        print(
-                            f"[BurstCacheWorker] Taichi demosaic returned None for {path}"
-                        )
-            except Exception as e:
-                print(f"[BurstCacheWorker] GPU demosaic error {path}: {e}")
-
-        if raw_paths:
-            # Gunakan ThreadPoolExecutor kedua khusus untuk GPU dengan 2 workers
-            with ThreadPoolExecutor(max_workers=2) as gpu_pool:
-                gpu_futures = []
-                for path in raw_paths:
-                    if self._is_cancelled:
-                        break
-                    raw_obj = loaded_raws.get(path)
-                    if raw_obj is not None:
-                        gpu_futures.append(
-                            gpu_pool.submit(_process_single_raw, path, raw_obj)
-                        )
-
-                # Tunggu semua GPU task selesai
-                for fut in as_completed(gpu_futures):
-                    if self._is_cancelled:
-                        break
-                    fut.result()
-
-            # ── Final VRAM Cleanup di Akhir Batch ──
-            # Setelah seluruh batch RAW selesai, lepaskan semua cached buffer kembali ke sistem
-            try:
-                engine = getattr(taichi_aot, "engine", None)
-                if engine and hasattr(engine, "buffer_pool") and engine.buffer_pool:
-                    engine.buffer_pool.clear()
-            except Exception:
-                pass
-            gc.collect()
-
-    def cancel(self):
-        self._is_cancelled = True
 
 
 class BackgroundBatchPreloader(QThread):
@@ -495,12 +267,18 @@ class DisplayPanel(QWidget):
         self.current_batch_name = None
         self.all_cards = {}  # Map card_id -> ImageCard widget
 
+        # LRU cache of populated batches. Keyed by batch_id; each entry
+        # stores the visual_images list and a list of ImageCard widgets
+        # that can be re-attached to the grid without re-running the
+        # 30ms QTimer-based populate loop. Capped to 8 entries.
+        self._grid_cache: "OrderedDict[int, Tuple[list, list]]" = OrderedDict()
+        self._grid_cache_limit: int = 8
+
         # Restoring missing attributes
         self.current_preview_path = None
         self.current_results_map = {}
         self.zoom_states = {}
         self.playback_cache = {}
-        self.cache_worker = None
         self.toast = ToastManager(self)
         self.active_deletions = {}  # {batch_id: [paths]} for resume logic
         self.right_panel: Any = None
@@ -1200,6 +978,91 @@ class DisplayPanel(QWidget):
     # === 1. PUBLIC SLOTS UNTUK MEMUAT DATA ===
     # =========================================================================
 
+    def _touch_grid_cache(self, batch_id):
+        """Mark *batch_id* as most-recently-used in the grid cache and
+        enforce the LRU cap. Safe to call with an int or None.
+        """
+        if batch_id is None:
+            return
+        if batch_id in self._grid_cache:
+            self._grid_cache.move_to_end(batch_id)
+        while len(self._grid_cache) > self._grid_cache_limit:
+            self._grid_cache.popitem(last=False)
+
+    def invalidate_grid_cache(self, batch_id=None):
+        """Drop one batch_id (int) or the entire grid cache (None).
+
+        Called by ``BatchPageController`` signal handlers
+        (``images_added`` / ``images_removed``) and by
+        ``page_layout._load_batch_content`` when the controller delivers
+        a different visual_images list than the cached one.
+        """
+        if batch_id is None:
+            self._grid_cache.clear()
+        else:
+            self._grid_cache.pop(batch_id, None)
+
+    def _try_restore_from_grid_cache(self, batch_id, visual_images):
+        """If the grid cache has a valid entry for *batch_id* whose
+        visual_images is identical to the supplied list, re-attach the
+        cached card widgets to the grid container and return True. The
+        caller can then skip the ``QTimer``-based populate loop.
+
+        Returns False on miss so the caller falls back to the standard
+        populate path.
+        """
+        entry = self._grid_cache.get(batch_id)
+        if not entry:
+            return False
+        cached_images, cached_cards = entry
+        if cached_images is None or cached_cards is None:
+            return False
+        # Structural equality check on the visual_images list. Image
+        # objects use ``id`` (basename) so list comparison is cheap.
+        try:
+            if [getattr(img, "id", None) for img in cached_images] != [
+                getattr(img, "id", None) for img in visual_images
+            ]:
+                return False
+        except Exception:
+            return False
+        # Re-attach cached cards. GridContainer.add_item is idempotent
+        # for the same widget object; if cards were removed earlier we
+        # re-add them here.
+        try:
+            self.all_cards.clear()
+            for card in cached_cards:
+                if card is None:
+                    continue
+                card_id = card.property("card_id") or getattr(card, "_card_id", None)
+                if card_id is None:
+                    continue
+                self.all_cards[str(card_id)] = card
+                self.grid_container.add_item(card)
+            self._touch_grid_cache(batch_id)
+            self.grid_container.set_batch_update(False)
+            self.grid_manager._update_window()
+            return True
+        except Exception:
+            return False
+
+    def _store_grid_cache(self, batch_id, visual_images):
+        """Snapshot the current grid contents into the LRU cache.
+
+        Stores the visual_images list and a shallow copy of the
+        ``all_cards`` values so a later re-attach can re-use the
+        widgets. Skips when batch_id is None or no cards exist.
+        """
+        if batch_id is None or not self.all_cards:
+            return
+        try:
+            cached_cards = list(self.all_cards.values())
+            self._grid_cache[batch_id] = (list(visual_images), cached_cards)
+            self._touch_grid_cache(batch_id)
+        except Exception:
+            # Cache is best-effort; never fail the load path.
+            pass
+
     @Slot(int, list)
     def load_batch(self, batch_id, images, batch_name=None):
         """
@@ -1259,12 +1122,15 @@ class DisplayPanel(QWidget):
         self._update_header_title(count=self.total_image_count)
 
         # Show param overlay based on setting state (collapsed by default)
+        # Note: ``param_panel.update_settings_state`` is already invoked by
+        # the ``algorithm_settings_changed`` signal wired in
+        # ``page_layout.setup_main_layout`` (slot at index 1). The previous
+        # call here duplicated the work and scheduled an extra layout pass
+        # on every click. We only need to set the visual style here.
         if self.right_panel:
-            current_settings = self.right_panel.get_current_settings()
             self.param_panel.active_tab = None
             self.param_panel.set_expanded(False)
             self.param_panel._update_styles("transparent")
-            self.param_panel.update_settings_state(current_settings)
 
         # Check if batch is empty (visually)
         if not visual_images:
@@ -1288,8 +1154,20 @@ class DisplayPanel(QWidget):
         # Resume deletion simulation if there are pending deletions for this batch
         self.deletion_manager.resume_deletion_simulation(batch_id)
 
-        # Delegate incremental population to GridManager
-        self.grid_manager.populate_grid_incremental(visual_images)
+        # Try to restore the previously built grid for this batch_id
+        # without re-running the QTimer-based populate loop. Falls back
+        # to the standard populate path on a miss.
+        restored = self._try_restore_from_grid_cache(batch_id, visual_images)
+        if not restored:
+            # Delegate incremental population to GridManager
+            self.grid_manager.populate_grid_incremental(visual_images)
+            # Snapshot the freshly built cards for the next switch.
+            QTimer.singleShot(
+                0,
+                lambda bid=batch_id, vi=list(visual_images): self._store_grid_cache(
+                    bid, vi
+                ),
+            )
 
         # Aktifkan watchdog recovery untuk retry thumbnail yang tertinggal
         self.grid_manager.start_recovery_timer()
@@ -2204,81 +2082,12 @@ class DisplayPanel(QWidget):
         self._display_fast_preview(prev_path)
 
     def _trigger_preview_preload(self, center_path):
+        """No-op stub kept for backward compatibility.
+
+        The eager BurstCacheWorker preloader was removed; preview images
+        are now loaded on demand by :meth:`_display_fast_preview`.
         """
-        Lazy on-demand preloader: segera setelah user membuka preview mode,
-        decode SELURUH gambar dalam batch menggunakan BurstCacheWorker.
-
-        Urutan decode diprioritaskan:
-          1. Gambar yang diklik (center) → paling pertama agar langsung tampil
-          2. Gambar-gambar lain dalam urutan melingkar dari center ke luar
-             (center±1, center±2, dst) agar navigasi prev/next terasa instan.
-          3. Gambar yang sudah ada di playback_cache di-skip.
-
-        BurstCacheWorker menangani:
-          - JPEG/PNG/TIFF : ThreadPoolExecutor (full CPU paralel)
-          - RAW           : GPU-pipeline serial (taichi_lock)
-        """
-        if not self.logic.current_images:
-            return
-
-        all_paths = [
-            img.path
-            for img in self.logic.current_images
-            if hasattr(img, "path") and img.path
-        ]
-        if not all_paths:
-            return
-
-        n = len(all_paths)
-        norm_center = os.path.normpath(center_path)
-        try:
-            center_idx = next(
-                i for i, p in enumerate(all_paths) if os.path.normpath(p) == norm_center
-            )
-        except StopIteration:
-            center_idx = 0
-
-        # Build priority order: center first, then ring-buffer outward
-        # e.g. [0, +1, -1, +2, -2, +3, -3, ...]
-        ordered_indices = [center_idx]
-        for offset in range(1, n):
-            ordered_indices.append((center_idx + offset) % n)
-            ordered_indices.append((center_idx - offset) % n)
-
-        # Deduplicate while preserving order, skip already cached
-        seen = set()
-        paths_to_load = []
-        for i in ordered_indices:
-            p = all_paths[i]
-            if p not in seen and p not in self.playback_cache:
-                seen.add(p)
-                paths_to_load.append(p)
-
-        if not paths_to_load:
-            return  # Entire batch already cached
-
-        # Check if we are already preloading the current batch to avoid interrupting the worker
-        if (
-            hasattr(self, "cache_worker")
-            and self.cache_worker is not None
-            and self.cache_worker.isRunning()
-        ):
-            if getattr(self, "_preloading_batch_id", None) == self.current_batch_id:
-                return
-
-        # Cancel previous worker to avoid overlap
-        if hasattr(self, "cache_worker") and self.cache_worker is not None:
-            try:
-                self.cache_worker.cancel()
-                self.cache_worker.wait()
-            except Exception:
-                pass
-            self.cache_worker = None
-
-        self._preloading_batch_id = self.current_batch_id
-        self.cache_worker = BurstCacheWorker(paths_to_load, self)
-        self.cache_worker.image_cached.connect(self._on_image_pre_cached)
-        self.cache_worker.start()
+        return
 
     def _display_fast_preview(self, image_path):
         """High-efficiency loader specifically for burst previews using preloaded cache or Hamilton Adams half-res demosaicing."""
@@ -2356,6 +2165,7 @@ class DisplayPanel(QWidget):
             "Median",
             "Similarity",
             "Spatial AI",
+            "FusionNet",
         }
         if hasattr(self, "param_panel"):
             self.param_panel.apply_algorithm_visibility_fast(settings)

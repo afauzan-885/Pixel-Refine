@@ -51,8 +51,16 @@ fun SegmentedControl(
     ) {
         items.forEachIndexed { index, title ->
             val isSelected = index == selectedIndex
-            val bg = if (isSelected) activeColor else Color.Transparent
-            val textColor = if (isSelected) theme.textWhite else theme.textSecondary
+            val bg = when {
+                !enabled -> theme.bgSecondary.copy(alpha = 0.5f)
+                isSelected -> activeColor
+                else -> Color.Transparent
+            }
+            val textColor = when {
+                !enabled -> theme.textMuted
+                isSelected -> theme.textWhite
+                else -> theme.textSecondary
+            }
 
             Box(
                 modifier = Modifier

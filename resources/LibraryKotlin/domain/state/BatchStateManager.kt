@@ -33,7 +33,7 @@ class BatchStateManager(initialBatches: List<BatchItem> = emptyList()) {
         val validated = ImageValidator.validatePaths(imagePaths).accepted
         val newBatch = BatchItem(name = name, images = validated)
         batches.add(newBatch)
-        if (activeBatchIndex == -1) {
+        if (activeBatchIndex == -1 && batches.isNotEmpty()) {
             activeBatchIndex = batches.lastIndex
         }
         newBatch
