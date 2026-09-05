@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+from contextlib import contextmanager
 
 
 class DatabaseManager:
@@ -23,10 +24,12 @@ class DatabaseManager:
 
     # --- 1. Initialization & Setup ---
 
+    @contextmanager
     def _get_connection(self):
         """Establishes a database connection with High-Performance settings."""
+        conn = None
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
 
             # --- OPTIMASI HDD ---
             # WAL Mode: Write-Ahead Logging. Menulis jauh lebih cepat di HDD, concurrency lebih baik.
@@ -41,10 +44,21 @@ class DatabaseManager:
             # Foreign Keys tetap ON
             conn.execute("PRAGMA foreign_keys = ON;")
 
-            return conn
+            yield conn
         except sqlite3.Error as e:
+            if conn:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
             print(f"Database connection error to {self.db_path}: {e}")
             raise
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
 
     def _add_column_if_not_exists(self, cursor, table_name, column_name, column_def):
         cursor.execute(f"PRAGMA table_info({table_name})")

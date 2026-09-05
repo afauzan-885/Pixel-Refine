@@ -290,29 +290,9 @@ class BatchPageController(QObject):
                 self.batch_updated.emit(batch_id)
             return count
         except Exception as e:
-            self.batch_error.emit(f"Error adding images: {e}")
-            return 0
-
-    def remove_images_from_batch(self, batch_id: int, image_paths: List[str]) -> int:
-        """
-        Remove images from a batch.
-
-        Args:
-            batch_id: Batch ID
-            image_paths: List of image paths to remove
-
-        Returns:
-            Number of images removed
-        """
-        try:
-            count = self.batch_repo.remove_images(batch_id, image_paths)
-            if count > 0:
-                self.images_removed.emit(batch_id, count)
-                self.batch_updated.emit(batch_id)
-            return count
-        except Exception as e:
             self.batch_error.emit(f"Error removing images: {e}")
             return 0
+
 
     def set_reference_image(self, batch_id: int, image_path: str) -> bool:
         """

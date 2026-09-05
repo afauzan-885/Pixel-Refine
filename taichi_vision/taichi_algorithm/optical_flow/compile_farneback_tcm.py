@@ -7,6 +7,7 @@ Graphs compiled:
   - poly_expansion_f32      : vertical + horizontal polynomial expansion
   - farneback_iteration     : single iteration (tensors Ã¢â€ â€™ blur Ã¢â€ â€™ solve)
   - farneback_multi_2/3/5   : batched N iterations in one dispatch
+  - farneback_level_*_3     : fused expansion + init/upsample + 3 iterations
   - farneback_upsample_flow : bicubic flow upsampling (reuses pyramid kernel)
   - farneback_clear_flow    : zero-initialize flow field
 
@@ -62,11 +63,22 @@ def compile_farneback_flow(arch=ti.vulkan, out_dir=None):
 
     # ----- Symbolic arguments -----
     sym_src_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", dtype=ti.f32, ndim=2)
+    # Fused level graphs need distinct input names because the same
+    # polynomial-expansion graph is dispatched once for ref and once for
+    # comp inside a single graph sequence.
+    sym_ref_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ref", dtype=ti.f32, ndim=2)
+    sym_comp_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "comp", dtype=ti.f32, ndim=2)
     sym_vert_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "vert", dtype=ti.f32, ndim=3)
     sym_poly_5ch = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "poly", dtype=ti.f32, ndim=3)
     sym_R0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "R0", dtype=ti.f32, ndim=3)
     sym_R1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "R1", dtype=ti.f32, ndim=3)
     sym_flow = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow", dtype=ti.f32, ndim=3)
+    sym_flow_src = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "flow_coarse", dtype=ti.f32, ndim=3
+    )
+    sym_flow_dst = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "flow_fine", dtype=ti.f32, ndim=3
+    )
     sym_M = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "M", dtype=ti.f32, ndim=3)
     sym_M_smooth = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "M_smooth", dtype=ti.f32, ndim=3)
 
@@ -126,27 +138,75 @@ def compile_farneback_flow(arch=ti.vulkan, out_dir=None):
         module.add_graph(f"farneback_multi_{n}", g_multi.compile())
         print(f"  [OK] farneback_multi_{n}")
 
-    # ----- 4. Upsample flow (reuse pyramid kernel) -----
-    sym_flow_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow_coarse", dtype=ti.f32, ndim=3)
-    sym_flow_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flow_fine", dtype=ti.f32, ndim=3)
+    # ----- 4. Fused coarse-to-fine level graphs -----
+    # The alignment/public wrappers always use three iterations per level.
+    # Keeping the ref/comp expansion, flow initialization, and iteration
+    # sequence in one graph removes four host/driver submission boundaries
+    # from each level while preserving the exact kernel order.
+    def _add_poly_pair(builder):
+        for source, poly in ((sym_ref_2d, sym_R0), (sym_comp_2d, sym_R1)):
+            builder.dispatch(
+                fb._poly_exp_vertical_kernel,
+                source,
+                sym_vert_3d,
+                sym_h,
+                sym_w,
+                sym_poly_weights,
+                sym_poly_radius,
+            )
+            builder.dispatch(
+                fb._poly_exp_horizontal_kernel,
+                sym_vert_3d,
+                poly,
+                sym_h,
+                sym_w,
+                sym_poly_weights,
+                sym_ig11,
+                sym_ig03,
+                sym_ig33,
+                sym_ig55,
+                sym_poly_radius,
+            )
+
+    def _add_multi_three(builder):
+        for _ in range(3):
+            _add_iteration(builder)
+
+    g_level_clear = ti.graph.GraphBuilder()
+    _add_poly_pair(g_level_clear)
+    g_level_clear.dispatch(fb._clear_flow_kernel, sym_flow)
+    _add_multi_three(g_level_clear)
+    module.add_graph("farneback_level_clear_3", g_level_clear.compile())
+    print("  [OK] farneback_level_clear_3")
+
+    g_level_upsample = ti.graph.GraphBuilder()
+    _add_poly_pair(g_level_upsample)
+    g_level_upsample.dispatch(
+        pyr._upsample_flow_kernel, sym_flow_src, sym_flow_dst, sym_scale
+    )
+    _add_multi_three(g_level_upsample)
+    module.add_graph("farneback_level_upsample_3", g_level_upsample.compile())
+    print("  [OK] farneback_level_upsample_3")
+
+    # ----- 5. Upsample flow (reuse pyramid kernel) -----
     g_up = ti.graph.GraphBuilder()
     g_up.dispatch(pyr._upsample_flow_kernel, sym_flow_src, sym_flow_dst, sym_scale)
     module.add_graph("farneback_upsample_flow", g_up.compile())
     print("  [OK] farneback_upsample_flow")
 
-    # ----- 5. Clear flow -----
+    # ----- 6. Clear flow -----
     g_clear = ti.graph.GraphBuilder()
     g_clear.dispatch(fb._clear_flow_kernel, sym_flow)
     module.add_graph("farneback_clear_flow", g_clear.compile())
     print("  [OK] farneback_clear_flow")
 
-    # ----- 6. Median Filter Flow -----
+    # ----- 7. Median Filter Flow -----
     g_median = ti.graph.GraphBuilder()
     g_median.dispatch(fb._median_filter_flow_kernel, sym_flow_src, sym_flow_dst, sym_h, sym_w)
     module.add_graph("farneback_median_filter", g_median.compile())
     print("  [OK] farneback_median_filter")
 
-    # ----- 7. Copy Flow -----
+    # ----- 8. Copy Flow -----
     g_copy = ti.graph.GraphBuilder()
     g_copy.dispatch(fb._copy_flow_kernel, sym_flow_src, sym_flow_dst, sym_h, sym_w)
     module.add_graph("farneback_copy_flow", g_copy.compile())

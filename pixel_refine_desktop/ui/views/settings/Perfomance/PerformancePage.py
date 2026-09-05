@@ -1,5 +1,6 @@
 """Performance settings, including target backend selection and validation."""
 
+import os
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -100,19 +101,11 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             language_config.BTN_TEST_BACKEND_HARDWARE, variant="secondary"
         )
         self.test_btn.setMinimumHeight(35)
-        self.test_btn.setStyleSheet(
-            self.test_btn.styleSheet()
-            + "\nQPushButton { font-size: 10.4pt; }"
-        )
-        self.test_btn.set_content_width_limit(
-            reference=self.device_group.input,
-            minimum_width=120,
-        )
+        self.test_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.test_btn.clicked.connect(self._on_test_backends_clicked)
         left_form.add_row(self.test_btn)
-        left_form.form_layout.setAlignment(
-            self.test_btn, Qt.AlignmentFlag.AlignHCenter
-        )
+        left_form.form_layout.setAlignment(self.test_btn, Qt.AlignmentFlag.AlignCenter)
+        self._update_test_button_width()
 
         auto_fb_label = getattr(language_config, "LBL_AUTO_FALLBACK", "Auto Fallback")
         auto_fb_tip = getattr(
@@ -124,6 +117,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.auto_fallback_cb = Checkbox(auto_fb_label, auto_sync=True)
         self.auto_fallback_cb.checkbox.setToolTip(auto_fb_tip)
         self.auto_fallback_cb.bind_store(self.store, "auto_fallback")
+        self.auto_fallback_cb.checkbox.toggled.connect(self._on_auto_fallback_toggled)
         left_form.add_row(self.auto_fallback_cb)
 
         # FormGroup's decimal editor is the GenericUILibrary component as
@@ -161,6 +155,23 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.compute_block_size_group.bind_store(self.store, "compute_block_size")
         right_form.add_row(self.compute_block_size_group)
 
+        self.onnx_runtime_group = FormGroup(
+            label="ONNX Runtime", input_type="select", auto_sync=True
+        )
+        self.onnx_runtime_group.input.addItems(["Auto", "DirectML (GPU)", "CPU"])
+        onnx_tip = (
+            "Select the execution provider for AI inference models (WeightNet FusionNet).\n"
+            "Auto: uses DirectML when available, falls back to CPU.\n"
+            "DirectML (GPU): forces GPU acceleration via DirectML.\n"
+            "CPU: forces CPU-only execution."
+        )
+        self.onnx_runtime_group.input.setToolTip(onnx_tip)
+        self.onnx_runtime_group.bind_store(self.store, "onnx_runtime")
+        self.onnx_runtime_group.input.currentTextChanged.connect(
+            self._on_onnx_runtime_changed
+        )
+        right_form.add_row(self.onnx_runtime_group)
+
         self.performance_left.add_widget(left_form)
         self.performance_left.add_stretch()
         self.performance_right.add_widget(right_form)
@@ -182,6 +193,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.apply_btn.clicked.connect(self._on_apply_clicked)
         actions.add_item(self.apply_btn)
         self.add_widget(actions)
+        self.update_theme()
 
     def _add_backend_info_action(self):
         """Add a compact help action beside the GPU acceleration label."""
@@ -272,14 +284,14 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             f"Benchmark GPU: 1024 x 1024 (1,049 MP) | 4x per algoritma "
             f"(1 warm-up + 3 pengukuran) | Estimasi target: {target_label}"
         )
-        summary.setStyleSheet(
-            "color: #475569; font-size: 11px; padding: 2px 0 4px 0;"
-        )
+        summary.setStyleSheet("color: #475569; font-size: 11px; padding: 2px 0 4px 0;")
         body_layout.addWidget(summary)
 
         grouped = {}
         for option in options:
-            hardware = str(option.get("raw_name") or option.get("text", "Unknown hardware"))
+            hardware = str(
+                option.get("raw_name") or option.get("text", "Unknown hardware")
+            )
             group_key = hardware.strip().lower()
             grouped.setdefault((group_key, hardware), []).append(option)
         grouped_options = []
@@ -306,11 +318,19 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         table.verticalHeader().setVisible(False)
         table.setAlternatingRowColors(True)
         table.setWordWrap(True)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
+        )
+        table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.ResizeToContents
+        )
         table.setStyleSheet(
             """
             QTableWidget {
@@ -333,7 +353,8 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         )
 
         for row, row_type, option in (
-            (index, kind, item) for index, (kind, _hardware, item) in enumerate(grouped_options)
+            (index, kind, item)
+            for index, (kind, _hardware, item) in enumerate(grouped_options)
         ):
             if row_type == "group":
                 table.setSpan(row, 0, 1, 5)
@@ -362,7 +383,9 @@ class PerformanceSettingsPage(GeneralSettingsPage):
                 try:
                     benchmark_ms = float(benchmark_ms)
                     projected_ms = benchmark_ms * target_megapixels / benchmark_mp
-                    small_text = f"{benchmark_ms:.0f} ms\n{benchmark_width}x{benchmark_height}"
+                    small_text = (
+                        f"{benchmark_ms:.0f} ms\n{benchmark_width}x{benchmark_height}"
+                    )
                     large_text = (
                         f"~{projected_ms / 1000.0:.1f} s\n"
                         f"~{1000.0 / max(projected_ms, 1.0):.2f} FPS"
@@ -388,14 +411,18 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             table.item(row, 2).setForeground(
                 Qt.GlobalColor.darkGreen
                 if status == "support"
-                else Qt.GlobalColor.darkRed
-                if status == "disable"
-                else Qt.GlobalColor.darkGray
+                else (
+                    Qt.GlobalColor.darkRed
+                    if status == "disable"
+                    else Qt.GlobalColor.darkGray
+                )
             )
 
         table.resizeColumnsToContents()
         table.resizeRowsToContents()
-        table_width = sum(table.columnWidth(column) for column in range(table.columnCount()))
+        table_width = sum(
+            table.columnWidth(column) for column in range(table.columnCount())
+        )
         table_width += table.verticalScrollBar().sizeHint().width() + 4
         table_height = table.horizontalHeader().height()
         table_height += sum(table.rowHeight(row) for row in range(table.rowCount()))
@@ -414,7 +441,9 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         note.setStyleSheet("color: #64748B; font-size: 10px;")
         body_layout.addWidget(note)
 
-        dialog = Modal(title="Hardware Backend Statistics", size="medium", parent=self.window())
+        dialog = Modal(
+            title="Hardware Backend Statistics", size="medium", parent=self.window()
+        )
         dialog.set_body(body)
         dialog.add_footer_button("Tutup", variant="secondary")
         dialog.fit_to_content(max_width=660, max_height=700)
@@ -445,6 +474,12 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.store.set("compute_block_mode", self._block_mode_value())
         self._update_block_processing_controls()
 
+    def _on_onnx_runtime_changed(self, text):
+        value = {"Auto": "auto", "DirectML (GPU)": "dml", "CPU": "cpu"}.get(
+            text, "auto"
+        )
+        self.store.set("onnx_runtime", value)
+
     def _on_performance_store_changed(self, key, _value):
         if key is None or key == "compute_block_mode":
             mode_text = self._block_mode_text(
@@ -455,6 +490,16 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             combo.setCurrentText(mode_text)
             combo.blockSignals(False)
             self._update_block_processing_controls()
+        if key is None or key == "onnx_runtime":
+            onnx_text = {
+                "dml": "DirectML (GPU)",
+                "cpu": "CPU",
+                "auto": "Auto",
+            }.get(self.store.get("onnx_runtime", "auto"), "Auto")
+            combo = self.onnx_runtime_group.input
+            combo.blockSignals(True)
+            combo.setCurrentText(onnx_text)
+            combo.blockSignals(False)
 
     def _update_block_processing_controls(self):
         """Apply the mode-dependent visibility/enabled contract."""
@@ -471,8 +516,11 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         inputs = (
             getattr(getattr(self, "device_group", None), "input", None),
             getattr(getattr(self, "compute_block_size_group", None), "input", None),
-            getattr(getattr(self, "compute_block_threshold_group", None), "input", None),
+            getattr(
+                getattr(self, "compute_block_threshold_group", None), "input", None
+            ),
             getattr(getattr(self, "compute_block_mode_group", None), "input", None),
+            getattr(getattr(self, "onnx_runtime_group", None), "input", None),
         )
         compact_width = max(180, int(max(1, self.width()) * 0.5) - 30)
         block_inputs = (
@@ -502,45 +550,110 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             editor.setFixedWidth(width)
             if isinstance(editor, QComboBox):
                 editor.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        if hasattr(self, "test_btn"):
-            self.test_btn.refresh_content_width()
+
+        if hasattr(self, "test_btn") and self.test_btn:
+            device_input = getattr(getattr(self, "device_group", None), "input", None)
+            max_btn_width = (
+                device_input.width()
+                if device_input is not None and device_input.width() > 50
+                else compact_width
+            )
+            self._update_test_button_width(max_btn_width)
+
+    def _update_test_button_width(self, max_available=None):
+        """Fit button width to text content plus margin, eliding if exceeding maximum space."""
+        if not hasattr(self, "test_btn") or not self.test_btn:
+            return
+
+        full_text = getattr(self.test_btn, "_full_text", None) or getattr(
+            language_config, "BTN_TEST_BACKEND_HARDWARE", "Test Hardware Acceleration"
+        )
+        self.test_btn._full_text = full_text
+
+        from PySide6.QtGui import QFontMetrics
+        metrics = QFontMetrics(self.test_btn.font())
+        # Stylesheet padding: 6px 14px; border: 1px -> 14*2 + 2 = 30px margin
+        horizontal_padding = 30
+        text_width = metrics.horizontalAdvance(full_text)
+        content_width = text_width + horizontal_padding
+
+        if max_available is None:
+            compact_width = max(180, int(max(1, self.width()) * 0.5) - 30)
+            device_input = getattr(getattr(self, "device_group", None), "input", None)
+            if device_input is not None and device_input.width() > 50:
+                max_available = device_input.width()
+            elif hasattr(self, "performance_left") and self.performance_left.width() > 50:
+                max_available = max(100, self.performance_left.width() - 24)
+            else:
+                max_available = compact_width
+
+        target_width = min(content_width, max_available) if max_available > 0 else content_width
+        target_width = max(40, target_width)
+
+        self.test_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.test_btn.setMinimumWidth(0)
+        self.test_btn.setMaximumWidth(target_width)
+        self.test_btn.setFixedWidth(target_width)
+
+        available_text_width = max(10, target_width - horizontal_padding)
+        if text_width > available_text_width:
+            elided = metrics.elidedText(
+                full_text, Qt.TextElideMode.ElideRight, available_text_width
+            )
+            super(Button, self.test_btn).setText(elided)
+            self.test_btn.setToolTip(full_text)
+        else:
+            super(Button, self.test_btn).setText(full_text)
+            self.test_btn.setToolTip("")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._compact_performance_inputs()
 
-    def _restore_saved_backend_selection(self, options):
-        """Select the persisted backend by key, identity, or architecture.
+    def _on_auto_fallback_toggled(self, checked):
+        self.store.set("auto_fallback", bool(checked))
+        os.environ["PIXEL_REFINE_AOT_AUTO_FALLBACK"] = "1" if checked else "0"
+        os.environ["PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK"] = "1" if checked else "0"
+        if checked:
+            os.environ.pop("AOT_STRICT_BACKEND", None)
+        else:
+            os.environ["AOT_STRICT_BACKEND"] = "1"
+        if hasattr(self.store, "save_to_file"):
+            self.store.save_to_file()
 
-        The display text can be stale after a device rename or migration. The
-        canonical architecture/device selector is therefore preferred so the
-        combo box reflects the backend actually loaded at startup.
-        """
+    def _restore_saved_backend_selection(self, options):
+        """Select the persisted physical hardware option."""
         if not isinstance(getattr(self.device_group, "input", None), QComboBox):
             return
         saved_key = str(self.store.get("device_backend_key", "") or "")
-        saved_arch = str(self.store.get("device_backend_arch", "cpu") or "cpu").lower()
-        saved_id = self.store.get("device_backend_id", None)
-        try:
-            saved_id = int(saved_id)
-        except (TypeError, ValueError):
-            saved_id = None
-        selector = self.store.get("device_selector", {})
-        saved_name = str(selector.get("name", "") if isinstance(selector, dict) else "").lower()
         saved_text = str(self.store.get("device_backend", "") or "")
+        selector = self.store.get("device_selector", {})
+        saved_vendor = str(
+            selector.get("vendor", "") if isinstance(selector, dict) else ""
+        ).lower()
+        saved_name = str(
+            selector.get("name", "") if isinstance(selector, dict) else ""
+        ).lower()
 
         def matches(option):
             if saved_key and option.get("key") == saved_key:
                 return True
-            if option.get("backend") != saved_arch:
-                return False
-            if saved_id is not None and option.get("device_id") == saved_id:
+            if option.get("text") == saved_text:
+                return True
+            if (
+                saved_vendor
+                and option.get("vendor") == saved_vendor
+                and saved_vendor != "unknown"
+            ):
                 return True
             if saved_name and saved_name in str(option.get("raw_name", "")).lower():
                 return True
-            return option.get("text") == saved_text
+            return False
 
-        selected = next((option for option in options if matches(option)), None)
+        selected = next(
+            (option for option in options if matches(option)),
+            options[0] if options else None,
+        )
         if selected is None:
             return
         index = self.device_group.input.findData(selected)
@@ -561,7 +674,9 @@ class PerformanceSettingsPage(GeneralSettingsPage):
                 if index >= 0:
                     tabs.setTabText(
                         index,
-                        getattr(language_config, "SETTING_PERFORMANCE_LABEL", "Performance"),
+                        getattr(
+                            language_config, "SETTING_PERFORMANCE_LABEL", "Performance"
+                        ),
                     )
         self.device_group.label.setText(
             getattr(language_config, "DEVICE_ACCELERATION_LABEL", "GPU Acceleration")
@@ -572,6 +687,8 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             self.compute_block_threshold_group.label.setText("Megapixel Threshold")
         if hasattr(self, "compute_block_size_group"):
             self.compute_block_size_group.label.setText("Block Size")
+        if hasattr(self, "onnx_runtime_group"):
+            self.onnx_runtime_group.label.setText("ONNX Runtime")
         self.auto_fallback_cb.checkbox.setText(
             getattr(language_config, "LBL_AUTO_FALLBACK", "Auto Fallback")
         )
@@ -584,6 +701,38 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         )
         self.update_theme()
         self.update_device_dropdown_style()
+        self._update_test_button_width()
+
+    def update_theme(self):
+        """Update button styles, checkbox styles, and form elements dynamically on theme change."""
+        super().update_theme()
+        from resources.GenericUILibrary.theme import get_theme, create_checkbox_style
+        theme = get_theme()
+        if hasattr(self, "auto_fallback_cb") and hasattr(self.auto_fallback_cb, "checkbox"):
+            self.auto_fallback_cb.checkbox.setStyleSheet(create_checkbox_style(theme=theme))
+        if hasattr(self, "test_btn") and self.test_btn:
+            self.test_btn.setStyleSheet(
+                f"QPushButton {{"
+                f"    background-color: {theme.bg_primary};"
+                f"    color: {theme.text_primary};"
+                f"    border: 1px solid {theme.border_dark};"
+                f"    border-radius: {theme.radius_md}px;"
+                f"    padding: 6px 14px;"
+                f"    font-size: 10pt;"
+                f"    font-weight: 500;"
+                f"}}"
+                f"QPushButton:hover {{"
+                f"    background-color: {theme.bg_secondary};"
+                f"    border-color: {theme.focus_color};"
+                f"}}"
+                f"QPushButton:pressed {{"
+                f"    background-color: {theme.border_color};"
+                f"}}"
+                f"QPushButton:disabled {{"
+                f"    background-color: {theme.bg_secondary};"
+                f"    color: {theme.text_muted};"
+                f"}}"
+            )
 
     def _on_apply_clicked(self):
         selected_backend_text = self.device_group.input.currentText()
@@ -606,7 +755,9 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             dialog = modal_confirm(
                 language_config.MSG_BACKEND_EXIT_REQUIRED, self.window()
             )
-            dialog.title_text.setText(language_config.EXIT_APPLICATION_APPLY_BACKEND_TITLE)
+            dialog.title_text.setText(
+                language_config.EXIT_APPLICATION_APPLY_BACKEND_TITLE
+            )
             dialog.yes_button.setText(language_config.EXIT_APPLICATION_YES)
             dialog.no_button.setText(language_config.EXIT_APPLICATION_NO)
             if dialog.exec() == dialog.DialogCode.Accepted:

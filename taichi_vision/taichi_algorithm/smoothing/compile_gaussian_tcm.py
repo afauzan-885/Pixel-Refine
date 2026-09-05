@@ -11,43 +11,45 @@ project_root = os.path.abspath(os.path.join(file_dir, "../../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+import taichi_vision.taichi_algorithm.common as _common
+importlib.reload(_common)
 gaussian_mod = importlib.import_module("taichi_vision.taichi_algorithm.smoothing.gaussian")
+importlib.reload(gaussian_mod)
 
 try:
     from taichi_vision.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
 except ImportError:  # Direct script execution.
     from aot_artifact import normalize_tcm
 
-def compile_gaussian_tcm():
-    # The suite worker sets AOT_ARCH/TARGET_BACKEND.  Prefer the explicit
-    # project override, then those worker markers, so a CPU migration can
-    # never silently emit a Vulkan archive into a CPU-qualified directory.
-    arch_str = (
-        os.environ.get("PIXEL_REFINE_AOT_ARCH")
-        or os.environ.get("TARGET_BACKEND")
-        or os.environ.get("AOT_ARCH")
-        or "vulkan"
-    ).lower()
-    arch = ti.vulkan
-    if arch_str == "cuda": arch = ti.cuda
-    elif arch_str == "cpu": arch = ti.x64
-    elif arch_str == "opengl": arch = ti.opengl
-    elif arch_str == "gles": arch = ti.gles
+def compile_gaussian_tcm(arch=None, save_path=None):
+    if arch is None:
+        arch_str = (
+            os.environ.get("PIXEL_REFINE_AOT_ARCH")
+            or os.environ.get("TARGET_BACKEND")
+            or os.environ.get("AOT_ARCH")
+            or "vulkan"
+        ).lower()
+        arch = ti.vulkan
+        if arch_str == "cuda": arch = ti.cuda
+        elif arch_str == "cpu": arch = ti.x64
+        elif arch_str == "opengl": arch = ti.opengl
+        elif arch_str == "gles": arch = ti.gles
     
     print(f"\n>>> Compiling GAUSSIAN BLUR AOT for: {arch}")
     ti.init(arch=arch, offline_cache=False)
     
-    save_dir = os.environ.get(
-        "PIXEL_REFINE_AOT_TCM_ROOT",
-        os.path.join(file_dir, "../aot_tcm"),
-    )
-    os.makedirs(save_dir, exist_ok=True)
-    suffix = "vulkan"
-    if arch == ti.cuda: suffix = "cuda"
-    elif arch == ti.x64: suffix = "cpu"
-    elif arch == ti.opengl: suffix = "opengl"
-    elif arch == ti.gles: suffix = "gles"
-    save_path = os.path.join(save_dir, f"gaussian_{suffix}.tcm")
+    if save_path is None:
+        save_dir = os.environ.get(
+            "PIXEL_REFINE_AOT_TCM_ROOT",
+            os.path.join(file_dir, "../aot_tcm"),
+        )
+        os.makedirs(save_dir, exist_ok=True)
+        suffix = "vulkan"
+        if arch == ti.cuda: suffix = "cuda"
+        elif arch == ti.x64: suffix = "cpu"
+        elif arch == ti.opengl: suffix = "opengl"
+        elif arch == ti.gles: suffix = "gles"
+        save_path = os.path.join(save_dir, f"gaussian_{suffix}.tcm")
 
     # Gaussian kernels and weights are f32/i32. Do not advertise Float64:
     # doing so needlessly excludes Vulkan devices lacking shaderFloat64.

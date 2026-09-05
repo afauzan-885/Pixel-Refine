@@ -7,7 +7,6 @@ descriptor matching compiled with Taichi AOT for zero-copy GPU execution.
 
 import json
 import os
-import cv2
 import numpy as np
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
@@ -94,52 +93,37 @@ class OFBAlgorithm:
             return None, None
 
         try:
-            from taichi_vision.taichi_algorithm.feature_matching.ofb import detect_ofb_keypoints
-            kps_ref = detect_ofb_keypoints(
+            from taichi_vision import taichi_aot
+
+            matched = taichi_aot.ofb(
                 ref_gray,
-                max_kps=preset["max_kps"],
-                grid_size=preset["grid_size"],
-                threshold=preset["threshold"],
-            )
-            kps_tgt = detect_ofb_keypoints(
                 tgt_gray,
-                max_kps=preset["max_kps"],
-                grid_size=preset["grid_size"],
-                threshold=preset["threshold"],
+                ratio_threshold=float(preset["ratio"]),
+                grid_size=int(preset["grid_size"]),
+                threshold=float(preset["threshold"]),
+                margin=max(4, int(config.get("margin", 15))),
+                max_keypoints=int(preset["max_kps"]),
             )
-
-            if len(kps_ref) < 8 or len(kps_tgt) < 8:
+            if matched is None or matched[0] is None or matched[1] is None:
+                return None, None
+            src_pts, dst_pts = matched[0], matched[1]
+            if len(src_pts) < 4 or len(dst_pts) < 4:
                 return None, None
 
-            # Compute descriptors and match using Taichi OFB pattern
-            orb = cv2.ORB_create(nfeatures=preset["max_kps"])
-            kps_ref, desc_ref = orb.compute((ref_gray * 255).astype(np.uint8), kps_ref)
-            kps_tgt, desc_tgt = orb.compute((tgt_gray * 255).astype(np.uint8), kps_tgt)
-
-            if desc_ref is None or desc_tgt is None or len(kps_ref) < 8 or len(kps_tgt) < 8:
+            H, mask = taichi_aot.find_homography(
+                np.ascontiguousarray(dst_pts, dtype=np.float32),
+                np.ascontiguousarray(src_pts, dtype=np.float32),
+                method="RANSAC",
+                ransacReprojThreshold=float(config.get("ransac_threshold", 5.0)),
+                n_hypotheses=max(64, int(config.get("ransac_hypotheses", 1024))),
+                max_iters=max(1, int(config.get("ransac_iters", 1))),
+                return_gpu=False,
+            )
+            if H is None:
                 return None, None
-
-            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-            matches = bf.knnMatch(desc_ref, desc_tgt, k=2)
-
-            ratio = float(preset["ratio"])
-            good = [
-                m
-                for pair in matches
-                if len(pair) == 2
-                for m, n in [pair]
-                if m.distance < ratio * n.distance
-            ]
-
-            if len(good) < 8:
+            if mask is not None and int(np.asarray(mask).reshape(-1).sum()) < 4:
                 return None, None
-
-            src_pts = np.float32([kps_ref[m.queryIdx].pt for m in good]).reshape(-1, 2)
-            dst_pts = np.float32([kps_tgt[m.trainIdx].pt for m in good]).reshape(-1, 2)
-
-            # Estimate homography with RANSAC
-            H, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
-            return H, mask
+            return np.asarray(H, dtype=np.float32), mask
         except Exception as exc:
             print(f"[OFB] Motion estimation error: {exc}")
             return None, None
@@ -162,11 +146,18 @@ class OFBAlgorithm:
         if H is None:
             return img_to_warp
 
-        h, w = reference.shape[:2]
-        try:
-            from taichi_vision import taichi_aot
-            # GPU-native warping
-            return cv2.warpPerspective(img_to_warp, H, (w, h))
-        except Exception:
-            return cv2.warpPerspective(img_to_warp, H, (w, h))
+        from taichi_vision import taichi_aot
 
+        h, w = reference.shape[:2]
+        warped = taichi_aot.warp_perspective(
+            np.ascontiguousarray(img_to_warp),
+            H,
+            (w, h),
+            return_gpu=False,
+        )
+        if np.issubdtype(np.asarray(img_to_warp).dtype, np.integer):
+            info = np.iinfo(np.asarray(img_to_warp).dtype)
+            warped = np.clip(warped + 0.5, info.min, info.max).astype(
+                np.asarray(img_to_warp).dtype
+            )
+        return warped

@@ -208,6 +208,17 @@ def register_hamilton_graphs(module, kernels):
     g.dispatch(kernels["red_blue_direct"], bayer, green, dst, *common)
     module.add_graph("hamilton_demosaic", g.compile())
 
+    # 1b. hamilton_demosaic_u16 (CUDA-only path; SPIR-V targets Vulkan/OpenGL lack u16 primitive)
+    if getattr(module, "_arch", getattr(module, "arch", None)) == ti.cuda:
+        try:
+            bayer_u16 = ndarray_arg("bayer", ti.u16, 2)
+            g = ti.graph.GraphBuilder()
+            g.dispatch(kernels["green_direct"], bayer_u16, green, *common)
+            g.dispatch(kernels["red_blue_direct"], bayer_u16, green, dst, *common)
+            module.add_graph("hamilton_demosaic_u16", g.compile())
+        except Exception:
+            pass
+
     # 2. hamilton_demosaic_tonemapped
     g = ti.graph.GraphBuilder()
     g.dispatch(kernels["green_direct"], bayer, green, *common)

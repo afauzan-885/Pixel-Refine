@@ -9,15 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 import os
-import json
 import subprocess
 import sys
-import tempfile
 from typing import Any, Mapping
 from taichi_vision.backend_config import (
     is_android_runtime,
     requested_backend as _requested_backend,
 )
+from taichi_vision.graphics_compatibility import graphics_compatibility_enabled
 from taichi_vision.cuda_arch_matrix import (
     bridge_target_status,
     load_bridge_manifest,
@@ -63,11 +62,11 @@ def _device_metadata(device: Any) -> tuple[Mapping[str, Any], str, str]:
     vendor = (
         "intel"
         if "intel" in searchable
-        else "nvidia"
-        if ("nvidia" in searchable or "geforce" in searchable)
-        else "amd"
-        if ("amd" in searchable or "radeon" in searchable)
-        else "unknown"
+        else (
+            "nvidia"
+            if ("nvidia" in searchable or "geforce" in searchable)
+            else "amd" if ("amd" in searchable or "radeon" in searchable) else "unknown"
+        )
     )
     return metadata, device_name, vendor
 
@@ -191,6 +190,18 @@ def classify_device(device: Any, backend: str, driver: str = "unknown"):
                 safe=True,
                 reason="Intel Vulkan lifecycle, parity, and pipeline manifest validated",
             )
+        if graphics_compatibility_enabled(backend, vendor):
+            return BackendCapabilities(
+                backend,
+                vendor,
+                device_name,
+                driver,
+                safe=True,
+                reason=(
+                    "Intel Vulkan admitted through conservative host-visible "
+                    "memory and direct-dispatch compatibility policy"
+                ),
+            )
         return BackendCapabilities(
             backend,
             vendor,
@@ -200,6 +211,27 @@ def classify_device(device: Any, backend: str, driver: str = "unknown"):
             reason="Intel Vulkan AOT is quarantined after ABI/pipeline failures",
         )
     if backend == "opengl":
+        if vendor == "intel" and sys.platform.startswith("win"):
+            if graphics_compatibility_enabled(backend, vendor):
+                return BackendCapabilities(
+                    backend,
+                    vendor,
+                    device_name,
+                    driver,
+                    safe=True,
+                    reason=(
+                        "Intel Windows OpenGL admitted through conservative "
+                        "direct-dispatch compatibility policy"
+                    ),
+                )
+            return BackendCapabilities(
+                backend,
+                vendor,
+                device_name,
+                driver,
+                safe=False,
+                reason="Intel Windows OpenGL ICD causes access violation during native runtime initialization",
+            )
         return BackendCapabilities(
             backend,
             vendor,
@@ -231,15 +263,15 @@ def requested_backend():
 def backend_candidates(device: Any = "unknown"):
     """Return deterministic preference order for automatic dispatch."""
     _, device_name, vendor = _device_metadata(device)
-    auto_fallback = (
-        os.environ.get("PIXEL_REFINE_AOT_AUTO_FALLBACK", "0") == "1"
-    )
+    auto_fallback = os.environ.get("PIXEL_REFINE_AOT_AUTO_FALLBACK", "0") == "1"
     if is_android_runtime():
         # Android's desktop-OpenGL spelling is not a valid artifact identity;
         # the resolver canonicalizes it to GLES. Keep the mobile preference
         # list explicit so auto mode never attempts a desktop OpenGL bridge.
         return ["vulkan", "gles", "cpu"]
     if vendor == "intel":
+        if auto_fallback or graphics_compatibility_enabled("vulkan", vendor):
+            return ["vulkan", "opengl", "cpu"]
         try:
             from taichi_vision.vulkan_probe import intel_vulkan_is_validated
 
@@ -250,7 +282,11 @@ def backend_candidates(device: Any = "unknown"):
         return ["opengl", "cpu"]
     # Auto-fallback order requested by the user: CUDA -> Vulkan -> OpenGL -> CPU.
     if vendor == "nvidia":
-        return ["cuda", "vulkan", "opengl", "cpu"] if auto_fallback else ["vulkan", "opengl", "cpu"]
+        return (
+            ["cuda", "vulkan", "opengl", "cpu"]
+            if auto_fallback
+            else ["vulkan", "opengl", "cpu"]
+        )
     if vendor == "amd":
         # CUDA is NVIDIA-only; never advertise it for an AMD device even when
         # the optional automatic-fallback switch is enabled.

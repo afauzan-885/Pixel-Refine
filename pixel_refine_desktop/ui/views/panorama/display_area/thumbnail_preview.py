@@ -3,6 +3,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QPixmap,
+    QImage,
 )
 from PySide6.QtWidgets import (
     QVBoxLayout,
@@ -13,7 +14,6 @@ from PySide6.QtWidgets import (
 )
 
 from PIL import Image, ImageOps
-from PIL.ImageQt import ImageQt
 
 from pixel_refine_desktop.enhance_stack.core.logic.Zoomable_Handler import Zoomable
 
@@ -80,13 +80,21 @@ class ImagePreviewDialog(QDialog):
     def load_pixmap_with_correct_orientation(self, image_path: str) -> QPixmap | None:
         """
         Membuka file gambar menggunakan Pillow, menerapkan orientasi EXIF,
-        dan mengonversinya menjadi QPixmap.
+        dan mengonversinya menjadi QPixmap secara aman.
         """
         try:
-            pil_image = Image.open(image_path)
-            oriented_pil_image = ImageOps.exif_transpose(pil_image)
-            qimage = ImageQt(oriented_pil_image)
-            return QPixmap.fromImage(qimage)
+            with Image.open(image_path) as pil_image:
+                oriented_pil_image = ImageOps.exif_transpose(pil_image)
+                if oriented_pil_image.mode != "RGB":
+                    oriented_pil_image = oriented_pil_image.convert("RGB")
+                qimage = QImage(
+                    oriented_pil_image.tobytes(),
+                    oriented_pil_image.width,
+                    oriented_pil_image.height,
+                    oriented_pil_image.width * 3,
+                    QImage.Format.Format_RGB888,
+                )
+                return QPixmap.fromImage(qimage)
         except Exception as e:
             print(f"Error loading image with Pillow for preview: {e}")
             return None

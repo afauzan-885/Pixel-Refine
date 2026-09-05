@@ -1,6 +1,4 @@
 import time
-
-import cv2
 import numpy as np
 
 # --- Bagian Projection & Blending (Contoh) ---

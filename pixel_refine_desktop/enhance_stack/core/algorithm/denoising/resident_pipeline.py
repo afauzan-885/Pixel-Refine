@@ -35,6 +35,7 @@ Architecture:
     │  Download final fused result (one frame)                │
     └─────────────────────────────────────────────────────────┘
 """
+
 import gc
 import os
 import queue
@@ -135,6 +136,150 @@ _RAW_EXTENSIONS = frozenset(
 )
 
 
+def _normalise_alignment_plan(value: str) -> str:
+    return str(value or "").strip().casefold().replace("-", " ").replace("_", " ")
+
+
+def preflight_resident_dependencies(
+    *,
+    alignment_plan: str,
+    weight_engine: str,
+    is_raw: bool,
+    engine=None,
+) -> dict:
+    """Validate the target-qualified graph contract before frame allocation.
+
+    This is intentionally a graph-index check, not a compile/provider claim:
+    the subsequent smoke test must still execute each selected backend.
+    """
+    from taichi_vision import taichi_aot
+
+    plan = _normalise_alignment_plan(alignment_plan)
+    requires_analysis = str(
+        weight_engine or ""
+    ).casefold() != "average" or plan not in {
+        "",
+        "none",
+        "no alignment",
+        "off",
+    }
+    requirements = []
+
+    if is_raw:
+        requirements.append(
+            (
+                "hamilton",
+                "hamilton_demosaic|hamilton_demosaic_u16",
+                lambda: any(
+                    taichi_aot.aot_graph_available("hamilton", graph)
+                    for graph in ("hamilton_demosaic", "hamilton_demosaic_u16")
+                ),
+            )
+        )
+    if requires_analysis:
+        requirements.extend(
+            [
+                ("auto_enhance", "auto_enhance", None),
+                ("estimate_noise", "estimate_noise", None),
+            ]
+        )
+
+    if plan in {"ofb", "orb", "feature matching"}:
+        requirements.extend(
+            [
+                ("ofb", "detect_keypoints", None),
+                ("ransac", "ransac_homography", None),
+                ("remap", "warp_perspective_f32_3d", None),
+            ]
+        )
+    elif plan == "akaze":
+        requirements.extend(
+            [
+                ("akaze", "detect_keypoints", None),
+                ("ransac", "ransac_homography", None),
+                ("remap", "warp_perspective_f32_3d", None),
+            ]
+        )
+    elif plan in {"farneback", "farneback optical flow"}:
+        requirements.extend(
+            [
+                ("farneback_flow", "farneback_multi_3", None),
+                ("remap", "remap_with_flow_f32_3d", None),
+            ]
+        )
+    elif plan in {
+        "lucas kanade",
+        "lucas kanade optical flow",
+        "lucas kanade gpu optical flow",
+    }:
+        requirements.extend(
+            [
+                ("lucas_kanade", "flow_lk_grid_track", None),
+                ("remap", "remap_with_flow_f32_3d", None),
+            ]
+        )
+    elif plan in {
+        "block matching",
+        "block matching gpu",
+        "blockmatching",
+        "bm",
+        "block align",
+    }:
+        requirements.extend(
+            [
+                ("lucas_kanade", "flow_lk_grid_track", None),
+                ("remap", "remap_with_flow_f32_3d", None),
+            ]
+        )
+    elif plan in {"optical flow", "dense optical flow"}:
+        requirements.extend(
+            [
+                ("compute_flow", "align_end_to_end_3layer", None),
+                ("remap", "remap_with_flow_f32_3d", None),
+            ]
+        )
+
+    missing = []
+    checked = []
+    for module_name, graph_name, custom_check in requirements:
+        available = (
+            bool(custom_check())
+            if custom_check is not None
+            else taichi_aot.aot_graph_available(module_name, graph_name)
+        )
+        checked.append(
+            {
+                "module": module_name,
+                "graph": graph_name,
+                "available": bool(available),
+            }
+        )
+        if not available:
+            missing.append(f"{module_name}:{graph_name}")
+
+    result = {
+        "backend": str(getattr(engine or taichi_aot.engine, "arch", "unknown")),
+        "alignment_plan": alignment_plan,
+        "weight_engine": weight_engine,
+        "is_raw": bool(is_raw),
+        "checked": checked,
+        "missing": missing,
+    }
+    if missing:
+        raise RuntimeError(
+            "Resident dependency preflight failed before frame allocation: "
+            + ", ".join(missing)
+            + ". Compile the target-qualified TCM suite for backend "
+            + result["backend"]
+            + "."
+        )
+    print(
+        f"[GPU Pipeline] Dependency preflight OK: backend={result['backend']} "
+        f"alignment={alignment_plan!r} checked={len(checked)}"
+    )
+    return result
+
+
 def _read_orientation(path: Path) -> int:
     from PIL import Image
 
@@ -184,12 +329,13 @@ def load_frame_to_gpu(
             method="hamilton",
             return_gpu=True,
         )
-        if rgb_gpu.dtype in (np.uint8, np.uint16):
-            scale = 255.0 if rgb_gpu.dtype == np.uint8 else 65535.0
-            rgb_np = rgb_gpu.to_numpy().astype(np.float32) / scale
-            rgb_gpu.destroy()
-            return taichi_aot.upload(
-                np.ascontiguousarray(np.clip(rgb_np, 0.0, 1.0), dtype=np.float32)
+        # The canonical demosaic API returns float32 [0, 1] when
+        # return_gpu=True. Keep that buffer in VRAM; a GPU->CPU->GPU
+        # normalization round-trip defeats the resident pipeline.
+        if np.dtype(rgb_gpu.dtype) != np.dtype(np.float32):
+            raise RuntimeError(
+                "Resident RAW demosaic returned a non-float32 GPU buffer "
+                f"({rgb_gpu.dtype}); refusing an implicit CPU round-trip."
             )
         return rgb_gpu
 
@@ -227,15 +373,46 @@ def load_frame_to_gpu(
 
 
 def analyze_auto_enhance_on_gpu(
-    ref_gpu: TaichiGPUBuffer, mode: str = "natural"
+    ref_gpu: TaichiGPUBuffer,
+    mode: str = "natural",
+    max_analysis_pixels: int = 500_000,
 ) -> dict:
+    """Analyze AutoEnhance parameters from a bounded GPU downsample.
+
+    AutoEnhance only consumes luminance statistics and already samples at most
+    500k values internally. Downsampling before ``to_numpy`` avoids reading a
+    complete 12 MP RGB frame back to host memory just to compute those stats.
+    """
+    from taichi_vision import taichi_aot
     from taichi_vision.taichi_algorithm.enhancement.auto_enhance import (
         analyze_auto_enhance_params,
     )
 
-    ref_np = ref_gpu.to_numpy()
-    params = analyze_auto_enhance_params(ref_np, mode=mode)
-    del ref_np
+    source_gpu = ref_gpu
+    analysis_gpu = None
+    source_pixels = int(ref_gpu.shape[0]) * int(ref_gpu.shape[1])
+    limit = max(1, int(max_analysis_pixels))
+    if source_pixels > limit:
+        scale = (float(limit) / float(source_pixels)) ** 0.5
+        sample_h = max(32, int(round(ref_gpu.shape[0] * scale)))
+        sample_w = max(32, int(round(ref_gpu.shape[1] * scale)))
+        analysis_gpu = taichi_aot.resize(
+            ref_gpu,
+            (sample_w, sample_h),
+            interpolation=taichi_aot.INTER_AREA,
+            return_gpu=True,
+        )
+        source_gpu = analysis_gpu
+    analysis_pixels = int(source_gpu.shape[0]) * int(source_gpu.shape[1])
+    ref_np = source_gpu.to_numpy()
+    try:
+        params = analyze_auto_enhance_params(ref_np, mode=mode)
+    finally:
+        del ref_np
+        if analysis_gpu is not None:
+            analysis_gpu.destroy()
+    params["analysis_pixels"] = analysis_pixels
+    params["analysis_source_pixels"] = source_pixels
     return params
 
 
@@ -265,20 +442,622 @@ class NoAlignmentGPUAligner:
         secondary_frame_to_warp=None,
         stop_event=None,
         return_gpu=True,
+        stream_primary: bool = False,
     ):
         if stop_event is not None:
             if hasattr(stop_event, "is_set") and stop_event.is_set():
                 raise RuntimeError("Alignment cancelled.")
             elif callable(stop_event) and stop_event():
                 raise RuntimeError("Alignment cancelled.")
+        if secondary_frame_to_warp is None:
+            return supp_linear_gpu
         return supp_linear_gpu, secondary_frame_to_warp
 
     def close(self):
         pass
 
 
+class BlockMatchingGPUResidentAligner:
+    """GPU-resident block matching with dual-domain remapping.
+
+    The reference and support analysis buffers are matched at work resolution,
+    while the resulting flow is reused to warp both the full-resolution linear
+    frame and the smaller analysis frame.  No CPU flow fallback is allowed in
+    this adapter; a native failure is surfaced to the resident pipeline.
+    """
+
+    def __init__(
+        self,
+        ref_analysis_gpu: TaichiGPUBuffer,
+        *,
+        full_shape: Optional[Tuple[int, int]] = None,
+        alignment_config: Optional[dict] = None,
+    ):
+        from taichi_vision import taichi_aot
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching_gpu import (
+            BlockMatchingGPU,
+        )
+
+        self.engine = get_engine()
+        self.matcher = BlockMatchingGPU()
+        config = dict(self.matcher.load_config())
+        overrides = alignment_config if isinstance(alignment_config, dict) else {}
+        nested = overrides.get("block_matching_gpu_params")
+        if isinstance(nested, dict):
+            overrides = nested
+        if "mode" in overrides:
+            config = dict(
+                BlockMatchingGPU._resolve_mode_config({"mode": overrides["mode"]})
+            )
+        for key in (
+            "grid_step",
+            "border_margin",
+            "win_size",
+            "max_level",
+            "iterations",
+            "epsilon",
+            "motion_mode",
+            "adaptive",
+            "adaptive_threshold",
+            "tile_overlap",
+            "max_flow_px",
+            "decoupled_scale",
+        ):
+            if key in overrides and overrides[key] is not None:
+                config[key] = overrides[key]
+        config["strict"] = True
+        config["conservative_vram"] = True
+        self.config = config
+        self.ref_shape = tuple(int(value) for value in ref_analysis_gpu.shape[:2])
+        if full_shape is None:
+            self.full_h, self.full_w = self.ref_shape
+        else:
+            self.full_h, self.full_w = int(full_shape[0]), int(full_shape[1])
+        self.ref_gray_gpu = taichi_aot.cvtColor(
+            ref_analysis_gpu, taichi_aot.COLOR_RGB2GRAY
+        )
+        self.reference_pyramid = self._build_reference_pyramid_cache()
+        print(
+            f"[GPU Pipeline] Aligner: Block Matching GPU ({self.config.get('mode', 'fast')}, step={self.config.get('grid_step', 32)})"
+        )
+
+    def _build_reference_pyramid_cache(self):
+        """Build caller-owned reference pyramid levels once per burst.
+
+        ``calcOpticalFlowBlockMatching`` is called for every support frame,
+        while the reference image is invariant. Cache only the pyramid levels
+        needed by the selected native path; target levels remain per-frame
+        allocations. Failure to build this optional performance cache is
+        non-fatal and leaves the established native construction path in
+        place.
+        """
+        from taichi_vision import taichi_aot
+
+        levels = [self.ref_gray_gpu]
+        height, width = self.ref_shape
+        max_level = max(0, int(self.config.get("max_level", 2)))
+        requested_decouple = max(0, int(self.config.get("decoupled_scale", 0) or 0))
+        if requested_decouple in (2, 4):
+            decouple_factor = requested_decouple
+        elif requested_decouple == 0 and height * width >= 8_000_000:
+            decouple_factor = 2
+        else:
+            decouple_factor = 0
+        decouple_levels = {2: 1, 4: 2}.get(decouple_factor, 0)
+        backend = str(getattr(self.engine, "arch", "")).lower()
+        use_decoupled = backend in {"cuda", "cpu"} and decouple_levels > 0
+        if use_decoupled:
+            # The outer wrapper starts at the selected coarse level, then
+            # invokes the native path with the remaining pyramid levels.
+            # Cache both the coarse base and all descendants so the invariant
+            # reference is never downsampled again for each support frame.
+            levels_to_build = decouple_levels + max(1, max_level - decouple_levels)
+        else:
+            levels_to_build = max_level
+
+        try:
+            pyramid_mod = taichi_aot._mod("pyramid")
+            with self.engine._lock:
+                for _ in range(levels_to_build):
+                    next_height = height // 2
+                    next_width = width // 2
+                    if next_height < 32 or next_width < 32:
+                        break
+                    next_level = self.engine.allocate(
+                        (next_height, next_width),
+                        dtype=np.float32,
+                        is_vector=False,
+                        host_accessible=False,
+                        vector_dim=1,
+                    )
+                    pyramid_mod.run(
+                        "downsample_2x_f32",
+                        src=levels[-1],
+                        dst=next_level,
+                    )
+                    levels.append(next_level)
+                    height, width = next_height, next_width
+            if len(levels) <= 1:
+                return None
+            pass
+            return levels
+        except Exception as exc:
+            for level in levels[1:]:
+                if level is not None and hasattr(level, "destroy"):
+                    try:
+                        level.destroy()
+                    except Exception:
+                        pass
+            pass
+            return None
+
+    def align_frame(
+        self,
+        supp_linear_gpu: TaichiGPUBuffer,
+        *,
+        analysis_frame_gpu: Optional[TaichiGPUBuffer] = None,
+        secondary_frame_to_warp: Optional[TaichiGPUBuffer] = None,
+        stop_event=None,
+        return_gpu: bool = False,
+        stream_primary: bool = False,
+    ):
+        from taichi_vision import taichi_aot
+
+        if stop_event is not None:
+            if hasattr(stop_event, "is_set") and stop_event.is_set():
+                raise RuntimeError("Block-matching alignment cancelled.")
+            if callable(stop_event) and stop_event():
+                raise RuntimeError("Block-matching alignment cancelled.")
+
+        analysis_gpu = (
+            analysis_frame_gpu if analysis_frame_gpu is not None else supp_linear_gpu
+        )
+        owned_analysis = False
+        analysis_gray_gpu = None
+        flow_gpu = None
+        warped_linear = None
+        warped_secondary = None
+        try:
+            if tuple(int(value) for value in analysis_gpu.shape[:2]) != self.ref_shape:
+                analysis_gpu = taichi_aot.resize(
+                    analysis_gpu,
+                    (self.ref_shape[1], self.ref_shape[0]),
+                    interpolation=taichi_aot.INTER_AREA,
+                    return_gpu=True,
+                )
+                owned_analysis = True
+
+            analysis_gray_gpu = taichi_aot.cvtColor(
+                analysis_gpu, taichi_aot.COLOR_RGB2GRAY
+            )
+            flow_gpu = self.matcher._calculate_flow_gpu_buffer(
+                self.ref_gray_gpu,
+                analysis_gray_gpu,
+                self.config,
+                reference_pyramid=self.reference_pyramid,
+            )
+            if secondary_frame_to_warp is not None:
+                sec_h, sec_w = (
+                    int(secondary_frame_to_warp.shape[0]),
+                    int(secondary_frame_to_warp.shape[1]),
+                )
+                warped_secondary = taichi_aot.remap_with_flow(
+                    secondary_frame_to_warp,
+                    flow_gpu,
+                    sec_h,
+                    sec_w,
+                    return_gpu=return_gpu,
+                )
+            if stream_primary:
+                # Transfer ownership of the source and low-resolution flow to
+                # the descriptor.  The primary full-resolution warp is then
+                # produced one output tile at a time by the blend stage.
+                warped_linear = ResidentWarpedFrame(
+                    supp_linear_gpu,
+                    flow_gpu,
+                    full_shape=(self.full_h, self.full_w),
+                )
+                flow_gpu = None
+            else:
+                warped_linear = taichi_aot.remap_with_flow(
+                    supp_linear_gpu,
+                    flow_gpu,
+                    self.full_h,
+                    self.full_w,
+                    return_gpu=return_gpu,
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                "Native Block Matching GPU alignment failed; no CPU fallback is "
+                f"permitted in the resident pipeline: {exc}"
+            ) from exc
+        finally:
+            if flow_gpu is not None and hasattr(flow_gpu, "release"):
+                flow_gpu.release()
+            if analysis_gray_gpu is not None and hasattr(analysis_gray_gpu, "destroy"):
+                analysis_gray_gpu.destroy()
+            if owned_analysis and hasattr(analysis_gpu, "destroy"):
+                analysis_gpu.destroy()
+
+        if secondary_frame_to_warp is not None:
+            return warped_linear, warped_secondary
+        return warped_linear
+
+    def close(self):
+        if self.reference_pyramid is not None:
+            for level in self.reference_pyramid[1:]:
+                if level is not None and hasattr(level, "destroy"):
+                    try:
+                        level.destroy()
+                    except Exception:
+                        pass
+            self.reference_pyramid = None
+        if self.ref_gray_gpu is not None and hasattr(self.ref_gray_gpu, "destroy"):
+            self.ref_gray_gpu.destroy()
+            self.ref_gray_gpu = None
+        try:
+            self.engine.sync()
+        except Exception:
+            pass
+
+
+class TaichiDenseFlowResidentAligner:
+    """Resident Farneback/Lucas-Kanade adapter backed only by Taichi Vision.
+
+    The optical-flow kernels accept the work-resolution GPU buffers directly.
+    The only output materialized at full resolution is the requested remap;
+    no OpenCV tracker or CPU flow fallback is part of this route.
+    """
+
+    _PRESETS = {
+        "farneback": {
+            "pyr_scale": 0.5,
+            "num_levels": 3,
+            "win_size": 15,
+            "num_iters": 3,
+            "poly_n": 5,
+            "poly_sigma": 1.2,
+        },
+        "lucas_kanade": {
+            "grid_step": 32,
+            "border_margin": 8,
+            "win_size": 15,
+            "max_level": 2,
+            "iterations": 8,
+            "epsilon": 0.02,
+            "motion_mode": "fast",
+            "max_flow_px": 64.0,
+        },
+    }
+
+    def __init__(
+        self,
+        ref_analysis_gpu: TaichiGPUBuffer,
+        *,
+        flow_type: str,
+        full_shape: Optional[Tuple[int, int]] = None,
+        alignment_config: Optional[dict] = None,
+    ):
+        from taichi_vision import taichi_aot
+
+        flow_type = str(flow_type).strip().lower().replace("-", "_")
+        if flow_type not in self._PRESETS:
+            raise ValueError(f"Unsupported Taichi dense flow: {flow_type}")
+        self.flow_type = flow_type
+        self.engine = get_engine()
+        self.config = self._resolve_config(alignment_config)
+        self.ref_h, self.ref_w = (
+            int(ref_analysis_gpu.shape[0]),
+            int(ref_analysis_gpu.shape[1]),
+        )
+        if full_shape is None:
+            self.full_h, self.full_w = self.ref_h, self.ref_w
+        else:
+            self.full_h, self.full_w = int(full_shape[0]), int(full_shape[1])
+        self.ref_gray_gpu = self._to_gray(ref_analysis_gpu)
+        print(
+            f"[GPU Pipeline] Aligner: Taichi Vision {flow_type} "
+            f"(work={self.ref_w}x{self.ref_h}, engine={getattr(self.engine, 'arch', 'unknown')})"
+        )
+
+    def _resolve_config(self, alignment_config):
+        config = self._PRESETS[self.flow_type].copy()
+        overrides = alignment_config if isinstance(alignment_config, dict) else {}
+        nested_names = (
+            ("farneback_params", "Farneback", "farneback")
+            if self.flow_type == "farneback"
+            else ("lucas_kanade_params", "lucas_kanade_gpu_params", "LucasKanade")
+        )
+        for key in nested_names:
+            nested = overrides.get(key)
+            if isinstance(nested, dict):
+                overrides = nested
+                break
+        mode = str(overrides.get("mode", "")).strip().lower()
+        if mode:
+            try:
+                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
+                    FarnebackFlowCPU,
+                )
+                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
+                    LUCAS_KANADE_GPU_PRESETS,
+                )
+
+                preset_table = (
+                    FarnebackFlowCPU.PRESETS
+                    if self.flow_type == "farneback"
+                    else LUCAS_KANADE_GPU_PRESETS
+                )
+                selected = preset_table.get(mode) or preset_table.get("fast")
+                if isinstance(selected, dict):
+                    config.update(selected)
+            except Exception as exc:
+                print(f"[GPU Pipeline] Dense-flow preset lookup skipped: {exc}")
+        for key, value in overrides.items():
+            if key in config and value is not None:
+                config[key] = value
+        return config
+
+    @staticmethod
+    def _to_gray(buffer):
+        from taichi_vision import taichi_aot
+
+        if len(buffer.shape) == 2:
+            return buffer
+        return taichi_aot.cvtColor(buffer, taichi_aot.COLOR_RGB2GRAY)
+
+    def _calculate_flow(self, target_gray_gpu):
+        from taichi_vision import taichi_aot
+
+        if self.flow_type == "farneback":
+            return taichi_aot.farneback_flow(
+                self.ref_gray_gpu,
+                target_gray_gpu,
+                pyr_scale=float(self.config["pyr_scale"]),
+                num_levels=max(1, int(self.config["num_levels"])),
+                win_size=max(5, int(self.config["win_size"])),
+                num_iters=max(1, int(self.config["num_iters"])),
+                poly_n=max(3, int(self.config["poly_n"])),
+                poly_sigma=float(self.config["poly_sigma"]),
+                return_gpu=True,
+            )
+
+        from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
+
+        win_size = max(5, int(self.config["win_size"]))
+        if win_size % 2 == 0:
+            win_size += 1
+        return calcOpticalFlowPyrLK(
+            self.ref_gray_gpu,
+            target_gray_gpu,
+            winSize=(win_size, win_size),
+            maxLevel=max(0, int(self.config["max_level"])),
+            grid_step=max(4, int(self.config["grid_step"])),
+            border_margin=max(0, int(self.config["border_margin"])),
+            motion_mode=str(self.config.get("motion_mode", "fast")),
+            max_flow_px=float(self.config.get("max_flow_px", 0.0)),
+            return_gpu=True,
+        )
+
+    def align_frame(
+        self,
+        supp_linear_gpu,
+        *,
+        analysis_frame_gpu=None,
+        secondary_frame_to_warp=None,
+        stop_event=None,
+        return_gpu=True,
+        stream_primary: bool = False,
+    ):
+        from taichi_vision import taichi_aot
+
+        if stop_event is not None:
+            if hasattr(stop_event, "is_set") and stop_event.is_set():
+                raise RuntimeError("Dense-flow alignment cancelled.")
+            if callable(stop_event) and stop_event():
+                raise RuntimeError("Dense-flow alignment cancelled.")
+
+        analysis_gpu = (
+            analysis_frame_gpu if analysis_frame_gpu is not None else supp_linear_gpu
+        )
+        owned_analysis = False
+        target_gray_gpu = None
+        owned_gray = False
+        flow_gpu = None
+        warped_secondary = None
+        try:
+            if tuple(int(value) for value in analysis_gpu.shape[:2]) != (
+                self.ref_h,
+                self.ref_w,
+            ):
+                analysis_gpu = taichi_aot.resize(
+                    analysis_gpu,
+                    (self.ref_w, self.ref_h),
+                    interpolation=taichi_aot.INTER_AREA,
+                    return_gpu=True,
+                )
+                owned_analysis = True
+            target_gray_gpu = self._to_gray(analysis_gpu)
+            owned_gray = target_gray_gpu is not analysis_gpu
+            flow_gpu = self._calculate_flow(target_gray_gpu)
+            if isinstance(flow_gpu, tuple):
+                flow_gpu = flow_gpu[0]
+            if not hasattr(flow_gpu, "shape"):
+                flow_gpu = taichi_aot.upload(
+                    np.ascontiguousarray(flow_gpu, dtype=np.float32),
+                    is_vector=True,
+                    vector_dim=2,
+                )
+            expected = (self.ref_h, self.ref_w, 2)
+            if tuple(int(value) for value in flow_gpu.shape) != expected:
+                raise RuntimeError(
+                    f"Taichi {self.flow_type} returned flow shape {flow_gpu.shape}; "
+                    f"expected {expected}"
+                )
+
+            if secondary_frame_to_warp is not None:
+                sec_h, sec_w = map(int, secondary_frame_to_warp.shape[:2])
+                warped_secondary = taichi_aot.remap_with_flow(
+                    secondary_frame_to_warp,
+                    flow_gpu,
+                    sec_h,
+                    sec_w,
+                    return_gpu=return_gpu,
+                )
+
+            if stream_primary:
+                warped_primary = ResidentWarpedFrame(
+                    supp_linear_gpu,
+                    flow_gpu,
+                    full_shape=(self.full_h, self.full_w),
+                )
+                flow_gpu = None
+            else:
+                warped_primary = taichi_aot.remap_with_flow(
+                    supp_linear_gpu,
+                    flow_gpu,
+                    self.full_h,
+                    self.full_w,
+                    return_gpu=return_gpu,
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Native Taichi {self.flow_type} alignment failed; "
+                f"no OpenCV fallback is permitted: {exc}"
+            ) from exc
+        finally:
+            if flow_gpu is not None and hasattr(flow_gpu, "destroy"):
+                flow_gpu.destroy()
+            if (
+                owned_gray
+                and target_gray_gpu is not None
+                and hasattr(target_gray_gpu, "destroy")
+            ):
+                target_gray_gpu.destroy()
+            if owned_analysis and hasattr(analysis_gpu, "destroy"):
+                analysis_gpu.destroy()
+
+        if secondary_frame_to_warp is not None:
+            return warped_primary, warped_secondary
+        return warped_primary
+
+    def close(self):
+        if self.ref_gray_gpu is not None and hasattr(self.ref_gray_gpu, "destroy"):
+            self.ref_gray_gpu.destroy()
+            self.ref_gray_gpu = None
+
+
+class ResidentWarpedFrame:
+    """Ownership descriptor for a lazily warped full-resolution support frame.
+
+    Keeping the source and its work-resolution flow resident avoids allocating
+    a second full RGB frame.  ``_gpu_blend_frame`` asks the descriptor for
+    output tiles and consumes each tile immediately through the offset spatial
+    accumulation graph.
+    """
+
+    def __init__(self, source_gpu, flow_gpu, *, full_shape):
+        self.source_gpu = source_gpu
+        self.flow_gpu = flow_gpu
+        self.full_h, self.full_w = int(full_shape[0]), int(full_shape[1])
+        self._destroyed = False
+
+    @property
+    def shape(self):
+        return (self.full_h, self.full_w, 3)
+
+    @property
+    def dtype(self):
+        return getattr(self.source_gpu, "dtype", np.float32)
+
+    @property
+    def nbytes(self):
+        return int(self.full_h * self.full_w * 3 * np.dtype(np.float32).itemsize)
+
+    def destroy(self):
+        if self._destroyed:
+            return
+        self._destroyed = True
+        for name in ("source_gpu", "flow_gpu"):
+            buffer = getattr(self, name, None)
+            if buffer is not None and hasattr(buffer, "destroy"):
+                try:
+                    buffer.destroy()
+                except Exception:
+                    pass
+            setattr(self, name, None)
+
+    def release(self):
+        self.destroy()
+
+
+def _postprocess_spatial_weight_gpu(
+    weight_gpu: TaichiGPUBuffer,
+    *,
+    ghost_penalty: float,
+    ghost_cutoff: float,
+):
+    """Shape a SpatialFusion weight map without a CPU round-trip when able.
+
+    The returned value is either a GPU buffer (new graph path) or a NumPy
+    array (compatibility path for older spatial TCMs). Keeping the fallback
+    here preserves the established output contract while making the optimized
+    path fail closed on graph availability.
+    """
+    if float(ghost_penalty) == 1.0 and float(ghost_cutoff) <= 0.0:
+        return weight_gpu
+
+    processed_gpu = None
+    try:
+        from taichi_vision.taichi_algorithm.aot_api import aot_graph_available
+
+        if aot_graph_available("spatial", "postprocess_spatial_weight"):
+            from taichi_vision.taichi_algorithm.spatial_fusion import (
+                postprocess_spatial_weight_taichi,
+            )
+
+            processed_gpu = postprocess_spatial_weight_taichi(
+                weight_gpu,
+                ghost_penalty=float(ghost_penalty),
+                ghost_cutoff=float(ghost_cutoff),
+            )
+            weight_gpu.destroy()
+            return processed_gpu
+    except Exception as exc:
+        if processed_gpu is not None:
+            try:
+                processed_gpu.destroy()
+            except Exception:
+                pass
+        print(
+            f"[GPU Pipeline] Spatial weight GPU postprocess unavailable; "
+            f"using compatibility readback: {exc}"
+        )
+
+    # Compatibility path for an older artifact. This is numerically the same
+    # transform used before the resident GPU postprocess graph was introduced.
+    weights = weight_gpu.to_numpy()
+    weight_gpu.destroy()
+    if float(ghost_penalty) != 1.0:
+        weights = np.power(weights, float(ghost_penalty))
+    if float(ghost_cutoff) > 0.0:
+        cutoff = float(ghost_cutoff)
+        weights = np.clip(
+            (weights - cutoff) / max(1e-5, 1.0 - cutoff),
+            0.0,
+            1.0,
+        )
+    return np.ascontiguousarray(weights, dtype=np.float32)
+
+
 class FeatureMatchingGPUAligner:
-    """Pluggable GPU-Resident Feature Matching Aligner (ORB, AKAZE, SIFT, LightGlue)."""
+    """Taichi Vision feature matcher for both CPU and GPU engine targets.
+
+    ``ofb`` is the maintained Taichi Vision ORB-compatible FAST/BRIEF path;
+    ``akaze`` is the maintained Taichi Vision nonlinear diffusion path.  Both
+    return matched points to the Taichi Vision RANSAC wrapper, so this adapter
+    never imports or calls OpenCV.
+    """
 
     def __init__(
         self,
@@ -289,12 +1068,25 @@ class FeatureMatchingGPUAligner:
         full_shape: Optional[Tuple[int, int]] = None,
         feature_config: Optional[dict] = None,
     ):
-        import cv2
         from taichi_vision import taichi_aot
 
         self.feature_type = str(feature_type).lower().strip()
         self.work_scale = work_scale
-        self.config = feature_config or {}
+        self.config = feature_config if isinstance(feature_config, dict) else {}
+        for nested_name in ("ofb_params", "orb_params", "akaze_params"):
+            nested = self.config.get(nested_name)
+            if isinstance(nested, dict):
+                self.config = nested
+                break
+        if self.feature_type in {"orb", "ofb"}:
+            self.matcher_name = "ofb"
+        elif self.feature_type == "akaze":
+            self.matcher_name = "akaze"
+        else:
+            raise ValueError(
+                "Taichi feature aligner supports only ORB/OFB and AKAZE; "
+                f"received {feature_type!r}"
+            )
 
         ref_gray_gpu = taichi_aot.cvtColor(ref_analysis_gpu, taichi_aot.COLOR_RGB2GRAY)
         h, w = ref_gray_gpu.shape[:2]
@@ -319,30 +1111,70 @@ class FeatureMatchingGPUAligner:
             ref_gray_gpu.destroy()
             ref_gray_gpu = ref_gray_work
 
-        ref_gray_np = (
-            np.clip(ref_gray_gpu.to_numpy(), 0.0, 1.0) * 255.0
-        ).astype(np.uint8)
-        ref_gray_gpu.destroy()
+        self.ref_gray_gpu = ref_gray_gpu
+        print(
+            f"[GPU Pipeline] Aligner: Taichi Vision {self.matcher_name.upper()} "
+            f"(work={self.work_w}x{self.work_h}, engine={getattr(taichi_aot.engine, 'arch', 'unknown')})"
+        )
 
-        if "akaze" in self.feature_type:
-            thresh = float(self.config.get("akaze_threshold", 0.001))
-            self.detector = cv2.AKAZE_create(threshold=thresh)
-            self.norm_type = cv2.NORM_HAMMING
-        elif "sift" in self.feature_type:
-            nfeatures = int(self.config.get("nfeatures", 2000))
-            self.detector = cv2.SIFT_create(nfeatures=nfeatures)
-            self.norm_type = cv2.NORM_L2
+    def _matcher_parameters(self):
+        if self.matcher_name == "akaze":
+            return {
+                "ratio_threshold": float(self.config.get("ratio", 0.75)),
+                "grid_size": max(8, int(self.config.get("grid_size", 32))),
+                "threshold": float(
+                    self.config.get("akaze_threshold", self.config.get("thresh", 0.008))
+                ),
+                "margin": max(4, int(self.config.get("margin", 15))),
+                "max_keypoints": max(
+                    100,
+                    int(
+                        self.config.get(
+                            "max_kps", self.config.get("max_keypoints", 1500)
+                        )
+                    ),
+                ),
+                "k_contrast": float(self.config.get("k_contrast", 0.02)),
+                "num_fed_steps": max(1, int(self.config.get("num_fed_steps", 8))),
+            }
+        return {
+            "ratio_threshold": float(self.config.get("ratio", 0.75)),
+            "grid_size": max(8, int(self.config.get("grid_size", 32))),
+            "threshold": float(self.config.get("threshold", 0.015)),
+            "margin": max(4, int(self.config.get("margin", 15))),
+            "max_keypoints": max(
+                100,
+                int(self.config.get("max_kps", self.config.get("max_keypoints", 1500))),
+            ),
+        }
+
+    def _estimate_homography(self, supp_gray_gpu):
+        from taichi_vision import taichi_aot
+
+        parameters = self._matcher_parameters()
+        if self.matcher_name == "akaze":
+            matched = taichi_aot.akaze(self.ref_gray_gpu, supp_gray_gpu, **parameters)
         else:
-            nfeatures = int(self.config.get("nfeatures", 2000))
-            scale_factor = float(self.config.get("scaleFactor", 1.2))
-            nlevels = int(self.config.get("nlevels", 8))
-            self.detector = cv2.ORB_create(
-                nfeatures=nfeatures, scaleFactor=scale_factor, nlevels=nlevels
-            )
-            self.norm_type = cv2.NORM_HAMMING
-
-        self.kp_ref, self.des_ref = self.detector.detectAndCompute(ref_gray_np, None)
-        self.matcher = cv2.BFMatcher(self.norm_type, crossCheck=True)
+            matched = taichi_aot.ofb(self.ref_gray_gpu, supp_gray_gpu, **parameters)
+        if matched is None or matched[0] is None or matched[1] is None:
+            return None
+        pts_ref, pts_supp = matched[0], matched[1]
+        if len(pts_ref) < 4 or len(pts_supp) < 4:
+            return None
+        homography, mask = taichi_aot.find_homography(
+            np.ascontiguousarray(pts_supp, dtype=np.float32),
+            np.ascontiguousarray(pts_ref, dtype=np.float32),
+            method="RANSAC",
+            ransacReprojThreshold=float(self.config.get("ransac_threshold", 5.0)),
+            n_hypotheses=max(64, int(self.config.get("ransac_hypotheses", 1024))),
+            max_iters=max(1, int(self.config.get("ransac_iters", 1))),
+            return_gpu=False,
+        )
+        if homography is None:
+            return None
+        if mask is not None and int(np.asarray(mask).reshape(-1).sum()) < 4:
+            return None
+        return np.asarray(homography, dtype=np.float32)
 
     def align_frame(
         self,
@@ -352,8 +1184,8 @@ class FeatureMatchingGPUAligner:
         secondary_frame_to_warp=None,
         stop_event=None,
         return_gpu=True,
+        stream_primary: bool = False,
     ):
-        import cv2
         from taichi_vision import taichi_aot
 
         if stop_event is not None:
@@ -363,13 +1195,9 @@ class FeatureMatchingGPUAligner:
                 raise RuntimeError("Alignment cancelled.")
 
         src_for_analysis = (
-            analysis_frame_gpu
-            if analysis_frame_gpu is not None
-            else supp_linear_gpu
+            analysis_frame_gpu if analysis_frame_gpu is not None else supp_linear_gpu
         )
-        supp_gray_gpu = taichi_aot.cvtColor(
-            src_for_analysis, taichi_aot.COLOR_RGB2GRAY
-        )
+        supp_gray_gpu = taichi_aot.cvtColor(src_for_analysis, taichi_aot.COLOR_RGB2GRAY)
         if (self.work_h, self.work_w) != (self.target_h, self.target_w):
             supp_gray_work = taichi_aot.resize(
                 supp_gray_gpu,
@@ -380,66 +1208,50 @@ class FeatureMatchingGPUAligner:
             supp_gray_gpu.destroy()
             supp_gray_gpu = supp_gray_work
 
-        supp_gray_np = (
-            np.clip(supp_gray_gpu.to_numpy(), 0.0, 1.0) * 255.0
-        ).astype(np.uint8)
-        supp_gray_gpu.destroy()
+        try:
+            H_work = self._estimate_homography(supp_gray_gpu)
+        finally:
+            supp_gray_gpu.destroy()
 
-        kp_supp, des_supp = self.detector.detectAndCompute(supp_gray_np, None)
-        H_matrix = None
-        scale_x = self.target_w / float(self.work_w)
-        scale_y = self.target_h / float(self.work_h)
-
-        if (
-            self.des_ref is not None
-            and des_supp is not None
-            and len(self.kp_ref) >= 4
-            and len(kp_supp) >= 4
-        ):
-            matches = self.matcher.match(self.des_ref, des_supp)
-            if len(matches) >= 4:
-                matches = sorted(matches, key=lambda m: m.distance)[:100]
-                pts_ref = np.float32([self.kp_ref[m.queryIdx].pt for m in matches])
-                pts_supp = np.float32([kp_supp[m.trainIdx].pt for m in matches])
-
-                pts_ref_full = pts_ref * np.array([scale_x, scale_y], dtype=np.float32)
-                pts_supp_full = pts_supp * np.array([scale_x, scale_y], dtype=np.float32)
-
-                H_matrix, _ = cv2.findHomography(
-                    pts_supp_full, pts_ref_full, cv2.RANSAC, 5.0
-                )
-
-        if H_matrix is not None:
-            # Warp primary linear frame directly on GPU
+        if H_work is not None:
+            scale_x = self.target_w / float(self.work_w)
+            scale_y = self.target_h / float(self.work_h)
+            scale_to_full = np.array(
+                [[scale_x, 0, 0], [0, scale_y, 0], [0, 0, 1.0]],
+                dtype=np.float32,
+            )
+            scale_to_work = np.array(
+                [[1.0 / scale_x, 0, 0], [0, 1.0 / scale_y, 0], [0, 0, 1.0]],
+                dtype=np.float32,
+            )
+            H_full = scale_to_full @ H_work @ scale_to_work
             warped_primary = taichi_aot.warp_perspective(
                 supp_linear_gpu,
-                H_matrix,
+                H_full,
                 (self.target_w, self.target_h),
                 return_gpu=True,
             )
             warped_secondary = None
             if secondary_frame_to_warp is not None:
-                scale_mat = np.array(
-                    [[1.0 / scale_x, 0, 0], [0, 1.0 / scale_y, 0], [0, 0, 1.0]],
-                    dtype=np.float32,
-                )
-                scale_mat_inv = np.array(
-                    [[scale_x, 0, 0], [0, scale_y, 0], [0, 0, 1.0]],
-                    dtype=np.float32,
-                )
-                H_work = scale_mat @ H_matrix @ scale_mat_inv
                 warped_secondary = taichi_aot.warp_perspective(
                     secondary_frame_to_warp,
                     H_work,
                     (self.work_w, self.work_h),
-                    return_gpu=True,
+                    return_gpu=return_gpu,
                 )
-            return warped_primary, warped_secondary
-        else:
+            if secondary_frame_to_warp is not None:
+                return warped_primary, warped_secondary
+            return warped_primary
+
+        if secondary_frame_to_warp is not None:
             return supp_linear_gpu, secondary_frame_to_warp
+        return supp_linear_gpu
 
     def close(self):
-        pass
+        ref_gray_gpu = getattr(self, "ref_gray_gpu", None)
+        if ref_gray_gpu is not None and hasattr(ref_gray_gpu, "destroy"):
+            ref_gray_gpu.destroy()
+            self.ref_gray_gpu = None
 
 
 def create_resident_aligner(
@@ -451,21 +1263,73 @@ def create_resident_aligner(
     alignment_config: Optional[dict] = None,
 ):
     """Factory creating the appropriate GPU-resident aligner instance."""
-    plan_clean = str(alignment_plan or "").strip().lower()
+    plan_clean = (
+        str(alignment_plan or "").strip().lower().replace("-", " ").replace("_", " ")
+    )
     if plan_clean in ("no alignment", "none", "off", ""):
         print("[GPU Pipeline] Aligner: No Alignment (Bypass)")
         return NoAlignmentGPUAligner(ref_analysis_gpu)
-    elif plan_clean in ("ofb", "orb", "akaze", "sift", "lightglue", "feature matching"):
+    elif plan_clean in (
+        "block matching gpu",
+        "block matching",
+        "blockmatching",
+        "block_align",
+        "bm",
+    ):
+        return BlockMatchingGPUResidentAligner(
+            ref_analysis_gpu,
+            full_shape=full_shape,
+            alignment_config=alignment_config,
+        )
+    elif plan_clean in (
+        "farneback",
+        "farneback optical flow",
+    ):
+        return TaichiDenseFlowResidentAligner(
+            ref_analysis_gpu,
+            flow_type="farneback",
+            full_shape=full_shape,
+            alignment_config=alignment_config,
+        )
+    elif plan_clean in (
+        "lucas kanade",
+        "lucas kanade optical flow",
+        "lucas kanade gpu optical flow",
+    ):
+        return TaichiDenseFlowResidentAligner(
+            ref_analysis_gpu,
+            flow_type="lucas_kanade",
+            full_shape=full_shape,
+            alignment_config=alignment_config,
+        )
+    elif plan_clean in ("ofb", "orb", "akaze", "feature matching"):
         print(f"[GPU Pipeline] Aligner: Feature Matching ({plan_clean.upper()})")
         return FeatureMatchingGPUAligner(
             ref_analysis_gpu,
-            feature_type=plan_clean,
+            feature_type="ofb" if plan_clean == "feature matching" else plan_clean,
             work_scale=work_scale,
             full_shape=full_shape,
             feature_config=alignment_config,
         )
+    elif plan_clean in ("light glue", "lightglue"):
+        raise RuntimeError(
+            "Light Glue has no validated resident adapter. "
+            "Use OFB/ORB, AKAZE, Farneback, Lucas-Kanade, or Block Matching GPU."
+        )
+    elif plan_clean == "raft":
+        raise RuntimeError(
+            "RAFT has no validated resident adapter; refusing to route it to "
+            "the generic dense-flow graph."
+        )
+    elif plan_clean not in ("optical flow", "dense optical flow"):
+        raise ValueError(
+            f"Unsupported resident alignment plan {alignment_plan!r}; "
+            "select a validated Taichi alignment route."
+        )
     else:
-        print(f"[GPU Pipeline] Aligner: Dense Optical Flow ({plan_clean})")
+        print(
+            f"[GPU Pipeline] Aligner: Generic Taichi Dense Optical Flow ({plan_clean})"
+        )
         from .fusionet_engine.flownet_inference import AOTOpticalFlowAligner
 
         return AOTOpticalFlowAligner(
@@ -499,27 +1363,268 @@ def _destroy_work_item(item):
             pass
 
 
+def _primary_descriptor_owns_source(aligned_item, source_gpu):
+    return (
+        isinstance(aligned_item, ResidentWarpedFrame)
+        and getattr(aligned_item, "source_gpu", None) is source_gpu
+    )
+
+
+def _prepare_support_frame(
+    supp_path,
+    *,
+    is_raw,
+    target_h,
+    target_w,
+    analysis_box_kernel_size,
+    weight_engine,
+    prepare_work_analysis_fn,
+):
+    """Load a support frame to GPU, resize to target, create analysis copy, apply box filter.
+
+    Returns (supp_linear_gpu, secondary_frame_to_warp).
+    Caller owns both buffers and must destroy them when done.
+    """
+    from taichi_vision import taichi_aot
+
+    supp_linear_gpu = load_frame_to_gpu(supp_path, is_raw=is_raw)
+    if tuple(int(v) for v in supp_linear_gpu.shape[:2]) != (target_h, target_w):
+        supp_resized_gpu = taichi_aot.resize(
+            supp_linear_gpu,
+            (target_w, target_h),
+            interpolation=taichi_aot.INTER_LINEAR,
+            return_gpu=True,
+        )
+        supp_linear_gpu.destroy()
+        supp_linear_gpu = supp_resized_gpu
+
+    supp_analysis_work_gpu = prepare_work_analysis_fn(supp_linear_gpu)
+
+    if analysis_box_kernel_size > 0:
+        supp_analysis_denoised = taichi_aot.box_filter(
+            supp_analysis_work_gpu,
+            kernel_size=analysis_box_kernel_size,
+            return_gpu=True,
+        )
+        if supp_analysis_work_gpu is not supp_linear_gpu:
+            supp_analysis_work_gpu.destroy()
+        supp_analysis_work_gpu = supp_analysis_denoised
+
+    secondary_frame_to_warp = (
+        supp_analysis_work_gpu if weight_engine != "average" else None
+    )
+    return supp_linear_gpu, supp_analysis_work_gpu, secondary_frame_to_warp
+
+
+def _unpack_aligned_result(
+    aligned_result,
+    *,
+    secondary_frame_to_warp,
+    supp_linear_gpu,
+    supp_analysis_gpu,
+    supp_analysis_work_gpu,
+):
+    """Unpack aligner output and destroy intermediate buffers no longer needed.
+
+    Returns (supp_aligned_linear_gpu, supp_aligned_analysis_work_gpu).
+    """
+    if secondary_frame_to_warp is None:
+        supp_aligned_linear_gpu = aligned_result
+        supp_aligned_analysis_work_gpu = None
+    else:
+        supp_aligned_linear_gpu, supp_aligned_analysis_work_gpu = aligned_result
+
+    if (
+        supp_aligned_linear_gpu is not supp_linear_gpu
+        and not _primary_descriptor_owns_source(
+            supp_aligned_linear_gpu, supp_linear_gpu
+        )
+    ):
+        supp_linear_gpu.destroy()
+    if (
+        supp_analysis_gpu is not supp_linear_gpu
+        and supp_analysis_gpu is not supp_aligned_analysis_work_gpu
+    ):
+        supp_analysis_gpu.destroy()
+    if (
+        supp_analysis_work_gpu is not supp_analysis_gpu
+        and supp_analysis_work_gpu is not supp_aligned_analysis_work_gpu
+    ):
+        supp_analysis_work_gpu.destroy()
+
+    return supp_aligned_linear_gpu, supp_aligned_analysis_work_gpu
+
+
+def _compute_support_weight(
+    supp_aligned_analysis_work_gpu,
+    supp_aligned_linear_gpu,
+    *,
+    weight_engine,
+    engine,
+    session,
+    ref_work_rgb_np,
+    spatial_work_h,
+    spatial_work_w,
+    ref_spatial_gray_gpu,
+    spatial_row_starts,
+    spatial_col_starts,
+    spatial_rows_gpu,
+    spatial_cols_gpu,
+    spatial_tile_h,
+    spatial_tile_w,
+    spatial_noise_sigma,
+    spatial_motion_sens,
+    spatial_noise_offset,
+    spatial_texture_boost,
+    spatial_texture_radius,
+    spatial_single_coarse,
+    spatial_scratch,
+    ghost_penalty,
+    ghost_cutoff,
+    tile_size,
+    overlap,
+    chroma_sensitivity,
+    stop_event,
+):
+    """Compute the weight map for one support frame based on weight_engine.
+
+    Returns (weight_work_item, alpha_mean).  The caller owns weight_work_item.
+    """
+    if weight_engine == "spatial_fusion":
+        supp_work_gray_gpu = taichi_aot.cvtColor(
+            supp_aligned_analysis_work_gpu, taichi_aot.COLOR_RGB2GRAY
+        )
+        supp_aligned_analysis_work_gpu.destroy()
+        spatial_weight_input_gpu = _prepare_spatial_weight_gray_gpu(supp_work_gray_gpu)
+        weight_work_2d_gpu = engine.allocate(
+            (spatial_work_h, spatial_work_w),
+            dtype=np.float32,
+            host_accessible=False,
+        )
+        generate_spatial_weights_taichi(
+            current_image=spatial_weight_input_gpu,
+            reference_image=ref_spatial_gray_gpu,
+            weight_map_sum=weight_work_2d_gpu,
+            base_window=0,
+            stability_map=None,
+            row_starts=spatial_row_starts,
+            col_starts=spatial_col_starts,
+            tile_h=spatial_tile_h,
+            tile_w=spatial_tile_w,
+            noise_sigma=spatial_noise_sigma,
+            motion_sensitivity=spatial_motion_sens,
+            noise_offset_factor=spatial_noise_offset,
+            equalize_brightness=False,
+            buffer_provider=None,
+            scratch_cache=spatial_scratch,
+            row_starts_gpu=spatial_rows_gpu,
+            col_starts_gpu=spatial_cols_gpu,
+            coarse_texture_boost=spatial_texture_boost,
+            coarse_texture_radius=spatial_texture_radius,
+            coarse_pyramid_single_pass=spatial_single_coarse,
+        )
+        spatial_weight_input_gpu.destroy()
+        if spatial_weight_input_gpu is not supp_work_gray_gpu:
+            supp_work_gray_gpu.destroy()
+        weight_work_item = _postprocess_spatial_weight_gpu(
+            weight_work_2d_gpu,
+            ghost_penalty=ghost_penalty,
+            ghost_cutoff=ghost_cutoff,
+        )
+        return weight_work_item, 1.0
+
+    if weight_engine == "average":
+        if (
+            supp_aligned_analysis_work_gpu is not None
+            and supp_aligned_analysis_work_gpu is not supp_aligned_linear_gpu
+        ):
+            supp_aligned_analysis_work_gpu.destroy()
+        return None, 1.0
+
+    # FusionNet / ONNX path
+    supp_work_rgb_np = np.transpose(
+        supp_aligned_analysis_work_gpu.to_numpy(), (2, 0, 1)
+    ).astype(np.float32)
+    supp_aligned_analysis_work_gpu.destroy()
+    weight_work_np, alpha_mean = infer_single_support_weight_map(
+        session,
+        ref_work_rgb_np,
+        supp_work_rgb_np,
+        tile_size=tile_size,
+        overlap=overlap,
+        ghost_penalty=ghost_penalty,
+        ghost_cutoff=ghost_cutoff,
+        chroma_sensitivity=chroma_sensitivity,
+        stop_event=stop_event,
+    )
+    weight_work_item = np.ascontiguousarray(
+        np.transpose(weight_work_np, (1, 2, 0)), dtype=np.float32
+    )
+    del weight_work_np
+    return weight_work_item, alpha_mean
+
+
 def _gpu_blend_frame(
-    sum_img_gpu, weight_sum_gpu, supp_aligned_gpu, weight_work_gpu
+    sum_img_gpu,
+    weight_sum_gpu,
+    supp_aligned_gpu,
+    weight_work_gpu,
+    *,
+    splat_tile_size: Optional[int] = None,
+    uniform_weights: bool = False,
 ):
     """Blend one support frame into the GPU-resident accumulator.
 
-    Uses accumulate_spatial_merging_taichi from SpatialFusion which
-    auto-dispatches to the vec3 kernel when given a 3D weight map.
+    The streaming path uses one native fused remap+accumulate graph, so the
+    full-resolution source and low-resolution flow are sampled directly into
+    the global sums without materializing an aligned tile.  The full-frame
+    path retains the established accumulation graphs for compatibility.
 
-    The vec3 kernel performs per-channel bilinear upsample + multiply + accumulate
     entirely on GPU on-the-fly — saving 144 MB VRAM per frame.
     """
     from taichi_vision.taichi_algorithm.spatial_fusion import (
         accumulate_spatial_merging_taichi,
     )
 
-    accumulate_spatial_merging_taichi(
-        current_image_full=supp_aligned_gpu.view_as_vector(False),
-        weight_map_work=weight_work_gpu.view_as_vector(False),
-        final_image_sum=sum_img_gpu.view_as_vector(False),
-        weight_map_sum_full=weight_sum_gpu.view_as_vector(False),
-    )
+    if isinstance(supp_aligned_gpu, ResidentWarpedFrame):
+        from taichi_vision.taichi_algorithm.spatial_fusion import (
+            remap_accumulate_tile_taichi,
+        )
+
+        tile_size = max(32, int(splat_tile_size or 1024))
+        for y0 in range(0, supp_aligned_gpu.full_h, tile_size):
+            for x0 in range(0, supp_aligned_gpu.full_w, tile_size):
+                tile_h = min(tile_size, supp_aligned_gpu.full_h - y0)
+                tile_w = min(tile_size, supp_aligned_gpu.full_w - x0)
+                remap_accumulate_tile_taichi(
+                    source_full=supp_aligned_gpu.source_gpu,
+                    flow_work=supp_aligned_gpu.flow_gpu,
+                    final_image_sum=sum_img_gpu,
+                    weight_map_sum_full=weight_sum_gpu,
+                    full_shape=(supp_aligned_gpu.full_h, supp_aligned_gpu.full_w),
+                    offset=(y0, x0),
+                    tile_shape=(tile_h, tile_w),
+                    weight_map_work=None if uniform_weights else weight_work_gpu,
+                )
+        return
+
+    if uniform_weights:
+        from taichi_vision.taichi_algorithm.spatial_fusion import (
+            accumulate_average_taichi,
+        )
+
+        accumulate_average_taichi(
+            current_image_full=supp_aligned_gpu,
+            final_image_sum=sum_img_gpu,
+            weight_map_sum_full=weight_sum_gpu,
+        )
+    else:
+        accumulate_spatial_merging_taichi(
+            current_image_full=supp_aligned_gpu.view_as_vector(False),
+            weight_map_work=weight_work_gpu.view_as_vector(False),
+            final_image_sum=sum_img_gpu.view_as_vector(False),
+            weight_map_sum_full=weight_sum_gpu.view_as_vector(False),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +1694,6 @@ def run_gpu_resident_pipeline(
     from .fusionet_engine.weightnet_inference import (
         load_weightnet_onnx,
         infer_single_support_weight_map,
-        load_rgb_linear_image,
     )
 
     engine = get_engine()
@@ -605,6 +1709,13 @@ def run_gpu_resident_pipeline(
     if not is_raw and first_ext in RAW_EXTS:
         is_raw = True
 
+    preflight_resident_dependencies(
+        alignment_plan=alignment_plan,
+        weight_engine=weight_engine,
+        is_raw=is_raw,
+        engine=engine,
+    )
+
     if progress_callback:
         progress_callback(
             PROGRESS_LOAD_IMAGES_MIN,
@@ -613,8 +1724,10 @@ def run_gpu_resident_pipeline(
         )
 
     import gc
+
     try:
         from taichi_vision import taichi_aot
+
         taichi_aot.engine.buffer_pool.clear()
     except Exception:
         pass
@@ -624,9 +1737,7 @@ def run_gpu_resident_pipeline(
     target_h, target_w = ref_gpu.shape[:2]
 
     print(
-        f"[GPU Pipeline] Reference loaded to VRAM: "
-        f"shape=({target_h}, {target_w}, 3) dtype={ref_gpu.dtype} "
-        f"size={ref_gpu.nbytes / (1024*1024):.1f} MB (engine={weight_engine})"
+        f"[GPU Pipeline] Reference Frame: ({target_w}x{target_h}, {ref_gpu.dtype}) | Engine: {weight_engine}"
     )
 
     # ------------------------------------------------------------------
@@ -635,18 +1746,30 @@ def run_gpu_resident_pipeline(
     # AutoEnhance analysis on reference frame:
     # - Versi 1 (Analysis / High-Key): For Alignment & ONNX WeightNet (Used for BOTH RAW & Non-RAW)
     # - Versi 2 (Natural Tone Map): For SpatialFusion Perceptual Analysis (RAW only)
-    analysis_params = analyze_auto_enhance_on_gpu(ref_gpu, mode="analysis")
-    natural_params = analyze_auto_enhance_on_gpu(ref_gpu, mode="natural") if is_raw else None
-    if is_raw and natural_params is not None:
-        print(
-            f"[GPU Pipeline] AutoEnhance: Analysis Gain (v1)={analysis_params['gain']:.2f}x | "
-            f"Natural Gain (v2)={natural_params['gain']:.2f}x"
+    # Average without alignment has no analysis consumer, so avoid a needless
+    # GPU resize + host histogram readback.  Every other path keeps the same
+    # analysis contract, including Block Matching's optical domain.
+    plan_clean = str(alignment_plan or "").strip().lower()
+    alignment_requires_analysis = plan_clean not in (
+        "no alignment",
+        "none",
+        "off",
+        "",
+    )
+    analysis_required = weight_engine != "average" or alignment_requires_analysis
+    if analysis_required:
+        analysis_params = analyze_auto_enhance_on_gpu(ref_gpu, mode="analysis")
+        natural_params = (
+            analyze_auto_enhance_on_gpu(ref_gpu, mode="natural") if is_raw else None
         )
+        if is_raw and natural_params is not None:
+            pass
+        else:
+            pass
     else:
-        print(
-            f"[GPU Pipeline] AutoEnhance (Non-RAW): Analysis Gain (v1)={analysis_params['gain']:.2f}x "
-            f"(Applied only to analysis/flow/weightnet computation)"
-        )
+        analysis_params = None
+        natural_params = None
+        pass
 
     # ------------------------------------------------------------------
     # PHASE 3: Create Analysis Reference & Work-Resolution Copy
@@ -661,66 +1784,77 @@ def run_gpu_resident_pipeline(
     work_h = max(32, int(target_h * capped_scale))
     work_w = max(32, int(target_w * capped_scale))
 
-    # Create high-contrast analysis copy (Versi 1) on-the-fly for feature alignment & weight computation
-    if analysis_params is not None:
-        ref_analysis_gpu = apply_auto_enhance_on_gpu(ref_gpu, analysis_params)
-    else:
-        ref_analysis_gpu = ref_gpu
+    def _prepare_work_analysis_gpu(linear_gpu):
+        """Create only the work-resolution analysis buffer when needed."""
+        if not analysis_required:
+            return linear_gpu
 
-    # Downscale analysis frame to work-res directly FIRST to minimize VRAM footprint (144MB -> 36MB or less)
-    if (work_h, work_w) != (target_h, target_w):
-        ref_analysis_work_gpu = taichi_aot.resize(
-            ref_analysis_gpu,
-            (work_w, work_h),
-            interpolation=taichi_aot.INTER_AREA,
-            return_gpu=True,
-        )
-        if ref_analysis_gpu is not ref_gpu:
-            ref_analysis_gpu.destroy()
-        ref_analysis_gpu = ref_analysis_work_gpu
+        analysis_input_gpu = linear_gpu
+        if (work_h, work_w) != (target_h, target_w):
+            analysis_input_gpu = taichi_aot.resize(
+                linear_gpu,
+                (work_w, work_h),
+                interpolation=taichi_aot.INTER_AREA,
+                return_gpu=True,
+            )
+
+        # AutoEnhance is analysis preprocessing, not the linear fusion
+        # signal. Applying it after downsampling avoids a full-resolution
+        # temporary for every support frame.
+        if analysis_params is not None:
+            analysis_gpu = apply_auto_enhance_on_gpu(
+                analysis_input_gpu, analysis_params
+            )
+            if analysis_input_gpu is not linear_gpu:
+                analysis_input_gpu.destroy()
+            return analysis_gpu
+        return analysis_input_gpu
+
+    # Create high-contrast analysis copy (Versi 1) directly at work
+    # resolution. The fusion reference remains the original linear buffer.
+    ref_analysis_gpu = _prepare_work_analysis_gpu(ref_gpu)
 
     # Noise-Aware Analysis Pre-Filter on work-res:
     # - Noise Score >= 0.60: Aggressive pre-denoising (5x5 Box Filter)
     # - 0.30 <= Noise Score < 0.60: Light pre-denoising (3x3 Box Filter)
     # - Noise Score < 0.30: Clean image, pre-denoising bypassed
     analysis_box_kernel_size = 0
-    try:
-        from taichi_vision.taichi_algorithm.enhancement.estimate_noise import (
-            estimate_noise,
-        )
+    ref_noise_score = None
+    if analysis_required:
+        try:
+            from taichi_vision.taichi_algorithm.enhancement.estimate_noise import (
+                estimate_noise,
+            )
 
-        ref_noise_score = float(estimate_noise(ref_analysis_gpu))
-        if ref_noise_score >= 0.60:
-            analysis_box_kernel_size = 5
-            ref_analysis_denoised = taichi_aot.box_filter(
-                ref_analysis_gpu, kernel_size=5, return_gpu=True
-            )
-            if ref_analysis_gpu is not ref_gpu:
-                ref_analysis_gpu.destroy()
-            ref_analysis_gpu = ref_analysis_denoised
-            print(
-                f"[GPU Pipeline] High/Extreme noise detected for analysis (score={ref_noise_score:.4f} >= 0.60). "
-                f"Enabled aggressive Box Filter (5x5) pre-denoising."
-            )
-        elif ref_noise_score >= 0.30:
-            analysis_box_kernel_size = 3
-            ref_analysis_denoised = taichi_aot.box_filter(
-                ref_analysis_gpu, kernel_size=3, return_gpu=True
-            )
-            if ref_analysis_gpu is not ref_gpu:
-                ref_analysis_gpu.destroy()
-            ref_analysis_gpu = ref_analysis_denoised
-            print(
-                f"[GPU Pipeline] Moderate noise detected for analysis (score={ref_noise_score:.4f} >= 0.30). "
-                f"Enabled light Box Filter (3x3) pre-denoising."
-            )
-        else:
-            print(
-                f"[GPU Pipeline] Low noise detected for analysis (score={ref_noise_score:.4f} < 0.30). "
-                f"Bypassed analysis pre-denoising."
-            )
-    except Exception as e_noise:
-        print(f"[GPU Pipeline] Noise estimation note: {e_noise}")
+            ref_noise_score = float(estimate_noise(ref_analysis_gpu))
+            if ref_noise_score >= 0.60:
+                analysis_box_kernel_size = 5
+                ref_analysis_denoised = taichi_aot.box_filter(
+                    ref_analysis_gpu, kernel_size=5, return_gpu=True
+                )
+                if ref_analysis_gpu is not ref_gpu:
+                    ref_analysis_gpu.destroy()
+                ref_analysis_gpu = ref_analysis_denoised
+                pass
+            elif ref_noise_score >= 0.30:
+                analysis_box_kernel_size = 3
+                ref_analysis_denoised = taichi_aot.box_filter(
+                    ref_analysis_gpu, kernel_size=3, return_gpu=True
+                )
+                if ref_analysis_gpu is not ref_gpu:
+                    ref_analysis_gpu.destroy()
+                ref_analysis_gpu = ref_analysis_denoised
+                pass
+            else:
+                pass
+        except Exception as e_noise:
+            raise RuntimeError(
+                "Taichi estimate_noise failed during resident analysis; "
+                "the result cannot be classified safely: "
+                f"{e_noise}"
+            ) from e_noise
+    else:
+        pass
 
     ref_work_rgb_np = None
     ref_spatial_gray_gpu = None
@@ -735,6 +1869,8 @@ def run_gpu_resident_pipeline(
     spatial_cols_gpu = None
     spatial_row_starts = []
     spatial_col_starts = []
+    spatial_work_h = work_h
+    spatial_work_w = work_w
 
     if weight_engine == "spatial_fusion":
         from taichi_vision.taichi_algorithm.spatial_fusion import (
@@ -747,10 +1883,18 @@ def run_gpu_resident_pipeline(
         )
 
         cfg = spatial_config or {}
+        default_spatial_tile = (
+            # Larger spatial tiles reduce the number of serialized AOT
+            # dispatches on large frames.  Tile 24 was checked against tile
+            # 16 on the 12 MP Block Matching + SpatialFusion path.
+            24
+            if target_h * target_w >= 8_000_000
+            else (tile_size if tile_size <= 64 else 16)
+        )
         st_size = int(
             cfg.get(
                 "similarity_spatial_tile_size",
-                tile_size if tile_size <= 64 else 16,
+                default_spatial_tile,
             )
         )
         spatial_tile_h = st_size
@@ -762,39 +1906,80 @@ def run_gpu_resident_pipeline(
         spatial_noise_offset = float(
             cfg.get("similarity_spatial_noise_mad_offset_factor", 0.15)
         )
+        default_spatial_scale = min(
+            capped_scale,
+            # SpatialFusion is only a confidence-analysis map.  Keep optical
+            # alignment at ``capped_scale``; the lower map resolution avoids
+            # quadratic work on large sensors while preserving the full-res
+            # linear fusion signal.  0.25 was measured against 0.375 on the
+            # 12 MP RAW path before becoming the large-frame default.
+            0.25 if target_h * target_w >= 8_000_000 else capped_scale,
+        )
+        try:
+            spatial_scale = float(
+                cfg.get("similarity_spatial_work_scale", default_spatial_scale)
+            )
+        except (TypeError, ValueError):
+            spatial_scale = default_spatial_scale
+        spatial_scale = min(capped_scale, max(0.125, spatial_scale))
+        spatial_work_h = max(32, int(target_h * spatial_scale))
+        spatial_work_w = max(32, int(target_w * spatial_scale))
+        # Texture boosting is analysis-only.  Keep it configurable at the
+        # resident-pipeline boundary so large-frame profiles can disable the
+        # extra full-resolution Gaussian pass without changing the linear
+        # fusion buffer or the public SpatialFusion API.
+        default_texture_boost = 0.0 if target_h * target_w >= 8_000_000 else 0.30
+        spatial_texture_boost = float(
+            cfg.get("similarity_coarse_texture_boost", default_texture_boost)
+        )
+        spatial_texture_radius = float(
+            cfg.get("similarity_coarse_texture_radius", 10.0)
+        )
+        spatial_single_coarse = bool(
+            cfg.get(
+                "similarity_coarse_pyramid_single_pass",
+                target_h * target_w >= 8_000_000,
+            )
+        )
+        pass
 
         # SpatialFusion analyzes via AutoEnhance v1 (High-Key Analysis Mode)
-        if (work_h, work_w) != (target_h, target_w):
-            ref_work_v1_gpu = taichi_aot.resize(
+        if tuple(int(value) for value in ref_analysis_gpu.shape[:2]) != (
+            spatial_work_h,
+            spatial_work_w,
+        ):
+            ref_spatial_v1_gpu = taichi_aot.resize(
                 ref_analysis_gpu,
-                (work_w, work_h),
+                (spatial_work_w, spatial_work_h),
                 interpolation=taichi_aot.INTER_AREA,
                 return_gpu=True,
             )
         else:
-            ref_work_v1_gpu = ref_analysis_gpu
+            ref_spatial_v1_gpu = ref_analysis_gpu
 
         ref_spatial_gray_gpu = taichi_aot.cvtColor(
-            ref_work_v1_gpu, taichi_aot.COLOR_RGB2GRAY
+            ref_spatial_v1_gpu, taichi_aot.COLOR_RGB2GRAY
         )
-        ref_work_rgb_np = np.transpose(
-            ref_work_v1_gpu.to_numpy(), (2, 0, 1)
-        ).astype(np.float32)  # [3, work_h, work_w]
-
-        if ref_work_v1_gpu is not ref_analysis_gpu:
-            ref_work_v1_gpu.destroy()
 
         # Estimasi noise 100% GPU-Native Taichi Vision (Wavelet Subband Minima & Patch Subspace)
         # Terkalibrasi ke noise sigma spatial domain: score * 0.032 * 1.25
-        if 'ref_noise_score' in locals() and ref_noise_score is not None:
+        if "ref_noise_score" in locals() and ref_noise_score is not None:
             auto_noise_sigma = float(np.clip(ref_noise_score * 0.040, 1e-4, 0.99999))
         else:
             try:
-                from taichi_vision.taichi_algorithm.enhancement.estimate_noise import estimate_noise
-                gpu_score = float(estimate_noise(ref_work_v1_gpu))
+                from taichi_vision.taichi_algorithm.enhancement.estimate_noise import (
+                    estimate_noise,
+                )
+
+                gpu_score = float(estimate_noise(ref_spatial_v1_gpu))
                 auto_noise_sigma = float(np.clip(gpu_score * 0.040, 1e-4, 0.99999))
-            except Exception:
-                auto_noise_sigma = 0.025
+            except Exception as exc:
+                raise RuntimeError(
+                    "Taichi estimate_noise failed for SpatialFusion: " f"{exc}"
+                ) from exc
+
+        if ref_spatial_v1_gpu is not ref_analysis_gpu:
+            ref_spatial_v1_gpu.destroy()
 
         explicit_noise_sigma = cfg.get("noise_sigma")
         if explicit_noise_sigma is not None and float(explicit_noise_sigma) > 0.0:
@@ -802,14 +1987,12 @@ def run_gpu_resident_pipeline(
         else:
             spatial_noise_sigma = auto_noise_sigma
 
-        print(
-            f"[SpatialFusion] Reference noise sigma (Taichi Vision GPU-Native): {spatial_noise_sigma:.6f}"
-        )
+        pass
         spatial_row_starts = _compute_tile_starts(
-            work_h, spatial_tile_h, overlap=spatial_overlap
+            spatial_work_h, spatial_tile_h, overlap=spatial_overlap
         )
         spatial_col_starts = _compute_tile_starts(
-            work_w, spatial_tile_w, overlap=spatial_overlap
+            spatial_work_w, spatial_tile_w, overlap=spatial_overlap
         )
         spatial_rows_gpu = taichi_aot.upload(
             np.asarray(spatial_row_starts, dtype=np.int32)
@@ -818,9 +2001,18 @@ def run_gpu_resident_pipeline(
             np.asarray(spatial_col_starts, dtype=np.int32)
         )
         spatial_scratch = SpatialScratchCache()
+
+    elif weight_engine == "average":
+        # Average does not cross an ONNX analysis boundary.  Keep the
+        # reference entirely GPU-resident and avoid a work-resolution host
+        # copy that would otherwise be discarded by the worker.
+        ref_work_rgb_np = None
     else:
         # Work-resolution copy for ONNX WeightNet inference
-        if (work_h, work_w) != (target_h, target_w):
+        if tuple(int(value) for value in ref_analysis_gpu.shape[:2]) != (
+            work_h,
+            work_w,
+        ):
             ref_work_rgb_hwc_gpu = taichi_aot.resize(
                 ref_analysis_gpu,
                 (work_w, work_h),
@@ -838,6 +2030,25 @@ def run_gpu_resident_pipeline(
 
         if ref_work_rgb_hwc_gpu is not ref_analysis_gpu:
             ref_work_rgb_hwc_gpu.destroy()
+
+    def _prepare_spatial_weight_gray_gpu(source_gray_gpu):
+        """Downsample only the already-aligned analysis luma for SpatialFusion.
+
+        Alignment keeps the higher ``work_h x work_w`` domain.  Spatial
+        weights are confidence metadata, so they can use the bounded lower
+        analysis domain while the linear RGB fusion remains full resolution.
+        """
+        if tuple(int(value) for value in source_gray_gpu.shape[:2]) == (
+            spatial_work_h,
+            spatial_work_w,
+        ):
+            return source_gray_gpu
+        return taichi_aot.resize(
+            source_gray_gpu,
+            (spatial_work_w, spatial_work_h),
+            interpolation=taichi_aot.INTER_AREA,
+            return_gpu=True,
+        )
 
     # ------------------------------------------------------------------
     # PHASE 4: Initialize GPU-Resident Aligner
@@ -857,6 +2068,79 @@ def run_gpu_resident_pipeline(
         alignment_config=alignment_config,
     )
 
+    # The streaming primary path is deliberately opt-in by capability, not
+    # by assumption.  If the fused remap/accumulation graph is missing from
+    # the active target artifact, the aligner keeps the established
+    # same-backend full-frame route.
+    splat_tile_size = 1024
+    stream_root_cfg = alignment_config if isinstance(alignment_config, dict) else {}
+    stream_cfg = stream_root_cfg
+    try:
+        if isinstance(stream_cfg.get("block_matching_gpu_params"), dict):
+            block_matching_cfg = stream_cfg["block_matching_gpu_params"]
+        else:
+            block_matching_cfg = stream_cfg
+        splat_tile_size = max(
+            32,
+            int(
+                block_matching_cfg.get(
+                    "splat_tile_size",
+                    stream_root_cfg.get(
+                        "splat_tile_size",
+                        os.environ.get("PIXEL_REFINE_RESIDENT_SPLAT_TILE_SIZE", "1024"),
+                    ),
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        splat_tile_size = 1024
+
+    stream_primary = False
+    if isinstance(aligner, BlockMatchingGPUResidentAligner):
+        try:
+            from taichi_vision.taichi_algorithm.aot_api import aot_graph_available
+
+            stream_requested = stream_root_cfg.get(
+                "stream_primary",
+                stream_root_cfg.get(
+                    "resident_tile_streaming",
+                    block_matching_cfg.get(
+                        "stream_primary",
+                        block_matching_cfg.get("resident_tile_streaming", True),
+                    ),
+                ),
+            )
+            if isinstance(stream_requested, str):
+                stream_requested = stream_requested.strip().lower() not in {
+                    "0",
+                    "false",
+                    "off",
+                    "no",
+                    "disabled",
+                }
+            fused_splat_graph = (
+                "remap_accumulate_average_tile"
+                if weight_engine == "average"
+                else (
+                    "remap_accumulate_spatial_tile"
+                    if weight_engine == "spatial_fusion"
+                    else "remap_accumulate_spatial_vec3_tile"
+                )
+            )
+            stream_primary = bool(
+                stream_requested
+                and int(target_h) * int(target_w) >= 4_000_000
+                and aot_graph_available("spatial", fused_splat_graph)
+            )
+        except Exception as exc:
+            pass
+            stream_primary = False
+
+    if stream_primary:
+        pass
+    elif isinstance(aligner, BlockMatchingGPUResidentAligner):
+        pass
+
     if ref_analysis_gpu is not ref_gpu:
         ref_analysis_gpu.destroy()
 
@@ -869,7 +2153,10 @@ def run_gpu_resident_pipeline(
         weight_sum_gpu = engine.upload(np.ones((target_h, target_w), dtype=np.float32))
     else:
         # FusionNet/WeightNet outputs a 3-channel (vec3) weightmap [H, W, 3]
-        weight_sum_gpu = engine.upload(np.ones((target_h, target_w, 3), dtype=np.float32))
+        weight_sum_gpu = engine.upload(
+            np.ones((target_h, target_w, 3), dtype=np.float32)
+        )
+    use_uniform_weight_accumulation = weight_engine == "average"
 
     alpha_total = 0.0
     total_supp = num_images - 1
@@ -882,7 +2169,32 @@ def run_gpu_resident_pipeline(
     # Stage 3: Weight Inference   -> weighted_queue  (maxsize=1, 1 GPU Frame in-flight)
     # Stage 4: GPU Blending (Main Thread) consumes weighted_queue
     # ------------------------------------------------------------------
-    q_depth = max(1, int(batch_queue))
+    # A full-resolution float32 RGB frame is expensive on both sides of the
+    # pipeline.  The old value came directly from ``batch_size`` and could
+    # therefore retain several decoded 12-24 MP frames in the preloader queue
+    # while the GPU still held the reference, aligned frame, and accumulators.
+    # Keep at most the amount that fits in a small host staging budget.  The
+    # environment override is intentionally explicit for controlled
+    # benchmarking; production defaults to one large frame in flight.
+    requested_q_depth = max(1, int(batch_queue))
+    try:
+        host_queue_budget_mb = max(
+            64,
+            int(os.environ.get("PIXEL_REFINE_RESIDENT_HOST_QUEUE_MB", "256")),
+        )
+    except (TypeError, ValueError):
+        host_queue_budget_mb = 256
+    frame_host_bytes = max(
+        1, int(target_h) * int(target_w) * 3 * np.dtype(np.float32).itemsize
+    )
+    host_queue_capacity = max(
+        1,
+        int((host_queue_budget_mb * 1024 * 1024) // frame_host_bytes),
+    )
+    q_depth = min(requested_q_depth, host_queue_capacity)
+
+    pass
+
     if progress_callback:
         progress_callback(
             PROGRESS_MERGE_MIN,
@@ -892,17 +2204,58 @@ def run_gpu_resident_pipeline(
 
     _SENTINEL = object()
     preloaded_queue = queue.Queue(maxsize=q_depth)  # Host RAM queue (0 MB VRAM)
-    aligned_queue = queue.Queue(maxsize=1)          # Aligned queue (strictly 1 GPU frame in-flight max)
-    weighted_queue = queue.Queue(maxsize=1)         # Weighted queue (strictly 1 GPU frame in-flight max)
-
-    print(
-        f"[GPU Pipeline] Universal Multi-Stage Queue initialized: "
-        f"host_queue={q_depth}, gpu_in_flight=1 (Safe VRAM footprint active)"
+    aligned_queue = queue.Queue(
+        maxsize=1
+    )  # Aligned queue (strictly 1 GPU frame in-flight max)
+    weighted_queue = queue.Queue(
+        maxsize=1
+    )  # Weighted queue (strictly 1 GPU frame in-flight max)
+    average_direct_to_blend = weight_engine == "average" and not alignment_only
+    alignment_output_queue = (
+        weighted_queue if average_direct_to_blend else aligned_queue
     )
+
+    pass
 
     pipeline_error = None
     pipeline_lock = threading.Lock()
     gpu_hardware_lock = threading.Lock()
+
+    # ``destroy()`` is deliberately asynchronous in the AOT engine.  Reclaim
+    # only at a safe point and only when lifecycle buffers are accumulating;
+    # clearing the pool for every frame would trade the memory fix for costly
+    # repeated allocations.  Live accumulators remain resident throughout.
+    reclaim_threshold = max(
+        64 * 1024 * 1024,
+        min(256 * 1024 * 1024, frame_host_bytes),
+    )
+
+    def _reclaim_idle_buffers(stage):
+        try:
+            status = engine.get_memory_status(force=True)
+            lifecycle_bytes = (
+                int(status.get("pooled_bytes", 0) or 0)
+                + int(status.get("retired_bytes", 0) or 0)
+                + int(status.get("staging_bytes", 0) or 0)
+            )
+            pressure = str(status.get("pressure", "healthy")).lower()
+            if lifecycle_bytes < reclaim_threshold and pressure not in (
+                "critical",
+                "emergency",
+            ):
+                return
+
+            # The reclaim contract requires a synchronization safe-point.
+            engine.sync()
+            reclaimed = engine.reclaim_resident_buffers(reason=str(stage))
+            after = reclaimed.get("after", {})
+            pass
+        except Exception as exc:
+            # Reclaim is an optimization/safety valve.  Never hide the main
+            # pipeline error when a backend does not expose the optional API.
+            pass
+
+    _reclaim_idle_buffers("reference_analysis")
 
     def _is_stopped():
         if stop_event is not None:
@@ -917,13 +2270,14 @@ def run_gpu_resident_pipeline(
     def _set_error(exc):
         nonlocal pipeline_error
         import traceback
+
         traceback.print_exc()
         with pipeline_lock:
             if pipeline_error is None:
                 pipeline_error = exc
 
     # ------------------------------------------------------------------
-    # Worker 1: Disk Preloader (loads RAW to CPU Host RAM - 0 MB VRAM)
+    # Worker 1: Disk Preloader (queues paths; decode/upload stays bounded)
     # ------------------------------------------------------------------
     def _preloader_worker():
         try:
@@ -932,21 +2286,16 @@ def run_gpu_resident_pipeline(
                     break
                 f_path = image_paths[idx]
                 f_name = Path(f_path).name
-                s_np = load_rgb_linear_image(f_path, is_raw=is_raw)
-                if s_np.shape[:2] != (target_h, target_w):
-                    s_np = np.ascontiguousarray(
-                        taichi_aot.resize(
-                            s_np, (target_w, target_h), interpolation=taichi_aot.INTER_LINEAR
-                        ),
-                        dtype=np.float32,
-                    )
-
                 while not _is_stopped():
                     if pipeline_error is not None:
-                        del s_np
                         return
                     try:
-                        preloaded_queue.put((idx, f_name, s_np), timeout=0.05)
+                        # Queue only a path.  Keeping decoded 12 MP float32
+                        # frames in the host queue duplicates the resident
+                        # upload and can grow RSS by hundreds of MiB.  The
+                        # alignment worker decodes directly through the same
+                        # Hamilton/standard loader used by this pipeline.
+                        preloaded_queue.put((idx, f_name, f_path), timeout=0.05)
                         break
                     except queue.Full:
                         continue
@@ -961,6 +2310,7 @@ def run_gpu_resident_pipeline(
     def _alignment_worker():
         try:
             from taichi_vision.taichi_aot.engine import ensure_cuda_context
+
             ensure_cuda_context()
         except Exception:
             pass
@@ -976,83 +2326,55 @@ def run_gpu_resident_pipeline(
                 if item is _SENTINEL:
                     break
 
-                curr_idx, curr_name, supp_linear_np = item
+                curr_idx, curr_name, supp_path = item
 
                 with gpu_hardware_lock:
                     if _is_stopped():
-                        del supp_linear_np
                         break
-                    # Upload single frame to VRAM on demand
-                    supp_linear_gpu = engine.upload(supp_linear_np)
-                    del supp_linear_np
-
-                    # Generate on-the-fly Versi 1 (Analysis High-Key) for FlowNet / WeightNet
-                    if analysis_params is not None:
-                        supp_analysis_gpu = apply_auto_enhance_on_gpu(
-                            supp_linear_gpu, analysis_params
-                        )
-                    else:
-                        supp_analysis_gpu = supp_linear_gpu
-
-                    # Downscale analysis frame to work-res directly first (144MB -> 36MB or less)
-                    if (work_h, work_w) != (target_h, target_w):
-                        supp_analysis_work_gpu = taichi_aot.resize(
-                            supp_analysis_gpu,
-                            (work_w, work_h),
-                            interpolation=taichi_aot.INTER_AREA,
-                            return_gpu=True,
-                        )
-                        if supp_analysis_gpu is not supp_linear_gpu:
-                            supp_analysis_gpu.destroy()
-                    else:
-                        supp_analysis_work_gpu = supp_analysis_gpu
-
-                    # Apply Box Filter directly on work-res analysis frame (drastically saves VRAM)
-                    if analysis_box_kernel_size > 0:
-                        supp_analysis_denoised = taichi_aot.box_filter(
-                            supp_analysis_work_gpu,
-                            kernel_size=analysis_box_kernel_size,
-                            return_gpu=True,
-                        )
-                        if supp_analysis_work_gpu is not supp_linear_gpu:
-                            supp_analysis_work_gpu.destroy()
-                        supp_analysis_work_gpu = supp_analysis_denoised
-
-                    # Dual-Warp on GPU (Primary in full-res 12MP, Secondary directly in work-res ~36MB!)
-                    supp_aligned_linear_gpu, supp_aligned_analysis_work_gpu = (
-                        aligner.align_frame(
-                            supp_linear_gpu,
-                            analysis_frame_gpu=supp_analysis_work_gpu,
-                            secondary_frame_to_warp=supp_analysis_work_gpu,
-                            stop_event=stop_event,
-                            return_gpu=True,
+                    supp_linear_gpu, supp_analysis_work_gpu, secondary_frame_to_warp = (
+                        _prepare_support_frame(
+                            supp_path,
+                            is_raw=is_raw,
+                            target_h=target_h,
+                            target_w=target_w,
+                            analysis_box_kernel_size=analysis_box_kernel_size,
+                            weight_engine=weight_engine,
+                            prepare_work_analysis_fn=_prepare_work_analysis_gpu,
                         )
                     )
-                    if supp_aligned_linear_gpu is not supp_linear_gpu:
-                        supp_linear_gpu.destroy()
-                    if (
-                        supp_analysis_gpu is not supp_linear_gpu
-                        and supp_analysis_gpu is not supp_aligned_analysis_work_gpu
-                    ):
-                        supp_analysis_gpu.destroy()
-                    if (
-                        supp_analysis_work_gpu is not supp_analysis_gpu
-                        and supp_analysis_work_gpu is not supp_aligned_analysis_work_gpu
-                    ):
-                        supp_analysis_work_gpu.destroy()
+                    supp_analysis_gpu = supp_analysis_work_gpu
+
+                    aligned_result = aligner.align_frame(
+                        supp_linear_gpu,
+                        analysis_frame_gpu=supp_analysis_work_gpu,
+                        secondary_frame_to_warp=secondary_frame_to_warp,
+                        stop_event=stop_event,
+                        return_gpu=True,
+                        stream_primary=stream_primary,
+                    )
+                    supp_aligned_linear_gpu, supp_aligned_analysis_work_gpu = (
+                        _unpack_aligned_result(
+                            aligned_result,
+                            secondary_frame_to_warp=secondary_frame_to_warp,
+                            supp_linear_gpu=supp_linear_gpu,
+                            supp_analysis_gpu=supp_analysis_gpu,
+                            supp_analysis_work_gpu=supp_analysis_work_gpu,
+                        )
+                    )
 
                     if weight_engine == "spatial_fusion":
                         # SpatialFusion analyzes via AutoEnhance v1 (High-Key Analysis Mode)
                         supp_work_gray_gpu = taichi_aot.cvtColor(
                             supp_aligned_analysis_work_gpu, taichi_aot.COLOR_RGB2GRAY
                         )
-                        supp_work_rgb_np = np.transpose(
-                            supp_aligned_analysis_work_gpu.to_numpy(), (2, 0, 1)
-                        ).astype(np.float32)
                         supp_aligned_analysis_work_gpu.destroy()
-                        supp_work_item = (supp_work_gray_gpu, supp_work_rgb_np)
+                        supp_work_item = supp_work_gray_gpu
                     elif weight_engine == "average":
-                        if supp_aligned_analysis_work_gpu is not None:
+                        if (
+                            supp_aligned_analysis_work_gpu is not None
+                            and supp_aligned_analysis_work_gpu
+                            is not supp_aligned_linear_gpu
+                        ):
                             supp_aligned_analysis_work_gpu.destroy()
                         supp_work_item = None
                     else:
@@ -1078,22 +2400,34 @@ def run_gpu_resident_pipeline(
                         _destroy_work_item(supp_work_item)
                         return
                     try:
-                        aligned_queue.put(
-                            (
-                                curr_idx,
-                                curr_name,
-                                supp_aligned_linear_gpu,
-                                supp_work_item,
-                            ),
-                            timeout=0.05,
-                        )
+                        if average_direct_to_blend:
+                            alignment_output_queue.put(
+                                (
+                                    curr_idx,
+                                    curr_name,
+                                    supp_aligned_linear_gpu,
+                                    None,
+                                    1.0,
+                                ),
+                                timeout=0.05,
+                            )
+                        else:
+                            alignment_output_queue.put(
+                                (
+                                    curr_idx,
+                                    curr_name,
+                                    supp_aligned_linear_gpu,
+                                    supp_work_item,
+                                ),
+                                timeout=0.05,
+                            )
                         break
                     except queue.Full:
                         continue
         except Exception as exc:
             _set_error(exc)
         finally:
-            aligned_queue.put(_SENTINEL)
+            alignment_output_queue.put(_SENTINEL)
 
     # ------------------------------------------------------------------
     # Worker 3: Weight Inference (DirectML ONNX AI or Native Taichi AOT)
@@ -1101,6 +2435,7 @@ def run_gpu_resident_pipeline(
     def _weight_inference_worker():
         try:
             from taichi_vision.taichi_aot.engine import ensure_cuda_context
+
             ensure_cuda_context()
         except Exception:
             pass
@@ -1125,12 +2460,17 @@ def run_gpu_resident_pipeline(
                         break
 
                     if weight_engine == "spatial_fusion":
-                        supp_work_gray_gpu, supp_work_rgb_np = supp_work_item
+                        supp_work_gray_gpu = supp_work_item
+                        spatial_weight_input_gpu = _prepare_spatial_weight_gray_gpu(
+                            supp_work_gray_gpu
+                        )
                         weight_work_2d_gpu = engine.allocate(
-                            (work_h, work_w), dtype=np.float32, host_accessible=True
+                            (spatial_work_h, spatial_work_w),
+                            dtype=np.float32,
+                            host_accessible=False,
                         )
                         generate_spatial_weights_taichi(
-                            current_image=supp_work_gray_gpu,
+                            current_image=spatial_weight_input_gpu,
                             reference_image=ref_spatial_gray_gpu,
                             weight_map_sum=weight_work_2d_gpu,
                             base_window=0,
@@ -1147,48 +2487,45 @@ def run_gpu_resident_pipeline(
                             scratch_cache=spatial_scratch,
                             row_starts_gpu=spatial_rows_gpu,
                             col_starts_gpu=spatial_cols_gpu,
+                            coarse_texture_boost=spatial_texture_boost,
+                            coarse_texture_radius=spatial_texture_radius,
+                            coarse_pyramid_single_pass=spatial_single_coarse,
                         )
-                        supp_work_gray_gpu.destroy()
-                        w_2d_np = weight_work_2d_gpu.to_numpy()
-                        weight_work_2d_gpu.destroy()
-
-                        # Apply ghost penalty & cutoff on 2D weightmap
-                        if ghost_penalty != 1.0:
-                            w_2d_np = np.power(w_2d_np, float(ghost_penalty))
-                        if ghost_cutoff > 0.0:
-                            w_2d_np = np.clip(
-                                (w_2d_np - float(ghost_cutoff))
-                                / (1.0 - float(ghost_cutoff)),
-                                0.0,
-                                1.0,
-                            )
-
-                        # Pure 1-Channel (2D) Spatial Weightmap
-                        w_2d_np = np.ascontiguousarray(w_2d_np, dtype=np.float32)
-                        del supp_work_rgb_np
-                        weight_work_item = w_2d_np
-                        alpha_mean = 1.0
-                    elif weight_engine == "average":
-                        weight_work_item = np.ones((work_h, work_w, 3), dtype=np.float32)
-                        alpha_mean = 1.0
-                    else:
-                        supp_work_rgb_np = supp_work_item
-                        weight_work_np, alpha_mean = infer_single_support_weight_map(
-                            session,
-                            ref_work_rgb_np,
-                            supp_work_rgb_np,
-                            tile_size=tile_size,
-                            overlap=overlap,
+                        spatial_weight_input_gpu.destroy()
+                        if spatial_weight_input_gpu is not supp_work_gray_gpu:
+                            supp_work_gray_gpu.destroy()
+                        weight_work_item = _postprocess_spatial_weight_gpu(
+                            weight_work_2d_gpu,
                             ghost_penalty=ghost_penalty,
                             ghost_cutoff=ghost_cutoff,
-                            chroma_sensitivity=chroma_sensitivity,
-                            stop_event=stop_event,
                         )
-                        weight_work_item = np.ascontiguousarray(
-                            np.transpose(weight_work_np, (1, 2, 0)), dtype=np.float32
-                        )
-                        del weight_work_np
-                        engine.sync()
+                        alpha_mean = 1.0
+                    elif weight_engine == "average":
+                        # Uniform averaging uses the dedicated native graph;
+                        # no work-resolution all-ones map is required.
+                        weight_work_item = None
+                        alpha_mean = 1.0
+
+                # WeightNet consumes the already downloaded work-resolution
+                # NumPy pair. Do not hold the AOT lock during ONNX inference;
+                # this allows the alignment worker to prepare the next frame.
+                if weight_engine not in ("spatial_fusion", "average"):
+                    supp_work_rgb_np = supp_work_item
+                    weight_work_np, alpha_mean = infer_single_support_weight_map(
+                        session,
+                        ref_work_rgb_np,
+                        supp_work_rgb_np,
+                        tile_size=tile_size,
+                        overlap=overlap,
+                        ghost_penalty=ghost_penalty,
+                        ghost_cutoff=ghost_cutoff,
+                        chroma_sensitivity=chroma_sensitivity,
+                        stop_event=stop_event,
+                    )
+                    weight_work_item = np.ascontiguousarray(
+                        np.transpose(weight_work_np, (1, 2, 0)), dtype=np.float32
+                    )
+                    del weight_work_np
 
                 while not _is_stopped():
                     if pipeline_error is not None:
@@ -1241,156 +2578,90 @@ def run_gpu_resident_pipeline(
                         raise pipeline_error
                     break
 
-                curr_idx, curr_name, supp_linear_np = item
+                curr_idx, curr_name, supp_path = item
                 if _is_stopped():
-                    del supp_linear_np
                     break
 
-                supp_linear_gpu = engine.upload(supp_linear_np)
-                del supp_linear_np
-
-                if is_raw and analysis_params is not None:
-                    supp_analysis_gpu = apply_auto_enhance_on_gpu(
-                        supp_linear_gpu, analysis_params
-                    )
-                else:
-                    supp_analysis_gpu = supp_linear_gpu
-
-                # Downscale analysis frame to work-res directly first (144MB -> 36MB or less)
-                if (work_h, work_w) != (target_h, target_w):
-                    supp_analysis_work_gpu = taichi_aot.resize(
-                        supp_analysis_gpu,
-                        (work_w, work_h),
-                        interpolation=taichi_aot.INTER_AREA,
-                        return_gpu=True,
-                    )
-                    if supp_analysis_gpu is not supp_linear_gpu:
-                        supp_analysis_gpu.destroy()
-                else:
-                    supp_analysis_work_gpu = supp_analysis_gpu
-
-                # Apply Box Filter directly on work-res analysis frame (drastically saves VRAM)
-                if analysis_box_kernel_size > 0:
-                    supp_analysis_denoised = taichi_aot.box_filter(
-                        supp_analysis_work_gpu,
-                        kernel_size=analysis_box_kernel_size,
-                        return_gpu=True,
-                    )
-                    if supp_analysis_work_gpu is not supp_linear_gpu:
-                        supp_analysis_work_gpu.destroy()
-                    supp_analysis_work_gpu = supp_analysis_denoised
-
-                supp_aligned_linear_gpu, supp_aligned_analysis_work_gpu = (
-                    aligner.align_frame(
-                        supp_linear_gpu,
-                        analysis_frame_gpu=supp_analysis_work_gpu,
-                        secondary_frame_to_warp=supp_analysis_work_gpu,
-                        stop_event=stop_event,
-                        return_gpu=True,
+                supp_linear_gpu, supp_analysis_work_gpu, secondary_frame_to_warp = (
+                    _prepare_support_frame(
+                        supp_path,
+                        is_raw=is_raw,
+                        target_h=target_h,
+                        target_w=target_w,
+                        analysis_box_kernel_size=analysis_box_kernel_size,
+                        weight_engine=weight_engine,
+                        prepare_work_analysis_fn=_prepare_work_analysis_gpu,
                     )
                 )
-                if supp_aligned_linear_gpu is not supp_linear_gpu:
-                    supp_linear_gpu.destroy()
-                if (
-                    supp_analysis_gpu is not supp_linear_gpu
-                    and supp_analysis_gpu is not supp_aligned_analysis_work_gpu
-                ):
-                    supp_analysis_gpu.destroy()
-                if (
-                    supp_analysis_work_gpu is not supp_analysis_gpu
-                    and supp_analysis_work_gpu is not supp_aligned_analysis_work_gpu
-                ):
-                    supp_analysis_work_gpu.destroy()
+                supp_analysis_gpu = supp_analysis_work_gpu
 
-                if weight_engine == "spatial_fusion":
-                    supp_work_gray_gpu = taichi_aot.cvtColor(
-                        supp_aligned_analysis_work_gpu, taichi_aot.COLOR_RGB2GRAY
+                aligned_result = aligner.align_frame(
+                    supp_linear_gpu,
+                    analysis_frame_gpu=supp_analysis_work_gpu,
+                    secondary_frame_to_warp=secondary_frame_to_warp,
+                    stop_event=stop_event,
+                    return_gpu=True,
+                    stream_primary=stream_primary,
+                )
+                supp_aligned_linear_gpu, supp_aligned_analysis_work_gpu = (
+                    _unpack_aligned_result(
+                        aligned_result,
+                        secondary_frame_to_warp=secondary_frame_to_warp,
+                        supp_linear_gpu=supp_linear_gpu,
+                        supp_analysis_gpu=supp_analysis_gpu,
+                        supp_analysis_work_gpu=supp_analysis_work_gpu,
                     )
-                    supp_work_rgb_np = np.transpose(
-                        supp_aligned_analysis_work_gpu.to_numpy(), (2, 0, 1)
-                    ).astype(np.float32)
-                    supp_aligned_analysis_work_gpu.destroy()
+                )
 
-                    weight_work_2d_gpu = engine.allocate(
-                        (work_h, work_w), dtype=np.float32, host_accessible=True
-                    )
-                    generate_spatial_weights_taichi(
-                        current_image=supp_work_gray_gpu,
-                        reference_image=ref_spatial_gray_gpu,
-                        weight_map_sum=weight_work_2d_gpu,
-                        base_window=0,
-                        stability_map=None,
-                        row_starts=spatial_row_starts,
-                        col_starts=spatial_col_starts,
-                        tile_h=spatial_tile_h,
-                        tile_w=spatial_tile_w,
-                        noise_sigma=spatial_noise_sigma,
-                        motion_sensitivity=spatial_motion_sens,
-                        noise_offset_factor=spatial_noise_offset,
-                        equalize_brightness=False,
-                        buffer_provider=None,
-                        scratch_cache=spatial_scratch,
-                        row_starts_gpu=spatial_rows_gpu,
-                        col_starts_gpu=spatial_cols_gpu,
-                    )
-                    supp_work_gray_gpu.destroy()
-                    w_2d_np = weight_work_2d_gpu.to_numpy()
-                    weight_work_2d_gpu.destroy()
-
-                    # Apply ghost penalty & cutoff on 2D weightmap
-                    if ghost_penalty != 1.0:
-                        w_2d_np = np.power(w_2d_np, float(ghost_penalty))
-                    if ghost_cutoff > 0.0:
-                        w_2d_np = np.clip(
-                            (w_2d_np - float(ghost_cutoff))
-                            / max(1e-5, (1.0 - float(ghost_cutoff))),
-                            0.0,
-                            1.0,
-                        )
-
-                    # Pure 1-Channel (2D) Spatial Weightmap
-                    w_2d_np = np.ascontiguousarray(w_2d_np, dtype=np.float32)
-                    del supp_work_rgb_np
-                    weight_work_item = w_2d_np
-                    alpha_mean = 1.0
-                elif weight_engine == "average":
-                    if supp_aligned_analysis_work_gpu is not None:
-                        supp_aligned_analysis_work_gpu.destroy()
-                    weight_work_item = np.ones((work_h, work_w, 3), dtype=np.float32)
-                    alpha_mean = 1.0
-                else:
-                    supp_work_rgb_np = np.transpose(
-                        supp_aligned_analysis_work_gpu.to_numpy(), (2, 0, 1)
-                    ).astype(np.float32)
-                    supp_aligned_analysis_work_gpu.destroy()
-                    weight_work_np, alpha_mean = infer_single_support_weight_map(
-                        session,
-                        ref_work_rgb_np,
-                        supp_work_rgb_np,
-                        tile_size=tile_size,
-                        overlap=overlap,
-                        ghost_penalty=ghost_penalty,
-                        ghost_cutoff=ghost_cutoff,
-                        chroma_sensitivity=chroma_sensitivity,
-                        stop_event=stop_event,
-                    )
-                    weight_work_item = np.ascontiguousarray(
-                        np.transpose(weight_work_np, (1, 2, 0)), dtype=np.float32
-                    )
-                    del weight_work_np
+                weight_work_item, alpha_mean = _compute_support_weight(
+                    supp_aligned_analysis_work_gpu,
+                    supp_aligned_linear_gpu,
+                    weight_engine=weight_engine,
+                    engine=engine,
+                    session=session,
+                    ref_work_rgb_np=ref_work_rgb_np,
+                    spatial_work_h=spatial_work_h,
+                    spatial_work_w=spatial_work_w,
+                    ref_spatial_gray_gpu=ref_spatial_gray_gpu,
+                    spatial_row_starts=spatial_row_starts,
+                    spatial_col_starts=spatial_col_starts,
+                    spatial_rows_gpu=spatial_rows_gpu,
+                    spatial_cols_gpu=spatial_cols_gpu,
+                    spatial_tile_h=spatial_tile_h,
+                    spatial_tile_w=spatial_tile_w,
+                    spatial_noise_sigma=spatial_noise_sigma,
+                    spatial_motion_sens=spatial_motion_sens,
+                    spatial_noise_offset=spatial_noise_offset,
+                    spatial_texture_boost=spatial_texture_boost,
+                    spatial_texture_radius=spatial_texture_radius,
+                    spatial_single_coarse=spatial_single_coarse,
+                    spatial_scratch=spatial_scratch,
+                    ghost_penalty=ghost_penalty,
+                    ghost_cutoff=ghost_cutoff,
+                    tile_size=tile_size,
+                    overlap=overlap,
+                    chroma_sensitivity=chroma_sensitivity,
+                    stop_event=stop_event,
+                )
 
                 processed_count += 1
                 alpha_total += alpha_mean
 
                 if progress_callback:
-                    align_lbl = alignment_plan if alignment_plan not in ("none", "off", "") else "No Alignment"
+                    align_lbl = (
+                        alignment_plan
+                        if alignment_plan not in ("none", "off", "")
+                        else "No Alignment"
+                    )
                     progress_callback(
                         _merge_percent(processed_count, total_supp),
                         ui=f"Memproses {curr_idx}/{total_supp}...",
                         console=f"Memproses frame {curr_idx}/{total_supp} ({curr_name}) [{align_lbl} + Fusion]...",
                     )
 
-                if isinstance(weight_work_item, taichi_aot.TaichiGPUBuffer):
+                if use_uniform_weight_accumulation:
+                    weight_work_gpu = None
+                elif isinstance(weight_work_item, taichi_aot.TaichiGPUBuffer):
                     weight_work_gpu = weight_work_item
                 else:
                     weight_work_gpu = engine.upload(weight_work_item)
@@ -1401,16 +2672,20 @@ def run_gpu_resident_pipeline(
                     weight_sum_gpu,
                     supp_aligned_linear_gpu,
                     weight_work_gpu,
+                    splat_tile_size=splat_tile_size,
+                    uniform_weights=use_uniform_weight_accumulation,
                 )
 
                 supp_aligned_linear_gpu.destroy()
-                weight_work_gpu.destroy()
-                if weight_engine != "spatial_fusion":
-                    engine.sync()
+                if weight_work_gpu is not None:
+                    weight_work_gpu.destroy()
+                # ``_reclaim_idle_buffers`` below provides the synchronization
+                # safe-point when lifecycle pressure requires it.  Avoid an
+                # unconditional barrier after every frame.
+                _reclaim_idle_buffers(f"frame_{curr_idx}")
 
                 print(
-                    f"[GPU Flow Coordinator] Frame {curr_idx}/{total_supp} ({curr_name}) blended "
-                    f"(alpha={alpha_mean:.3f})"
+                    f"[GPU Pipeline] Frame {curr_idx}/{total_supp} ({curr_name}) blended (alpha={alpha_mean:.3f})"
                 )
         finally:
             t_preloader.join(timeout=1.0)
@@ -1425,8 +2700,10 @@ def run_gpu_resident_pipeline(
         threads = [t_preloader, t_aligner]
 
         t_weight = None
-        if not alignment_only and (
-            session is not None or weight_engine in ("spatial_fusion", "average")
+        if (
+            not alignment_only
+            and weight_engine != "average"
+            and (session is not None or weight_engine == "spatial_fusion")
         ):
             t_weight = threading.Thread(
                 target=_weight_inference_worker, name="Stage3_Weight", daemon=True
@@ -1452,6 +2729,8 @@ def run_gpu_resident_pipeline(
                 spatial_rows_gpu.destroy()
             if spatial_cols_gpu is not None:
                 spatial_cols_gpu.destroy()
+            if spatial_scratch is not None:
+                spatial_scratch.clear()
             return ref_out, 1.0
 
         processed_count = 0
@@ -1486,7 +2765,11 @@ def run_gpu_resident_pipeline(
                 alpha_total += alpha_mean
 
                 if progress_callback:
-                    align_lbl = alignment_plan if alignment_plan not in ("none", "off", "") else "No Alignment"
+                    align_lbl = (
+                        alignment_plan
+                        if alignment_plan not in ("none", "off", "")
+                        else "No Alignment"
+                    )
                     progress_callback(
                         _merge_percent(processed_count, total_supp),
                         ui=f"Memproses {curr_idx}/{total_supp}...",
@@ -1500,7 +2783,9 @@ def run_gpu_resident_pipeline(
                             weight_work_item.destroy()
                         break
 
-                    if isinstance(weight_work_item, taichi_aot.TaichiGPUBuffer):
+                    if use_uniform_weight_accumulation:
+                        weight_work_gpu = None
+                    elif isinstance(weight_work_item, taichi_aot.TaichiGPUBuffer):
                         weight_work_gpu = weight_work_item
                     else:
                         weight_work_gpu = engine.upload(weight_work_item)
@@ -1511,16 +2796,19 @@ def run_gpu_resident_pipeline(
                         weight_sum_gpu,
                         supp_aligned_linear_gpu,
                         weight_work_gpu,
+                        splat_tile_size=splat_tile_size,
+                        uniform_weights=use_uniform_weight_accumulation,
                     )
 
                     supp_aligned_linear_gpu.destroy()
+                if weight_work_gpu is not None:
                     weight_work_gpu.destroy()
-                    if weight_engine != "spatial_fusion":
-                        engine.sync()
+                # Memory reclamation owns the conditional synchronization
+                # safe-point; do not serialize every support frame here.
+                _reclaim_idle_buffers(f"frame_{curr_idx}")
 
                 print(
-                    f"[GPU Flow Coordinator] Frame {curr_idx}/{total_supp} ({curr_name}) blended "
-                    f"(alpha={alpha_mean:.3f}, in_flight={weighted_queue.qsize()})"
+                    f"[GPU Pipeline] Frame {curr_idx}/{total_supp} ({curr_name}) blended (alpha={alpha_mean:.3f})"
                 )
 
         finally:
@@ -1556,6 +2844,8 @@ def run_gpu_resident_pipeline(
                         spatial_rows_gpu.destroy()
                     if spatial_cols_gpu is not None:
                         spatial_cols_gpu.destroy()
+                    if spatial_scratch is not None:
+                        spatial_scratch.clear()
                 except Exception:
                     pass
                 try:
@@ -1566,7 +2856,9 @@ def run_gpu_resident_pipeline(
                 gc.collect()
 
     if _is_stopped():
-        print("[GPU Pipeline] Process cancelled by user. Discarded in-flight computation & released GPU memory.")
+        print(
+            "[GPU Pipeline] Process cancelled by user. Discarded in-flight computation & released GPU memory."
+        )
         return None, 0.0
 
     # ------------------------------------------------------------------
@@ -1579,36 +2871,28 @@ def run_gpu_resident_pipeline(
             console="Finalisasi GPU-resident fusion & normalisasi pembagian bobot...",
         )
 
-    # Normalization with reference fallback
-    # Directly passing ref_gpu (already resident in VRAM, 0 overhead!)
-    from taichi_vision.taichi_algorithm.spatial_fusion import (
-        mean_division_vec3_weight_taichi,
-    )
+    # Normalization with reference fallback. Both the vec3 and scalar-weight
+    # forms stay on the GPU; ``common.mean_division_vec3_f32`` accepts a 2D
+    # weight map and broadcasts it across RGB without a CPU repeat/upload.
 
     if getattr(weight_sum_gpu, "ndim", 2) == 2 or (len(weight_sum_gpu.shape) == 2):
-        # Broadcast 2D weight sum to 3D for vector division kernel
-        weight_sum_3d = taichi_aot.upload(
-            np.ascontiguousarray(
-                np.repeat(weight_sum_gpu.to_numpy()[:, :, None], 3, axis=2),
-                dtype=np.float32,
-            )
-        )
-        _final_linear_gpu = mean_division_vec3_weight_taichi(
+        _final_linear_gpu = taichi_aot.mean_division(
             sum_img=sum_img_gpu,
-            sum_weight=weight_sum_3d,
+            sum_weight=weight_sum_gpu,
             ref_img=ref_gpu,
         )
-        weight_sum_3d.destroy()
     else:
+        from taichi_vision.taichi_algorithm.spatial_fusion import (
+            mean_division_vec3_weight_taichi,
+        )
+
         _final_linear_gpu = mean_division_vec3_weight_taichi(
             sum_img=sum_img_gpu,
             sum_weight=weight_sum_gpu,
             ref_img=ref_gpu,
         )
 
-    result_hwc = np.ascontiguousarray(
-        _final_linear_gpu.to_numpy(), dtype=np.float32
-    )
+    result_hwc = np.ascontiguousarray(_final_linear_gpu.to_numpy(), dtype=np.float32)
     _final_linear_gpu.destroy()
 
     # Cleanup GPU resources and flush buffer pool back to baseline
@@ -1623,15 +2907,20 @@ def run_gpu_resident_pipeline(
             spatial_rows_gpu.destroy()
         if spatial_cols_gpu is not None:
             spatial_cols_gpu.destroy()
+        if spatial_scratch is not None:
+            spatial_scratch.clear()
     except Exception:
         pass
     del ref_work_rgb_np
     try:
         engine.sync()
-        if hasattr(engine, "buffer_pool") and engine.buffer_pool is not None:
-            engine.buffer_pool.clear()
-        if hasattr(engine, "_staging_pool") and engine._staging_pool is not None:
-            engine._staging_pool.clear()
+        if hasattr(engine, "reclaim_resident_buffers"):
+            engine.reclaim_resident_buffers(reason="pipeline_complete")
+        else:
+            if hasattr(engine, "buffer_pool") and engine.buffer_pool is not None:
+                engine.buffer_pool.clear()
+            if hasattr(engine, "_staging_pool") and engine._staging_pool is not None:
+                engine._staging_pool.clear()
         engine.get_device_block_cache().clear()
     except Exception:
         pass
@@ -1639,8 +2928,7 @@ def run_gpu_resident_pipeline(
 
     mean_alpha = alpha_total / max(1, total_supp)
     print(
-        f"[GPU Pipeline] Complete: shape={result_hwc.shape} "
-        f"mean_alpha={mean_alpha:.4f} (VRAM drained to baseline)"
+        f"[GPU Pipeline] Complete: {result_hwc.shape[1]}x{result_hwc.shape[0]} | Mean Alpha: {mean_alpha:.4f}"
     )
 
     return result_hwc, mean_alpha
@@ -1648,4 +2936,3 @@ def run_gpu_resident_pipeline(
 
 # Canonical alias
 run_resident_pipeline = run_gpu_resident_pipeline
-

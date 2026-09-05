@@ -7,7 +7,6 @@ dengan support untuk berbagai format dan ukuran gambar.
 """
 
 import os
-import cv2
 import numpy as np
 import rawpy
 from PySide6.QtGui import QPixmap, QImage
@@ -67,10 +66,10 @@ class ComparisonCache:
         """Saves converted image_array to cache for a specific batch and updates metadata."""
         ref_file, meta_file = self._get_paths(batch_id)
 
-        # Save new image (OpenCV format is BGR)
+        # Save new image (RGB format)
         try:
             # Use PNG for lossless reference in comparison
-            cv2.imwrite(ref_file, image_array)
+            Image.fromarray(image_array).save(ref_file)
 
             # Update metadata
             with open(meta_file, "w") as f:
@@ -203,25 +202,21 @@ class ImageLoaderThread(QThread):
                         img = img.convert("RGB")
                     elif img.mode == "L":
                         img = img.convert("RGB")
-                    # Convert PIL image to numpy array
+                    # Convert PIL image to numpy array (RGB)
                     image_array = np.array(img)
-                    # Convert RGB to BGR for OpenCV compatibility
-                    image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
                     
-                    # If half_res requested, downsample for quick preview
+                    # If half_res requested, downsample for quick preview via fast slice
                     if getattr(self, "half_res", False):
-                        h, w = image_array.shape[:2]
-                        image_array = cv2.resize(image_array, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
+                        image_array = np.ascontiguousarray(image_array[::2, ::2])
 
             # Handle RAW formats
             elif ext in SUPPORTED_FORMATS.get("raw", []):
                 if getattr(self, "half_res", False):
                     from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb_half_res
-                    img_rgb = load_raw_as_8bit_rgb_half_res(self.image_path)
+                    image_array = load_raw_as_8bit_rgb_half_res(self.image_path)
                 else:
                     from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb
-                    img_rgb = load_raw_as_8bit_rgb(self.image_path)
-                image_array = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                    image_array = load_raw_as_8bit_rgb(self.image_path)
 
         except Exception as e:
             print(f"Error loading image {self.image_path}: {e}")
@@ -235,12 +230,12 @@ class ImageLoaderThread(QThread):
             if image_array is None or image_array.size == 0:
                 return None
 
+            image_array = np.ascontiguousarray(image_array)
             height, width = image_array.shape[:2]
 
             # Handle different image formats
             if len(image_array.shape) == 3 and image_array.shape[2] == 3:
-                # BGR image - convert to RGB for display
-                image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+                # RGB image
                 bytes_per_line = 3 * width
                 q_image = QImage(
                     image_array.data,
@@ -287,10 +282,10 @@ class ImageLoaderThread(QThread):
 
 
 def setup_zoomable_preview(
-    zoomable_widget, image_path, is_reference=False, batch_id=None, half_res=False
+    zoomable_widget, image_path, is_reference=False, batch_id=None, half_res=False, callback=None
 ):
     """
-    Setup Zoomable widget untuk display gambar.
+    Setup dan load gambar ke Zoomable widget menggunakan background thread.
 
     Args:
         zoomable_widget: Zoomable QGraphicsView instance
@@ -298,6 +293,7 @@ def setup_zoomable_preview(
         is_reference: Jika True, gunakan/update comparison cache
         batch_id: ID batch untuk caching referensi
         half_res: Jika True, load resolusi rendah (cepat) untuk preview burst
+        callback: Optional callback saat image loaded (pixmap, path) -> None
     """
     # Clear scene
     zoomable_widget.scene().clear()
@@ -329,14 +325,23 @@ def setup_zoomable_preview(
             scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio
         )
 
+        if callback:
+            try:
+                callback(pixmap, path)
+            except Exception as e_cb:
+                print(f"[image_display_helper] Callback error: {e_cb}")
+
     def on_error(error_msg):
         print(f"Error loading image: {error_msg}")
 
-    # Start loading thread
+    # Start loading thread with optimized bounds for half_res burst previews
+    max_w = 1920 if half_res else 4000
+    max_h = 1080 if half_res else 4000
+
     loader = ImageLoaderThread(
         image_path,
-        max_width=4000,
-        max_height=4000,
+        max_width=max_w,
+        max_height=max_h,
         is_reference=is_reference,
         batch_id=batch_id,
         half_res=half_res,
@@ -363,12 +368,13 @@ def display_image_in_zoomable(
         half_res: Jika True, load resolusi rendah (cepat) untuk preview burst
     """
     loader = setup_zoomable_preview(
-        zoomable_widget, image_path, is_reference=is_reference, batch_id=batch_id, half_res=half_res
+        zoomable_widget,
+        image_path,
+        is_reference=is_reference,
+        batch_id=batch_id,
+        half_res=half_res,
+        callback=callback,
     )
-
-    if callback:
-        loader.image_loaded.connect(lambda pixmap, path: callback(pixmap, path))
-
     return loader
 
 
@@ -425,12 +431,10 @@ def load_and_display_image(
                 if img.mode in ("RGBA", "LA", "P"):
                     img = img.convert("RGB")
                 image_array = np.array(img)
-                image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
 
         elif ext in SUPPORTED_FORMATS.get("raw", []):
             from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb
-            img_rgb = load_raw_as_8bit_rgb(image_path)
-            image_array = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            image_array = load_raw_as_8bit_rgb(image_path)
 
         else:
             print(f"Unsupported format: {ext}")
@@ -439,6 +443,8 @@ def load_and_display_image(
         if image_array is None:
             return None
 
+        image_array = np.ascontiguousarray(image_array)
+
         # --- OPTIMIZATION: Save to Cache if it's a reference ---
         if is_reference:
             print(f"[ComparisonCache] Saving to cache (Batch {batch_id}): {image_path}")
@@ -446,7 +452,6 @@ def load_and_display_image(
 
         # Convert to QPixmap
         height, width = image_array.shape[:2]
-        image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
         bytes_per_line = 3 * width
         q_image = QImage(
             image_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888

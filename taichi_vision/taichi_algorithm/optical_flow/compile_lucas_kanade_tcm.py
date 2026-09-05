@@ -162,6 +162,108 @@ def compile_lucas_kanade_flow(arch=ti.vulkan, out_dir=None):
     module.add_graph("flow_lk_dense_blocky_clamped", g_blocky_clamped.compile())
     print("  [OK] flow_lk_dense_blocky_clamped")
 
+    # Fused level graphs keep the established kernel order and arguments but
+    # remove one host/driver dispatch boundary per pyramid level.  The graph
+    # is an optimization only; the public wrapper retains the two-dispatch
+    # recovery path for older artifacts or drivers that reject the fused graph.
+    for suffix, dense_kernel in (
+        ("", lk._lk_dense_interpolate_kernel),
+        ("_blocky", lk._lk_dense_blocky_kernel),
+        ("_blocky_clamped", lk._lk_dense_blocky_clamped_kernel),
+    ):
+        g_track_dense = ti.graph.GraphBuilder()
+        g_track_dense.dispatch(
+            lk._lk_grid_track_kernel,
+            sym_img,
+            sym_next,
+            sym_init_flow,
+            sym_grid_flow,
+            sym_grid_meta,
+            sym_grid_step,
+            sym_border_margin,
+            sym_win_radius,
+            sym_iterations,
+            sym_epsilon,
+        )
+        if suffix == "_blocky_clamped":
+            g_track_dense.dispatch(
+                dense_kernel,
+                sym_grid_flow,
+                sym_flow_out,
+                sym_grid_step,
+                sym_border_margin,
+                sym_max_flow_px,
+            )
+        elif suffix == "":
+            g_track_dense.dispatch(
+                dense_kernel,
+                sym_grid_flow,
+                sym_flow_out,
+                sym_grid_step,
+                sym_border_margin,
+                sym_overlap,
+            )
+        else:
+            g_track_dense.dispatch(
+                dense_kernel,
+                sym_grid_flow,
+                sym_flow_out,
+                sym_grid_step,
+                sym_border_margin,
+            )
+        module.add_graph(
+            f"flow_lk_track_dense{suffix}", g_track_dense.compile()
+        )
+
+        # The coarsest LK level also needs a zeroed initial flow.  Fuse that
+        # initialization with the same track+dense sequence so a three-graph
+        # coarse level becomes one graph submission.
+        g_zero_track_dense = ti.graph.GraphBuilder()
+        g_zero_track_dense.dispatch(lk._lk_zero_flow_kernel, sym_init_flow)
+        g_zero_track_dense.dispatch(
+            lk._lk_grid_track_kernel,
+            sym_img,
+            sym_next,
+            sym_init_flow,
+            sym_grid_flow,
+            sym_grid_meta,
+            sym_grid_step,
+            sym_border_margin,
+            sym_win_radius,
+            sym_iterations,
+            sym_epsilon,
+        )
+        if suffix == "_blocky_clamped":
+            g_zero_track_dense.dispatch(
+                dense_kernel,
+                sym_grid_flow,
+                sym_flow_out,
+                sym_grid_step,
+                sym_border_margin,
+                sym_max_flow_px,
+            )
+        elif suffix == "":
+            g_zero_track_dense.dispatch(
+                dense_kernel,
+                sym_grid_flow,
+                sym_flow_out,
+                sym_grid_step,
+                sym_border_margin,
+                sym_overlap,
+            )
+        else:
+            g_zero_track_dense.dispatch(
+                dense_kernel,
+                sym_grid_flow,
+                sym_flow_out,
+                sym_grid_step,
+                sym_border_margin,
+            )
+        module.add_graph(
+            f"flow_lk_zero_track_dense{suffix}",
+            g_zero_track_dense.compile(),
+        )
+
     if out_dir is None:
         out_dir = os.path.join(file_dir, "..", "aot_tcm")
     os.makedirs(out_dir, exist_ok=True)

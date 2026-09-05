@@ -292,6 +292,43 @@ if _IS_COMPILE_MODE:
             result[i, j] = ti.select(denom > 1e-8, value / denom, 0.0)
             coverage[i, j] = denom
 
+    @ti.kernel
+    def robust_splat_gray_offset_kernel(
+        frames: ti.types.ndarray(dtype=ti.f32, ndim=3), confidence: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        flow_y: ti.types.ndarray(dtype=ti.f32, ndim=3), flow_x: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        result: ti.types.ndarray(dtype=ti.f32, ndim=2), coverage: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        scale: ti.i32, radius: ti.f32, sigma: ti.f32,
+        origin_y: ti.i32, origin_x: ti.i32,
+    ):
+        """Splat a resident full-frame batch into an HR output tile.
+
+        ``origin_y``/``origin_x`` keep the source tensors in their global LR
+        coordinate system.  The host wrapper can therefore upload a batch
+        once and reuse it for every output tile instead of re-uploading the
+        source halo for each tile.
+        """
+        inv_two_sigma2 = 0.5 / ti.max(sigma, 1e-4) ** 2
+        for i, j in ti.ndrange(result.shape[0], result.shape[1]):
+            global_i = i + origin_y
+            global_j = j + origin_x
+            cy = global_i // scale
+            cx = global_j // scale
+            value = 0.0
+            denom = 0.0
+            for k, oy, ox in ti.ndrange(frames.shape[0], (-3, 4), (-3, 4)):
+                y = cy + oy
+                x = cx + ox
+                if 0 <= y < frames.shape[1] and 0 <= x < frames.shape[2]:
+                    ty = (float(y) + flow_y[k, y, x]) * float(scale)
+                    tx = (float(x) + flow_x[k, y, x]) * float(scale)
+                    d2 = (float(global_i) - ty) ** 2 + (float(global_j) - tx) ** 2
+                    if d2 <= radius * radius:
+                        weight = confidence[k, y, x] * ti.exp(-d2 * inv_two_sigma2)
+                        value += weight * frames[k, y, x]
+                        denom += weight
+            result[i, j] = ti.select(denom > 1e-8, value / denom, 0.0)
+            coverage[i, j] = denom
+
     # --- 3. AOT GRAPH COMPILATION ---
 
     def _build_sr_step_graph(module, K):
@@ -395,6 +432,16 @@ if _IS_COMPILE_MODE:
         scalar_graph = ti.graph.GraphBuilder()
         scalar_graph.dispatch(robust_splat_gray_kernel, f, c, fy, fx, r, cov, sym_scale, sym_radius, sym_sigma)
         module.add_graph("robust_splat_gray", scalar_graph.compile())
+
+        offset_y = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "origin_y", dtype=ti.i32)
+        offset_x = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "origin_x", dtype=ti.i32)
+        offset_graph = ti.graph.GraphBuilder()
+        offset_graph.dispatch(
+            robust_splat_gray_offset_kernel,
+            f, c, fy, fx, r, cov,
+            sym_scale, sym_radius, sym_sigma, offset_y, offset_x,
+        )
+        module.add_graph("robust_splat_gray_offset", offset_graph.compile())
 
     def compile_splat_sr():
         """Compile all SR step graphs and package as TCM."""

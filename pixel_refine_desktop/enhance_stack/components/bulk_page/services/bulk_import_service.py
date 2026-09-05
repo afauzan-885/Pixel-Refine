@@ -5,7 +5,6 @@ import weakref
 from PySide6.QtWidgets import QMessageBox, QFileDialog
 from PIL import Image
 from PySide6.QtCore import QThread, Signal, QObject
-import cv2
 import numpy as np
 import tifffile
 
@@ -387,7 +386,7 @@ def convert_tiff_to_uncompressed(input_paths, output_folder):
 
             numpy_image_rgb = tifffile.imread(input_path)
             if len(numpy_image_rgb.shape) == 3 and numpy_image_rgb.shape[2] >= 3:
-                numpy_image = cv2.cvtColor(numpy_image_rgb[:, :, :3], cv2.COLOR_RGB2BGR)
+                numpy_image = numpy_image_rgb[:, :, :3][:, :, ::-1]
             else:
                 numpy_image = numpy_image_rgb
 

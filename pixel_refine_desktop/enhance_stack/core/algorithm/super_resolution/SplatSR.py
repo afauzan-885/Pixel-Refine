@@ -1,7 +1,9 @@
 import os
 import gc
+import json
 import traceback
 import sqlite3
+import tempfile
 import numpy as np
 import cv2
 from PySide6.QtWidgets import QMessageBox, QVBoxLayout, QDialog, QProgressBar, QLabel
@@ -14,11 +16,128 @@ from resources.styles.stylesheet import PROGRESS_BAR
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     normalize_image,
     save_image,
+    save_image_streaming,
     get_all_image_paths_for_single_process,
-    load_images_from_paths,
     cleanup_old_hdf5_files,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
+
+
+def _create_splat_hr_accumulator(shape, directory=None):
+    """Create paired disk-backed float32 HR numerator/denominator arrays."""
+    if directory is None:
+        directory = os.path.abspath(
+            os.path.join("database", "cache", "splatting_sr")
+        )
+    os.makedirs(directory, exist_ok=True)
+    numerator_path = None
+    denominator_path = None
+    numerator = None
+    denominator = None
+    try:
+        handle, numerator_path = tempfile.mkstemp(
+            prefix="splat_hr_",
+            suffix=".numerator.f32",
+            dir=directory,
+        )
+        os.close(handle)
+        denominator_path = numerator_path.replace(
+            ".numerator.f32", ".denominator.f32"
+        )
+        numerator = np.memmap(
+            numerator_path,
+            mode="w+",
+            dtype=np.float32,
+            shape=shape,
+        )
+        denominator = np.memmap(
+            denominator_path,
+            mode="w+",
+            dtype=np.float32,
+            shape=shape[:2],
+        )
+        numerator[...] = 0.0
+        denominator[...] = 0.0
+        numerator.flush()
+        denominator.flush()
+        return (numerator, denominator), (numerator_path, denominator_path)
+    except Exception:
+        for mapping in (numerator, denominator):
+            if mapping is not None:
+                try:
+                    mapping._mmap.close()
+                except Exception:
+                    pass
+        for path in (numerator_path, denominator_path):
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        raise
+
+
+def _dispose_splat_hr_accumulator(accumulator, paths):
+    """Close and remove temporary HR accumulator files."""
+    for mapping in accumulator or ():
+        if mapping is None:
+            continue
+        try:
+            mapping.flush()
+        except Exception:
+            pass
+        try:
+            mapping._mmap.close()
+        except Exception:
+            pass
+    for path in paths or ():
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _dispose_splat_result_memmap(result):
+    """Release the output memmap and its paired denominator after saving."""
+    if not isinstance(result, np.memmap):
+        return
+    numerator_path = str(getattr(result, "filename", "") or "")
+    try:
+        result.flush()
+    except Exception:
+        pass
+    try:
+        result._mmap.close()
+    except Exception:
+        pass
+    if ".numerator.f32" not in numerator_path:
+        return
+    denominator_path = numerator_path.replace(
+        ".numerator.f32", ".denominator.f32"
+    )
+    for path in (numerator_path, denominator_path):
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def _clip_splat_memmap_inplace(result, block_size):
+    """Clamp a floating HR memmap without materializing the full image."""
+    height, width = result.shape[:2]
+    block_size = max(64, int(block_size))
+    for y0 in range(0, height, block_size):
+        y1 = min(height, y0 + block_size)
+        for x0 in range(0, width, block_size):
+            x1 = min(width, x0 + block_size)
+            np.clip(
+                result[y0:y1, x0:x1],
+                0.0,
+                1.0,
+                out=result[y0:y1, x0:x1],
+            )
+    result.flush()
 
 
 class SplatSRAlgorithm:
@@ -210,6 +329,65 @@ class SplatSRAlgorithm:
             raise ValueError("Lucas-Kanade flow contains NaN or infinity")
         return np.ascontiguousarray(-flow, dtype=np.float32)
 
+    @staticmethod
+    def _warp_rgb_for_confidence(image, lk_flow):
+        """Warp RGB only for WeightNet analysis using the already estimated LK flow."""
+        image = np.asarray(image, dtype=np.float32)
+        if image.ndim == 2:
+            image = image[..., None]
+        if image.ndim == 3 and image.shape[2] == 1:
+            image = np.repeat(image, 3, axis=2)
+        image = np.ascontiguousarray(image, dtype=np.float32)
+        flow = np.ascontiguousarray(lk_flow, dtype=np.float32)
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(f"RGB frame must have shape (H,W,3), got {image.shape}")
+        if flow.shape != image.shape[:2] + (2,):
+            raise ValueError(
+                f"LK flow shape {flow.shape} does not match RGB frame {image.shape}"
+            )
+        h, w = image.shape[:2]
+        # Avoid ``mgrid`` here: at 12MP it creates two extra full-resolution
+        # float32 planes before map_x/map_y are materialized. Broadcasted
+        # coordinate vectors produce the same maps without that peak.
+        x_coords = np.arange(w, dtype=np.float32)[None, :]
+        y_coords = np.arange(h, dtype=np.float32)[:, None]
+        map_x = np.empty((h, w), dtype=np.float32)
+        map_y = np.empty((h, w), dtype=np.float32)
+        np.add(x_coords, flow[..., 0], out=map_x)
+        np.add(y_coords, flow[..., 1], out=map_y)
+        aligned = np.empty_like(image, dtype=np.float32)
+        for channel in range(3):
+            aligned[..., channel] = cv2.remap(
+                image[..., channel],
+                map_x,
+                map_y,
+                cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT101,
+            )
+        return aligned
+
+    @staticmethod
+    def _estimate_exposure_gain(reference, aligned_support):
+        """Estimate support-to-reference gain after geometric alignment."""
+        reference = np.asarray(reference, dtype=np.float32)
+        support = np.asarray(aligned_support, dtype=np.float32)
+        valid = (
+            np.isfinite(reference)
+            & np.isfinite(support)
+            & (reference > np.float32(0.03))
+            & (support > np.float32(0.03))
+            & (reference < np.float32(0.98))
+            & (support < np.float32(0.98))
+        )
+        if int(np.count_nonzero(valid)) < 32:
+            return np.float32(1.0)
+        ratios = reference[valid] / np.maximum(support[valid], np.float32(1.0e-4))
+        ratios = ratios[np.isfinite(ratios)]
+        if ratios.size < 32:
+            return np.float32(1.0)
+        gain = float(np.median(ratios))
+        return np.float32(np.clip(gain, 0.5, 2.0))
+
     @classmethod
     def _estimate_lucas_kanade_pair(
         cls,
@@ -315,7 +493,7 @@ class SplatSRAlgorithm:
     def _estimate_internal_block_matching_pair(
         matcher, config, reference, target, index, matching_scale=1.0
     ):
-        """Return one dense LR flow plane, with explicit same-backend recovery."""
+        """Return one dense LR flow plane from native block matching."""
         h, w = reference.shape
         matching_scale = float(max(1.0e-3, min(1.0, matching_scale)))
         if matching_scale < 0.999:
@@ -329,54 +507,9 @@ class SplatSRAlgorithm:
             )
         else:
             matching_reference, matching_target = reference, target
-        # Vulkan on older hybrid GPUs has a large one-time graph/queue latency
-        # for BlockMatchingGPU (observed even at 192x256).  Splatting only
-        # needs a bounded motion proxy, so use OpenCV phase correlation for
-        # that case.  The result is expanded to the same dense flow contract;
-        # CUDA/OpenGL and an explicit override still use the native matcher.
-        try:
-            from taichi_vision.taichi_aot import engine as active_engine
-
-            active_arch = str(getattr(active_engine, "arch", "")).lower()
-        except Exception:
-            active_arch = ""
-        use_phase_proxy = (
-            matching_scale < 0.999
-            and active_arch == "vulkan"
-            and os.environ.get("SPLATSR_VULKAN_NATIVE_FLOW", "0") != "1"
-        )
-        if use_phase_proxy:
-            try:
-                if (
-                    max(
-                        float(np.std(matching_reference)),
-                        float(np.std(matching_target)),
-                    )
-                    < 1.0e-5
-                ):
-                    dx = dy = 0.0
-                    response = 0.0
-                else:
-                    (dx, dy), response = cv2.phaseCorrelate(
-                        np.ascontiguousarray(matching_reference, dtype=np.float32),
-                        np.ascontiguousarray(matching_target, dtype=np.float32),
-                    )
-                    # A phase peak outside the configured motion envelope is
-                    # an ambiguous/low-texture result, not a valid warp.
-                    max_flow = float(config.get("max_flow_px", 48.0))
-                    max_proxy_flow = max_flow * float(matching_scale)
-                    dx = float(np.clip(dx, -max_proxy_flow, max_proxy_flow))
-                    dy = float(np.clip(dy, -max_proxy_flow, max_proxy_flow))
-                pair = np.empty((h, w, 2), dtype=np.float32)
-                pair[..., 0] = np.float32(dx) / np.float32(matching_scale)
-                pair[..., 1] = np.float32(dy) / np.float32(matching_scale)
-                print(
-                    f"[splattingSR] Vulkan proxy flow=phase_correlation "
-                    f"frame={index} response={float(response):.3f}"
-                )
-                return pair
-            except Exception as exc:
-                print(f"[splattingSR] phase proxy failed; trying native flow: {exc}")
+        # SplatSR alignment is deliberately strict: the motion proxy must come
+        # from the native BlockMatchingGPU graph.  Phase correlation and the
+        # retired Lucas-Kanade path are not valid substitutes here.
         try:
             pair = matcher.calculate_flow(
                 np.ascontiguousarray(matching_reference, dtype=np.float32),
@@ -399,19 +532,9 @@ class SplatSRAlgorithm:
                 )
             return np.ascontiguousarray(pair)
         except Exception as exc:
-            print(
-                f"[splattingSR] block_matching frame {index} failed; "
-                f"same-backend phase recovery: {exc}"
-            )
-            from taichi_vision.taichi_aot import phase_correlation
-
-            dx, dy, _ = phase_correlation(
-                matching_reference, matching_target, use_hanning=True
-            )
-            pair = np.empty((h, w, 2), dtype=np.float32)
-            pair[..., 0] = np.float32(dx) / np.float32(matching_scale)
-            pair[..., 1] = np.float32(dy) / np.float32(matching_scale)
-            return pair
+            raise RuntimeError(
+                f"native block-matching alignment failed for frame {index}: {exc}"
+            ) from exc
 
     def run_splatting_sr(
         self,
@@ -419,8 +542,14 @@ class SplatSRAlgorithm:
         scale=2,
         update_progress=None,
         stop_requested=None,
-        alignment_method="lucas_kanade",
+        alignment_method="block_matching",
         num_iterations=None,
+        weightnet_provider=None,
+        refinement_iterations=0,
+        refinement_step=0.1,
+        refinement_regularization=0.1,
+        exposure_normalization=True,
+        release_input=False,
     ):
         """Confidence-guided subpixel splatting reconstruction.
 
@@ -434,6 +563,8 @@ class SplatSRAlgorithm:
         # accepting it so existing callers and saved sessions remain
         # compatible; the confidence-guided splat path is non-iterative.
         del num_iterations
+        refinement_iterations = max(int(refinement_iterations), 0)
+        exposure_normalization = bool(exposure_normalization)
         from .spatial_splat_sr import (
             robust_subpixel_splat,
             robust_subpixel_splat_stream,
@@ -445,29 +576,140 @@ class SplatSRAlgorithm:
         dtype_ref = ref.dtype
         color = ref.ndim == 3 and ref.shape[2] == 3
         ys = []
-        chroma = None
+        rgb_frames = []
+        reference_rgb = None
+        weightnet_work_warp = os.environ.get(
+            "SPLATSR_WEIGHTNET_WORK_WARP", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+        def normalized_rgb(image):
+            image = np.asarray(image)
+            normalized = np.asarray(
+                normalize_image(image, image.dtype), dtype=np.float32
+            )
+            if normalized.ndim == 2:
+                normalized = normalized[..., None]
+            if normalized.ndim != 3 or normalized.shape[2] not in (1, 3):
+                raise ValueError(
+                    "weightnet_provider requires grayscale or RGB input frames"
+                )
+            if normalized.shape[2] == 1:
+                normalized = np.repeat(normalized, 3, axis=2)
+            return np.ascontiguousarray(normalized, dtype=np.float32)
+
+        def infer_weightnet_confidence(support_rgb, lk_flow):
+            """Use the resident-style work-resolution confidence bridge."""
+            fast_path = getattr(
+                weightnet_provider, "infer_aligned_support_with_flow", None
+            )
+            if weightnet_work_warp and callable(fast_path):
+                return fast_path(reference_rgb, support_rgb, lk_flow)
+            # Preserve compatibility with custom providers that only expose
+            # the original full-resolution call contract.
+            return weightnet_provider(
+                reference_rgb,
+                self._warp_rgb_for_confidence(support_rgb, lk_flow),
+            )
+
         for image in images:
             if stop_requested and stop_requested():
                 return None
             if color:
                 yuv = cv2.cvtColor(image, cv2.COLOR_RGB2YCrCb)
-                if chroma is None:
-                    chroma = (yuv[..., 1], yuv[..., 2])
                 ys.append(normalize_image(yuv[..., 0], dtype_ref)[..., 0])
+                rgb_frames.append(normalize_image(image, dtype_ref))
             else:
                 ys.append(normalize_image(image, dtype_ref)[..., 0])
-        frames = np.ascontiguousarray(np.stack(ys).astype(np.float32))
+        frames = np.ascontiguousarray(np.stack(ys, axis=0), dtype=np.float32)
         n, h, w = frames.shape
+        splat_frames = (
+            np.ascontiguousarray(np.stack(rgb_frames, axis=0), dtype=np.float32)
+            if color
+            else frames[..., None]
+        )
+        # Keep the resident-pipeline dual-buffer contract: v1 is an analysis
+        # view for alignment/WeightNet only; the linear splat stack remains
+        # untouched and is the sole reconstruction source.
+        from taichi_vision import taichi_aot
+
+        def analysis_rgb(frame):
+            frame = np.asarray(frame, dtype=np.float32)
+            if frame.ndim == 2:
+                frame = frame[..., None]
+            if frame.shape[2] == 1:
+                frame = np.repeat(frame, 3, axis=2)
+            return np.ascontiguousarray(frame, dtype=np.float32)
+
+        analysis_reference_rgb = analysis_rgb(splat_frames[0])
+        analysis_params = taichi_aot.analyze_auto_enhance_params(
+            analysis_reference_rgb, mode="analysis"
+        )
+        analysis_reference_rgb = taichi_aot.AutoEnhance(
+            analysis_reference_rgb,
+            params=analysis_params,
+        )
+        analysis_reference_gray = cv2.cvtColor(
+            analysis_reference_rgb, cv2.COLOR_RGB2GRAY
+        )
+        print(
+            f"[splattingSR] AutoEnhance analysis v1 gain="
+            f"{analysis_params.get('gain', 1.0):.2f}x; "
+            "linear buffer retained for splatting"
+        )
+
+        def make_analysis_frame(index):
+            analysis = taichi_aot.AutoEnhance(
+                analysis_rgb(splat_frames[index]),
+                params=analysis_params,
+            )
+            return (
+                np.ascontiguousarray(analysis, dtype=np.float32),
+                cv2.cvtColor(analysis, cv2.COLOR_RGB2GRAY),
+            )
+
+        if weightnet_provider is not None:
+            # For RGB, use a view into the already-required splat stack.  The
+            # previous path normalized the reference a second time, creating a
+            # full-resolution copy before the larger stacks were complete.
+            reference_rgb = (
+                analysis_reference_rgb
+            )
+            print(
+                "[splattingSR] WeightNet warp mode="
+                f"{'work_resolution' if weightnet_work_warp else 'full_resolution_compat'}"
+            )
+        if color:
+            del image, yuv
+        else:
+            del image, norm_img
+        if release_input and hasattr(images, "clear"):
+            # ``main`` owns this list and no longer needs the source arrays
+            # after entering the reconstruction stage. Keep the public method
+            # non-mutating by default for external callers.
+            images.clear()
+        # ``images``, ``ys`` and ``rgb_frames`` are only staging containers.
+        # Release them before flow/WeightNet/native splatting starts so the
+        # resident pipeline does not retain multiple full-resolution copies.
+        del images, ys, rgb_frames, ref
+        gc.collect()
         if update_progress:
-            update_progress(8, "Estimating internal Lucas-Kanade flow...")
-        if str(alignment_method or "lucas_kanade").strip().lower() not in {
-            "lucas_kanade",
-            "block_matching",  # Backward-compatible saved-session value.
+            update_progress(8, "Estimating internal block-matching flow...")
+        requested_alignment = str(alignment_method or "block_matching").strip().lower()
+        if requested_alignment not in {
+            "lucas_kanade",  # Legacy saved-session alias; no longer selected.
+            "block_matching",
+            "blockmatching",
+            "bm",
             "internal",
         }:
             raise ValueError(
-                "splattingSR requires internal taichi_vision Lucas-Kanade "
+                "splattingSR requires internal taichi_vision block-matching "
                 "alignment; external alignment is not supported"
+            )
+        if requested_alignment == "lucas_kanade":
+            print(
+                "[splattingSR] legacy alignment=lucas_kanade ignored; "
+                "using block_matching"
             )
         # For large frames, stream one flow/confidence plane at a time.  The
         # previous full-frame path materialized flow[N,H,W,2] and confidence
@@ -486,12 +728,16 @@ class SplatSRAlgorithm:
         if block_enabled:
             from .spatial_weight_pipeline import generate_spatial_weight_map_blockwise
 
-            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
-                LucasKanadeGPU,
+            from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching_gpu import (
+                BlockMatchingGPU,
             )
 
-            lk_config = LucasKanadeGPU.load_config()
+            matcher = BlockMatchingGPU()
+            bm_config = matcher.load_config()
             cache = {}
+            exposure_gains = np.ones(n, dtype=np.float32)
+            exposure_ready = np.zeros(n, dtype=bool)
+            exposure_ready[0] = True
             reference = frames[0]
             # Keep large-frame alignment bounded to a proxy, while preserving
             # the full-resolution flow contract after upsampling.
@@ -500,22 +746,26 @@ class SplatSRAlgorithm:
                 int(os.environ.get("SPLATSR_FLOW_PROXY_MAX", "256")),
             )
             flow_proxy_scale = min(1.0, flow_proxy_max / float(max(h, w)))
-            # The proxy is not the final alignment product.  Use a bounded
-            # native LK configuration so a driver cannot spend an unbounded
+            # The proxy is not the final alignment product. Use a bounded
+            # native block-matching configuration so a driver cannot spend an unbounded
             # amount of time building a deep pyramid for every burst frame.
-            lk_config = dict(lk_config)
-            lk_config.update(
-                grid_step=max(64, int(lk_config.get("grid_step", 48))),
-                win_size=min(13, int(lk_config.get("win_size", 13))),
+            bm_config = dict(bm_config)
+            bm_config.update(
+                grid_step=max(64, int(bm_config.get("grid_step", 48))),
                 max_level=0,
                 iterations=1,
                 motion_mode="fast",
                 adaptive=False,
+                strict=True,
             )
             print(
-                f"[splattingSR] lucas_kanade flow proxy="
+                f"[splattingSR] block_matching flow proxy="
                 f"{flow_proxy_scale:.3f} ({max(32, int(h * flow_proxy_scale))}x"
                 f"{max(32, int(w * flow_proxy_scale))})"
+            )
+            print(
+                f"[splattingSR] block_matching mode={bm_config.get('mode', 'fast')} "
+                f"grid_step={bm_config.get('grid_step')}"
             )
 
             def flow_provider(index):
@@ -524,38 +774,59 @@ class SplatSRAlgorithm:
                         cache[index] = (
                             np.zeros((h, w, 2), dtype=np.float32),
                             reference,
+                            None,
+                            analysis_reference_rgb,
                         )
                     else:
                         if update_progress:
                             update_progress(
                                 9 + int((index / max(n - 1, 1)) * 12),
-                                f"Lucas-Kanade alignment {index + 1}/{n}...",
+                                f"Block matching alignment {index + 1}/{n}...",
                             )
-                        lk_flow, warped = self._estimate_lucas_kanade_pair(
-                            reference,
-                            frames[index],
-                            index,
-                            config=lk_config,
-                            matching_scale=flow_proxy_scale,
-                            update_progress=update_progress,
-                            stop_requested=stop_requested,
+                        if exposure_normalization and not exposure_ready[index]:
+                            # Photometric differences can be interpreted as
+                            # motion by LK.  Normalize a robust global gain
+                            # before alignment, then correct any residual gain
+                            # again after the geometric warp below.
+                            pre_gain = self._estimate_exposure_gain(
+                                reference, frames[index]
+                            )
+                            exposure_gains[index] = pre_gain
+                            if abs(float(pre_gain) - 1.0) > 1.0e-5:
+                                frames[index] *= pre_gain
+                                splat_frames[index] *= pre_gain
+                        analysis_support, analysis_support_gray = make_analysis_frame(
+                            index
                         )
-                        if lk_flow is None:
-                            raise RuntimeError("Lucas-Kanade alignment was cancelled")
+                        alignment_flow = self._estimate_internal_block_matching_pair(
+                            matcher,
+                            bm_config,
+                            analysis_reference_gray,
+                            analysis_support_gray,
+                            index,
+                            matching_scale=flow_proxy_scale,
+                        )
+                        warped_analysis = self._warp_rgb_for_confidence(
+                            analysis_support, alignment_flow
+                        )
+                        exposure_ready[index] = True
                         cache[index] = (
-                            self._splat_flow_from_lk_flow(lk_flow),
-                            warped,
+                            self._splat_flow_from_lk_flow(alignment_flow),
+                            warped_analysis,
+                            alignment_flow,
+                            analysis_support,
                         )
                     if update_progress:
                         update_progress(
                             10 + int((index / max(n - 1, 1)) * 12),
-                            f"Lucas-Kanade flow/warp {index + 1}/{n}",
+                            f"Block matching flow/warp {index + 1}/{n}",
                         )
                 return cache[index][0]
 
             def confidence_provider(index):
-                flow_provider(index)
-                _, warped = cache[index]
+                if index not in cache:
+                    flow_provider(index)
+                _, warped, alignment_flow, analysis_support = cache[index]
                 if index == 0:
                     cache.pop(index, None)
                     return np.ones((h, w), dtype=np.float32)
@@ -566,38 +837,110 @@ class SplatSRAlgorithm:
                         20 + int((index / max(n - 1, 1)) * 4),
                         f"SpatialFusion weight map {index + 1}/{n}",
                     )
-                result = generate_spatial_weight_map_blockwise(
-                    reference,
-                    warped,
-                    None,
-                    block_size=block_size,
-                    halo=max(32, int(lk_config.get("win_size", 13))),
-                    tile_size=min(256, block_size),
-                    overlap=0.2,
-                    motion_sensitivity=1.0,
-                    noise_offset_factor=0.0,
-                    noise_sigma=0.015,
-                    early_exit_threshold=0.05,
-                )
+                if weightnet_provider is not None:
+                    result = infer_weightnet_confidence(
+                        analysis_support, alignment_flow
+                    )
+                else:
+                    warped_analysis_gray = cv2.cvtColor(
+                        np.ascontiguousarray(warped, dtype=np.float32),
+                        cv2.COLOR_RGB2GRAY,
+                    )
+                    result = generate_spatial_weight_map_blockwise(
+                        analysis_reference_gray,
+                        warped_analysis_gray,
+                        None,
+                        block_size=block_size,
+                        halo=max(32, int(bm_config.get("win_size", 13))),
+                        tile_size=min(256, block_size),
+                        overlap=0.2,
+                        motion_sensitivity=1.0,
+                        noise_offset_factor=0.0,
+                        noise_sigma=0.015,
+                        early_exit_threshold=0.05,
+                    )
+                    del warped_analysis_gray
                 # The stream asks for each flow before its confidence.  Once
                 # this frame is accumulated, release its dense flow plane.
                 cache.pop(index, None)
                 return result
 
+            def release_resident_flow_planes(indices):
+                for index in indices:
+                    cached = cache.get(index)
+                    if cached is None:
+                        continue
+                    _, warped, alignment_flow, analysis_support = cached
+                    cache[index] = (None, warped, alignment_flow, analysis_support)
+
+            flow_provider.release_resident_flow_planes = (
+                release_resident_flow_planes
+            )
+
             print(
                 f"[splattingSR] compute_block=enabled size={block_size}px "
-                f"threshold={threshold_mp:g}MP; streaming flow/compute_spatial weights"
+                f"threshold={threshold_mp:g}MP; streaming resident flow/weights"
             )
+            hr_accumulator = None
+            hr_accumulator_paths = None
             try:
                 from .spatial_splat_runtime import SpatialSplatAOT
 
                 native_splat = SpatialSplatAOT()
-                result, _ = native_splat.run_streaming(
-                    frames[..., None],
+                resident_batch_override = os.environ.get(
+                    "SPLATSR_RESIDENT_BATCH_SIZE"
+                )
+                resident_batch_size = max(
+                    1,
+                    int(
+                        resident_batch_override
+                        if resident_batch_override is not None
+                        else ("1" if frame_mp >= 8.0 else "2")
+                    ),
+                )
+                print(
+                    f"[splattingSR] resident splat batch="
+                    f"{resident_batch_size} block={block_size}px"
+                    f"{' (auto-large-frame)' if resident_batch_override is None and frame_mp >= 8.0 else ''}"
+                )
+                # Native output tiles are already bounded, but the old
+                # stitching boundary still allocated a full HR numerator and
+                # denominator in process RAM. Use disk-backed accumulators for
+                # large RGB jobs so final normalization and save stay tiled.
+                hr_bytes = (
+                    h
+                    * int(scale)
+                    * w
+                    * int(scale)
+                    * 3
+                    * np.dtype(np.float32).itemsize
+                )
+                use_disk_accumulator = (
+                    bool(release_input)
+                    and color
+                    and np.issubdtype(dtype_ref, np.floating)
+                    and refinement_iterations <= 0
+                    and native_splat.backend != "cpu"
+                    and hr_bytes >= 64 * 1024 * 1024
+                )
+                if use_disk_accumulator:
+                    hr_accumulator, hr_accumulator_paths = _create_splat_hr_accumulator(
+                        (h * int(scale), w * int(scale), 3)
+                    )
+                    print(
+                        "[splattingSR] HR accumulator=memmap "
+                        f"block={block_size}px estimate="
+                        f"{(hr_bytes * 1.3333333) / (1024 * 1024):.1f}MB "
+                        "(numerator+coverage)"
+                    )
+                result, _coverage = native_splat.run_streaming(
+                    splat_frames,
                     flow_provider,
                     confidence_provider,
                     scale=scale,
                     block_size=block_size,
+                    batch_size=resident_batch_size,
+                    resident=True,
                     progress_callback=(
                         lambda done, total: (
                             update_progress(
@@ -608,7 +951,9 @@ class SplatSRAlgorithm:
                             else None
                         )
                     ),
+                    accumulator=hr_accumulator,
                 )
+                del _coverage
                 print(
                     f"[splattingSR] native block splat backend={native_splat.backend} "
                     f"size={block_size}px"
@@ -621,6 +966,9 @@ class SplatSRAlgorithm:
                 except Exception:
                     active_backend = "cpu"
                 if active_backend != "cpu":
+                    _dispose_splat_hr_accumulator(
+                        hr_accumulator, hr_accumulator_paths
+                    )
                     raise RuntimeError(
                         "Native block splatting is unavailable for the active "
                         f"{active_backend} backend: {native_error}. Rebuild "
@@ -631,8 +979,13 @@ class SplatSRAlgorithm:
                     "[splattingSR] CPU native block graph unavailable; using "
                     f"explicit CPU oracle recovery: {native_error}"
                 )
+                _dispose_splat_hr_accumulator(
+                    hr_accumulator, hr_accumulator_paths
+                )
+                hr_accumulator = None
+                hr_accumulator_paths = None
                 result, _ = robust_subpixel_splat_stream(
-                    frames[..., None],
+                    splat_frames,
                     flow_provider,
                     confidence_provider,
                     scale=scale,
@@ -648,41 +1001,110 @@ class SplatSRAlgorithm:
                         )
                     ),
                 )
+            if refinement_iterations > 0:
+                from .spatial_splat_sr import iterative_optical_refine_stream
+
+                print(
+                    f"[splattingSR] optical refinement iterations="
+                    f"{refinement_iterations} step={float(refinement_step):g} "
+                    f"regularization={float(refinement_regularization):g}"
+                )
+                initial_luma = (
+                    cv2.cvtColor(
+                        np.ascontiguousarray(result, dtype=np.float32),
+                        cv2.COLOR_RGB2GRAY,
+                    )
+                    if color
+                    else np.asarray(result[..., 0], dtype=np.float32)
+                )
+                refined = iterative_optical_refine_stream(
+                    frames,
+                    flow_provider,
+                    confidence_provider,
+                    scale=scale,
+                    block_size=block_size,
+                    initial=initial_luma,
+                    iterations=refinement_iterations,
+                    step=refinement_step,
+                    regularization=refinement_regularization,
+                )
+                if color:
+                    current_luma = cv2.cvtColor(
+                        np.ascontiguousarray(result, dtype=np.float32),
+                        cv2.COLOR_RGB2GRAY,
+                    )
+                    result = np.ascontiguousarray(
+                        result + (refined - current_luma)[..., None],
+                        dtype=np.float32,
+                    )
+                else:
+                    result = np.ascontiguousarray(refined[..., None], dtype=np.float32)
             cache.clear()
-            # The caller may retain the original colour images for UI/cache
-            # purposes.  Release this large luminance stack before upsampling
-            # chroma so host RAM does not grow across repeated runs.
-            del frames
+            # All flow/confidence work is complete. Drop closure references to
+            # the full source/RGB stacks before final conversion or save.
+            del flow_provider, confidence_provider, release_resident_flow_planes
+            del (
+                cache,
+                reference,
+                reference_rgb,
+                splat_frames,
+                frames,
+                analysis_reference_rgb,
+                analysis_reference_gray,
+                analysis_params,
+                analysis_rgb,
+                make_analysis_frame,
+            )
             gc.collect()
+            if (
+                isinstance(result, np.memmap)
+                and color
+                and np.issubdtype(dtype_ref, np.floating)
+            ):
+                _clip_splat_memmap_inplace(result, block_size)
+                if hr_accumulator is not None:
+                    # ``run_streaming`` returns the coverage map for API
+                    # compatibility. Close that paired mapping here so the
+                    # Windows file handle is gone before the writer removes
+                    # the temporary files after save.
+                    coverage_memmap = hr_accumulator[1]
+                    try:
+                        coverage_memmap.flush()
+                    except Exception:
+                        pass
+                    try:
+                        coverage_memmap._mmap.close()
+                    except Exception:
+                        pass
+                return result
             if np.issubdtype(dtype_ref, np.integer):
                 max_val = np.iinfo(dtype_ref).max
+                if color:
+                    return np.clip(result * max_val, 0, max_val).astype(dtype_ref)
                 y_hr = np.clip(result[..., 0] * max_val, 0, max_val).astype(dtype_ref)
             else:
+                if color:
+                    return np.clip(result, 0.0, 1.0).astype(dtype_ref)
                 y_hr = np.clip(result[..., 0], 0.0, 1.0).astype(dtype_ref)
-            if color:
-                cr = cv2.resize(
-                    chroma[0], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
-                )
-                cb = cv2.resize(
-                    chroma[1], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
-                )
-                return cv2.cvtColor(cv2.merge([y_hr, cr, cb]), cv2.COLOR_YCrCb2RGB)
             return y_hr
 
-        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
-            LucasKanadeGPU,
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching_gpu import (
+            BlockMatchingGPU,
         )
         from .spatial_weight_pipeline import SpatialWeightMapGenerator
 
-        lk_config = LucasKanadeGPU.load_config()
+        matcher = BlockMatchingGPU()
+        bm_config = matcher.load_config()
+        bm_config = dict(bm_config)
+        bm_config["strict"] = True
         splat_flow = np.zeros((n, h, w, 2), dtype=np.float32)
         confidence = np.ones((n, h, w), dtype=np.float32)
 
-        # Follow SpatialFusion's ordering exactly: LK flow -> warp -> spatial
+        # Follow SpatialFusion's ordering exactly: block matching -> warp -> spatial
         # confidence.  The raw frames and inverse flow are retained for the
         # final sub-pixel splat so the source is not interpolated twice.
         with SpatialWeightMapGenerator(
-            frames[0], tile_size=256, overlap=0.2, noise_sigma=0.015
+            analysis_reference_gray, tile_size=256, overlap=0.2, noise_sigma=0.015
         ) as weight_generator:
             for index in range(1, n):
                 if stop_requested and stop_requested():
@@ -690,21 +1112,48 @@ class SplatSRAlgorithm:
                 if update_progress:
                     update_progress(
                         9 + int((index / max(n - 1, 1)) * 10),
-                        f"Lucas-Kanade alignment {index + 1}/{n}...",
+                        f"Block matching alignment {index + 1}/{n}...",
                     )
-                pair_lk_flow, warped = self._estimate_lucas_kanade_pair(
-                    frames[0],
-                    frames[index],
+                pre_gain = np.float32(1.0)
+                if exposure_normalization:
+                    pre_gain = self._estimate_exposure_gain(
+                        frames[0], frames[index]
+                    )
+                    if abs(float(pre_gain) - 1.0) > 1.0e-5:
+                        frames[index] *= pre_gain
+                        splat_frames[index] *= pre_gain
+                analysis_support, analysis_support_gray = make_analysis_frame(index)
+                alignment_flow = self._estimate_internal_block_matching_pair(
+                    matcher,
+                    bm_config,
+                    analysis_reference_gray,
+                    analysis_support_gray,
                     index,
-                    config=lk_config,
-                    update_progress=None,
-                    stop_requested=stop_requested,
+                    matching_scale=1.0,
                 )
-                if pair_lk_flow is None:
+                if alignment_flow is None:
                     return None
-                splat_flow[index] = self._splat_flow_from_lk_flow(pair_lk_flow)
-                confidence[index] = weight_generator.generate(warped)
-                del warped
+                splat_flow[index] = self._splat_flow_from_lk_flow(alignment_flow)
+                warped_analysis = self._warp_rgb_for_confidence(
+                    analysis_support, alignment_flow
+                )
+                if exposure_normalization:
+                    gain = self._estimate_exposure_gain(
+                        analysis_reference_rgb, warped_analysis
+                    )
+                    if abs(float(gain) - 1.0) > 1.0e-5:
+                        frames[index] *= gain
+                        splat_frames[index] *= gain
+                        warped_analysis = np.ascontiguousarray(
+                            warped_analysis * gain, dtype=np.float32
+                        )
+                if weightnet_provider is not None:
+                    confidence[index] = infer_weightnet_confidence(
+                        analysis_support, alignment_flow
+                    )
+                else:
+                    confidence[index] = weight_generator.generate(warped_analysis)
+                del analysis_support, analysis_support_gray, warped_analysis
                 if update_progress:
                     update_progress(
                         20 + int((index / max(n - 1, 1)) * 4),
@@ -716,7 +1165,7 @@ class SplatSRAlgorithm:
             if update_progress:
                 update_progress(20, "Running native GPU subpixel splatting...")
             result, _ = SpatialSplatAOT().run(
-                frames[..., None], confidence, splat_flow, scale=scale
+                splat_frames, confidence, splat_flow, scale=scale
             )
         except Exception as native_error:
             try:
@@ -738,24 +1187,57 @@ class SplatSRAlgorithm:
             if update_progress:
                 update_progress(20, "Native splat ABI unavailable; using CPU oracle...")
             result, _ = robust_subpixel_splat(
-                frames[..., None],
+                splat_frames,
                 flow=splat_flow,
                 confidence=confidence,
                 scale=scale,
             )
+        if refinement_iterations > 0:
+            from .spatial_splat_sr import iterative_optical_refine
+
+            print(
+                f"[splattingSR] optical refinement iterations="
+                f"{refinement_iterations} step={float(refinement_step):g} "
+                f"regularization={float(refinement_regularization):g}"
+            )
+            initial_luma = (
+                cv2.cvtColor(
+                    np.ascontiguousarray(result, dtype=np.float32),
+                    cv2.COLOR_RGB2GRAY,
+                )
+                if color
+                else np.asarray(result[..., 0], dtype=np.float32)
+            )
+            refined = iterative_optical_refine(
+                frames,
+                splat_flow,
+                confidence,
+                scale=scale,
+                initial=initial_luma,
+                iterations=refinement_iterations,
+                step=refinement_step,
+                regularization=refinement_regularization,
+            )
+            if color:
+                current_luma = cv2.cvtColor(
+                    np.ascontiguousarray(result, dtype=np.float32),
+                    cv2.COLOR_RGB2GRAY,
+                )
+                result = np.ascontiguousarray(
+                    result + (refined - current_luma)[..., None],
+                    dtype=np.float32,
+                )
+            else:
+                result = np.ascontiguousarray(refined[..., None], dtype=np.float32)
         if np.issubdtype(dtype_ref, np.integer):
             max_val = np.iinfo(dtype_ref).max
+            if color:
+                return np.clip(result * max_val, 0, max_val).astype(dtype_ref)
             y_hr = np.clip(result[..., 0] * max_val, 0, max_val).astype(dtype_ref)
         else:
+            if color:
+                return np.clip(result, 0.0, 1.0).astype(dtype_ref)
             y_hr = np.clip(result[..., 0], 0.0, 1.0).astype(dtype_ref)
-        if color:
-            cr = cv2.resize(
-                chroma[0], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
-            )
-            cb = cv2.resize(
-                chroma[1], (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
-            )
-            return cv2.cvtColor(cv2.merge([y_hr, cr, cb]), cv2.COLOR_YCrCb2RGB)
         return y_hr
 
     def run_super_resolution(
@@ -969,6 +1451,174 @@ class SplatSRAlgorithm:
             raise e
 
 
+def _env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_raw_path(path):
+    return os.path.splitext(str(path))[1].lower() in {
+        ".dng",
+        ".cr2",
+        ".cr3",
+        ".nef",
+        ".arw",
+        ".orf",
+        ".rw2",
+        ".pef",
+        ".raf",
+        ".srw",
+    }
+
+
+def _mfd_linear_mode(path):
+    """Mirror MFDenoiser's RAW -> Linear DNG output switch."""
+    if os.path.splitext(str(path))[1].lower() not in {
+        ".dng",
+        ".cr2",
+        ".cr3",
+        ".nef",
+        ".arw",
+    }:
+        return False
+    try:
+        import config as app_config
+
+        with open(app_config.GENERAL_SETTINGS_FILE, "r", encoding="utf-8") as handle:
+            settings = json.load(handle)
+        return bool(settings.get("enable_linear_mode", False))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _load_mfdenoiser_frames(image_paths, stop_requested=None, update_progress=None):
+    """Load SplatSR inputs through the same RGB-linear MFDenoiser loader."""
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
+        load_rgb_linear_image,
+    )
+    from taichi_vision import taichi_aot
+
+    frames = []
+    target_shape = None
+    total = len(image_paths)
+    for index, path in enumerate(image_paths):
+        if stop_requested and stop_requested():
+            return None
+        frame = load_rgb_linear_image(path)
+        frame = np.ascontiguousarray(frame, dtype=np.float32)
+        if target_shape is None:
+            target_shape = frame.shape[:2]
+        elif frame.shape[:2] != target_shape:
+            frame = taichi_aot.resize(
+                frame,
+                (target_shape[1], target_shape[0]),
+                interpolation=taichi_aot.INTER_LINEAR,
+            )
+            frame = np.ascontiguousarray(frame, dtype=np.float32)
+        frames.append(frame)
+        if update_progress:
+            update_progress(
+                5 + int(((index + 1) / max(total, 1)) * 3),
+                f"Loading image {index + 1}/{total}...",
+            )
+    return frames
+
+
+def _save_mfd_compatible_result(result, output_path, reference_image_path=None):
+    """Use the same output dtype/tone/DNG contract as MFDenoiser."""
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+        save_linear_dng,
+        save_linear_dng_streaming,
+    )
+
+    if isinstance(result, np.memmap):
+        try:
+            tile_size = int(os.environ.get("SPLATSR_OUTPUT_TILE_SIZE", "1024"))
+            if reference_image_path and _mfd_linear_mode(reference_image_path):
+                dng_path = os.path.splitext(output_path)[0] + ".dng"
+                return save_linear_dng_streaming(
+                    result,
+                    dng_path,
+                    reference_image_path=reference_image_path,
+                    tile_size=tile_size,
+                )
+            return save_image_streaming(
+                result,
+                output_path,
+                reference_image_path=reference_image_path,
+                apply_tonemapping=bool(
+                    reference_image_path and _is_raw_path(reference_image_path)
+                ),
+                tile_size=tile_size,
+            )
+        finally:
+            _dispose_splat_result_memmap(result)
+
+    result = np.asarray(result)
+    if np.issubdtype(result.dtype, np.floating):
+        result_u16 = np.clip(result * 65535.0 + 0.5, 0.0, 65535.0).astype(
+            np.uint16
+        )
+    elif result.dtype != np.uint16:
+        result_u16 = np.clip(result, 0, 65535).astype(np.uint16)
+    else:
+        result_u16 = result
+
+    if reference_image_path and _mfd_linear_mode(reference_image_path):
+        dng_path = os.path.splitext(output_path)[0] + ".dng"
+        return save_linear_dng(
+            result_u16,
+            dng_path,
+            reference_image_path=reference_image_path,
+        )
+
+    return save_image(
+        result_u16,
+        output_path,
+        reference_image_path=reference_image_path,
+        apply_tonemapping=bool(
+            reference_image_path and _is_raw_path(reference_image_path)
+        ),
+    )
+
+
+def _build_weightnet_provider():
+    """Build the WeightNet confidence provider used by the SR route."""
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
+        DEFAULT_WEIGHTNET_ONNX,
+    )
+    from .weightnet_confidence import WeightNetConfidenceProvider
+
+    model_path = os.environ.get("SPLATSR_WEIGHTNET_MODEL", str(DEFAULT_WEIGHTNET_ONNX))
+    runtime = os.environ.get("SPLATSR_WEIGHTNET_RUNTIME", "auto")
+    tile_size = int(os.environ.get("SPLATSR_WEIGHTNET_TILE", "256"))
+    work_scale = float(os.environ.get("SPLATSR_WEIGHTNET_WORK_SCALE", "0.50"))
+    provider = WeightNetConfidenceProvider(
+        model_path=model_path,
+        runtime=runtime,
+        tile_size=tile_size,
+        work_scale=work_scale,
+        overlap=float(os.environ.get("SPLATSR_WEIGHTNET_OVERLAP", "0.30")),
+        ghost_penalty=float(
+            os.environ.get("SPLATSR_WEIGHTNET_GHOST_PENALTY", "1.0")
+        ),
+        ghost_cutoff=float(
+            os.environ.get("SPLATSR_WEIGHTNET_GHOST_CUTOFF", "0.05")
+        ),
+        chroma_sensitivity=float(
+            os.environ.get("SPLATSR_WEIGHTNET_CHROMA_SENSITIVITY", "1.0")
+        ),
+    )
+    print(
+        f"[splattingSR] WeightNet confidence enabled runtime={runtime} "
+        f"providers={provider.providers} model={model_path} "
+        f"reference_cache_tiles={provider.reference_cache_tiles}"
+    )
+    return provider
+
+
 def main(
     db_path,
     update_progress=None,
@@ -976,6 +1626,12 @@ def main(
     single_process=None,
     batch_id=None,
     progress_bar=None,
+    use_weightnet=None,
+    weightnet_provider=None,
+    refinement_iterations=None,
+    refinement_step=0.1,
+    refinement_regularization=0.1,
+    exposure_normalization=None,
 ):
     try:
         if update_progress:
@@ -1035,7 +1691,40 @@ def main(
                 keys = list(h5f.keys())
                 images = [np.array(h5f[key]) for key in keys]
         else:
-            images = load_images_from_paths(image_paths, stop_requested)
+            images = _load_mfdenoiser_frames(
+                image_paths,
+                stop_requested=stop_requested,
+                update_progress=update_progress,
+            )
+
+        if not images:
+            if update_progress:
+                update_progress(100, "Failed to load input images.")
+            return None
+
+        if weightnet_provider is None and (
+            _env_flag("SPLATSR_USE_WEIGHTNET", default=True)
+            if use_weightnet is None
+            else bool(use_weightnet)
+        ):
+            weightnet_provider = _build_weightnet_provider()
+        if refinement_iterations is None:
+            refinement_iterations = int(
+                os.environ.get("SPLATSR_REFINEMENT_ITERATIONS", "0")
+            )
+        refinement_step = float(
+            os.environ.get("SPLATSR_REFINEMENT_STEP", str(refinement_step))
+        )
+        refinement_regularization = float(
+            os.environ.get(
+                "SPLATSR_REFINEMENT_REGULARIZATION",
+                str(refinement_regularization),
+            )
+        )
+        if exposure_normalization is None:
+            exposure_normalization = _env_flag(
+                "SPLATSR_EXPOSURE_NORMALIZATION", default=True
+            )
 
         # Run process
         final_result = image_processor.run_splatting_sr(
@@ -1044,17 +1733,25 @@ def main(
             num_iterations=120,
             update_progress=update_progress,
             stop_requested=stop_requested,
+            weightnet_provider=weightnet_provider,
+            refinement_iterations=refinement_iterations,
+            refinement_step=refinement_step,
+            refinement_regularization=refinement_regularization,
+            exposure_normalization=exposure_normalization,
+            release_input=True,
         )
 
         if final_result is not None:
-            save_success = save_image(
+            if isinstance(final_result, np.memmap) and update_progress:
+                update_progress(97, "Writing HR output tiles...")
+            saved_path = _save_mfd_compatible_result(
                 final_result,
                 output_path,
                 reference_image_path=image_paths[0] if image_paths else None,
             )
             final_message = (
-                f"Process finished successfully: {os.path.basename(output_path)}"
-                if save_success
+                f"Process finished successfully: {os.path.basename(saved_path)}"
+                if saved_path
                 else "Failed to save result image."
             )
             if update_progress:

@@ -507,6 +507,7 @@ def plan_aot_bundle(*, tcm_root: os.PathLike[str] | str, dll_root: os.PathLike[s
             detail = "; ".join(f"{target}: {', '.join(names)}" for target, names in missing.items())
             raise FileNotFoundError("requested AOT modules are missing: " + detail)
     bridges: list[Path] = []
+    qualification_tools: list[Path] = []
     for target_id, backend in zip(
         target_ids,
         (str(entries_by_id[target]["backend"]).lower() for target in target_ids),
@@ -539,6 +540,16 @@ def plan_aot_bundle(*, tcm_root: os.PathLike[str] | str, dll_root: os.PathLike[s
                     + f" in {directory}"
                 )
         bridges.extend(libraries)
+        if backend == "vulkan" and host_os == "windows":
+            qualification_tools.extend(
+                path
+                for name in (
+                    "spirv-val.exe",
+                    "spirv-dis.exe",
+                    "SPIRV-Tools-LICENSE.txt",
+                )
+                if (path := directory / name).is_file()
+            )
 
     # Generic desktop OpenGL bridges can be selected for both the generic and
     # Intel target profiles. Deduplicate before writing release metadata so a
@@ -594,6 +605,15 @@ def plan_aot_bundle(*, tcm_root: os.PathLike[str] | str, dll_root: os.PathLike[s
                 }
                 for bridge in bridges
             ],
+            "qualification_tools": [
+                {
+                    "directory": tool.parent.name,
+                    "filename": tool.name,
+                    "sha256": _sha256(tool),
+                    "size": tool.stat().st_size,
+                }
+                for tool in qualification_tools
+            ],
         }
         if preflight_report is not None:
             # Keep the complete audit in the staged manifest so a build log or
@@ -616,6 +636,10 @@ def plan_aot_bundle(*, tcm_root: os.PathLike[str] | str, dll_root: os.PathLike[s
             destination = staging_dll / bridge.parent.name
             destination.mkdir(parents=True, exist_ok=True)
             shutil.copy2(bridge, destination / bridge.name)
+        for tool in qualification_tools:
+            destination = staging_dll / tool.parent.name
+            destination.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(tool, destination / tool.name)
         # Validate the exact staged tree before handing it to Nuitka or
         # PyInstaller. The import is lazy to keep this planner standalone and
         # avoid any runtime/engine initialization during packaging.

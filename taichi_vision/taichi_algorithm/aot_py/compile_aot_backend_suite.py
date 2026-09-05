@@ -48,6 +48,8 @@ COLOCATED_COMPILER_PACKAGES = {
     "compile_research_tcm": "taichi_vision.taichi_algorithm",
     "compile_akaze_tcm": "taichi_vision.taichi_algorithm.feature_matching",
     "compile_ofb_tcm": "taichi_vision.taichi_algorithm.feature_matching",
+    "compile_auto_enhance_tcm": "taichi_vision.taichi_algorithm.enhancement",
+    "compile_estimate_noise_tcm": "taichi_vision.taichi_algorithm.enhancement",
     "compile_area_tcm": "taichi_vision.taichi_algorithm.interpolation",
     "compile_bicubic_tcm": "taichi_vision.taichi_algorithm.interpolation",
     "compile_bilinear_tcm": "taichi_vision.taichi_algorithm.interpolation",
@@ -72,6 +74,7 @@ COLOCATED_COMPILER_PACKAGES = {
     "compile_horn_schunck_tcm": "taichi_vision.taichi_algorithm.optical_flow",
     "compile_lucas_kanade_tcm": "taichi_vision.taichi_algorithm.optical_flow",
     "compile_lucas_kanade_batch_tcm": "taichi_vision.taichi_algorithm.optical_flow",
+    "compile_compute_flow_tcm": "taichi_vision.taichi_algorithm.optical_flow",
     "compile_fft_tcm": "taichi_vision.taichi_algorithm.pyramid",
     "compile_pyramid_tcm": "taichi_vision.taichi_algorithm.pyramid",
     "compile_gradients_tcm": "taichi_vision.taichi_algorithm.math_ops",
@@ -80,6 +83,7 @@ COLOCATED_COMPILER_PACKAGES = {
     "compile_ncc_tcm": "taichi_vision.taichi_algorithm.alignment",
     "compile_phase_corr_tcm": "taichi_vision.taichi_algorithm.alignment",
     "compile_ransac_tcm": "taichi_vision.taichi_algorithm.alignment",
+    "compile_normalize_image_tcm": "taichi_vision.taichi_algorithm.alignment",
     "compile_analysis_suite_tcm": "taichi_vision.taichi_algorithm.image_processing",
     "compile_extended_tcm": "taichi_vision.taichi_algorithm.image_processing",
     "compile_inpaint_tcm": "taichi_vision.taichi_algorithm.image_processing",
@@ -100,6 +104,12 @@ FORK_PYTHON = (
 # artifact: (compiler module, callable, calling convention, generated aliases)
 JOBS = {
     "akaze": ("compile_akaze_tcm", "compile_akaze_tcm", "path", ()),
+    "auto_enhance": (
+        "compile_auto_enhance_tcm",
+        "compile_auto_enhance",
+        "path",
+        (),
+    ),
     "area": ("compile_area_tcm", "compile_area_aot", "path", ()),
     "arm": ("compile_arm_tcm", "compile_arm_tcm", "path", ()),
     "bicubic": ("compile_bicubic_tcm", "compile_bicubic_aot", "path", ()),
@@ -134,7 +144,7 @@ JOBS = {
         (),
     ),
     "fft": ("compile_fft_tcm", "compile_fft_aot", "path", ()),
-    "gaussian": ("compile_gaussian_tcm", "compile_gaussian_tcm", "environment", ()),
+    "gaussian": ("compile_gaussian_tcm", "compile_gaussian_tcm", "path", ()),
     "gradients": ("compile_gradients_tcm", "compile_gradients_aot", "path", ()),
     "hamilton": ("compile_hamilton_tcm", "compile_hamilton_tcm", "path", ()),
     "highlight_recovery": (
@@ -256,6 +266,12 @@ JOBS = {
     "filter2d": ("compile_extended_tcm", "compile_filter2d_aot", "path", ()),
     "copy_make_border": ("compile_extended_tcm", "compile_border_aot", "path", ()),
     "normalize": ("compile_extended_tcm", "compile_normalize_aot", "path", ()),
+    "normalize_image": (
+        "compile_normalize_image_tcm",
+        "compile_normalize_image_tcm",
+        "path",
+        (),
+    ),
     "threshold": ("compile_extended_tcm", "compile_threshold_aot", "path", ()),
     "gaussian_window": (
         "compile_extended_tcm",
@@ -270,9 +286,21 @@ JOBS = {
         (),
     ),
     "enhance_image": ("compile_extended_tcm", "compile_enhance_aot", "path", ()),
+    "estimate_noise": (
+        "compile_estimate_noise_tcm",
+        "compile_estimate_noise",
+        "path",
+        (),
+    ),
     "compression_image": (
         "compile_compression_image_tcm",
         "compile_compression_aot",
+        "path",
+        (),
+    ),
+    "compute_flow": (
+        "compile_compute_flow_tcm",
+        "compile_compute_flow_tcm",
         "path",
         (),
     ),

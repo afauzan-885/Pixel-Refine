@@ -2,12 +2,10 @@ import concurrent.futures
 from functools import lru_cache
 import os
 
-import cv2
 import numpy as np
 
 
-# Creating a thread pool is not free, and cv2's remap/flow kernels already
-# release the GIL.  Below this pixel count the scheduling cost is usually
+# Creating a thread pool is not free. Below this pixel count the scheduling cost is usually
 # larger than the useful parallel work (especially for thumbnail-sized
 # previews).  The value is deliberately an implementation detail so the
 # existing public alignment API remains unchanged.  It can be tuned for a
@@ -101,7 +99,14 @@ def to_flow_gray_u8(image):
     if image is None:
         return None
     if image.ndim == 3:
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if image.shape[2] >= 3:
+            image = (
+                0.2126 * image[:, :, 0]
+                + 0.7152 * image[:, :, 1]
+                + 0.0722 * image[:, :, 2]
+            )
+        else:
+            image = image[:, :, 0]
     if image.dtype == np.uint8:
         return image
     if image.dtype == np.uint16:
@@ -161,7 +166,7 @@ def _restore_dtype(image, dtype):
 def _accumulate_weighted_tile(accumulator, warped, weight, x, y):
     """Accumulate one warped tile without a second weighted temporary.
 
-    ``warped`` is freshly allocated by ``cv2.remap`` and is no longer used
+    ``warped`` is freshly allocated by the Taichi remap graph and is no longer used
     after this call.  Converting it in place (when possible) and multiplying
     in place avoids the short-lived ``weighted * weight`` array that used to
     double the peak allocation for every tile.  The numerical operation and
@@ -180,30 +185,17 @@ def _accumulate_weighted_tile(accumulator, warped, weight, x, y):
 
 def warp_tile_with_flow(target_tile, flow):
     height, width = flow.shape[:2]
-    grid = _cached_coordinate_grid(height, width)
-    if grid is None:
-        grid_x, grid_y = np.meshgrid(
-            np.arange(width, dtype=np.float32),
-            np.arange(height, dtype=np.float32),
-        )
-    else:
-        grid_x, grid_y = grid
+    # Keep the CPU facade on the same Taichi Vision remap implementation used
+    # by the resident GPU route. This preserves the public tiled compositor
+    # while removing the historical OpenCV remap dependency.
+    from taichi_vision import taichi_aot
 
-    # Reuse the coordinate-grid storage and only allocate the two maps that
-    # cv2.remap requires.  The old expression form created temporary arrays
-    # for both additions on every tile.
-    flow_x = flow[..., 0].astype(np.float32, copy=False)
-    flow_y = flow[..., 1].astype(np.float32, copy=False)
-    map_x = np.empty_like(grid_x)
-    map_y = np.empty_like(grid_y)
-    np.add(grid_x, flow_x, out=map_x)
-    np.add(grid_y, flow_y, out=map_y)
-    return cv2.remap(
-        target_tile,
-        map_x,
-        map_y,
-        interpolation=cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_REFLECT,
+    return taichi_aot.remap_with_flow(
+        np.ascontiguousarray(target_tile),
+        np.ascontiguousarray(flow, dtype=np.float32),
+        height,
+        width,
+        return_gpu=False,
     )
 
 

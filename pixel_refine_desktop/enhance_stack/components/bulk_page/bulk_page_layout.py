@@ -140,6 +140,7 @@ from resources.animations.fade import fade_out
 from resources.styles import stylesheet
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from pixel_refine_desktop.enhance_stack.core.logic.batch_parameter_manager import load_json_state
+from pixel_refine_desktop.enhance_stack.core.logic.process_manager import is_widget_alive
 from config import CACHE_DIR, SUPPORTED_FORMATS
 
 def safe_hide_widget(widget):
@@ -951,7 +952,7 @@ class BulkPageLayout(QWidget):
 
         batches_wrapper = [BatchWrapper(panel) for panel in panels_to_actually_process]
         dialog = BatchProcessDialog(batches_wrapper, self, self)
-        dialog.exec_()
+        dialog.exec()
 
     def _move_single_batch_result(self, source_file_path, target_folder):
         """

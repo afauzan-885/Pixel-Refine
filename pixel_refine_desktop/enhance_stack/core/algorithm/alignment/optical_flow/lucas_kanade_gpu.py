@@ -4,7 +4,6 @@ import time
 import gc
 
 import numpy as np
-import cv2
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
 
@@ -403,7 +402,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
             if not LucasKanadeGPU._reported_gpu_remap_disabled:
                 print(
                     "[LucasKanadeGPU] GPU remap path disabled after previous failure; "
-                    "using CPU/OpenCV fallback."
+                    "using the Taichi Vision host/remap compatibility path."
                 )
                 LucasKanadeGPU._reported_gpu_remap_disabled = True
             return self._align_frame_cpu_fallback(
@@ -442,7 +441,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
             LucasKanadeGPU._gpu_remap_disabled = True
             print(
-                f"[LucasKanadeGPU] GPU remap path failed, falling back to CPU remap: {exc}"
+                f"[LucasKanadeGPU] GPU remap path failed, falling back to Taichi host remap: {exc}"
             )
             return self._align_frame_cpu_fallback(
                 reference,
@@ -994,20 +993,40 @@ class LucasKanadeGPU(LucasKanadeCPU):
         # CPU-like but fast: repair invalid grid cells on the compact grid, not
         # on the full tile. This avoids the old 64-pass full-resolution blur.
         valid_f = valid.astype(np.float32)
+
+        def box_blur(array):
+            padded = np.pad(array, ((1, 1), (1, 1)), mode="edge")
+            return sum(
+                padded[dy : dy + array.shape[0], dx : dx + array.shape[1]]
+                for dy in range(3)
+                for dx in range(3)
+            ) / 9.0
+
         for _ in range(3):
             missing = valid_f <= 0
             if not np.any(missing):
                 break
-            blurred_weight = cv2.blur(valid_f, (3, 3))
+            blurred_weight = box_blur(valid_f)
             can_fill = missing & (blurred_weight > 1e-6)
             if not np.any(can_fill):
                 break
             for channel in (0, 1):
-                blurred_flow = cv2.blur(compact[..., channel] * valid_f, (3, 3))
+                blurred_flow = box_blur(compact[..., channel] * valid_f)
                 compact[..., channel][can_fill] = (
                     blurred_flow[can_fill] / blurred_weight[can_fill]
                 )
             valid_f[can_fill] = 1.0
 
-        flow = cv2.resize(compact, (width, height), interpolation=cv2.INTER_NEAREST)
+        from taichi_vision import taichi_aot
+
+        compact_gpu = taichi_aot.upload(compact, is_vector=True, vector_dim=2)
+        try:
+            flow = taichi_aot.resize(
+                compact_gpu,
+                (width, height),
+                interpolation=taichi_aot.INTER_NEAREST,
+                return_gpu=False,
+            )
+        finally:
+            compact_gpu.destroy()
         return np.ascontiguousarray(flow, dtype=np.float32)

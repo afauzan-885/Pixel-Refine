@@ -108,11 +108,13 @@ class ONNXSessionManager:
             # print(f"Mencoba memuat model ONNX RAFT dari: {model_path}")
             available_providers = ort.get_available_providers()
 
-            preferred_providers = self.provider_preference or [
-                "CUDAExecutionProvider",
-                "DmlExecutionProvider",
-                "CPUExecutionProvider",
-            ]
+            if self.provider_preference:
+                preferred_providers = self.provider_preference
+            else:
+                from pixel_refine_desktop.enhance_stack.core.algorithm.onnx_utils import (
+                    resolve_onnx_runtime_and_providers,
+                )
+                _, preferred_providers = resolve_onnx_runtime_and_providers()
 
             # Filter provider yang tersedia
             providers_to_try = [
@@ -578,10 +580,16 @@ def _flow_net_session():
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     options.enable_mem_pattern = False
     options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+    from pixel_refine_desktop.enhance_stack.core.algorithm.onnx_utils import (
+        resolve_onnx_runtime_and_providers,
+    )
+    _, dml_providers = resolve_onnx_runtime_and_providers("dml")
+    # Exclude CPU provider since disable_cpu_ep_fallback is requested
+    dml_only = [p for p in dml_providers if p != "CPUExecutionProvider"]
     session = ort.InferenceSession(
         model_path,
         sess_options=options,
-        providers=["DmlExecutionProvider"],
+        providers=dml_only or ["DmlExecutionProvider"],
     )
     actual = session.get_providers()
     if "DmlExecutionProvider" not in actual:
@@ -991,14 +999,40 @@ def perform_alignment_gpu(
             mod = None
             if flow_module_name is not None:
                 if flow_backend in ("horn_schunck", "farneback_jit", "farneback_aot"):
-                    # Horn-Schunck & Farneback AOT TCM ada di taichi_vision/taichi_algorithm/aot_tcm/
-                    tcm_path = os.path.abspath(
+                    # Resolve the target-qualified artifact.  The old
+                    # unsuffixed ``horn_schunck_cpu.tcm`` /
+                    # ``farneback_flow_cpu.tcm`` names can silently select an
+                    # incompatible bridge and are no longer the canonical
+                    # desktop layout.
+                    from taichi_vision.taichi_aot.artifact_targets import (
+                        detect_target,
+                        resolve_artifact,
+                    )
+
+                    artifact_root = os.path.abspath(
                         os.path.join(
                             file_dir,
                             "../../../../../../taichi_vision/taichi_algorithm/aot_tcm",
-                            flow_module_name,
                         )
                     )
+                    algorithm_name = (
+                        "horn_schunck"
+                        if flow_backend == "horn_schunck"
+                        else "farneback_flow"
+                    )
+                    target = detect_target(backend=active_arch)
+                    resolved = resolve_artifact(
+                        artifact_root,
+                        algorithm_name,
+                        target,
+                        allow_legacy=True,
+                    )
+                    if resolved is None:
+                        raise FileNotFoundError(
+                            f"No target-qualified {algorithm_name} artifact for "
+                            f"{target.target_id} under {artifact_root}"
+                        )
+                    tcm_path = str(resolved)
                 else:
                     tcm_path = os.path.abspath(
                         os.path.join(
@@ -1008,7 +1042,7 @@ def perform_alignment_gpu(
                         )
                     )
                 mod = engine.load(tcm_path)
-                print(f"[GPU Alignment] Loaded AOT module: {flow_module_name}")
+                print(f"[GPU Alignment] Loaded AOT module: {tcm_path}")
 
             # [LUMA ENHANCEMENT CACHE] Pre-allocate LUT untuk optimasi kontras
             lut_np = np.zeros(256, dtype=np.float32)
@@ -1168,6 +1202,64 @@ def perform_alignment_gpu(
                 writer_thread = threading.Thread(target=bg_writer_worker, daemon=True)
                 writer_thread.start()
 
+            # Farneback constants and tensor scratch are invariant across
+            # support frames. Keep them resident for the whole alignment
+            # burst; rebuilding them inside the frame loop adds work without
+            # changing the result.
+            farneback_poly_weights_gpu = None
+            farneback_smooth_gpu = None
+            farneback_scratch = None
+            farneback_poly_radius = 0
+            farneback_ig11 = 0.0
+            farneback_ig03 = 0.0
+            farneback_ig33 = 0.0
+            farneback_ig55 = 0.0
+            farneback_smooth_radius = 0
+            if flow_backend in ("farneback_jit", "farneback_aot"):
+                from taichi_vision.taichi_algorithm.optical_flow.farneback_flow import (
+                    prepare_gaussian_constants,
+                    compute_smoothing_weights,
+                )
+
+                g_w, xg_w, xxg_w, farneback_ig11, farneback_ig03, farneback_ig33, farneback_ig55 = (
+                    prepare_gaussian_constants(5, 1.2)
+                )
+                smooth_w, farneback_smooth_radius = compute_smoothing_weights(15)
+                farneback_poly_radius = 5 // 2
+                farneback_poly_weights_gpu = engine.upload(
+                    np.ascontiguousarray(
+                        np.stack((g_w, xg_w, xxg_w), axis=1), dtype=np.float32
+                    )
+                )
+                farneback_smooth_gpu = engine.upload(
+                    smooth_w[: farneback_smooth_radius + 1]
+                )
+                farneback_scratch = []
+                for scratch_h, scratch_w in (
+                    (h_w, w_w),
+                    (h_w // 2, w_w // 2),
+                    (h_w // 4, w_w // 4),
+                ):
+                    farneback_scratch.append(
+                        {
+                            "vert": engine.allocate(
+                                (scratch_h, scratch_w, 3), dtype=np.float32
+                            ),
+                            "R0": engine.allocate(
+                                (scratch_h, scratch_w, 5), dtype=np.float32
+                            ),
+                            "R1": engine.allocate(
+                                (scratch_h, scratch_w, 5), dtype=np.float32
+                            ),
+                            "M": engine.allocate(
+                                (scratch_h, scratch_w, 5), dtype=np.float32
+                            ),
+                            "M_smooth": engine.allocate(
+                                (scratch_h, scratch_w, 5), dtype=np.float32
+                            ),
+                        }
+                    )
+
             try:
                 # 4. Loop Proses Penyelarasan per Bingkai Citra Kompetitor
                 for i in range(1, num_images):
@@ -1196,29 +1288,12 @@ def perform_alignment_gpu(
                     # 🚀 STEP 2: EKSEKUSI GRAF BESAR TAICHI (SUNTIKKAN SCALAR MAX SEARCH RADIUS & SCRATCH BUFFERS)
                     # Build graph arguments based on flow backend
                     if flow_backend in ("farneback_jit", "farneback_aot"):
-                        # Farneback AOT: multi-step pipeline using pre-compiled TCM graphs
-                        # 1. Pre-compute Gaussian constants for polynomial expansion
-                        from taichi_vision.taichi_algorithm.optical_flow.farneback_flow import (
-                            prepare_gaussian_constants,
-                            compute_smoothing_weights,
-                        )
-
-                        poly_n = 5
-                        poly_sigma = 1.2
-                        win_size = 15
-                        g_w, xg_w, xxg_w, ig11, ig03, ig33, ig55 = (
-                            prepare_gaussian_constants(poly_n, poly_sigma)
-                        )
-                        smooth_w, smooth_radius = compute_smoothing_weights(win_size)
-                        poly_radius = poly_n // 2
-
-                        # Upload constants to GPU
-                        g_gpu = engine.upload(g_w[: poly_radius + 1])
-                        xg_gpu = engine.upload(xg_w[: poly_radius + 1])
-                        xxg_gpu = engine.upload(xxg_w[: poly_radius + 1])
-                        smooth_gpu = engine.upload(smooth_w[: smooth_radius + 1])
-
-                        # Allocate temp buffers for each pyramid level
+                        # The fused graph reduces CPU/CUDA submission overhead,
+                        # but the current NVIDIA graphics drivers schedule a
+                        # long graph sequence less efficiently.  Keep the
+                        # measured faster path per backend instead of forcing
+                        # one graph shape everywhere.
+                        use_fused_farneback = active_arch in {"cpu", "cuda"}
                         h0, w0 = work_res_h, work_res_w
                         h1, w1 = h0 // 2, w0 // 2
                         h2, w2 = h0 // 4, w0 // 4
@@ -1238,92 +1313,128 @@ def perform_alignment_gpu(
                                 ref_lvl = ref_pyramid[0]
                                 comp_lvl = comp_pyramid[0]
 
-                            # Allocate level-specific buffers
-                            vert_buf = engine.allocate((hl, wl, 3), dtype=np.float32)
-                            R0 = engine.allocate((hl, wl, 5), dtype=np.float32)
-                            R1 = engine.allocate((hl, wl, 5), dtype=np.float32)
-                            M_buf = engine.allocate((hl, wl, 5), dtype=np.float32)
-                            M_smooth = engine.allocate((hl, wl, 5), dtype=np.float32)
-                            flow_lvl = engine.allocate((hl, wl, 2), dtype=np.float32)
-
-                            # Polynomial expansion for ref and comp
-                            mod.run(
-                                "poly_expansion_f32",
-                                src=ref_lvl,
-                                vert=vert_buf,
-                                poly=R0,
-                                h=hl,
-                                w=wl,
-                                g=g_gpu,
-                                xg=xg_gpu,
-                                xxg=xxg_gpu,
-                                ig11=ig11,
-                                ig03=ig03,
-                                ig33=ig33,
-                                ig55=ig55,
-                                poly_radius=poly_radius,
-                            )
-                            mod.run(
-                                "poly_expansion_f32",
-                                src=comp_lvl,
-                                vert=vert_buf,
-                                poly=R1,
-                                h=hl,
-                                w=wl,
-                                g=g_gpu,
-                                xg=xg_gpu,
-                                xxg=xxg_gpu,
-                                ig11=ig11,
-                                ig03=ig03,
-                                ig33=ig33,
-                                ig55=ig55,
-                                poly_radius=poly_radius,
-                            )
-
-                            # Initialize flow: upsample from coarser or clear
+                            # Use the persistent level buffer directly.  The
+                            # old path allocated a temporary HxWx2 buffer and
+                            # copied it into flow_l{0,1,2}; aot_api.copy_field
+                            # treats every rank-3 array as a 3-channel vector,
+                            # which is incompatible with Farneback's 2-channel
+                            # flow ABI.  Direct reuse removes that copy and
+                            # keeps the coarse-to-fine buffers in their native
+                            # graph layout.
                             if lvl == 2:
-                                mod.run("farneback_clear_flow", flow=flow_lvl)
+                                flow_lvl = flow_l2
+                            elif lvl == 1:
+                                flow_lvl = flow_l1
                             else:
-                                # Upsample flow from coarser level
-                                flow_prev = flow_l1 if lvl == 1 else flow_l0
-                                scale_up = float(hl) / float(flow_prev.shape[0])
-                                mod.run(
-                                    "farneback_upsample_flow",
-                                    flow_coarse=flow_prev,
-                                    flow_fine=flow_lvl,
-                                    scale=scale_up,
-                                )
+                                flow_lvl = flow_l0
 
-                            # Run 3 iterations of Farneback
-                            mod.run(
-                                "farneback_multi_3",
-                                R0=R0,
-                                R1=R1,
-                                flow=flow_lvl,
-                                M=M_buf,
-                                M_smooth=M_smooth,
-                                h=hl,
-                                w=wl,
-                                smooth_weights=smooth_gpu,
-                                smooth_radius=smooth_radius,
-                            )
+                            # Reuse level-specific scratch buffers across
+                            # support frames. Each graph overwrites all of
+                            # their pixels before the next consumer reads it.
+                            scratch = farneback_scratch[lvl]
+                            vert_buf = scratch["vert"]
+                            R0 = scratch["R0"]
+                            R1 = scratch["R1"]
+                            M_buf = scratch["M"]
+                            M_smooth = scratch["M_smooth"]
+
+                            # Fuse expansion, flow initialization, and the
+                            # fixed three-iteration update into one graph.
+                            # Retain the direct sequence as a same-backend
+                            # recovery path for older artifacts.
+                            level_args = {
+                                "ref": ref_lvl,
+                                "comp": comp_lvl,
+                                "vert": vert_buf,
+                                "R0": R0,
+                                "R1": R1,
+                                "M": M_buf,
+                                "M_smooth": M_smooth,
+                                "h": hl,
+                                "w": wl,
+                                "flow": flow_lvl,
+                                "poly_weights": farneback_poly_weights_gpu,
+                                "ig11": farneback_ig11,
+                                "ig03": farneback_ig03,
+                                "ig33": farneback_ig33,
+                                "ig55": farneback_ig55,
+                                "poly_radius": farneback_poly_radius,
+                                "smooth_weights": farneback_smooth_gpu,
+                                "smooth_radius": farneback_smooth_radius,
+                            }
+                            if lvl == 2:
+                                fused_level_name = "farneback_level_clear_3"
+                            else:
+                                flow_prev = flow_l2 if lvl == 1 else flow_l1
+                                fused_level_name = "farneback_level_upsample_3"
+                                level_args.update(
+                                    {
+                                        "flow_coarse": flow_prev,
+                                        "flow_fine": flow_lvl,
+                                        "scale": float(hl)
+                                        / float(flow_prev.shape[0]),
+                                    }
+                                )
+                            if use_fused_farneback:
+                                try:
+                                    mod.run(fused_level_name, **level_args)
+                                except Exception as exc:
+                                    print(
+                                        f"[AOT Farneback] {fused_level_name} unavailable; "
+                                        f"using direct dispatch: {exc}"
+                                    )
+                                    fused_level_name = None
+                            else:
+                                fused_level_name = None
+                            if fused_level_name is None:
+                                poly_args = {
+                                    "vert": vert_buf,
+                                    "h": hl,
+                                    "w": wl,
+                                    "poly_weights": farneback_poly_weights_gpu,
+                                    "ig11": farneback_ig11,
+                                    "ig03": farneback_ig03,
+                                    "ig33": farneback_ig33,
+                                    "ig55": farneback_ig55,
+                                    "poly_radius": farneback_poly_radius,
+                                }
+                                mod.run(
+                                    "poly_expansion_f32",
+                                    src=ref_lvl,
+                                    poly=R0,
+                                    **poly_args,
+                                )
+                                mod.run(
+                                    "poly_expansion_f32",
+                                    src=comp_lvl,
+                                    poly=R1,
+                                    **poly_args,
+                                )
+                                if lvl == 2:
+                                    mod.run(
+                                        "farneback_clear_flow", flow=flow_lvl
+                                    )
+                                else:
+                                    mod.run(
+                                        "farneback_upsample_flow",
+                                        flow_coarse=flow_prev,
+                                        flow_fine=flow_lvl,
+                                        scale=level_args["scale"],
+                                    )
+                                mod.run(
+                                    "farneback_multi_3",
+                                    R0=R0,
+                                    R1=R1,
+                                    flow=flow_lvl,
+                                    M=M_buf,
+                                    M_smooth=M_smooth,
+                                    h=hl,
+                                    w=wl,
+                                    smooth_weights=farneback_smooth_gpu,
+                                    smooth_radius=farneback_smooth_radius,
+                                )
                             engine.sync()
 
-                            # Copy flow to appropriate buffer for next level
-                            if lvl == 2:
-                                taichi_aot.copy_field(flow_lvl, flow_l2)
-                            elif lvl == 1:
-                                taichi_aot.copy_field(flow_lvl, flow_l1)
-                            else:
-                                taichi_aot.copy_field(flow_lvl, flow_l0)
-
-                            # Release level-specific buffers
-                            for buf in [vert_buf, R0, R1, M_buf, M_smooth, flow_lvl]:
-                                buf.release()
-
-                        # Release constant buffers
-                        for buf in [g_gpu, xg_gpu, xxg_gpu, smooth_gpu]:
-                            buf.release()
                     elif flow_backend == "horn_schunck":
                         hs_alpha = kwargs.get("hs_alpha", 1.0)
                         hs_iters_val = kwargs.get("hs_iters", 20)
@@ -1654,16 +1765,58 @@ def perform_alignment_gpu(
                             _buf.destroy()
                     except Exception:
                         pass
+
+                for _buf in [
+                    farneback_poly_weights_gpu,
+                    farneback_smooth_gpu,
+                ]:
+                    try:
+                        if _buf is not None:
+                            _buf.destroy()
+                    except Exception:
+                        pass
+                for _scratch in farneback_scratch or ():
+                    for _buf in _scratch.values():
+                        try:
+                            _buf.destroy()
+                        except Exception:
+                            pass
                 gc.collect()
 
             return (True, flow_results) if return_flow else True
 
-        is_aot = os.environ.get("PIXEL_REFINE_AOT_MODE") == "1"
+        # ``taichi_worker`` is intentionally inert when the project-wide
+        # ``AOT_MODE=1`` contract is active.  Checking only the legacy
+        # PIXEL_REFINE_AOT_MODE override would enqueue work onto that inert
+        # worker and wait forever.  Keep the explicit override for older
+        # callers, but derive the default from the canonical AOT setting.
+        is_aot = (
+            os.environ.get("PIXEL_REFINE_AOT_MODE") == "1"
+            or os.environ.get("AOT_MODE", "1") == "1"
+        )
         if is_aot:
             print(
                 f"[GPU Alignment] Running synchronously on caller thread (Pure {active_arch.upper()} AOT C++)..."
             )
-            success = _run_gpu_alignment_loop()
+            # Several graphics TCMs map their inputs/outputs while loading or
+            # during dispatch.  On Vulkan those buffers must be host-visible;
+            # setting the policy only inside the later Farneback function is
+            # too late because pyramid/common TCMs are loaded during setup.
+            force_host_visible = active_arch == "vulkan" and flow_backend in {
+                "farneback_jit",
+                "farneback_aot",
+                "horn_schunck",
+            }
+            previous_host_visible = getattr(
+                engine, "_force_host_accessible", None
+            )
+            if force_host_visible:
+                engine.set_force_host_accessible(True)
+            try:
+                success = _run_gpu_alignment_loop()
+            finally:
+                if force_host_visible:
+                    engine.set_force_host_accessible(previous_host_visible)
         else:
             worker = get_taichi_worker()
             success = worker.submit_and_wait(_run_gpu_alignment_loop)

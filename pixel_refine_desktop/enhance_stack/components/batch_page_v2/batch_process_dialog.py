@@ -342,7 +342,7 @@ class MassAlgorithmEditDialog(QDialog):
         self.close_button.setText("Close")
         try:
             self.close_button.clicked.disconnect()
-        except:
+        except (RuntimeError, TypeError):
             pass
         self.close_button.clicked.connect(self.close)
 

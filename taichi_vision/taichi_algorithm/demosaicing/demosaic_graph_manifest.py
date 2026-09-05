@@ -32,6 +32,7 @@ _MANIFEST: dict[str, dict[str, str]] = {
     },
     "hamilton": {
         "default": "hamilton_demosaic",
+        "u16": "hamilton_demosaic_u16",
         "tonemapped": "hamilton_demosaic_tonemapped",
         "1channel": "hamilton_demosaic_1channel",
         "half_res": "hamilton_demosaic_half_res",

@@ -17,6 +17,19 @@ import tempfile
 # Suppress Vulkan loader registry warnings on Windows
 os.environ["VK_LOADER_DEBUG"] = "error"
 
+if os.name == "nt":
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x8000)
+        for crt_name in ("ucrtbase.dll", "msvcrt.dll"):
+            try:
+                crt = ctypes.CDLL(crt_name)
+                crt._set_abort_behavior(0, 0x0001 | 0x0002)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 def _ensure_llvm20_interpreter():
     """Re-exec the desktop entrypoint on the isolated LLVM20 interpreter.
@@ -148,27 +161,108 @@ def _bootstrap_aot_backend_from_settings():
     except (TypeError, ValueError):
         return
 
+    auto_fallback = bool(settings.get("auto_fallback", True))
+    os.environ["PIXEL_REFINE_AOT_AUTO_FALLBACK"] = "1" if auto_fallback else "0"
+    os.environ["PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK"] = "1" if auto_fallback else "0"
+
+    fallback_chain = settings.get("device_fallback_chain", [])
+    if auto_fallback and fallback_chain:
+        try:
+            import importlib.util
+            from pathlib import Path
+
+            cap_path = (
+                Path(__file__).parent / "taichi_vision" / "taichi_aot" / "capabilities.py"
+            )
+            spec = importlib.util.spec_from_file_location(
+                "_taichi_capabilities_bootstrap", cap_path
+            )
+            if spec and spec.loader:
+                cap_mod = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = cap_mod
+                spec.loader.exec_module(cap_mod)
+                classify_fn = cap_mod.classify_device
+            else:
+                classify_fn = None
+        except Exception:
+            classify_fn = None
+
+        if classify_fn is not None:
+            device_name = (
+                (selector or {}).get("name", "") if isinstance(selector, dict) else ""
+            )
+            for cand in fallback_chain:
+                caps = classify_fn(device_name or arch, cand)
+                if caps.safe:
+                    if cand != arch:
+                        print(
+                            f"[PixelRefine Auto-Fallback] '{arch}' is unvalidated/quarantined on '{device_name}'; "
+                            f"automatically prioritizing safe candidate '{cand}'."
+                        )
+                    arch = cand
+                    if arch in ("opengl", "cpu"):
+                        device_id_int = 0 if arch == "opengl" else -1
+                    break
+
     from taichi_vision.backend_config import BackendConfig, backend_env
 
     canonical_config = BackendConfig(
         backend=arch or "cpu",
-        device_id=device_id_int,
+        device_id=device_id_int if device_id_int >= 0 else 0,
         vendor=(selector or {}).get("vendor", "") if isinstance(selector, dict) else "",
         device_name=(
             (selector or {}).get("name", "") if isinstance(selector, dict) else ""
         ),
         explicit=True,
         source="app_setting.json",
-        strict=True,
+        strict=not auto_fallback,
     )
     os.environ.update(backend_env(canonical_config))
-    os.environ["AOT_STRICT_BACKEND"] = "1"
+    os.environ["AOT_ARCH"] = arch or "cpu"
+    os.environ["AOT_DEVICE"] = str(device_id_int if device_id_int >= 0 else 0)
+    if not auto_fallback:
+        os.environ["AOT_STRICT_BACKEND"] = "1"
+    else:
+        os.environ.pop("AOT_STRICT_BACKEND", None)
+
+    vendor_val = str((selector or {}).get("vendor", "")).lower() if isinstance(selector, dict) else ""
+    if vendor_val and vendor_val != "unknown" and arch != "cpu":
+        os.environ["TARGET_VENDOR"] = vendor_val
+
+    if arch == "cuda":
+        os.environ["TARGET_VENDOR"] = "nvidia"
+        if isinstance(selector, dict) and selector.get("name"):
+            os.environ["CUDA_EXPECTED_NAME"] = str(selector.get("name", ""))
+        os.environ["CUDA_DEVICE"] = str(device_id_int)
+        os.environ["PIXEL_REFINE_CUDA_DEVICE"] = str(device_id_int)
+
+    fallback_chain = settings.get("device_fallback_chain", [])
+    if vendor_val == "intel" or "opengl" in fallback_chain or arch == "opengl":
+        try:
+            import glob
+            base_repo = r"C:\WINDOWS\system32\DriverStore\FileRepository"
+            for icd_cand in glob.glob(os.path.join(base_repo, "*iigd_dch*", "ig9icd64.dll")):
+                if os.path.exists(icd_cand):
+                    os.environ["PIXEL_REFINE_OPENGL_ICD_LIBRARY"] = icd_cand
+                    break
+        except Exception:
+            pass
+
     if arch == "opengl" and isinstance(selector, dict):
-        os.environ["OPENGL_EXPECTED_VENDOR"] = str(selector.get("vendor", "")).lower()
-        os.environ["OPENGL_EXPECTED_NAME"] = str(selector.get("name", ""))
+        os.environ["OPENGL_EXPECTED_VENDOR"] = vendor_val
+        os.environ["PIXEL_REFINE_OPENGL_EXPECTED_VENDOR"] = vendor_val
+        if vendor_val != "intel":
+            name_val = str(selector.get("name", ""))
+            os.environ["OPENGL_EXPECTED_NAME"] = name_val
+            os.environ["PIXEL_REFINE_OPENGL_EXPECTED_NAME"] = name_val
+        else:
+            os.environ.pop("OPENGL_EXPECTED_NAME", None)
+            os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_NAME", None)
     else:
         os.environ.pop("OPENGL_EXPECTED_VENDOR", None)
         os.environ.pop("OPENGL_EXPECTED_NAME", None)
+        os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR", None)
+        os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_NAME", None)
     if arch == "vulkan" and device_id_int >= 0:
         try:
             cache_dir = os.path.join(os.environ.get("LOCALAPPDATA", ""), "PixelRefine")
@@ -282,6 +376,11 @@ def _cleanup_aot_backend(reason="app-shutdown"):
         pass
 
     try:
+        try:
+            from pixel_refine_desktop.app_core.aot_warmup import stop_silent_aot_warmup
+            stop_silent_aot_warmup()
+        except Exception:
+            pass
         import gc
         import taichi_vision.taichi_aot as taichi_aot
 
@@ -931,6 +1030,14 @@ def main():
     # Show main window and close splash
     window.show()
     splash.finish(window)
+
+    # Silent background AOT & TCM warm-up (Host RAM, Zero VRAM bloat)
+    try:
+        from pixel_refine_desktop.app_core.aot_warmup import start_silent_aot_warmup
+
+        start_silent_aot_warmup(delay_ms=200, parent=window)
+    except Exception as exc:
+        print(f"[AOT Warmup] Launch skipped: {exc}", flush=True)
 
     # A .prf opened from Explorer is passed as a command-line argument.
     if project_argument and window.enhance_stack_view:

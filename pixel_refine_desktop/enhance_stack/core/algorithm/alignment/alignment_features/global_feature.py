@@ -944,6 +944,219 @@ def save_image(
         return None
 
 
+def _stream_oriented_tile(image, orientation, y0, y1, x0, x1):
+    """Read one output tile after applying the same orientation as save_image."""
+    height, width = image.shape[:2]
+    orientation = int(orientation or 1)
+    if orientation == 1:
+        tile = image[y0:y1, x0:x1]
+    elif orientation == 2:
+        tile = image[y0:y1, width - x1 : width - x0]
+        tile = np.flip(tile, axis=1)
+    elif orientation == 3:
+        tile = image[height - y1 : height - y0, width - x1 : width - x0]
+        tile = np.flip(tile, axis=(0, 1))
+    elif orientation == 4:
+        tile = image[height - y1 : height - y0, x0:x1]
+        tile = np.flip(tile, axis=0)
+    elif orientation == 5:
+        tile = image[x0:x1, width - y1 : width - y0]
+        tile = np.transpose(tile, (1, 0, 2))
+        tile = np.flip(tile, axis=0)
+    elif orientation in (6, 7):
+        tile = image[height - x1 : height - x0, y0:y1]
+        tile = np.transpose(tile, (1, 0, 2))
+        tile = np.flip(tile, axis=1)
+    elif orientation == 8:
+        tile = image[x0:x1, width - y1 : width - y0]
+        tile = np.transpose(tile, (1, 0, 2))
+        tile = np.flip(tile, axis=0)
+    else:
+        tile = image[y0:y1, x0:x1]
+    return np.ascontiguousarray(tile)
+
+
+def _copy_output_metadata(reference_image_path, output_path):
+    """Copy MFDenoiser's metadata contract without touching pixel buffers."""
+    if reference_image_path and os.path.exists(reference_image_path):
+        try:
+            subprocess.run(
+                [
+                    "exiftool",
+                    "-q",
+                    "-overwrite_original",
+                    "-TagsFromFile",
+                    reference_image_path,
+                    "-IFD0:Orientation#=1",
+                    output_path,
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "exiftool",
+                    "-q",
+                    "-overwrite_original",
+                    "-IFD0:Orientation#=1",
+                    output_path,
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            print(
+                " Warning: Failed to copy metadata to "
+                f"'{output_path}'. ExifTool may not be installed. Error: {exc}"
+            )
+
+
+def save_image_streaming(
+    image,
+    output_path,
+    reference_image_path=None,
+    apply_tonemapping: bool = False,
+    tile_size: int = 1024,
+):
+    """Save an RGB HR array tile-by-tile using the regular MFDenoiser contract.
+
+    This is intended for ndarray/memmap results that must not be copied into a
+    second full-frame uint16/tone-mapped array.  Tone-map parameters are
+    analyzed from the exact same row-major sample positions used by
+    ``save_image`` and the pointwise transform is then applied per tile.
+    """
+    try:
+        if image is None or getattr(image, "ndim", 0) != 3 or image.shape[2] != 3:
+            raise ValueError("streaming image must have shape (H,W,3)")
+        if os.path.splitext(output_path)[1].lower() not in {".tif", ".tiff"}:
+            # SplatSR's production output is TIFF. Preserve the generic helper
+            # contract for other callers, accepting the unavoidable full-frame
+            # fallback for formats that do not support tiled iterator writes.
+            return save_image(
+                image,
+                output_path,
+                reference_image_path=reference_image_path,
+                apply_tonemapping=apply_tonemapping,
+            )
+
+        orientation = _reference_orientation(reference_image_path)
+        source_h, source_w = image.shape[:2]
+        if int(orientation) in (5, 6, 7, 8):
+            output_h, output_w = source_w, source_h
+        else:
+            output_h, output_w = source_h, source_w
+        tile_size = max(16, (int(tile_size) // 16) * 16)
+        source_is_float = np.issubdtype(image.dtype, np.floating)
+
+        def encoded_tile(y0, y1, x0, x1):
+            tile = _stream_oriented_tile(image, orientation, y0, y1, x0, x1)
+            if source_is_float:
+                tile = np.clip(tile * 65535.0 + 0.5, 0.0, 65535.0).astype(
+                    np.uint16
+                )
+            elif image.dtype != np.uint16:
+                tile = np.clip(tile, 0, 65535).astype(np.uint16)
+            else:
+                tile = np.ascontiguousarray(tile, dtype=np.uint16)
+            return tile
+
+        tone_params = None
+        tone_scale = 1.0
+        if apply_tonemapping:
+            max_value = 0.0
+            for y0 in range(0, output_h, tile_size):
+                y1 = min(output_h, y0 + tile_size)
+                for x0 in range(0, output_w, tile_size):
+                    x1 = min(output_w, x0 + tile_size)
+                    max_value = max(max_value, float(np.max(encoded_tile(y0, y1, x0, x1))))
+            if max_value > 1.5:
+                tone_scale = 65535.0 if max_value > 255.0 else 255.0
+            try:
+                from taichi_vision import taichi_aot
+
+                sample_step = max(
+                    1,
+                    int(np.ceil((output_h * output_w) / 500000.0)),
+                )
+                sample_count = ((output_h * output_w - 1) // sample_step) + 1
+                sample_buffer = np.empty((sample_count, 3), dtype=np.float32)
+                for y0 in range(0, output_h, tile_size):
+                    y1 = min(output_h, y0 + tile_size)
+                    for x0 in range(0, output_w, tile_size):
+                        x1 = min(output_w, x0 + tile_size)
+                        tile = encoded_tile(y0, y1, x0, x1).astype(
+                            np.float32, copy=False
+                        )
+                        if tone_scale != 1.0:
+                            tile = tile / np.float32(tone_scale)
+                        for row in range(tile.shape[0]):
+                            global_start = (y0 + row) * output_w + x0
+                            first = ((global_start + sample_step - 1) // sample_step) * sample_step
+                            if first >= global_start + tile.shape[1]:
+                                continue
+                            sample_positions = np.arange(
+                                first,
+                                global_start + tile.shape[1],
+                                sample_step,
+                                dtype=np.int64,
+                            )
+                            sample_buffer[sample_positions // sample_step] = tile[
+                                row,
+                                sample_positions - global_start,
+                            ]
+                sample = sample_buffer[:, None, :]
+                tone_params = taichi_aot.analyze_auto_enhance_params(
+                    sample, mode="natural"
+                )
+                del sample, sample_buffer
+            except Exception as tone_error:
+                print(
+                    f"[save_image_streaming] AutoEnhance v2 tone mapping warning: "
+                    f"{tone_error}"
+                )
+                tone_params = None
+
+        def tile_iterator():
+            for y0 in range(0, output_h, tile_size):
+                y1 = min(output_h, y0 + tile_size)
+                for x0 in range(0, output_w, tile_size):
+                    x1 = min(output_w, x0 + tile_size)
+                    tile = encoded_tile(y0, y1, x0, x1)
+                    if tone_params is not None:
+                        from taichi_vision.taichi_algorithm.enhancement.auto_enhance import (
+                            apply_auto_enhance_np,
+                        )
+
+                        tile_f32 = tile.astype(np.float32)
+                        if tone_scale != 1.0:
+                            tile_f32 /= np.float32(tone_scale)
+                        tile_tm = apply_auto_enhance_np(tile_f32, tone_params)
+                        tile = np.clip(
+                            tile_tm * 65535.0 + 0.5, 0.0, 65535.0
+                        ).astype(np.uint16)
+                    padded = np.zeros((tile_size, tile_size, 3), dtype=np.uint16)
+                    padded[: tile.shape[0], : tile.shape[1]] = tile
+                    yield padded
+
+        tifffile.imwrite(
+            output_path,
+            tile_iterator(),
+            shape=(output_h, output_w, 3),
+            dtype=np.uint16,
+            tile=(tile_size, tile_size),
+            photometric="rgb",
+            planarconfig="CONTIG",
+            compression=None,
+            extratags=[(274, "H", 1, 1, False)],
+        )
+        _copy_output_metadata(reference_image_path, output_path)
+        return output_path
+    except Exception as exc:
+        print(f"Error fatal saat streaming gambar ke '{output_path}': {exc}")
+        traceback.print_exc()
+        return None
+
+
 def calculate_scale_from_gt_proxy(linear_img, gt_proxy, ref_dtype=np.uint16):
     """
     Menghitung faktor skala optimal untuk `to_gamma_proxy` dengan membandingkan
@@ -1075,6 +1288,78 @@ def save_linear_dng(image, output_path, reference_image_path):
         )
 
     return output_path
+
+
+def save_linear_dng_streaming(
+    image,
+    output_path,
+    reference_image_path,
+    tile_size: int = 1024,
+):
+    """Write the Linear DNG-compatible TIFF stream without a HR copy."""
+    try:
+        if image is None or getattr(image, "ndim", 0) != 3 or image.shape[2] != 3:
+            raise ValueError("streaming linear image must have shape (H,W,3)")
+        height, width = image.shape[:2]
+        tile_size = max(16, (int(tile_size) // 16) * 16)
+        source_is_float = np.issubdtype(image.dtype, np.floating)
+
+        def tile_iterator():
+            for y0 in range(0, height, tile_size):
+                y1 = min(height, y0 + tile_size)
+                for x0 in range(0, width, tile_size):
+                    x1 = min(width, x0 + tile_size)
+                    tile = np.ascontiguousarray(image[y0:y1, x0:x1])
+                    if source_is_float:
+                        tile = np.clip(
+                            tile * 65535.0 + 0.5, 0.0, 65535.0
+                        ).astype(np.uint16)
+                    elif image.dtype != np.uint16:
+                        tile = np.clip(tile, 0, 65535).astype(np.uint16)
+                    else:
+                        tile = np.ascontiguousarray(tile, dtype=np.uint16)
+                    # Preserve save_linear_dng's BGR -> RGB conversion.
+                    tile = np.ascontiguousarray(tile[..., ::-1])
+                    padded = np.zeros((tile_size, tile_size, 3), dtype=np.uint16)
+                    padded[: tile.shape[0], : tile.shape[1]] = tile
+                    yield padded
+
+        tifffile.imwrite(
+            output_path,
+            tile_iterator(),
+            shape=(height, width, 3),
+            dtype=np.uint16,
+            tile=(tile_size, tile_size),
+            photometric="rgb",
+            planarconfig="CONTIG",
+            compression="zlib",
+        )
+        if reference_image_path and os.path.exists(reference_image_path):
+            subprocess.run(
+                [
+                    "exiftool",
+                    "-q",
+                    "-overwrite_original",
+                    "-TagsFromFile",
+                    reference_image_path,
+                    "-all:all",
+                    "-SubfileType=0",
+                    "-PhotometricInterpretation=LinearRaw",
+                    "-Compression=Deflate",
+                    "-DefaultScale=1.0",
+                    "-BlackLevel=0",
+                    "-WhiteLevel=65535",
+                    output_path,
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        return output_path
+    except Exception as exc:
+        print(f"Error fatal saat streaming Linear DNG ke '{output_path}': {exc}")
+        traceback.print_exc()
+        return None
 
 
 def save_special_jpg_and_png(

@@ -14,13 +14,16 @@ from __future__ import annotations
 
 import os
 import sys
+import importlib.util
 
 
-os.environ.setdefault("AOT_MODE", "0")
+# This script is the explicit compile entry point.  ``setdefault`` is unsafe
+# here because a parent process may export the production value ``AOT_MODE=1``;
+# in that case ``splat_sr`` hides its JIT graph builder and compilation fails
+# with a misleading missing-attribute error.
+os.environ["AOT_MODE"] = "0"
 
 import taichi as ti
-
-from taichi_vision.taichi_algorithm.aot_py.aot_artifact import normalize_tcm
 
 try:
     from . import splat_sr
@@ -60,7 +63,23 @@ def compile_spatial_splat(backend: str, output_dir: str | None = None) -> str:
         # production TCM builders.  Packing ``module.save`` ourselves can add
         # auxiliary metadata that older native bridges reject at load time.
         module.archive(out_path)
-        normalize_tcm(out_path)
+        # Import after ``ti.init``.  Importing the taichi_vision package before
+        # backend initialization can eagerly create the production bridge and
+        # make Taichi's OpenGL compiler context fall back to CPU.
+        artifact_source = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "../../../../../taichi_vision/taichi_algorithm/aot_py/aot_artifact.py",
+            )
+        )
+        artifact_spec = importlib.util.spec_from_file_location(
+            "_pixel_refine_aot_artifact", artifact_source
+        )
+        if artifact_spec is None or artifact_spec.loader is None:
+            raise ImportError(f"Unable to load TCM normalizer: {artifact_source}")
+        artifact_module = importlib.util.module_from_spec(artifact_spec)
+        artifact_spec.loader.exec_module(artifact_module)
+        artifact_module.normalize_tcm(out_path)
         print(f"[AOT] compiled backend={name} artifact={out_path}")
         return out_path
     finally:

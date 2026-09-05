@@ -255,12 +255,36 @@ _OP_TIMEOUT_S = _env_float("OP_TIMEOUT", 120.0)
 _LOCK_CONTENTION_S = _env_float("LOCK_TIMEOUT", 30.0)
 _ERROR_WINDOW_S = _env_float("ERROR_WINDOW", 30.0)
 _ERROR_THRESHOLD = _env_int("ERROR_THRESHOLD", 5)
-_AUTO_DESTROY_ENABLED = os.environ.get("AUTO_DESTROY", "1") != "0"
+_WATCHDOG_DISABLE_REQUESTED = any(
+    os.environ.get(name, "0") == "1"
+    for name in (
+        "DISABLE_AOT_WATCHDOG",
+        "PIXEL_REFINE_DISABLE_AOT_WATCHDOG",
+    )
+)
+_AUTO_DESTROY_ENABLED = (
+    os.environ.get("AUTO_DESTROY", "1") != "0"
+    and not _WATCHDOG_DISABLE_REQUESTED
+)
+# Idle reclamation is deliberately disabled by default.  Native GPU buffer
+# finalizers and Python GC must run at an owner-thread synchronization point,
+# never from this daemon watchdog thread.  The resident pipeline already has
+# explicit safe-point reclamation for the supported processing paths.
+_WATCHDOG_IDLE_RECLAIM_ENABLED = (
+    os.environ.get("AOT_WATCHDOG_IDLE_RECLAIM", "0") == "1"
+)
 _INIT_TIMEOUT_S = _env_float("INIT_TIMEOUT", 30.0)
 _CLEAN_ZOMBIES = os.environ.get("CLEAN_ZOMBIES", "0") == "1"
 _EXPERIMENT_MODE = os.environ.get("AOT_EXPERIMENT", "0") == "1"
 _SUPPRESS_VULKAN_LOADER_WARNINGS = (
     os.environ.get("SUPPRESS_VULKAN_LOADER_WARNINGS", "1") != "0"
+)
+_PRESERVE_NATIVE_STDERR = any(
+    os.environ.get(name, "0") == "1"
+    for name in (
+        "AOT_PRESERVE_NATIVE_STDERR",
+        "AOT_VERBOSE_NATIVE_ERRORS",
+    )
 )
 _DEVICE_CACHE_PATH = os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
@@ -289,8 +313,14 @@ _QUALIFICATION_NOTICES = set()
 def _intel_vulkan_probe_override():
     """Permit Intel Vulkan only inside an explicitly isolated probe process."""
     return (
-        os.environ.get("AOT_INTEL_PROBE") == "1"
-        and os.environ.get("AOT_ALLOW_UNSAFE_INTEL") == "1"
+        any(
+            os.environ.get(name) == "1"
+            for name in ("AOT_INTEL_PROBE", "PIXEL_REFINE_AOT_INTEL_PROBE")
+        )
+        and any(
+            os.environ.get(name) == "1"
+            for name in ("AOT_ALLOW_UNSAFE_INTEL", "PIXEL_REFINE_AOT_ALLOW_UNSAFE_INTEL")
+        )
     )
 
 
@@ -302,6 +332,18 @@ def _intel_vulkan_allowed(device_id):
         from taichi_vision.vulkan_probe import intel_vulkan_is_validated
 
         return intel_vulkan_is_validated(device_id=int(device_id))
+    except Exception:
+        return False
+
+
+def _graphics_compatibility_enabled(backend, vendor):
+    """Resolve the shared legacy-driver policy without importing the API facade."""
+    try:
+        from taichi_vision.graphics_compatibility import (
+            graphics_compatibility_enabled,
+        )
+
+        return graphics_compatibility_enabled(backend, vendor)
     except Exception:
         return False
 
@@ -520,7 +562,10 @@ class _suppress_native_stderr:
 
     def __init__(self, enabled=True):
         self.enabled = bool(
-            enabled and _SUPPRESS_VULKAN_LOADER_WARNINGS and os.name == "nt"
+            enabled
+            and _SUPPRESS_VULKAN_LOADER_WARNINGS
+            and not _PRESERVE_NATIVE_STDERR
+            and os.name == "nt"
         )
         self._saved_fd = None
         self._null_fd = None
@@ -742,19 +787,30 @@ def _watchdog_run():
     main_thread = threading.main_thread()
     while True:
         time.sleep(_WATCHDOG_INTERVAL_S)
-        # Eksperimen: Untuk backend CUDA, nonaktifkan Watchdog idle reclamation dan error circuit breaker
-        # agar Primary CUDA Context tetap aktif 100% dan GC diatur murni per-algoritma.
-        is_cuda = False
-        for inst in list(AOTEngine._instances.values()):
-            if getattr(inst, "arch", "").lower() == "cuda":
-                is_cuda = True
+        # Lazy engine creation is intentional.  Before the first runtime is
+        # registered, there is no native resource that this thread can safely
+        # inspect or reclaim.  Treating that startup interval as idle used to
+        # invoke Python GC while Vulkan was about to initialize.
+        instances = list(AOTEngine._instances.values())
+        if not instances:
+            if not main_thread.is_alive():
+                break
+            continue
+
+        # Eksperimen: Untuk backend GPU (CUDA, Vulkan, OpenGL), nonaktifkan Watchdog idle reclamation
+        # dan error circuit breaker agar Primary GPU Context tetap aktif 100% dan GC diatur murni
+        # per-algoritma / di main thread, mencegah crash assertion taichi_c_api.dll (vulkan_device.cpp:2045)
+        # akibat _gc.collect() di secondary watchdog thread.
+        is_gpu = False
+        for inst in instances:
+            arch_name = getattr(inst, "arch", "").lower()
+            if arch_name in ("cuda", "vulkan", "opengl"):
+                is_gpu = True
                 break
 
-        if not _AUTO_DESTROY_ENABLED or is_cuda:
-            # If auto-destroy is disabled or CUDA is active, only check main thread liveness
+        if not _AUTO_DESTROY_ENABLED or is_gpu:
+            # If auto-destroy is disabled or GPU backend is active, only check main thread liveness
             if not main_thread.is_alive():
-                _global_cleanup("watchdog-main-thread-dead")
-                os._exit(1)  # Hard kill when auto-destroy disabled
                 break
             continue
 
@@ -824,48 +880,26 @@ def _watchdog_run():
             break
 
         # --- Condition 4: Heartbeat stale (no GPU activity at all -> Idle) ---
-        # When the application is idle, we don't want to shut down the application.
-        # Instead, we perform a smart VRAM cleanup (clear buffer pools, collect GC) to
-        # minimize VRAM footprint, while keeping the application fully alive and functional.
-        # Note: We only run reclamation once per idle session (guarded by _vram_reclaimed).
+        # Idle reclamation is not performed by this daemon thread.  Native
+        # finalizers can execute when Python objects become unreachable, so
+        # even clearing a staging dictionary here can destroy a GPU resource
+        # from the wrong thread.  Resident callers reclaim at explicit,
+        # synchronized safe points instead.
         if activity_age > _HEARTBEAT_TIMEOUT_S and op_elapsed == 0.0:
-            if not _vram_reclaimed:
+            if _WATCHDOG_IDLE_RECLAIM_ENABLED and not _vram_reclaimed:
                 try:
                     sys.stderr.write(
-                        f"[AOTEngine Watchdog] No GPU activity for {activity_age:.1f}s "
-                        f"(limit {_HEARTBEAT_TIMEOUT_S}s). Triggering smart VRAM reclamation.\n"
+                        f"[AOTEngine Watchdog] Idle reclamation requested after "
+                        f"{activity_age:.1f}s, but it is deferred to an owner-thread "
+                        f"safe point.\n"
                     )
                     sys.stderr.flush()
                 except Exception:
                     pass
 
-                # Smart VRAM reclamation logic:
-                # We do NOT call buffer_pool.clear() or native free_gpu_buffer from
-                # the Watchdog background thread, because doing so on CUDA breaks the
-                # primary context on Windows driver implementations.
-                # Instead, we trim idle staging buffers and trigger Python GC so unreferenced
-                # memory is freed safely without losing the active CUDA context.
-                try:
-                    for key, inst in list(AOTEngine._instances.items()):
-                        with inst._lock:
-                            # Trim idle staging pool
-                            if hasattr(inst, "_staging_pool"):
-                                inst._staging_pool.clear()
-
-                    # Trigger Python garbage collection to release unreferenced GPU buffers
-                    import gc as _gc
-
-                    _gc.collect()
-                except Exception as e:
-                    try:
-                        sys.stderr.write(
-                            f"[AOTEngine Watchdog] Smart VRAM reclamation error: {e}\n"
-                        )
-                        sys.stderr.flush()
-                    except Exception:
-                        pass
-
-                # Mark VRAM as reclaimed for the current idle session
+                # Mark the idle interval as observed so the watchdog does not
+                # repeatedly emit the deferred notice.  No native resource is
+                # touched here.
                 with _heartbeat_lock:
                     _vram_reclaimed = True
 
@@ -1522,7 +1556,9 @@ def resolve_backend_config(arch=None, device_id=None, *, prefer=None, strict=Non
             # Automatic/default Vulkan selection prefers a native NVIDIA
             # adapter, then native Intel/AMD, never Dozen.
             if os.environ.get("AOT_AUTOSCAN", "1") == "1" and (
-                not explicit or requested_id is None
+                not explicit
+                or requested_id is None
+                or preferred_vendor != "unknown"
             ):
                 # A saved backend choice may carry a vendor identity while
                 # Vulkan ordinals are free to change after a driver update.
@@ -1589,6 +1625,22 @@ def resolve_backend_config(arch=None, device_id=None, *, prefer=None, strict=Non
                 "adapter; native Vulkan is required by the current policy."
             )
         vendor = normalize_vendor(name)
+        if vendor == "intel" and not _intel_vulkan_allowed(ordinal):
+            _schedule_intel_vulkan_qualification(ordinal)
+            if not _graphics_compatibility_enabled("vulkan", vendor):
+                raise RuntimeError(
+                    "Native Intel Vulkan is quarantined for this device/driver "
+                    "until the isolated lifecycle, device-copy, artifact-load, "
+                    "and graph-dispatch gates pass. Dozen/D3D12 translation is "
+                    "not an accepted production fallback. Enable "
+                    "PIXEL_REFINE_GFX_COMPAT_MODE=1 for conservative native-GPU "
+                    "execution, use CPU/OpenGL, or run the isolated Intel "
+                    "qualification probe."
+                )
+            print(
+                "[AOTEngine] Native Intel Vulkan admitted in legacy graphics "
+                "compatibility mode; qualification continues independently."
+            )
 
     config = BackendConfig(
         backend=backend,
@@ -2845,13 +2897,10 @@ class AOTEngine:
                 # the OS reclaim the context instead of calling the faulty
                 # destructor; this is scoped to Intel and never affects NVIDIA.
                 if (
-                    arch.lower() == "vulkan"
+                    arch.lower() in ("vulkan", "opengl")
                     and "intel" in gpu_name.lower()
                     and "microsoft" not in gpu_name.lower()
                 ):
-                    # Keep teardown conservative even while the execution
-                    # quarantine is disabled: it affects only resource release,
-                    # not backend selection or graph dispatch.
                     os.environ.setdefault("AOT_SAFE_TEARDOWN", "1")
                     # TEMPORARILY DISABLED: setting this flag previously made
                     # every unqualified Intel Vulkan graph fail before dispatch.
@@ -2863,6 +2912,20 @@ class AOTEngine:
                 )
 
             instance.gpu_name = gpu_name or ""
+            instance._graphics_compatibility_mode = _graphics_compatibility_enabled(
+                arch, normalize_vendor(gpu_name or config.vendor)
+            )
+            if instance._graphics_compatibility_mode:
+                # Legacy integrated Vulkan drivers require host-visible storage
+                # for buffers that cross the Python/C-API boundary.  Keeping
+                # every allocation in that domain also avoids the invalid
+                # device-local ti_map_memory path without changing algorithms
+                # or silently moving execution to CPU.
+                instance._force_host_accessible = True
+                print(
+                    "[AOTEngine] Legacy graphics compatibility active: "
+                    "host-visible buffers, serialized direct graph dispatch."
+                )
             # The bridge is the source of truth for the actual OpenGL ICD and
             # Vulkan physical-device name.  Refresh the immutable selection
             # record so diagnostics and downstream callers never rely on an
@@ -2944,6 +3007,11 @@ class AOTEngine:
             instance._auto_pipeline_planner = AutoPipelinePlanner(
                 backend=str(arch).lower(),
                 memory_provider=lambda: instance.get_memory_status(),
+                unsafe_backends=(
+                    {str(arch).lower()}
+                    if instance._graphics_compatibility_mode
+                    else ()
+                ),
             )
             initial_memory = instance._memory_governor.refresh(force=True)
             instance.buffer_pool.set_budget(initial_memory.device_pool_budget)
@@ -5311,16 +5379,14 @@ class AOTEngine:
         elif hasattr(data, "__cuda_array_interface__"):
             if hasattr(data, "get"):
                 materialized = data.get()
+            elif hasattr(data, "cpu"):
+                materialized = data.cpu().numpy()
+            elif hasattr(data, "copy_to_host"):
+                materialized = data.copy_to_host()
+            elif hasattr(data, "numpy"):
+                materialized = data.numpy()
             else:
-                try:
-                    import cupy as cp
-                except ImportError as exc:
-                    raise RuntimeError(
-                        "CUDA array interop requires an object with .get() or "
-                        "the optional CuPy package; refusing to memcpy a device "
-                        "pointer as host memory"
-                    ) from exc
-                materialized = cp.asnumpy(cp.asarray(data))
+                materialized = np.asarray(data)
 
         if materialized is not None:
             materialized = np.ascontiguousarray(materialized)
@@ -5464,16 +5530,43 @@ class AOTEngine:
             is_vector=is_vector,
             vector_dim=vector_dim,
         )
-        _op_begin("write_to_gpu_buffer")
-        try:
-            _LIB.write_to_gpu_buffer(
-                self.runtime, buf.handle, arr.ctypes.data, buf.nbytes
-            )
-        except Exception:
-            _record_error()
-            raise
-        finally:
-            _op_end()
+        if buf.host_accessible:
+            _op_begin("write_to_gpu_buffer")
+            try:
+                _LIB.write_to_gpu_buffer(
+                    self.runtime, buf.handle, arr.ctypes.data, buf.nbytes
+                )
+            except Exception:
+                _record_error()
+                raise
+            finally:
+                _op_end()
+        else:
+            # A device-local Vulkan allocation is not mappable on many Intel
+            # and NVIDIA drivers.  Upload through the host-visible staging
+            # pool, then issue an explicit same-device copy.  The old direct
+            # ti_map_memory call happened to work on permissive heaps but
+            # asserted on standards-conforming legacy drivers.
+            staging = self.acquire_staging_buffer(arr.shape, arr.dtype)
+            try:
+                _op_begin("write+copy_gpu_buffer")
+                try:
+                    _LIB.write_to_gpu_buffer(
+                        self.runtime,
+                        staging.handle,
+                        arr.ctypes.data,
+                        staging.nbytes,
+                    )
+                    _LIB.copy_gpu_buffer(
+                        self.runtime, staging.handle, buf.handle, staging.nbytes
+                    )
+                except Exception:
+                    _record_error()
+                    raise
+                finally:
+                    _op_end()
+            finally:
+                self.release_staging_buffer(staging)
         return buf
 
     def load(self, path):
@@ -5975,7 +6068,7 @@ class AOTEngine:
                     destroy_engine = None
                 skip_native_destroy = (
                     os.environ.get("AOT_SAFE_TEARDOWN", "0") == "1"
-                    and self.arch.lower() == "vulkan"
+                    and self.arch.lower() in ("vulkan", "opengl")
                 )
                 if (
                     runtime_to_destroy
@@ -5988,7 +6081,7 @@ class AOTEngine:
                         pass
                 elif skip_native_destroy:
                     print(
-                        "[AOTEngine] Intel native Vulkan safe teardown: native context destructor skipped"
+                        f"[AOTEngine] Intel native {self.arch.upper()} safe teardown: native context destructor skipped"
                     )
                 self.runtime = None
                 global _RUNTIME
@@ -6152,7 +6245,7 @@ def emergency_cleanup():
 if _CLEAN_ZOMBIES:
     _cleanup_zombie_gpu_processes()
 
-_initial_engine = AOTEngine()
+_initial_engine = None
 
 
 class _EngineHandle:
@@ -6171,17 +6264,19 @@ class _EngineHandle:
         object.__setattr__(self, "_target", target)
 
     def _live(self):
-        global _RUNTIME
+        global _RUNTIME, _initial_engine
         target = object.__getattribute__(self, "_target")
         if (
-            getattr(target, "_destroyed", False)
+            target is None
+            or getattr(target, "_destroyed", False)
             or getattr(target, "runtime", None) is None
         ):
             target = AOTEngine(
-                arch=getattr(target, "arch", None),
-                device_id=getattr(target, "device_id", 0),
+                arch=getattr(target, "arch", None) if target is not None else None,
+                device_id=getattr(target, "device_id", 0) if target is not None else 0,
             )
             object.__setattr__(self, "_target", target)
+            _initial_engine = target
             _RUNTIME = target.runtime
         return target
 
@@ -6203,8 +6298,8 @@ class _EngineHandle:
         return self._live().__class__
 
 
-engine = _EngineHandle(_initial_engine)
-_RUNTIME = _initial_engine.runtime
+engine = _EngineHandle(None)
+_RUNTIME = None
 
 
 def get_backend_config() -> BackendConfig:

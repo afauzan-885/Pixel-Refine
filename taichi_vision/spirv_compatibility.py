@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -39,12 +40,33 @@ _VARIABLE_RE = re.compile(
 
 
 def _tool(name):
-    path = shutil.which(name)
-    if not path:
-        raise FileNotFoundError(
-            f"{name} is required for the Vulkan artifact portability audit"
+    env_names = {
+        "spirv-val": ("SPIRV_VAL", "PIXEL_REFINE_SPIRV_VAL"),
+        "spirv-dis": ("SPIRV_DIS", "PIXEL_REFINE_SPIRV_DIS"),
+    }.get(name, ())
+    candidates = [os.environ.get(env_name) for env_name in env_names]
+    candidates.append(shutil.which(name))
+    candidates.append(
+        str(
+            Path(__file__).resolve().parent
+            / "taichi_algorithm"
+            / "aot_py"
+            / "aot_dll"
+            / "vulkan"
+            / f"{name}.exe"
         )
-    return path
+    )
+    vulkan_sdk = os.environ.get("VULKAN_SDK")
+    if vulkan_sdk:
+        candidates.append(str(Path(vulkan_sdk) / "Bin" / f"{name}.exe"))
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return str(Path(candidate).resolve())
+    hint = "/".join(env_names) if env_names else "PATH"
+    raise FileNotFoundError(
+        f"{name} is required for the Vulkan artifact portability audit; "
+        f"set {hint} or install it through the Vulkan SDK"
+    )
 
 
 def _spirv_version(payload):

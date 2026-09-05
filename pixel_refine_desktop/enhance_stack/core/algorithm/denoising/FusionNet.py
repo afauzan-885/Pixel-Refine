@@ -1,7 +1,10 @@
 import gc
+import json
 import os
 from pathlib import Path
 import numpy as np
+
+from config import GENERAL_SETTINGS_FILE
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.flownet_inference import (
     AOTOpticalFlowAligner,
@@ -14,6 +17,20 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine
     load_rgb_linear_image,
     load_weightnet_onnx,
 )
+
+
+def _read_onnx_runtime():
+    """Read the ONNX runtime preference from Performance Settings."""
+    try:
+        if os.path.exists(GENERAL_SETTINGS_FILE):
+            with open(GENERAL_SETTINGS_FILE, "r") as f:
+                general = json.load(f)
+            runtime = str(general.get("onnx_runtime", "auto")).strip().lower()
+            if runtime in ("auto", "dml", "cpu"):
+                return runtime
+    except (OSError, json.JSONDecodeError):
+        pass
+    return "auto"
 
 
 class FusionNetDenoisingAlgorithm:
@@ -125,7 +142,7 @@ class FusionNetDenoisingAlgorithm:
 
             print("[FusionNet] Routing to GPU-resident zero-copy pipeline...")
             session = _load_wn_onnx(
-                DEFAULT_WEIGHTNET_ONNX, runtime="dml", patch_size=tile_size
+                DEFAULT_WEIGHTNET_ONNX, runtime=_read_onnx_runtime(), patch_size=tile_size
             )
 
             alignment_plan = getattr(ctx, "alignment_selection_name", None) or getattr(
@@ -249,7 +266,7 @@ class FusionNetDenoisingAlgorithm:
                 )
 
             session = load_weightnet_onnx(
-                DEFAULT_WEIGHTNET_ONNX, runtime="dml", patch_size=tile_size
+                DEFAULT_WEIGHTNET_ONNX, runtime=_read_onnx_runtime(), patch_size=tile_size
             )
 
             with AOTOpticalFlowAligner(

@@ -851,7 +851,8 @@ def run_intel_vulkan_comprehensive(
         / "taichi_vision"
         / "taichi_algorithm"
         / "aot_tcm"
-        / "bicubic_vulkan.tcm"
+        / "vulkan_x86_64_windows"
+        / "bicubic_vulkan_x86_64_windows.tcm"
     )
     probes = [
         run_intel_vulkan_probe(

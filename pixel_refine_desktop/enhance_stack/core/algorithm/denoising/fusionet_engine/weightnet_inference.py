@@ -9,6 +9,7 @@ Returns raw uncompressed float32 RGB array [H, W, 3] in range [0.0, 1.0].
 
 import os
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -228,6 +229,17 @@ class DecoupledWeightNetSession:
         self.encoder_session = encoder_session
         self.attention_session = attention_session
         self.patch_size = patch_size
+        try:
+            self.reference_cache_tiles = max(
+                0,
+                int(
+                    os.environ.get(
+                        "MFDENOISER_WEIGHTNET_REFERENCE_CACHE_TILES", "16"
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            self.reference_cache_tiles = 16
         self._cached_ref_hash = None
         self._cached_tiles = None
 
@@ -246,29 +258,17 @@ def load_weightnet_onnx(
         raise RuntimeError("ONNX inference requires the onnxruntime package.") from exc
 
     model_path = Path(model_path)
-    runtime = str(runtime).strip().lower()
-    available = set(ort.get_available_providers())
-    if runtime == "auto":
-        runtime = "dml" if "DmlExecutionProvider" in available else "cpu"
-    if runtime == "dml":
-        if "DmlExecutionProvider" not in available:
-            raise RuntimeError(
-                "DML runtime requested but DmlExecutionProvider is unavailable; "
-                f"available={sorted(available)}"
-            )
-        providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
-    elif runtime == "cpu":
-        providers = ["CPUExecutionProvider"]
-    else:
-        raise ValueError(
-            f"Unsupported ONNX runtime {runtime!r}; choose auto, dml, or cpu."
-        )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.onnx_utils import (
+        resolve_onnx_runtime_and_providers,
+    )
+
+    runtime, providers = resolve_onnx_runtime_and_providers(runtime)
 
     options = ort.SessionOptions()
-    # Disable node fusion completely on DML to eliminate DmlFusedNode crashes across long bursts
+    # Disable node fusion completely on DML/GPU to eliminate DmlFusedNode crashes across long bursts
     options.graph_optimization_level = (
         ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-        if runtime == "dml"
+        if runtime in ("dml", "cuda")
         else ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     )
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -277,7 +277,7 @@ def load_weightnet_onnx(
         "session.use_device_allocator_for_initializers", "1"
     )
 
-    dev_suffix = "gpu" if runtime == "dml" else "cpu"
+    dev_suffix = "gpu" if runtime in ("dml", "cuda") else "cpu"
     dev_upper = dev_suffix.upper()
 
     search_dirs = [
@@ -424,25 +424,26 @@ def infer_single_support_weight_map(
     if total_tiles == 0:
         return np.ones((3, work_h, work_w), dtype=np.float32), 1.0
 
-    # 2. Extract and cache reference features once per burst if using decoupled architecture
+    # The SR adapter sets a bounded reference-feature cache. The old default
+    # encoded and retained every tile before attention started, so its RAM
+    # scaled with the entire image area instead of the resident tile budget.
+    cache_limit = getattr(session, "reference_cache_tiles", None)
+    # Denoising defaults to a bounded cache to keep multi-frame RSS stable;
+    # callers may raise it through the session attribute or environment.
+    reference_cache_tiles = (
+        len(tile_coords)
+        if cache_limit is None
+        else max(0, int(cache_limit))
+    )
+
+    # 2. Prepare a bounded reference-feature cache for decoupled architecture.
     if is_decoupled:
         ref_id = id(ref_work)
         if session._cached_ref_hash != ref_id:
-            cached_tiles = []
-            for (y_start, y_end, x_start, x_end) in tile_coords:
-                cur_h, cur_w = y_end - y_start, x_end - x_start
-                r_in = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
-                r_in[0, 0, :cur_h, :cur_w] = ref_luma[y_start:y_end, x_start:x_end]
-                try:
-                    feat_np = session.encoder_session.run(
-                        ["ref_feat"],
-                        {"ref_img": r_in},
-                    )[0]
-                except Exception:
-                    feat_np = np.zeros((1, 16, tile_size, tile_size), dtype=np.float32)
-                cached_tiles.append((r_in, feat_np))
             session._cached_ref_hash = ref_id
-            session._cached_tiles = cached_tiles
+            session._cached_tiles = OrderedDict()
+        elif not isinstance(session._cached_tiles, OrderedDict):
+            session._cached_tiles = OrderedDict()
 
     # 3. High-throughput single-tile ONNX inference matching model
     weight_map_luma = np.zeros((1, work_h, work_w), dtype=np.float32)
@@ -451,6 +452,7 @@ def infer_single_support_weight_map(
 
     ref_in = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
     supp_in = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
+    ref_in_tile = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
 
     for i, (y_start, y_end, x_start, x_end) in enumerate(tile_coords):
         if stop_event is not None:
@@ -463,8 +465,28 @@ def infer_single_support_weight_map(
 
         supp_in[0, 0, :cur_h, :cur_w] = supp_luma[y_start:y_end, x_start:x_end]
 
+        # Reuse the fixed-shape staging tensor; clear the padded region so
+        # edge tiles retain the same zero-padding semantics as the old
+        # per-tile allocation without repeated heap allocations.
+        ref_in_tile.fill(0.0)
+        ref_in_tile[0, 0, :cur_h, :cur_w] = ref_luma[
+            y_start:y_end, x_start:x_end
+        ]
+
         if is_decoupled:
-            ref_in_tile, ref_feat_tile = session._cached_tiles[i]
+            ref_feat_tile = session._cached_tiles.get(i)
+            if ref_feat_tile is None:
+                try:
+                    ref_feat_tile = session.encoder_session.run(
+                        ["ref_feat"],
+                        {"ref_img": ref_in_tile},
+                    )[0]
+                except Exception:
+                    ref_feat_tile = np.zeros(
+                        (1, 16, tile_size, tile_size), dtype=np.float32
+                    )
+                if len(session._cached_tiles) < reference_cache_tiles:
+                    session._cached_tiles[i] = ref_feat_tile
             try:
                 weight_np, alpha_np = session.attention_session.run(
                     ["weight_map", "alpha"],

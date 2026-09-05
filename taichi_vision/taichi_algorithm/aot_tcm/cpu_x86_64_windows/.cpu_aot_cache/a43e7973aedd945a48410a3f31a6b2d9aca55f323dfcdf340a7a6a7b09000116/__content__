@@ -1,7 +1,0 @@
-cgraph:hamilton_demosaic
-cgraph:hamilton_demosaic_tonemapped
-cgraph:hamilton_demosaic_1channel
-cgraph:hamilton_demosaic_half_res
-cgraph:hamilton_demosaic_rgb_half_res
-cgraph:hamilton_demosaic_3channel
-cgraph:rgb_to_bgr_i32

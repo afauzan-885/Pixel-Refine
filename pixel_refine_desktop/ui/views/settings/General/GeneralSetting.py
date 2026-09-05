@@ -18,11 +18,29 @@ from resources.GenericUILibrary.modals import modal_confirm
 from .general_store import get_general_store
 from .helpers import restart_application
 from taichi_vision.device_selection import (
+    is_translation_device,
     make_device_selector,
     resolve_device_selector,
     scan_cuda_device_records,
     scan_vulkan_device_records,
 )
+
+
+def _hardware_test_timeout_seconds(analysis_mode: str) -> float:
+    """Return a bounded timeout for one disposable backend test child.
+
+    The interactive fast test must not leave the settings modal waiting for
+    the native driver for the 25-minute deep-analysis limit.  The override is
+    intentionally process-local so qualification scripts can choose a longer
+    limit without changing the UI default.
+    """
+    default = 120.0 if str(analysis_mode).lower() == "fast" else 1500.0
+    raw = os.environ.get("PIXEL_REFINE_HARDWARE_TEST_TIMEOUT_S")
+    try:
+        value = float(raw) if raw else default
+    except (TypeError, ValueError):
+        value = default
+    return max(10.0, min(value, 3600.0))
 
 
 @contextmanager
@@ -187,6 +205,10 @@ class HardwareBackendTestWorker(QObject):
                     "AOT_SKIP_DOZEN": "1",
                     "INTEL_VULKAN_AUTO_QUALIFY": "0",
                     "VK_LOADER_DEBUG": "error",
+                    # Every backend test is disposable. Prevent a native
+                    # MSVC assertion from opening a modal dialog over the
+                    # settings window; the child exit/log remains evidence.
+                    "AOT_SUPPRESS_NATIVE_DIALOGS": "1",
                 }
             )
             if backend == "vulkan" and vendor == "intel":
@@ -325,10 +347,19 @@ class HardwareBackendTestWorker(QObject):
                                     pass
 
                                 elapsed = time.monotonic() - started
-                                if elapsed >= 1500:
+                                process_timeout = _hardware_test_timeout_seconds(
+                                    self.analysis_mode
+                                )
+                                if elapsed >= process_timeout:
                                     process.kill()
                                     process.wait(timeout=10)
-                                    raise subprocess.TimeoutExpired(command, 1500)
+                                    self.log_line.emit(
+                                        f"[Hardware Test] Timeout setelah "
+                                        f"{process_timeout:.0f}s: {text}"
+                                    )
+                                    raise subprocess.TimeoutExpired(
+                                        command, process_timeout
+                                    )
 
                                 effective_estimate = max(
                                     estimate,
@@ -799,104 +830,124 @@ class GeneralSettingsPage(Container, SyncMixin):
         # Apply variant styling for buttons dynamically
         if hasattr(self, "apply_btn") and self.apply_btn:
             self.apply_btn.setStyleSheet(create_button_style("success"))
-        if hasattr(self, "test_btn") and self.test_btn:
-            self.test_btn.setStyleSheet(
-                create_button_style("secondary")
-                + "\nQPushButton { font-size: 10.4pt; }"
-            )
-        self.update_device_dropdown_style()
 
     def _scan_hardware_backend_options(self):
+        """Enumerate physical hardware devices (CPU, iGPU, Dedicated GPU) without exposing API names."""
         options = [
             {
                 "key": "cpu",
                 "text": "CPU (Universal)",
+                "device_type": "cpu",
                 "backend": "cpu",
                 "device_id": -1,
                 "vendor": "cpu",
+                "raw_name": "CPU (Universal)",
+                "fallback_chain": ["cpu"],
             }
         ]
-        allowed_ids = self.store.get("allowed_backend_ids", [])
 
-        # CUDA discovery is independent from Vulkan enumeration.  Keep it in
-        # its own guarded probe so a missing/broken Vulkan loader cannot hide
-        # an otherwise usable NVIDIA CUDA device from General Settings.
         try:
-            cuda_devices = scan_cuda_device_records()
-            for record in cuda_devices:
-                idx = int(record.get("ordinal", 0))
-                dev = str(record.get("name") or "")
-                if not dev:
+            try:
+                vk_records = scan_vulkan_device_records()
+            except Exception as e:
+                print(f"[Hardware Scan] Failed to scan Vulkan devices: {e}")
+                vk_records = []
+
+            try:
+                cuda_records = scan_cuda_device_records()
+            except Exception as e:
+                print(f"[Hardware Scan] Failed to scan CUDA devices: {e}")
+                cuda_records = []
+
+            # Filter out translation adapters (Dozen/D3D12)
+            native_vk = [
+                r for r in vk_records
+                if not r.get("translation") and not is_translation_device(r)
+            ]
+
+            for record in native_vk:
+                if record.get("device_type") == "PHYSICAL_DEVICE_TYPE_CPU":
                     continue
+
+                dev_name = str(record.get("name", "")).strip()
+                if not dev_name:
+                    continue
+
+                vendor = str(record.get("vendor") or "unknown").lower()
+                vk_ordinal = int(record.get("ordinal", 0))
+                dev_type = str(record.get("device_type", ""))
+
+                is_igpu = (
+                    dev_type == "PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU"
+                    or vendor == "intel"
+                    or "uhd" in dev_name.lower()
+                    or "iris" in dev_name.lower()
+                )
+
                 selector = make_device_selector(record)
                 fingerprint = str(
                     selector.get("fingerprint")
-                    or f"nvidia:{record.get('device_uuid', dev)}"
+                    or f"{record.get('vendor_id')}:{record.get('device_id')}"
                 )
-                options.append(
-                    {
-                        "key": f"{fingerprint}|cuda",
-                        "text": f"{dev} — CUDA",
-                        "backend": "cuda",
-                        "device_id": idx,
-                        "vendor": "nvidia",
-                        "raw_name": dev,
-                        "device_record": record,
-                        "device_selector": selector,
-                    }
-                )
-        except Exception as e:
-            print(f"[CUDA Scan] Failed to scan CUDA hardware: {e}")
 
-        try:
-            devices = scan_vulkan_device_records()
-            if devices:
-                for record in devices:
-                    idx = int(record["ordinal"])
-                    dev = str(record.get("name") or "")
-                    if not dev:
-                        continue
-
-                    # Filter by allowed device IDs if the list is not empty
-                    if allowed_ids and idx not in allowed_ids:
-                        continue
-
-                    # Native Vulkan only: Dozen is Vulkan-on-D3D12 and has a
-                    # different descriptor/pipeline ABI from native Intel
-                    # Vulkan.  Keep native Intel and NVIDIA ICDs visible.
-                    if record.get("translation"):
-                        continue
-
-                    selector = make_device_selector(record)
-                    fingerprint = str(
-                        selector.get("fingerprint")
-                        or f"{record.get('vendor_id')}:{record.get('device_id')}"
+                if is_igpu:
+                    label = f"{dev_name} (iGPU)"
+                    options.append(
+                        {
+                            "key": f"{fingerprint}|igpu",
+                            "text": label,
+                            "device_type": "igpu",
+                            "backend": "vulkan",
+                            "device_id": vk_ordinal,
+                            "vulkan_device_id": vk_ordinal,
+                            "vendor": vendor,
+                            "raw_name": dev_name,
+                            "fallback_chain": ["vulkan", "opengl", "cpu"],
+                            "device_record": record,
+                            "device_selector": selector,
+                        }
                     )
-                    vendor = str(record.get("vendor") or "unknown").lower()
-                    for backend, backend_label in (
-                        ("vulkan", "Vulkan"),
-                        ("opengl", "OpenGL"),
-                    ):
-                        # TEMPORARY real-device validation policy (2026-07):
-                        # expose every native GPU/backend pair in General Settings.
-                        # Keep the former conservative filters here, commented, so
-                        # they can be restored once the validation matrix is complete.
-                        # if backend == "vulkan" and vendor == "intel":
-                        #     continue
-                        # if backend == "opengl" and vendor == "nvidia":
-                        #     continue
-                        options.append(
-                            {
-                                "key": f"{fingerprint}|{backend}",
-                                "text": f"{dev} — {backend_label}",
-                                "backend": backend,
-                                "device_id": idx,
-                                "vendor": vendor,
-                                "raw_name": dev,
-                                "device_record": record,
-                                "device_selector": selector,
-                            }
+                else:
+                    # Discrete / Dedicated GPU
+                    label = f"{dev_name} (Dedicated GPU)"
+                    matching_cuda = None
+                    if vendor == "nvidia" and cuda_records:
+                        matching_cuda = next(
+                            (
+                                c for c in cuda_records
+                                if c.get("name", "").lower() in dev_name.lower()
+                                or dev_name.lower() in c.get("name", "").lower()
+                            ),
+                            cuda_records[0] if len(cuda_records) == 1 else None,
                         )
+
+                    if vendor == "nvidia" and matching_cuda:
+                        cuda_id = int(matching_cuda.get("ordinal", 0))
+                        primary_backend = "cuda"
+                        primary_id = cuda_id
+                        fallback_chain = ["cuda", "vulkan", "opengl", "cpu"]
+                    else:
+                        cuda_id = None
+                        primary_backend = "vulkan"
+                        primary_id = vk_ordinal
+                        fallback_chain = ["vulkan", "opengl", "cpu"]
+
+                    options.append(
+                        {
+                            "key": f"{fingerprint}|dgpu",
+                            "text": label,
+                            "device_type": "dgpu",
+                            "backend": primary_backend,
+                            "device_id": primary_id,
+                            "vulkan_device_id": vk_ordinal,
+                            "cuda_device_id": cuda_id,
+                            "vendor": vendor,
+                            "raw_name": dev_name,
+                            "fallback_chain": fallback_chain,
+                            "device_record": record,
+                            "device_selector": selector,
+                        }
+                    )
 
         except Exception as e:
             print(f"[Hardware Scan] Failed to scan hardware: {e}")
@@ -904,67 +955,55 @@ class GeneralSettingsPage(Container, SyncMixin):
         return options
 
     def _migrate_saved_backend_option(self, options):
-        """Map legacy GPU-only labels to an explicit GPU/backend pair."""
+        """Map legacy backend-name labels to a physical hardware option."""
         saved_text = str(self.store.get("device_backend", "") or "")
         saved_key = str(self.store.get("device_backend_key", "") or "")
-        saved_arch = str(self.store.get("device_backend_arch", "cpu") or "cpu").lower()
+
+        # 1. Exact text match
         exact_text = next(
-            (option for option in options if option.get("text") == saved_text),
+            (opt for opt in options if opt.get("text") == saved_text),
             None,
         )
         if exact_text is not None:
             self.store.set("device_backend_key", exact_text["key"])
+            self.store.set("device_backend_arch", exact_text.get("backend", "cpu"))
+            self.store.set("device_backend_id", exact_text.get("device_id", -1))
+            self.store.set("device_fallback_chain", exact_text.get("fallback_chain", ["cpu"]))
             return
+
+        # 2. Key match
         exact_key = next(
-            (option for option in options if option.get("key") == saved_key),
+            (opt for opt in options if opt.get("key") == saved_key),
             None,
         )
-        if exact_key is not None and (
-            saved_key != "cpu" or "cpu" in saved_text.lower()
-        ):
+        if exact_key is not None:
             self.store.set("device_backend", exact_key["text"])
+            self.store.set("device_backend_arch", exact_key.get("backend", "cpu"))
+            self.store.set("device_backend_id", exact_key.get("device_id", -1))
+            self.store.set("device_fallback_chain", exact_key.get("fallback_chain", ["cpu"]))
             return
+
+        # 3. Fuzzy migration from legacy strings (e.g. "Intel(R) UHD Graphics 620 — Vulkan")
         legacy = saved_text.lower()
-        preferred_arch = saved_arch
-        if preferred_arch not in ("vulkan", "opengl", "cuda"):
-            preferred_arch = (
-                "cuda"
-                if saved_arch == "cuda" and ("nvidia" in legacy or "geforce" in legacy)
-                else (
-                    "vulkan"
-                    if ("nvidia" in legacy or "geforce" in legacy)
-                    else "opengl"
-                )
-            )
-        saved_selector = self.store.get("device_selector", {})
-        resolved_id = None
-        if isinstance(saved_selector, dict):
-            records = [
-                option.get("device_record")
-                for option in options
-                if isinstance(option.get("device_record"), dict)
-                and option.get("backend") == preferred_arch
-            ]
-            unique_records = {int(record["ordinal"]): record for record in records}
-            resolved_id = resolve_device_selector(
-                saved_selector,
-                list(unique_records.values()),
-                self.store.get("device_backend_id", None),
-            )
-        migrated = next(
-            (
-                option
-                for option in options
-                if option.get("backend") == preferred_arch
-                and (
-                    (resolved_id is not None and option.get("device_id") == resolved_id)
-                    or str(option.get("raw_name", "")).lower() in legacy
-                )
-            ),
-            options[0],
-        )
-        self.store.set("device_backend", migrated["text"])
-        self.store.set("device_backend_key", migrated["key"])
+        if "intel" in legacy or "uhd" in legacy or "iris" in legacy:
+            target_opt = next((opt for opt in options if opt.get("vendor") == "intel"), None)
+        elif "nvidia" in legacy or "geforce" in legacy or "mx150" in legacy:
+            target_opt = next((opt for opt in options if opt.get("vendor") == "nvidia"), None)
+        elif "cpu" in legacy:
+            target_opt = options[0]
+        else:
+            target_opt = options[0]
+
+        if target_opt is None:
+            target_opt = options[0]
+
+        self.store.set("device_backend", target_opt["text"])
+        self.store.set("device_backend_key", target_opt["key"])
+        self.store.set("device_backend_arch", target_opt.get("backend", "cpu"))
+        self.store.set("device_backend_id", target_opt.get("device_id", -1))
+        self.store.set("device_fallback_chain", target_opt.get("fallback_chain", ["cpu"]))
+        if "device_selector" in target_opt:
+            self.store.set("device_selector", target_opt["device_selector"])
 
     def _get_selected_backend_option(self):
         if not hasattr(self, "device_group") or not isinstance(
@@ -978,34 +1017,51 @@ class GeneralSettingsPage(Container, SyncMixin):
         text = self.device_group.input.currentText()
         return {
             "text": text,
-            "backend": (
-                "cpu"
-                if text == "CPU (Universal)"
-                else (
-                    "cuda"
-                    if "cuda" in text.lower()
-                    else ("opengl" if "intel" in text.lower() else "vulkan")
-                )
-            ),
-            "device_id": idx - 1,
+            "backend": "cpu" if "cpu" in text.lower() else ("cuda" if "nvidia" in text.lower() else "vulkan"),
+            "device_id": -1 if "cpu" in text.lower() else 0,
         }
 
-    def _apply_selected_backend_to_process(self):
-        option = self._get_selected_backend_option()
+    def _apply_selected_backend_to_process(self, option=None):
+        if option is None:
+            option = self._get_selected_backend_option()
         if not option:
             return
 
         import os
-
-        from taichi_vision.backend_config import normalize_backend
+        from taichi_vision.backend_config import normalize_backend, BackendConfig, backend_env
 
         backend = normalize_backend(option.get("backend", "cpu"), allow_auto=False)
         device_id = int(option.get("device_id", -1))
+        fallback_chain = option.get("fallback_chain", [backend])
+        auto_fallback = bool(self.store.get("auto_fallback", True))
+
+        active_backend = backend
+        active_device_id = device_id
+        if auto_fallback and fallback_chain:
+            from taichi_vision.taichi_aot.capabilities import classify_device
+
+            raw_name = option.get("raw_name", "") or option.get("text", "")
+            for cand in fallback_chain:
+                caps = classify_device(raw_name, cand)
+                if caps.safe:
+                    active_backend = cand
+                    if cand in ("opengl", "cpu"):
+                        active_device_id = 0 if cand == "opengl" else -1
+                    elif cand == "vulkan":
+                        active_device_id = option.get("vulkan_device_id", device_id)
+                    elif cand == "cuda":
+                        active_device_id = option.get("cuda_device_id", 0)
+                    break
+
+        vendor = str(option.get("vendor", "")).lower()
         self.store.set("device_backend", option.get("text", "CPU (Universal)"))
         self.store.set("device_backend_key", option.get("key", "cpu"))
-        self.store.set("device_backend_arch", backend)
-        self.store.set("device_backend_id", device_id)
-        if backend == "cpu":
+        self.store.set("device_backend_arch", active_backend)
+        self.store.set("device_backend_id", active_device_id)
+        self.store.set("device_fallback_chain", fallback_chain)
+        self.store.set("device_vendor", vendor)
+
+        if active_backend == "cpu":
             self.store.set(
                 "device_selector", {"vendor": "cpu", "name": "cpu universal"}
             )
@@ -1017,47 +1073,61 @@ class GeneralSettingsPage(Container, SyncMixin):
                 )
             self.store.set("device_selector", selector)
 
-        from taichi_vision.backend_config import BackendConfig, backend_env
-
         canonical_config = BackendConfig(
-            backend=backend,
-            device_id=device_id,
+            backend=active_backend,
+            device_id=active_device_id if active_device_id >= 0 else 0,
             vendor=option.get("vendor", ""),
             device_name=option.get("raw_name", "") or option.get("text", ""),
             explicit=True,
             source="general_settings",
-            strict=True,
+            strict=not auto_fallback,
         )
         os.environ.update(backend_env(canonical_config))
-        os.environ["AOT_STRICT_BACKEND"] = "1"
-        if backend == "cuda":
-            os.environ["TARGET_VENDOR"] = "nvidia"
+        os.environ["AOT_ARCH"] = active_backend
+        os.environ["AOT_DEVICE"] = str(active_device_id if active_device_id >= 0 else 0)
+        os.environ["PIXEL_REFINE_AOT_AUTO_FALLBACK"] = "1" if auto_fallback else "0"
+        os.environ["PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK"] = "1" if auto_fallback else "0"
+        if not auto_fallback:
+            os.environ["AOT_STRICT_BACKEND"] = "1"
+        else:
+            os.environ.pop("AOT_STRICT_BACKEND", None)
+
+        if vendor != "cpu" and vendor:
+            os.environ["TARGET_VENDOR"] = vendor
+            os.environ["ONNX_TARGET_VENDOR"] = vendor
+        else:
+            os.environ.pop("TARGET_VENDOR", None)
+            os.environ.pop("ONNX_TARGET_VENDOR", None)
+
+        if active_backend == "cuda":
             os.environ["CUDA_EXPECTED_NAME"] = str(option.get("raw_name", ""))
+            os.environ["CUDA_DEVICE"] = str(active_device_id)
+            os.environ["PIXEL_REFINE_CUDA_DEVICE"] = str(active_device_id)
         else:
             os.environ.pop("CUDA_EXPECTED_NAME", None)
-            if backend == "cpu":
-                os.environ.pop("TARGET_VENDOR", None)
-            else:
-                os.environ["TARGET_VENDOR"] = str(option.get("vendor", "")).lower()
-        if backend == "opengl":
-            os.environ["OPENGL_EXPECTED_VENDOR"] = str(option.get("vendor", "")).lower()
-            os.environ["OPENGL_EXPECTED_NAME"] = str(option.get("raw_name", ""))
-            # The bridge prefers native ICD automatically.  Clear stale test
-            # overrides so production selection cannot accidentally force a
-            # WGL/EGL compatibility path from a previous hardware probe.
-            os.environ.pop("OPENGL_CONTEXT", None)
-            os.environ.pop("OPENGL_ICD_ONLY", None)
-            os.environ.pop("OPENGL_EGL_ONLY", None)
-        else:
-            os.environ.pop("OPENGL_EXPECTED_VENDOR", None)
-            os.environ.pop("OPENGL_EXPECTED_NAME", None)
-        # This is a selection policy for the Vulkan loader/runtime; it does
-        # not uninstall or modify any Windows display driver.  The native ICD
-        # remains selectable while Dozen/D3D12 devices are excluded above.
+
+        # Set up OpenGL ICD detection in environment if Intel device is selected or in chain
+        if vendor == "intel" or "opengl" in fallback_chain:
+            try:
+                import glob
+                base_repo = r"C:\WINDOWS\system32\DriverStore\FileRepository"
+                for icd_cand in glob.glob(os.path.join(base_repo, "*iigd_dch*", "ig9icd64.dll")):
+                    if os.path.exists(icd_cand):
+                        os.environ["PIXEL_REFINE_OPENGL_ICD_LIBRARY"] = icd_cand
+                        break
+            except Exception:
+                pass
+            if vendor == "intel":
+                os.environ["OPENGL_EXPECTED_VENDOR"] = "intel"
+                os.environ["PIXEL_REFINE_OPENGL_EXPECTED_VENDOR"] = "intel"
+                os.environ.pop("OPENGL_EXPECTED_NAME", None)
+                os.environ.pop("PIXEL_REFINE_OPENGL_EXPECTED_NAME", None)
+
         os.environ["AOT_NATIVE_VULKAN_ONLY"] = "1"
         os.environ["AOT_SKIP_DOZEN"] = "1"
 
     def _get_backend_test_options(self):
+        """Expand physical devices into individual backend candidates for testing."""
         if not hasattr(self, "device_group") or not isinstance(
             self.device_group.input, QComboBox
         ):
@@ -1065,23 +1135,97 @@ class GeneralSettingsPage(Container, SyncMixin):
         options = []
         for i in range(self.device_group.input.count()):
             data = self.device_group.input.itemData(i)
-            if isinstance(data, dict):
-                options.append(data)
-            else:
-                text = self.device_group.input.itemText(i)
+            if not isinstance(data, dict):
+                continue
+            vendor = str(data.get("vendor", "")).lower()
+            raw_name = str(data.get("raw_name", "") or data.get("text", ""))
+            fingerprint = str((data.get("device_selector") or {}).get("fingerprint") or data.get("key", ""))
+            vk_id = data.get("vulkan_device_id", data.get("device_id", 0))
+            cuda_id = data.get("cuda_device_id", 0)
+
+            if vendor == "cpu" or data.get("device_type") == "cpu":
                 options.append(
                     {
-                        "text": text,
-                        "backend": (
-                            "cpu"
-                            if text == "CPU (Universal)"
-                            else (
-                                "cuda"
-                                if "cuda" in text.lower()
-                                else ("opengl" if "intel" in text.lower() else "vulkan")
-                            )
-                        ),
-                        "device_id": i - 1,
+                        "key": "cpu",
+                        "text": "CPU (Universal)",
+                        "backend": "cpu",
+                        "device_id": -1,
+                        "vendor": "cpu",
+                        "raw_name": raw_name,
+                    }
+                )
+            elif vendor == "nvidia":
+                options.append(
+                    {
+                        "key": f"{fingerprint}|cuda",
+                        "text": f"{raw_name} — CUDA",
+                        "backend": "cuda",
+                        "device_id": cuda_id,
+                        "vendor": "nvidia",
+                        "raw_name": raw_name,
+                    }
+                )
+                options.append(
+                    {
+                        "key": f"{fingerprint}|vulkan",
+                        "text": f"{raw_name} — Vulkan",
+                        "backend": "vulkan",
+                        "device_id": vk_id,
+                        "vendor": "nvidia",
+                        "raw_name": raw_name,
+                    }
+                )
+                options.append(
+                    {
+                        "key": f"{fingerprint}|opengl",
+                        "text": f"{raw_name} — OpenGL",
+                        "backend": "opengl",
+                        "device_id": 0,
+                        "vendor": "nvidia",
+                        "raw_name": raw_name,
+                    }
+                )
+            elif vendor == "intel":
+                options.append(
+                    {
+                        "key": f"{fingerprint}|vulkan",
+                        "text": f"{raw_name} — Vulkan",
+                        "backend": "vulkan",
+                        "device_id": vk_id,
+                        "vendor": "intel",
+                        "raw_name": raw_name,
+                    }
+                )
+                options.append(
+                    {
+                        "key": f"{fingerprint}|opengl",
+                        "text": f"{raw_name} — OpenGL",
+                        "backend": "opengl",
+                        "device_id": 0,
+                        "vendor": "intel",
+                        "raw_name": raw_name,
+                    }
+                )
+            else:
+                # Generic GPU
+                options.append(
+                    {
+                        "key": f"{fingerprint}|vulkan",
+                        "text": f"{raw_name} — Vulkan",
+                        "backend": "vulkan",
+                        "device_id": vk_id,
+                        "vendor": vendor,
+                        "raw_name": raw_name,
+                    }
+                )
+                options.append(
+                    {
+                        "key": f"{fingerprint}|opengl",
+                        "text": f"{raw_name} — OpenGL",
+                        "backend": "opengl",
+                        "device_id": 0,
+                        "vendor": vendor,
+                        "raw_name": raw_name,
                     }
                 )
         return options

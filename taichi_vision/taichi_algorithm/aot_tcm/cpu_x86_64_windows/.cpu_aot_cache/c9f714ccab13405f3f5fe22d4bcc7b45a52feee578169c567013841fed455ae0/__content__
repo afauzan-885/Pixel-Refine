@@ -1,8 +1,0 @@
-cgraph:gaussian_blur_x_3ch_f32
-cgraph:gaussian_blur_y_3ch_f32
-cgraph:gaussian_blur_x_1ch_f32
-cgraph:gaussian_blur_y_1ch_f32
-cgraph:gaussian_blur_x_vec3_f32
-cgraph:gaussian_blur_y_vec3_f32
-cgraph:gaussian_blur_x_3ch_i32
-cgraph:gaussian_blur_y_3ch_i32

@@ -1,6 +1,6 @@
 # AOT backend build and verification
 
-> **Canonical developer/AI handoff document** (snapshot: 2026-08-08).  This
+> **Canonical developer/AI handoff document** (snapshot: 2026-09-06).  This
 > file is the source of truth for the experimental `taichi_vision` runtime.
 > It documents the stable contracts and the explicit gates around unfinished
 > features so a new contributor does not need to reverse-engineer the entire
@@ -198,6 +198,11 @@ and recomputed.
   path for an isolated qualification run.
 * Dozen/D3D12 translation adapters are excluded by default.  Translation is
   a diagnostic opt-in only.
+* `PIXEL_REFINE_GFX_COMPAT_MODE=auto` enables the conservative host-visible,
+  serialized-dispatch policy for Intel Vulkan/OpenGL. Set it to `0` for strict
+  admission or `1` for an explicit compatibility run.
+* `PIXEL_REFINE_AOT_DISABLE_CACHE=1` disables artifact load-status caching for
+  cache/ABI diagnosis. It is not a performance setting.
 * OpenGL initialization verifies `GL_RENDERER`; it never silently accepts an
   Intel context when NVIDIA was requested, or the reverse.
 * Android canonicalizes the historical `opengl` spelling to `gles` and never
@@ -220,7 +225,7 @@ qualification sections.
 | Target artifacts | Manifest-driven, ABI-qualified TCM and bridge resolution | Missing host/cross toolchains remain explicit `pending_toolchain` results |
 | Device mapping | Vendor/fingerprint mapping survives ordinal changes | A driver must expose a native renderer matching the request |
 | Full-frame path | Always available as the accuracy and recovery baseline | Native artifact must exist for the selected target |
-| Allocation cache | Full-frame and staging buffers reuse safely with lifecycle fencing | Idle entries can be evicted under pressure |
+| Allocation cache | Full-frame and staging buffers reuse safely with lifecycle fencing | Daemon-thread idle reclamation is disabled by default; owner-thread safe points perform explicit trimming |
 | Tile-result cache | Checksum/shape/tuple validation, retry, invalidation, quarantine | Generic result keys may not hit across distinct source objects |
 | Adaptive memory | Shared-RAM/VRAM budget, pressure state, resident limit, recommended block size | It intentionally reserves memory and may choose full-frame |
 | Automatic pipeline | Direct, recorded, or segmented plan without manual `rec_pipeline` pairs | It does not yet dispatch independent blocks concurrently |
@@ -541,9 +546,31 @@ The Intel UHD 620 native Vulkan gate is:
 python taichi_vision/vulkan_probe.py --comprehensive --all-intel --persist --repeat 5 --timeout 1200
 ```
 
-## Current qualification snapshot
+## Current qualification addendum (2026-09-05)
 
-The following is the current evidence-based status (2026-08-08). “Artifact”
+The latest native desktop records are tied to exact device and driver
+identities. Intel UHD Graphics 620 native Vulkan API 1.3.215 with driver
+101.2115 passed 75/75 target-qualified TCM loads, 940/940 SPIR-V shader
+validations, 28/28 algorithm checks, lifecycle/graph parity MAE
+`3.7529832752625225e-07`, and the 8122x2966 float32 stress gate. The same
+device through the explicit native `ig11icd64.dll` OpenGL ICD passed 29/29
+comprehensive checks and the recorded 8122x2966 direct full-frame stress gate.
+
+The fast hardware matrix also records CPU 5/5, CUDA on NVIDIA MX150 5/5,
+native NVIDIA OpenGL 5/5, and native NVIDIA Vulkan 5/5 where the corresponding
+process-level runs were available. These records qualify only the exact
+devices, drivers, shapes, dtypes, and commands tested. They do not establish
+universal support for historical drivers or arbitrary TCM graphs.
+
+Native Intel graphics compatibility mode uses host-visible buffers and
+serialized direct dispatch while retaining the selected GPU backend. Intel
+OpenGL startup remains lazy because the native context is thread-affine.
+Dozen/D3D12 translation adapters remain excluded from production selection;
+`AOT_ALLOW_TRANSLATION=1` is diagnostic-only.
+
+## Historical qualification snapshot
+
+The following is the historical evidence-based status (2026-08-08). “Artifact”
 counts are target-qualified archives; a percentage is not treated as a runtime
 guarantee when a real device is unavailable.
 

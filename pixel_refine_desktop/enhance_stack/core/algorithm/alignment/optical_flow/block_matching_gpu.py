@@ -24,6 +24,10 @@ BLOCK_MATCHING_GPU_PRESETS = {
         "use_multi_core": False,
         "tile_overlap": 0.20,
         "max_flow_px": 48.0,
+        # CUDA/CPU may estimate the coarse field at half resolution and
+        # upsample it. This keeps the fast preset optical while avoiding a
+        # full multi-level dense search at the work-resolution grid.
+        "decoupled_scale": 2,
     },
     "balance": {
         "grid_step": 32,
@@ -85,6 +89,14 @@ class BlockMatchingGPU(LucasKanadeGPU):
             params["maxLevel"] = 0
             if max(reference_gray.shape[:2]) > 768:
                 params["grid_step"] = max(64, int(params["grid_step"]))
+        return params
+
+    def _build_lk_params(self, config):
+        """Build block-matching parameters, including optional decoupling."""
+        params = super()._build_lk_params(config)
+        params["decoupled_scale"] = max(
+            0, int(config.get("decoupled_scale", 0) or 0)
+        )
         return params
 
     def align_frame(self, *args, **kwargs):
@@ -187,17 +199,30 @@ class BlockMatchingGPU(LucasKanadeGPU):
             print(
                 f"[BlockMatchingGPU] Dense AOT flow failed: {exc}"
             )
+            if bool(config.get("strict", False)):
+                raise RuntimeError("strict block-matching AOT flow failed") from exc
+        if bool(config.get("strict", False)):
+            raise RuntimeError("Block Matching AOT returned no flow")
         return np.zeros((reference_gray.shape[0], reference_gray.shape[1], 2), dtype=np.float32)
 
-    def _calculate_flow_gpu_buffer(self, reference_gray, target_gray, config):
+    def _calculate_flow_gpu_buffer(
+        self,
+        reference_gray,
+        target_gray,
+        config,
+        reference_pyramid=None,
+    ):
         from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
 
-        flow = calcOpticalFlowBlockMatching(
-            reference_gray,
-            target_gray,
+        flow_kwargs = {
+            "prev": reference_gray,
+            "next": target_gray,
             **self._build_lk_params(config),
-            return_gpu=True,
-        )
+            "return_gpu": True,
+        }
+        if reference_pyramid is not None:
+            flow_kwargs["reference_pyramid"] = reference_pyramid
+        flow = calcOpticalFlowBlockMatching(**flow_kwargs)
         if isinstance(flow, tuple):
             flow = flow[0]
         if flow is None or not hasattr(flow, "shape"):

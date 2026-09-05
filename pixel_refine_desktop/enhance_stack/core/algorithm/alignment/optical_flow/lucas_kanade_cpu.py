@@ -2,7 +2,6 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-import cv2
 import numpy as np
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
@@ -159,45 +158,16 @@ class LucasKanadeCPU:
         win_size,
         point_executor=None,
     ):
-        criteria = (
-            cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-            max(1, int(config.get("iterations", 18))),
-            float(config.get("epsilon", 0.015)),
-        )
-        max_level = max(0, int(config.get("max_level", 2)))
-
-        def track_chunk(chunk):
-            next_chunk, status_chunk, _ = cv2.calcOpticalFlowPyrLK(
-                reference_gray,
-                target_gray,
-                chunk,
-                None,
-                winSize=(win_size, win_size),
-                maxLevel=max_level,
-                criteria=criteria,
-            )
-            return next_chunk, status_chunk
-
-        point_workers = max(1, int(config.get("point_workers", 2)))
-        if point_executor is None or point_workers <= 1 or len(points) < 256:
-            return track_chunk(points)
-
-        chunks = [
-            chunk
-            for chunk in np.array_split(points, min(point_workers, len(points)))
-            if len(chunk) > 0
-        ]
-        results = list(point_executor.map(track_chunk, chunks))
-        next_chunks = []
-        status_chunks = []
-        for next_chunk, status_chunk in results:
-            if next_chunk is None or status_chunk is None:
-                continue
-            next_chunks.append(next_chunk)
-            status_chunks.append(status_chunk)
-        if not next_chunks:
-            return None, None
-        return np.vstack(next_chunks), np.vstack(status_chunks)
+        # This compatibility helper now samples the canonical dense Taichi
+        # result. It deliberately cannot fall back to a second tracker.
+        dense_flow = self.calculate_flow(reference_gray, target_gray, config)
+        points_xy = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        height, width = dense_flow.shape[:2]
+        x = np.clip(np.rint(points_xy[:, 0]).astype(np.int32), 0, width - 1)
+        y = np.clip(np.rint(points_xy[:, 1]).astype(np.int32), 0, height - 1)
+        next_points = (points_xy + dense_flow[y, x]).reshape(-1, 1, 2)
+        status = np.isfinite(next_points).all(axis=2).astype(np.uint8).reshape(-1, 1)
+        return next_points, status
 
     def _densify_sparse_flow(self, sparse_flow, known):
         if not np.any(known):
@@ -205,17 +175,28 @@ class LucasKanadeCPU:
 
         dense = sparse_flow.astype(np.float32, copy=True)
         valid = known.astype(np.float32)
+
+        def box_blur(array):
+            padded = np.pad(array, ((1, 1), (1, 1)), mode="edge")
+            return sum(
+                padded[dy : dy + array.shape[0], dx : dx + array.shape[1]]
+                for dy in range(3)
+                for dx in range(3)
+            ) / 9.0
+
         for _ in range(64):
             missing = valid <= 0
             if not np.any(missing):
                 break
             weighted = dense * valid[..., None]
-            blur_flow = cv2.blur(weighted, (5, 5))
-            blur_weight = cv2.blur(valid, (5, 5))
+            blur_flow = np.stack(
+                [box_blur(weighted[..., channel]) for channel in range(2)], axis=-1
+            )
+            blur_weight = box_blur(valid)
             can_fill = missing & (blur_weight > 1e-6)
             dense[can_fill] = blur_flow[can_fill] / blur_weight[can_fill, None]
             valid[can_fill] = 1.0
-        return cv2.GaussianBlur(dense, (5, 5), 0)
+        return dense
 
     def align_frame(
         self,

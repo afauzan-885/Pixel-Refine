@@ -18,7 +18,17 @@ def frame_info(frame):
 
 
 def active_backend():
-    """Resolve the backend selected by Performance Settings at call time."""
+    """Resolve the backend actually owning the current Taichi execution."""
+    # Runtime truth wins over a stale UI preference.  The preference is only
+    # useful before an engine has been initialized.
+    try:
+        from taichi_vision import taichi_aot
+
+        runtime = str(getattr(taichi_aot.engine, "arch", "")).strip().lower()
+        if runtime in {"cpu", "cuda", "vulkan", "opengl", "gles"}:
+            return runtime
+    except Exception:
+        pass
     try:
         from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import (
             get_backend_arch,
@@ -29,12 +39,7 @@ def active_backend():
             return configured
     except Exception:
         pass
-    try:
-        from taichi_vision import taichi_aot
-
-        return str(getattr(taichi_aot.engine, "arch", "cpu")).strip().lower()
-    except Exception:
-        return "cpu"
+    return "cpu"
 
 
 def restore_output_dtype(image, dtype=np.uint16):

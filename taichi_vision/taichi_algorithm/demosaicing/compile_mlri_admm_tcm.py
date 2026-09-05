@@ -591,7 +591,14 @@ def _mlri_admm_reconstruct_portable_kernel(
     wb_r: ti.f32, wb_g1: ti.f32, wb_b: ti.f32, wb_g2: ti.f32,
     h: ti.i32, w: ti.i32,
 ):
-    """Full RGB reconstruction with the 3x3 matrix passed as scalars."""
+    """Portable equivalent of the canonical linear RGB reconstruction.
+
+    The matrix scalars remain in the Vulkan graph ABI because older packed
+    modules and callers already provide them.  The canonical non-portable
+    graph does not apply the color matrix or gamma in this stage; doing so
+    here changed the public ``mlri_admm_demosaic`` result only on Vulkan.
+    Tone mapping belongs to the separately named ``*_tonemapped`` graph.
+    """
     inv_wb_r = 1.0 / ti.max(0.1, wb_r)
     inv_wb_g = 1.0 / ti.max(0.1, (wb_g1 + wb_g2) * 0.5)
     inv_wb_b = 1.0 / ti.max(0.1, wb_b)
@@ -614,15 +621,9 @@ def _mlri_admm_reconstruct_portable_kernel(
         R = R * (1.0 - final_factor) + L * final_factor
         G = G * (1.0 - final_factor) + L * final_factor
         B = B * (1.0 - final_factor) + L * final_factor
-        sR = m00 * R + m01 * G + m02 * B
-        sG = m10 * R + m11 * G + m12 * B
-        sB = m20 * R + m21 * G + m22 * B
-        sR = sR / ti.math.sqrt(1.0 + sR * sR)
-        sG = sG / ti.math.sqrt(1.0 + sG * sG)
-        sB = sB / ti.math.sqrt(1.0 + sB * sB)
-        dst[r, c, 0] = _fast_gamma(ti.math.clamp(sR, 0.0, 1.0))
-        dst[r, c, 1] = _fast_gamma(ti.math.clamp(sG, 0.0, 1.0))
-        dst[r, c, 2] = _fast_gamma(ti.math.clamp(sB, 0.0, 1.0))
+        dst[r, c, 0] = R / ti.math.sqrt(1.0 + R * R)
+        dst[r, c, 1] = G / ti.math.sqrt(1.0 + G * G)
+        dst[r, c, 2] = B / ti.math.sqrt(1.0 + B * B)
 
 @ti.func
 def _get_green_gain(nr: ti.i32, nc: ti.i32, c00: ti.i32, c01: ti.i32, c10: ti.i32, c11: ti.i32, wb_g1: ti.f32, wb_g2: ti.f32) -> ti.f32:

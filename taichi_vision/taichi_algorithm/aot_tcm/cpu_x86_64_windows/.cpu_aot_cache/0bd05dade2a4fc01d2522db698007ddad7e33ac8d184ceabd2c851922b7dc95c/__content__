@@ -1,4 +1,0 @@
-cgraph:median_3x3_f32
-cgraph:median_flow_3x3_f32
-cgraph:median_3ch_3x3_f32
-cgraph:conf_weighted_median_flow_f32

@@ -17,11 +17,12 @@ DEFAULTS = {
     "device_selector": {"vendor": "cpu", "name": "cpu universal"},
     "backend_test_results": {},
     "allowed_backend_ids": [],
-    "auto_fallback": False,
+    "auto_fallback": True,
     "compute_block_enabled": True,
     "compute_block_size": 1024,
     "compute_block_threshold_mp": 12.0,
     "compute_block_mode": "auto",
+    "onnx_runtime": "auto",
 }
 
 _general_store = None

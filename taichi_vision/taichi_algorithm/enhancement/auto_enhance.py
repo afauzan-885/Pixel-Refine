@@ -27,6 +27,20 @@ if os.environ.get("AOT_MODE", "1") == "0":
     except ImportError:
         pass
 
+if TAICHI_AVAILABLE:
+    try:
+        from ..feature_matching.akaze import compute_scharr_gradients, get_pixel_clamp
+    except (ImportError, ValueError):
+        try:
+            from taichi_vision.taichi_algorithm.feature_matching.akaze import (
+                compute_scharr_gradients,
+                get_pixel_clamp,
+            )
+        except ImportError:
+            compute_scharr_gradients = None
+            get_pixel_clamp = None
+
+
 # =========================================================================
 # 1. PARAMETER DEFAULTS & ANALYSIS
 # =========================================================================
@@ -263,13 +277,40 @@ def apply_auto_enhance_np(
     ratio = (lum_final / (lum + 1e-6))[:, :, np.newaxis]
     rgb_out = img * ratio
 
-    # 8. Adaptive Highlight Desaturation (Anti-Chromatic Aberration Fringe)
-    desat_factor = np.clip((lum_final - 0.55) / 0.40, 0.0, 1.0)
-    desat_smooth = desat_factor * desat_factor * (3.0 - 2.0 * desat_factor)
-    eff_sat = (
-        (1.0 + (saturation - 1.0) * (1.0 - desat_smooth))
-        * (1.0 - desat_smooth)
-    )[:, :, np.newaxis]
+    # 8. Edge-Aware Highlight Defringing with Hann Window (1-2 pixels)
+    scharr_x = np.array([[-3, 0, 3], [-10, 0, 10], [-3, 0, 3]], dtype=np.float32) / 32.0
+    scharr_y = np.array([[-3, -10, -3], [0, 0, 0], [3, 10, 3]], dtype=np.float32) / 32.0
+
+    try:
+        import cv2
+
+        gx = cv2.filter2D(lum, -1, scharr_x, borderType=cv2.BORDER_REPLICATE)
+        gy = cv2.filter2D(lum, -1, scharr_y, borderType=cv2.BORDER_REPLICATE)
+        grad_mag = np.sqrt(gx * gx + gy * gy)
+
+        kernel_3x3 = np.ones((3, 3), dtype=np.float32)
+        lum_max = cv2.dilate(lum, kernel_3x3, borderType=cv2.BORDER_REPLICATE)
+    except Exception:
+        from scipy.signal import convolve2d
+        from scipy.ndimage import maximum_filter
+
+        gx = convolve2d(lum, scharr_x, mode="same", boundary="symm")
+        gy = convolve2d(lum, scharr_y, mode="same", boundary="symm")
+        grad_mag = np.sqrt(gx * gx + gy * gy)
+        lum_max = maximum_filter(lum, size=3, mode="nearest")
+
+    # Edge transition with Hann window (raised cosine) across 1-2 pixels
+    g_low, g_high = 0.04, 0.20
+    t_g = np.clip((grad_mag - g_low) / (g_high - g_low), 0.0, 1.0)
+    w_edge = 0.5 * (1.0 - np.cos(np.pi * t_g))
+
+    # Highlight proximity with Hann window
+    hl_low, hl_high = 0.55, 0.80
+    t_hl = np.clip((lum_max - hl_low) / (hl_high - hl_low), 0.0, 1.0)
+    w_hl = 0.5 * (1.0 - np.cos(np.pi * t_hl))
+
+    w_fringe = (w_edge * w_hl)[:, :, np.newaxis]
+    eff_sat = saturation * (1.0 - w_fringe)
 
     lum_3d = lum_final[:, :, np.newaxis]
     rgb_out = lum_3d + (rgb_out - lum_3d) * eff_sat
@@ -344,10 +385,25 @@ if TAICHI_AVAILABLE:
             g_out = g * ratio
             b_out = b * ratio
 
-            # Adaptive Highlight Desaturation (Anti-Chromatic Aberration Fringe)
-            desat_factor = tm.clamp((lum_final - 0.55) / 0.40, 0.0, 1.0)
-            desat_smooth = desat_factor * desat_factor * (3.0 - 2.0 * desat_factor)
-            eff_sat = (1.0 + (saturation - 1.0) * (1.0 - desat_smooth)) * (1.0 - desat_smooth)
+            # 8. Edge-Aware Highlight Defringing with Hann Window (1-2 pixels)
+            grad = compute_scharr_gradients(src, i, j, h, w)
+            grad_mag = tm.sqrt(grad.x * grad.x + grad.y * grad.y)
+
+            lum_max = lum
+            for di in ti.static(range(-1, 2)):
+                for dj in ti.static(range(-1, 2)):
+                    lum_max = tm.max(
+                        lum_max, get_pixel_clamp(src, i + di, j + dj, h, w)
+                    )
+
+            t_g = tm.clamp((grad_mag - 0.04) / (0.20 - 0.04), 0.0, 1.0)
+            w_edge = 0.5 * (1.0 - tm.cos(3.141592653589793 * t_g))
+
+            t_hl = tm.clamp((lum_max - 0.55) / (0.80 - 0.55), 0.0, 1.0)
+            w_hl = 0.5 * (1.0 - tm.cos(3.141592653589793 * t_hl))
+
+            w_fringe = w_edge * w_hl
+            eff_sat = saturation * (1.0 - w_fringe)
 
             r_out = lum_final + (r_out - lum_final) * eff_sat
             g_out = lum_final + (g_out - lum_final) * eff_sat

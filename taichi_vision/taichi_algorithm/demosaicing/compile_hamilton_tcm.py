@@ -113,7 +113,7 @@ def _ha_green_direct_kernel(
         else:
             g_left = _sample_raw(bayer, r, c - 1, black, inv_range, h, w) * wb_g1
             g_right = _sample_raw(bayer, r, c + 1, black, inv_range, h, w) * wb_g1
-            g_up = _sample_raw_wb_g = _sample_raw(bayer, r - 1, c, black, inv_range, h, w) * wb_g2
+            g_up = _sample_raw(bayer, r - 1, c, black, inv_range, h, w) * wb_g2
             g_down = _sample_raw(bayer, r + 1, c, black, inv_range, h, w) * wb_g2
 
             c_center_wb = c_center * ti.select(color_idx == 0, wb_r, wb_b)
@@ -499,7 +499,7 @@ def _ha_grayscale_from_green_kernel(
 # -----------------------------------------------------------------------------
 # Modular AOT Module Compiler
 # -----------------------------------------------------------------------------
-def compile_hamilton_tcm(arch=ti.vulkan, save_path=None):
+def compile_hamilton_tcm(arch=ti.vulkan, save_path=None, target_variant=None):
     print(f"\n>>> Compiling Direct Fast 2-Pass Hamilton Demosaicing AOT for: {arch}")
     ti.init(arch=arch, offline_cache=False)
 
@@ -520,8 +520,17 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path=None):
         },
     )
 
-    # Archive the module using canonical archive_module
-    target_variant = "opengl_x86_64_windows_nvidia"
+    # Archive the module using the target selected by the caller.  Never
+    # hard-code the OpenGL target here: Vulkan/OpenGL archives have distinct
+    # bridge and shader contracts, and CUDA/CPU archives use LLVM payloads.
+    if target_variant is None:
+        arch_name = "cuda" if arch == ti.cuda else "cpu" if arch == ti.cpu else "opengl" if arch == ti.opengl else "vulkan"
+        target_variant = {
+            "cpu": "cpu_x86_64_windows",
+            "cuda": "cuda_x86_64_windows_nvidia",
+            "opengl": "opengl_x86_64_windows",
+            "vulkan": "vulkan_x86_64_windows",
+        }[arch_name]
     if save_path is None:
         save_path = os.path.abspath(
             os.path.join(file_dir, f"../aot_tcm/{target_variant}/hamilton_{target_variant}.tcm")
@@ -533,4 +542,13 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path=None):
 
 
 if __name__ == "__main__":
-    compile_hamilton_tcm(arch=ti.vulkan)
+    requested = os.environ.get("PIXEL_REFINE_AOT_ARCH", "vulkan").strip().lower()
+    arch = {
+        "cpu": ti.cpu,
+        "cuda": ti.cuda,
+        "opengl": ti.opengl,
+        "vulkan": ti.vulkan,
+    }.get(requested)
+    if arch is None:
+        raise ValueError("PIXEL_REFINE_AOT_ARCH must be cpu, cuda, opengl, or vulkan")
+    compile_hamilton_tcm(arch=arch)

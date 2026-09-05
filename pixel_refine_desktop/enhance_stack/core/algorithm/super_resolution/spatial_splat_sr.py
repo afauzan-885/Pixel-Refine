@@ -121,7 +121,7 @@ def robust_subpixel_splat(
     *,
     scale: int = 2,
     block_size: Optional[int] = None,
-    kernel_radius: float = 1.5,
+    kernel_radius: float = 2.0,
     sigma: float = 0.85,
     fallback: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -207,7 +207,11 @@ def robust_subpixel_splat(
                         # exact integer-aligned samples.
                         dy = yi.astype(np.float32) - target_y
                         dx = xi.astype(np.float32) - target_x
-                        kernel = np.exp(-(dx * dx + dy * dy) / (2.0 * kernel_sigma * kernel_sigma))
+                        distance2 = dx * dx + dy * dy
+                        inside &= distance2 <= np.float32(radius * radius)
+                        if not np.any(inside):
+                            continue
+                        kernel = np.exp(-distance2 / (2.0 * kernel_sigma * kernel_sigma))
                         weight = (kernel * sample_weight) * inside
                         ly = (yi[inside] - y0).ravel()
                         lx = (xi[inside] - x0).ravel()
@@ -230,6 +234,261 @@ def robust_subpixel_splat(
     if squeeze:
         result = result[..., 0]
     return result, coverage
+
+
+def simulate_lr_from_hr(
+    hr_image: np.ndarray,
+    flow: Optional[np.ndarray],
+    *,
+    scale: int = 2,
+    psf_radius: int = 1,
+    psf_sigma: float = 0.85,
+) -> np.ndarray:
+    """Simulate a burst of LR observations from an HR luminance image.
+
+    This is the forward model used by the optical-SR oracle and its synthetic
+    validation tests.  ``flow[..., 0]`` is ``dx`` and ``flow[..., 1]`` is
+    ``dy`` in LR pixels, matching :func:`robust_subpixel_splat`.  Each LR
+    sample observes a Gaussian-blurred HR image at the corresponding shifted
+    location.  Keeping the forward model explicit prevents an apparent gain
+    from being confused with a mere resize or sharpening operation.
+    """
+    hr = np.ascontiguousarray(hr_image, dtype=np.float32)
+    if hr.ndim != 2 or not hr.size:
+        raise ValueError("hr_image must be a non-empty 2-D float image")
+    scale = int(scale)
+    if scale < 1:
+        raise ValueError("scale must be >= 1")
+    radius = max(int(psf_radius), 0)
+    sigma = max(float(psf_sigma), 1.0e-4)
+    if flow is None:
+        raise ValueError("flow is required to define the LR burst")
+    flow_arr = np.asarray(flow, dtype=np.float32)
+    if flow_arr.ndim == 2 and flow_arr.shape[-1] == 2:
+        n = int(flow_arr.shape[0])
+    elif flow_arr.ndim == 4 and flow_arr.shape[-1] == 2:
+        n = int(flow_arr.shape[0])
+    else:
+        raise ValueError("flow must have shape (N,2) or (N,H,W,2)")
+
+    lr_h = max(1, hr.shape[0] // scale)
+    lr_w = max(1, hr.shape[1] // scale)
+    flow_arr = _normalize_flow(flow_arr, n, lr_h, lr_w)
+    yy, xx = np.mgrid[0:lr_h, 0:lr_w].astype(np.float32)
+    output = np.zeros((n, lr_h, lr_w), dtype=np.float32)
+    offsets = range(-radius, radius + 1)
+    for k in range(n):
+        cy = (yy + flow_arr[k, ..., 1]) * np.float32(scale)
+        cx = (xx + flow_arr[k, ..., 0]) * np.float32(scale)
+        value = np.zeros((lr_h, lr_w), dtype=np.float32)
+        denominator = np.float32(0.0)
+        for oy in offsets:
+            for ox in offsets:
+                kernel = np.exp(
+                    np.float32(-(ox * ox + oy * oy))
+                    / np.float32(2.0 * sigma * sigma)
+                ).astype(np.float32)
+                value += kernel * _bilinear_sample(hr, cy + oy, cx + ox)
+                denominator += kernel
+        output[k] = value / np.maximum(denominator, np.float32(1.0e-8))
+    return output
+
+
+def iterative_optical_refine(
+    frames: np.ndarray,
+    flow: Optional[np.ndarray],
+    confidence: Optional[np.ndarray] = None,
+    *,
+    scale: int = 2,
+    initial: Optional[np.ndarray] = None,
+    iterations: int = 20,
+    step: float = 0.5,
+    psf_radius: int = 1,
+    psf_sigma: float = 0.85,
+    regularization: float = 0.0,
+) -> np.ndarray:
+    """Refine a weighted splat with multi-frame optical data consistency.
+
+    The input is a grayscale LR burst.  Splatting supplies an HR initial
+    estimate when ``initial`` is omitted.  Each iteration simulates the LR
+    observations using the same blur/shift model, back-projects the weighted
+    residual to HR, and optionally applies a small quadratic smoothness prior.
+    The confidence map affects both the initial merge and residual update; it
+    does not create detail by itself.
+    """
+    arr, squeeze = _as_float_frames(frames)
+    if arr.shape[3] != 1:
+        raise ValueError("iterative_optical_refine currently expects grayscale frames")
+    n, h, w, _ = arr.shape
+    scale = int(scale)
+    if scale < 1:
+        raise ValueError("scale must be >= 1")
+    iterations = max(int(iterations), 0)
+    step = float(np.clip(step, 0.0, 1.0))
+    regularization = max(float(regularization), 0.0)
+    flow_arr = _normalize_flow(flow, n, h, w)
+    confidence_arr = _normalize_confidence(confidence, n, h, w)
+
+    if initial is None:
+        current, _ = robust_subpixel_splat(
+            arr,
+            flow=flow_arr,
+            confidence=confidence_arr,
+            scale=scale,
+            kernel_radius=2.0,
+            sigma=psf_sigma,
+            fallback=arr[0:1],
+        )
+        current = np.asarray(current, dtype=np.float32)
+        if current.ndim == 3 and current.shape[-1] == 1:
+            current = current[..., 0]
+    else:
+        current = np.ascontiguousarray(initial, dtype=np.float32).copy()
+        expected = (h * scale, w * scale)
+        if current.shape != expected:
+            raise ValueError(f"initial must have shape {expected}, got {current.shape}")
+
+    for _ in range(iterations):
+        simulated = simulate_lr_from_hr(
+            current,
+            flow_arr,
+            scale=scale,
+            psf_radius=psf_radius,
+            psf_sigma=psf_sigma,
+        )
+        residual = arr[..., 0] - simulated
+        correction, coverage = robust_subpixel_splat(
+            residual[..., None],
+            flow=flow_arr,
+            confidence=confidence_arr,
+            scale=scale,
+            kernel_radius=float(psf_radius),
+            sigma=psf_sigma,
+        )
+        valid = coverage > np.float32(1.0e-6)
+        current[valid] += np.float32(step) * correction[..., 0][valid]
+
+        if regularization > 0.0:
+            padded = np.pad(current, 1, mode="edge")
+            laplacian = (
+                4.0 * current
+                - padded[:-2, 1:-1]
+                - padded[2:, 1:-1]
+                - padded[1:-1, :-2]
+                - padded[1:-1, 2:]
+            )
+            current -= np.float32(step * regularization) * laplacian
+        current = np.clip(current, 0.0, 1.0).astype(np.float32, copy=False)
+
+    if squeeze:
+        return current
+    return current
+
+
+def iterative_optical_refine_stream(
+    frames: np.ndarray,
+    flow_provider,
+    confidence_provider,
+    *,
+    scale: int = 2,
+    block_size: int = 1024,
+    initial: Optional[np.ndarray] = None,
+    iterations: int = 20,
+    step: float = 0.1,
+    psf_radius: int = 1,
+    psf_sigma: float = 0.85,
+    regularization: float = 0.1,
+) -> np.ndarray:
+    """Run optical back-projection while keeping burst metadata streaming.
+
+    ``flow_provider`` and ``confidence_provider`` must be repeatable because
+    every refinement iteration revisits each frame.  This is deliberately a
+    NumPy/oracle stage: native splatting supplies the initial HR estimate,
+    while the residual solve remains opt-in until its device-side equivalent
+    is qualified.
+    """
+    arr, _ = _as_float_frames(frames)
+    if arr.shape[3] != 1:
+        raise ValueError("iterative_optical_refine_stream expects grayscale frames")
+    n, h, w, _ = arr.shape
+    scale = int(scale)
+    if scale < 1:
+        raise ValueError("scale must be >= 1")
+    iterations = max(int(iterations), 0)
+    step = float(np.clip(step, 0.0, 1.0))
+    regularization = max(float(regularization), 0.0)
+    hr_shape = (h * scale, w * scale)
+
+    if initial is None:
+        current, _ = robust_subpixel_splat_stream(
+            arr,
+            flow_provider,
+            confidence_provider,
+            scale=scale,
+            block_size=block_size,
+        )
+        current = np.asarray(current, dtype=np.float32)
+        if current.ndim == 3 and current.shape[-1] == 1:
+            current = current[..., 0]
+    else:
+        current = np.ascontiguousarray(initial, dtype=np.float32).copy()
+        if current.shape != hr_shape:
+            raise ValueError(f"initial must have shape {hr_shape}, got {current.shape}")
+
+    for _ in range(iterations):
+        correction_num = np.zeros(hr_shape, dtype=np.float32)
+        correction_den = np.zeros(hr_shape, dtype=np.float32)
+        for index in range(n):
+            flow = np.ascontiguousarray(flow_provider(index), dtype=np.float32)
+            confidence = np.ascontiguousarray(
+                confidence_provider(index), dtype=np.float32
+            )
+            if flow.shape != (h, w, 2):
+                raise ValueError(
+                    f"flow_provider({index}) returned {flow.shape}; "
+                    f"expected {(h, w, 2)}"
+                )
+            if confidence.shape != (h, w):
+                raise ValueError(
+                    f"confidence_provider({index}) returned {confidence.shape}; "
+                    f"expected {(h, w)}"
+                )
+            simulated = simulate_lr_from_hr(
+                current,
+                flow[None, ...],
+                scale=scale,
+                psf_radius=psf_radius,
+                psf_sigma=psf_sigma,
+            )[0]
+            residual = arr[index, ..., 0] - simulated
+            delta, coverage = robust_subpixel_splat(
+                residual[None, ..., None],
+                flow=flow[None, ...],
+                confidence=confidence[None, ...],
+                scale=scale,
+                block_size=block_size,
+                kernel_radius=float(psf_radius),
+                sigma=psf_sigma,
+            )
+            correction_num += delta[..., 0] * coverage
+            correction_den += coverage
+
+        valid = correction_den > np.float32(1.0e-6)
+        current[valid] += np.float32(step) * (
+            correction_num[valid] / correction_den[valid]
+        )
+        if regularization > 0.0:
+            padded = np.pad(current, 1, mode="edge")
+            laplacian = (
+                4.0 * current
+                - padded[:-2, 1:-1]
+                - padded[2:, 1:-1]
+                - padded[1:-1, :-2]
+                - padded[1:-1, 2:]
+            )
+            current -= np.float32(step * regularization) * laplacian
+        current = np.clip(current, 0.0, 1.0).astype(np.float32, copy=False)
+    return current
 
 
 def robust_subpixel_splat_stream(
@@ -272,6 +531,16 @@ def robust_subpixel_splat_stream(
     result = np.zeros_like(numerator)
     valid = denominator > np.float32(1e-6)
     result[valid] = numerator[valid] / denominator[valid, None]
+    if not np.all(valid):
+        # A finite HR reconstruction must not turn uncovered sub-pixel
+        # locations into black holes.  Use the reference frame only for those
+        # locations; covered pixels remain the multi-frame reconstruction.
+        fy = np.arange(hr_h, dtype=np.float32)[:, None] / np.float32(scale)
+        fx = np.arange(hr_w, dtype=np.float32)[None, :] / np.float32(scale)
+        gy, gx = np.broadcast_arrays(fy, fx)
+        for c in range(channels):
+            fallback = _bilinear_sample(arr[0, ..., c], gy, gx)
+            result[..., c] = np.where(valid, result[..., c], fallback)
     if squeeze:
         result = result[..., 0]
     return result, denominator
@@ -281,4 +550,7 @@ __all__ = [
     "spatial_rejection_map",
     "robust_subpixel_splat",
     "robust_subpixel_splat_stream",
+    "simulate_lr_from_hr",
+    "iterative_optical_refine",
+    "iterative_optical_refine_stream",
 ]

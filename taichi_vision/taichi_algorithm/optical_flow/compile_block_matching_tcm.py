@@ -156,6 +156,59 @@ def compile_block_matching_flow(arch=ti.vulkan, out_dir=None):
     )
     module.add_graph("flow_lk_dense_blocky_clamped", g_blocky_clamped.compile())
 
+    # Keep block matching's adaptive search kernel unchanged, but fuse its
+    # track+dense sequence to remove a host/driver dispatch boundary per
+    # pyramid level.  The wrapper retains the existing direct sequence as a
+    # recovery path for older TCMs or drivers that reject the fused graph.
+    for suffix, dense_kernel in (
+        ("", bm._bm_dense_interpolate_kernel),
+        ("_blocky", bm._bm_dense_blocky_kernel),
+        ("_blocky_clamped", bm._bm_dense_blocky_clamped_kernel),
+    ):
+        g_track_dense = ti.graph.GraphBuilder()
+        g_track_dense.dispatch(
+            bm._bm_grid_track_kernel,
+            sym_img,
+            sym_next,
+            sym_prev_grid_flow,
+            sym_grid_flow,
+            sym_grid_meta,
+            sym_grid_step,
+            sym_border_margin,
+            sym_win_radius,
+            sym_has_prev_flow,
+            sym_epsilon,
+        )
+        if suffix == "":
+            g_track_dense.dispatch(
+                dense_kernel,
+                sym_grid_flow,
+                sym_flow_out,
+                sym_grid_step,
+                sym_border_margin,
+                sym_overlap,
+            )
+        elif suffix == "_blocky_clamped":
+            g_track_dense.dispatch(
+                dense_kernel,
+                sym_grid_flow,
+                sym_flow_out,
+                sym_grid_step,
+                sym_border_margin,
+                sym_max_flow_px,
+            )
+        else:
+            g_track_dense.dispatch(
+                dense_kernel,
+                sym_grid_flow,
+                sym_flow_out,
+                sym_grid_step,
+                sym_border_margin,
+            )
+        module.add_graph(
+            f"flow_lk_track_dense{suffix}", g_track_dense.compile()
+        )
+
     if out_dir is None:
         out_dir = os.path.join(file_dir, "..", "aot_tcm")
     os.makedirs(out_dir, exist_ok=True)

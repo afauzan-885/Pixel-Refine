@@ -6,7 +6,13 @@ import numpy as np
 def get_pixel_clamp(src: ti.template(), y: int, x: int, h: int, w: int) -> ti.f32:
     ny = ti.max(0, ti.min(h - 1, y))
     nx = ti.max(0, ti.min(w - 1, x))
-    return src[ny, nx]
+    res = 0.0
+    if ti.static(list(src.element_shape()) == [3]):
+        v = src[ny, nx]
+        res = 0.2126 * ti.max(0.0, v[0]) + 0.7152 * ti.max(0.0, v[1]) + 0.0722 * ti.max(0.0, v[2])
+    else:
+        res = src[ny, nx]
+    return res
 
 @ti.func
 def compute_scharr_gradients(src: ti.template(), y: int, x: int, h: int, w: int) -> ti.Vector:

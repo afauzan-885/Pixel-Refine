@@ -7,7 +7,6 @@ for robust and fast feature-based global motion estimation.
 
 import json
 import os
-import cv2
 import numpy as np
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
@@ -72,10 +71,10 @@ class AKAZEAlgorithm:
         else:
             gray = img
         if gray.dtype == np.uint8:
-            return gray
+            return gray.astype(np.float32) / 255.0
         if gray.dtype == np.uint16:
-            return (gray >> 8).astype(np.uint8, copy=False)
-        return np.clip(gray * 255.0 if gray.max() <= 1.0 else gray, 0, 255).astype(np.uint8, copy=False)
+            return gray.astype(np.float32) / 65535.0
+        return np.clip(gray, 0.0, 1.0).astype(np.float32, copy=False)
 
     def calculate_global_motion(
         self, reference, target, config=None, stop_requested=None
@@ -92,51 +91,43 @@ class AKAZEAlgorithm:
             return None, None
 
         try:
-            detector = cv2.AKAZE_create(
-                descriptor_type=cv2.AKAZE_DESCRIPTOR_MLDB,
-                threshold=float(preset["thresh"]),
-                nOctaves=int(preset["octaves"]),
-                nOctaveLayers=int(preset["layers"]),
-                diffusivity=cv2.KAZE_DIFF_PM_G2,
+            from taichi_vision import taichi_aot
+
+            # Taichi Vision owns feature extraction, descriptor matching, and
+            # the RANSAC homography.  The point arrays are intentionally the
+            # only small host readback; image data stays in the Taichi path.
+            matched = taichi_aot.akaze(
+                ref_gray,
+                tgt_gray,
+                ratio_threshold=float(preset["ratio"]),
+                grid_size=max(8, int(config.get("grid_size", 32))),
+                threshold=float(config.get("threshold", preset["thresh"])),
+                margin=max(4, int(config.get("margin", 15))),
+                max_keypoints=int(preset["max_kps"]),
+                k_contrast=float(config.get("k_contrast", 0.02)),
+                num_fed_steps=max(1, int(config.get("num_fed_steps", 8))),
             )
-
-            kps_ref, desc_ref = detector.detectAndCompute(ref_gray, None)
-            kps_tgt, desc_tgt = detector.detectAndCompute(tgt_gray, None)
-
-            if desc_ref is None or desc_tgt is None or len(kps_ref) < 8 or len(kps_tgt) < 8:
+            if matched is None or matched[0] is None or matched[1] is None:
                 return None, None
 
-            max_kps = int(preset["max_kps"])
-            if len(kps_ref) > max_kps:
-                idx = np.argsort([-kp.response for kp in kps_ref])[:max_kps]
-                kps_ref = [kps_ref[i] for i in idx]
-                desc_ref = desc_ref[idx]
-
-            if len(kps_tgt) > max_kps:
-                idx = np.argsort([-kp.response for kp in kps_tgt])[:max_kps]
-                kps_tgt = [kps_tgt[i] for i in idx]
-                desc_tgt = desc_tgt[idx]
-
-            matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-            matches = matcher.knnMatch(desc_ref, desc_tgt, k=2)
-
-            ratio = float(preset["ratio"])
-            good = [
-                m
-                for pair in matches
-                if len(pair) == 2
-                for m, n in [pair]
-                if m.distance < ratio * n.distance
-            ]
-
-            if len(good) < 8:
+            src_pts, dst_pts = matched[0], matched[1]
+            if len(src_pts) < 4 or len(dst_pts) < 4:
                 return None, None
-
-            src_pts = np.float32([kps_ref[m.queryIdx].pt for m in good]).reshape(-1, 2)
-            dst_pts = np.float32([kps_tgt[m.trainIdx].pt for m in good]).reshape(-1, 2)
-
-            H, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
-            return H, mask
+            # The warp consumes a support -> reference matrix.
+            H, mask = taichi_aot.find_homography(
+                np.ascontiguousarray(dst_pts, dtype=np.float32),
+                np.ascontiguousarray(src_pts, dtype=np.float32),
+                method="RANSAC",
+                ransacReprojThreshold=float(config.get("ransac_threshold", 5.0)),
+                n_hypotheses=max(64, int(config.get("ransac_hypotheses", 1024))),
+                max_iters=max(1, int(config.get("ransac_iters", 1))),
+                return_gpu=False,
+            )
+            if H is None:
+                return None, None
+            if mask is not None and int(np.asarray(mask).reshape(-1).sum()) < 4:
+                return None, None
+            return np.asarray(H, dtype=np.float32), mask
         except Exception as exc:
             print(f"[AKAZE] motion estimation error: {exc}")
             return None, None
@@ -159,12 +150,24 @@ class AKAZEAlgorithm:
         if H is None:
             return img_to_warp
 
+        from taichi_vision import taichi_aot
+
         h, w = reference.shape[:2]
-        return cv2.warpPerspective(img_to_warp, H, (w, h))
+        warped = taichi_aot.warp_perspective(
+            np.ascontiguousarray(img_to_warp),
+            H,
+            (w, h),
+            return_gpu=False,
+        )
+        if np.issubdtype(np.asarray(img_to_warp).dtype, np.integer):
+            info = np.iinfo(np.asarray(img_to_warp).dtype)
+            warped = np.clip(warped + 0.5, info.min, info.max).astype(
+                np.asarray(img_to_warp).dtype
+            )
+        return warped
 
 
 def running_akaze(*args, **kwargs):
     raise RuntimeError(
         "AKAZE is now orchestrated by MFDenoiser. Use MFDenoiser with alignment='AKAZE' instead."
     )
-

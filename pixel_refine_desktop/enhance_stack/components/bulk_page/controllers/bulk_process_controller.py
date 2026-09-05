@@ -725,7 +725,7 @@ class BatchProcessDialog(ModalDialog):
     def open_mass_edit_dialog(self):
         dialog = MassAlgorithmEditDialog(self.panels, self)
         dialog.algorithms_updated.connect(self.on_algorithms_updated)
-        dialog.exec_()
+        dialog.exec()
 
     def on_algorithms_updated(self):
         for i, panel in enumerate(self.panels):

@@ -2,6 +2,7 @@ from concurrent.futures.thread import ThreadPoolExecutor
 import os
 import functools
 import time
+import zipfile
 
 # Suppress Vulkan loader registry warnings on Windows
 os.environ["VK_LOADER_DEBUG"] = "error"
@@ -510,6 +511,72 @@ def _mod(name: str):
         except Exception:
             pass
     return _module_cache[name]
+
+
+def aot_graph_available(module_name: str, graph_name: str) -> bool:
+    """Return whether the active target artifact contains a graph.
+
+    This is a preflight helper for optional streaming paths.  It reads the
+    packaged graph index only; it does not load or execute a module.  A caller
+    can therefore select a validated same-backend full-frame route when an
+    older artifact is still installed.
+    """
+    try:
+        target = detect_target(
+            backend=getattr(engine, "arch", "cpu"),
+            device=getattr(engine, "gpu_name", ""),
+        )
+        active_tcm_dir = _tcm_dir
+        if not os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT", "").strip():
+            try:
+                from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
+
+                staged_root = staged_tcm_root(target.target_id)
+            except (ImportError, OSError, ValueError):
+                staged_root = None
+            if staged_root is not None:
+                active_tcm_dir = os.path.abspath(str(staged_root))
+        module_dir = os.path.join(active_tcm_dir, str(module_name))
+        if os.path.isdir(module_dir):
+            # Directory-form modules expose their graph files directly.  Use
+            # the same marker scan as ZIP artifacts where possible.
+            candidates = [
+                os.path.join(module_dir, "graphs.tcb"),
+                os.path.join(module_dir, "graphs.json"),
+            ]
+        else:
+            allow_legacy = (
+                os.environ.get("PIXEL_REFINE_AOT_ALLOW_LEGACY_ARTIFACTS", "0") == "1"
+                and not target.is_arm
+                and not target.is_mobile
+            )
+            resolved = resolve_artifact(
+                active_tcm_dir,
+                str(module_name),
+                target,
+                allow_legacy=allow_legacy,
+            )
+            if resolved is None:
+                return False
+            candidates = [os.fspath(resolved)]
+
+        marker = str(graph_name).encode("utf-8")
+        for candidate in candidates:
+            if not os.path.isfile(candidate):
+                continue
+            if os.path.basename(candidate) in {"graphs.tcb", "graphs.json"}:
+                with open(candidate, "rb") as graph_file:
+                    data = graph_file.read()
+                if marker in data:
+                    return True
+                continue
+            with zipfile.ZipFile(candidate, "r") as archive:
+                for index_name in ("graphs.tcb", "graphs.json"):
+                    if index_name in archive.namelist() and marker in archive.read(index_name):
+                        return True
+    except (OSError, RuntimeError, ValueError, zipfile.BadZipFile):
+        return False
+    return False
 
 
 def load_tcm(name):
@@ -1229,6 +1296,28 @@ def _block_recovery(operation):
         return wrapped
 
     return decorate
+
+
+def _vulkan_host_accessible(function):
+    """Use host-visible allocations for Vulkan remap graph buffers.
+
+    The Vulkan remap TCM maps its input/output buffers through the native
+    bridge.  Device-local allocations are valid for most kernels but are not
+    mappable on the affected driver, so remap must temporarily opt into the
+    engine's shared-memory policy.  Restore the caller's policy afterwards.
+    """
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        if str(getattr(engine, "arch", "")).lower() != "vulkan":
+            return function(*args, **kwargs)
+        previous = getattr(engine, "_force_host_accessible", None)
+        engine.set_force_host_accessible(True)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            engine.set_force_host_accessible(previous)
+
+    return wrapped
 
 
 def _get_cached_output_tile(
@@ -4709,6 +4798,7 @@ def remap(src, map_x, map_y, return_gpu=False):
     return res
 
 
+@_vulkan_host_accessible
 @_block_recovery("remap_with_flow")
 def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
     """
@@ -5039,6 +5129,93 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
             dst[:] = res_np
             return dst
         return res_np
+
+
+def remap_with_flow_tile(
+    src,
+    flow,
+    full_h,
+    full_w,
+    offset_y,
+    offset_x,
+    tile_h,
+    tile_w,
+    dst=None,
+):
+    """Warp one output tile directly from GPU-resident source and flow.
+
+    Unlike :func:`remap_with_flow`, this low-level helper never allocates a
+    full-resolution destination and never synchronizes.  It is intended for a
+    same-stream producer/consumer pair where the returned tile is immediately
+    consumed by another AOT graph.  Source and flow ownership stays with the
+    caller.
+    """
+    if not isinstance(src, TaichiGPUBuffer) or not isinstance(flow, TaichiGPUBuffer):
+        raise TypeError("remap_with_flow_tile requires GPU source and flow buffers")
+    if np.dtype(src.dtype) != np.dtype(np.float32) or np.dtype(flow.dtype) != np.dtype(np.float32):
+        raise TypeError("remap_with_flow_tile requires float32 source and flow buffers")
+
+    full_h, full_w = int(full_h), int(full_w)
+    offset_y, offset_x = int(offset_y), int(offset_x)
+    tile_h, tile_w = int(tile_h), int(tile_w)
+    if full_h <= 0 or full_w <= 0 or tile_h <= 0 or tile_w <= 0:
+        raise ValueError("full and tile dimensions must be positive")
+    if offset_y < 0 or offset_x < 0 or offset_y >= full_h or offset_x >= full_w:
+        raise ValueError("tile offset is outside the full output")
+    if offset_y + tile_h > full_h or offset_x + tile_w > full_w:
+        raise ValueError("tile extends beyond the full output")
+
+    is_3d = len(src.shape) == 3
+    if is_3d and int(src.shape[2]) != 3:
+        raise ValueError("remap_with_flow_tile only supports RGB 3D source buffers")
+    if not is_3d and len(src.shape) != 2:
+        raise ValueError("source buffer must be 2D or RGB 3D")
+    if len(flow.shape) != 3 or int(flow.shape[2]) != 2:
+        raise ValueError("flow buffer must have shape (H, W, 2)")
+
+    graph_name = (
+        "remap_with_flow_offset_f32_3d"
+        if is_3d
+        else "remap_with_flow_offset_f32_2d"
+    )
+    if not aot_graph_available("remap", graph_name):
+        raise RuntimeError(
+            f"{graph_name} is unavailable in the active remap TCM; "
+            "recompile the target-qualified remap artifact."
+        )
+
+    h_src, w_src = int(src.shape[0]), int(src.shape[1])
+    h_flow, w_flow = int(flow.shape[0]), int(flow.shape[1])
+    if dst is None:
+        dst = engine.allocate(
+            (tile_h, tile_w, 3) if is_3d else (tile_h, tile_w),
+            dtype=np.float32,
+            is_vector=is_3d,
+            vector_dim=3,
+        )
+    elif tuple(int(v) for v in dst.shape[:2]) != (tile_h, tile_w):
+        raise ValueError("destination tile shape does not match tile dimensions")
+
+    src_v = src if getattr(src, "is_vector", False) else src.view_as_vector(True, 3)
+    dst_v = dst if getattr(dst, "is_vector", False) else dst.view_as_vector(True, 3)
+    flow_v = flow.view_as_vector(False) if getattr(flow, "is_vector", False) else flow
+    _mod("remap").run(
+        graph_name,
+        src=src_v if is_3d else src,
+        flow=flow_v,
+        dst=dst_v if is_3d else dst,
+        h_src=h_src,
+        w_src=w_src,
+        h_dst=full_h,
+        w_dst=full_w,
+        h_flow=h_flow,
+        w_flow=w_flow,
+        scale_x=float(full_w) / float(w_flow),
+        scale_y=float(full_h) / float(h_flow),
+        offset_y=offset_y,
+        offset_x=offset_x,
+    )
+    return dst
 
 
 def _smooth_flow_tile(tile, sigma, kernel_size):
@@ -6187,6 +6364,19 @@ def _hamilton_demosaic_full(
     first host-to-device copy.  ``cmatrix`` is uploaded only for the optional
     tonemapping graph, exactly as Bilinear uploads the matrix it actually uses.
     """
+    bayer_dtype = np.dtype(getattr(bayer, "dtype", np.float32))
+    use_u16_graph = (
+        bayer_dtype == np.dtype(np.uint16)
+        and aot_graph_available("hamilton", "hamilton_demosaic_u16")
+    )
+    if bayer_dtype == np.dtype(np.uint16) and not use_u16_graph:
+        # Compatibility with older Hamilton TCMs: preserve the old f32 graph
+        # contract instead of dispatching a u16 buffer into an f32 ABI.
+        if isinstance(bayer, TaichiGPUBuffer):
+            bayer = np.ascontiguousarray(bayer.to_numpy(), dtype=np.float32)
+        else:
+            bayer = np.ascontiguousarray(bayer, dtype=np.float32)
+
     with DemosaicBufferSet() as buffers:
         bayer_buf = buffers.input("bayer", bayer)
         h, w = bayer_buf.shape[:2]
@@ -6218,6 +6408,8 @@ def _hamilton_demosaic_full(
         graph_name = resolve_graph_name(
             "hamilton", "tonemapped" if tonemapping else "default"
         )
+        if use_u16_graph and not tonemapping:
+            graph_name = "hamilton_demosaic_u16"
         run_kwargs = {
             "bayer": bayer_buf,
             "green": green_buf,
@@ -8406,7 +8598,17 @@ def demosaic(
         import rawpy
 
         def _extract_from_raw(raw):
-            b_np = raw.raw_image.astype(np.float32)
+            # Keep the sensor mosaic compact through the upload boundary.
+            # Hamilton has a u16-specialized graph that promotes samples to
+            # f32 at the same arithmetic sites as the established f32 graph;
+            # retaining u16 here avoids a temporary 48 MiB host expansion on
+            # a 12 MP Bayer frame. Non-Hamilton variants convert at their
+            # dispatch boundary when their TCM only exposes f32 input.
+            raw_image = np.asarray(raw.raw_image)
+            if raw_image.dtype in (np.dtype(np.uint8), np.dtype(np.uint16)):
+                b_np = np.array(raw_image, copy=True)
+            else:
+                b_np = raw_image.astype(np.float32)
             bl = float(raw.black_level_per_channel[0])
             wl = float(raw.white_level)
 
@@ -8510,6 +8712,18 @@ def demosaic(
             "half_res=True is currently defined for the canonical RGB output; "
             "combine it with output_bgr_u16=False."
         )
+
+    # The compact-input graph is currently specific to the full-resolution
+    # Hamilton path. Keep the established f32 ABI for other families and
+    # Hamilton half-resolution/auxiliary variants.
+    if not (
+        method_lower in ("hamilton", "ha")
+        and not half_res
+    ) and isinstance(bayer, np.ndarray) and bayer.dtype in (
+        np.dtype(np.uint8),
+        np.dtype(np.uint16),
+    ):
+        bayer = np.ascontiguousarray(bayer, dtype=np.float32)
     if method_lower in ("hamilton", "ha"):
         if half_res and not output_bgr_u16:
             res = hamilton_demosaic_rgb_half_res(
@@ -10857,24 +11071,26 @@ def _canny_full(src, low_threshold=50.0, high_threshold=150.0, return_gpu=False)
     )
 
     # Step 4: Iterative hysteresis
-    changed_buffers = []
     # Do not read back a synchronization flag per pass: on Vulkan that creates
     # a host/device race around a pool-backed scalar. A bounded fixed pass
     # count is deterministic and keeps hysteresis entirely on the device.
-    for _ in range(min(h + w, 256)):
-        changed_buf = engine.upload(np.zeros(1, dtype=np.int32))
-        # Keep status buffers alive until finalization. Releasing a just-used
-        # Vulkan buffer lets the pool hand it to a later dispatch too early.
-        changed_buffers.append(changed_buf)
-        _mod("canny").run(
-            "canny_hysteresis_f32", edges=edges, changed=changed_buf, h=h, w=w
-        )
+    # One persistent status buffer is sufficient: dispatches are ordered and
+    # the host never reads this value in the fixed-pass AOT path. The previous
+    # implementation allocated and retained 256 SSBOs, which can exhaust or
+    # wedge older Intel OpenGL drivers even though the Canny kernels are valid.
+    changed_buf = engine.allocate((1,), dtype=np.int32)
+    try:
+        for _ in range(min(h + w, 256)):
+            _mod("canny").run(
+                "canny_hysteresis_f32", edges=edges, changed=changed_buf, h=h, w=w
+            )
 
-    # Step 5: Finalize
-    _mod("canny").run("canny_finalize_f32", edges=edges, dst=dst, h=h, w=w)
-    result = dst if return_gpu else dst.to_numpy()
-    for changed_buf in changed_buffers:
+        # Step 5: Finalize while the status buffer is still alive.
+        _mod("canny").run("canny_finalize_f32", edges=edges, dst=dst, h=h, w=w)
+        result = dst if return_gpu else dst.to_numpy()
+    finally:
         changed_buf.release()
+
     return result
 
 
@@ -11677,6 +11893,7 @@ def seamless_clone_aot(
 # ---------------------------------------------------------------------------
 
 
+@_vulkan_host_accessible
 def farneback_flow(
     ref_gray,
     comp_gray,
@@ -11694,6 +11911,37 @@ def farneback_flow(
         from taichi_vision.taichi_algorithm import aot_wrapper as _flow_wrapper
 
         _flow_wrapper._prepare_opengl_flow_family("farneback")
+    # Strategy A + C: Decoupling for High-Res (>= 8MP, e.g. 12MP) to prevent OOM
+    h, w = ref_gray.shape[:2]
+    if h * w >= 8_000_000 and flow_init is None and h >= 64 and w >= 64:
+        try:
+            from taichi_vision.taichi_algorithm.aot_wrapper import _get_module, _InputArray, _OutputArray
+            pyramid_mod = _get_module("pyramid")
+            prev_dev = _InputArray(ref_gray if hasattr(ref_gray, "handle") else ref_gray.astype(np.float32))
+            next_dev = _InputArray(comp_gray if hasattr(comp_gray, "handle") else comp_gray.astype(np.float32))
+            half_h, half_w = h // 2, w // 2
+            ref_half = _OutputArray((half_h, half_w), np.float32)
+            supp_half = _OutputArray((half_h, half_w), np.float32)
+            pyramid_mod.run("downsample_2x_f32", src=prev_dev, dst=ref_half)
+            pyramid_mod.run("downsample_2x_f32", src=next_dev, dst=supp_half)
+            flow_half = farneback_flow(
+                ref_half.to_numpy(),
+                supp_half.to_numpy(),
+                pyr_scale=pyr_scale,
+                num_levels=max(1, int(num_levels) - 1),
+                win_size=win_size,
+                num_iters=num_iters,
+                poly_n=poly_n,
+                poly_sigma=poly_sigma,
+                flags=flags,
+                return_gpu=True,
+            )
+            flow_full = _OutputArray((h, w, 2), np.float32)
+            pyramid_mod.run("upsample_flow_f32", src=flow_half, dst=flow_full, scale=2.0)
+            return flow_full if return_gpu else flow_full.to_numpy()
+        except Exception:
+            pass # fallback to tiled execution
+
     if (
         not return_gpu
         and flow_init is None
@@ -11893,89 +12141,139 @@ def _farneback_flow_full(
 
         flow_buf = engine.allocate((hl, wl, 2), dtype=np.float32)
 
-        if prev_flow is not None:
-            scale_up = float(ref_lvl.shape[0]) / float(prev_flow.shape[0])
-            mod.run(
-                "farneback_upsample_flow",
-                flow_coarse=prev_flow,
-                flow_fine=flow_buf,
-                scale=float(scale_up),
-            )
-        else:
-            mod.run("farneback_clear_flow", flow=flow_buf)
-        if str(getattr(engine, "arch", "")).lower() in ("opengl", "gles"):
-            engine.sync()
-
-        # Polynomial expansion for both images
+        # Scratch buffers are also valid for the fused level graph because
+        # every graph dispatch in the sequence is ordered by the runtime.
         vert_buf = engine.allocate((hl, wl, 3), dtype=np.float32)
         R0 = engine.allocate((hl, wl, 5), dtype=np.float32)
         R1 = engine.allocate((hl, wl, 5), dtype=np.float32)
+        M = engine.allocate((hl, wl, 5), dtype=np.float32)
+        M_smooth = engine.allocate((hl, wl, 5), dtype=np.float32)
 
-        # Polynomial expansion: ref (writes to R0), comp (writes to R1)
-        # poly_expansion_f32 graph: src -> vert (vertical) -> poly (horizontal)
-        poly_args = dict(
-            src=ref_lvl,
+        # A/B qualification on the current desktop showed a small gain on
+        # CPU/CUDA but a regression on OpenGL/Vulkan, so graph fusion is
+        # selected per backend rather than applied unconditionally.
+        fused_level = int(num_iters) == 3 and str(
+            getattr(engine, "arch", "")
+        ).lower() in {"cpu", "cuda"}
+        fused_level_name = (
+            "farneback_level_clear_3"
+            if prev_flow is None
+            else "farneback_level_upsample_3"
+        )
+        fused_args = dict(
+            ref=ref_lvl,
+            comp=comp_lvl,
             vert=vert_buf,
-            poly=R0,
+            R0=R0,
+            R1=R1,
+            M=M,
+            M_smooth=M_smooth,
             h=hl,
             w=wl,
+            poly_weights=poly_weights_gpu,
             ig11=float(ig11),
             ig03=float(ig03),
             ig33=float(ig33),
             ig55=float(ig55),
             poly_radius=poly_radius,
-        )
-        poly_args["poly_weights"] = poly_weights_gpu
-        mod.run("poly_expansion_f32", **poly_args)
-        if str(getattr(engine, "arch", "")).lower() in ("opengl", "gles"):
-            engine.sync()
-        poly_args["src"] = comp_lvl
-        poly_args["poly"] = R1
-        mod.run("poly_expansion_f32", **poly_args)
-        if str(getattr(engine, "arch", "")).lower() in ("opengl", "gles"):
-            engine.sync()
-
-        vert_buf.destroy()
-
-        # Allocate tensor scratch buffers
-        M = engine.allocate((hl, wl, 5), dtype=np.float32)
-        M_smooth = engine.allocate((hl, wl, 5), dtype=np.float32)
-
-        # Choose batched multi-iteration graph for efficiency
-        iter_args = dict(
-            R0=R0,
-            R1=R1,
-            flow=flow_buf,
-            M=M,
-            M_smooth=M_smooth,
-            h=hl,
-            w=wl,
             smooth_weights=smooth_gpu,
             smooth_radius=smooth_radius,
         )
+        if prev_flow is None:
+            fused_args["flow"] = flow_buf
+        else:
+            fused_args.update(
+                {
+                    "flow": flow_buf,
+                    "flow_coarse": prev_flow,
+                    "flow_fine": flow_buf,
+                    "scale": float(ref_lvl.shape[0]) / float(prev_flow.shape[0]),
+                }
+            )
 
-        remaining = num_iters
-        while remaining > 0:
-            if remaining >= 5:
-                batch_key = "farneback_multi_5"
-                batch_size = 5
-            elif remaining >= 3:
-                batch_key = "farneback_multi_3"
-                batch_size = 3
-            elif remaining >= 2:
-                batch_key = "farneback_multi_2"
-                batch_size = 2
-            else:
-                batch_key = "farneback_iteration"
-                batch_size = 1
+        fused_used = False
+        if fused_level:
             try:
-                mod.run(batch_key, **iter_args)
-            except Exception:
-                # Fallback to single iteration if batch graph not found
-                mod.run("farneback_iteration", **iter_args)
-            if str(getattr(engine, "arch", "")).lower() in ("opengl", "gles"):
-                engine.sync()
-            remaining -= batch_size
+                mod.run(fused_level_name, **fused_args)
+                fused_used = True
+            except Exception as exc:
+                # Older artifacts remain usable through the exact direct
+                # sequence below; this is a same-backend recovery path.
+                print(
+                    f"[AOT Farneback] {fused_level_name} unavailable; "
+                    f"using direct dispatch: {exc}"
+                )
+
+        if not fused_used:
+            if prev_flow is not None:
+                mod.run(
+                    "farneback_upsample_flow",
+                    flow_coarse=prev_flow,
+                    flow_fine=flow_buf,
+                    scale=fused_args.get("scale", 1.0),
+                )
+            else:
+                mod.run("farneback_clear_flow", flow=flow_buf)
+
+            poly_args = dict(
+                vert=vert_buf,
+                h=hl,
+                w=wl,
+                poly_weights=poly_weights_gpu,
+                ig11=float(ig11),
+                ig03=float(ig03),
+                ig33=float(ig33),
+                ig55=float(ig55),
+                poly_radius=poly_radius,
+            )
+            mod.run(
+                "poly_expansion_f32",
+                src=ref_lvl,
+                poly=R0,
+                **poly_args,
+            )
+            mod.run(
+                "poly_expansion_f32",
+                src=comp_lvl,
+                poly=R1,
+                **poly_args,
+            )
+
+            # Choose batched multi-iteration graph for efficiency.
+            iter_args = dict(
+                R0=R0,
+                R1=R1,
+                flow=flow_buf,
+                M=M,
+                M_smooth=M_smooth,
+                h=hl,
+                w=wl,
+                smooth_weights=smooth_gpu,
+                smooth_radius=smooth_radius,
+            )
+            remaining = num_iters
+            while remaining > 0:
+                if remaining >= 5:
+                    batch_key = "farneback_multi_5"
+                    batch_size = 5
+                elif remaining >= 3:
+                    batch_key = "farneback_multi_3"
+                    batch_size = 3
+                elif remaining >= 2:
+                    batch_key = "farneback_multi_2"
+                    batch_size = 2
+                else:
+                    batch_key = "farneback_iteration"
+                    batch_size = 1
+                try:
+                    mod.run(batch_key, **iter_args)
+                except Exception:
+                    # Fallback to single iteration if batch graph not found.
+                    mod.run("farneback_iteration", **iter_args)
+                remaining -= batch_size
+
+        if str(getattr(engine, "arch", "")).lower() in ("opengl", "gles"):
+            engine.sync()
 
         R0.destroy()
         R1.destroy()

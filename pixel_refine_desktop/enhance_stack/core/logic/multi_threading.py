@@ -1,11 +1,10 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import time
 import threading
-import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QPixmap, QImage
+from PIL import Image, ImageOps
 import rawpy
 
 from config import SUPPORTED_FORMATS
@@ -70,34 +69,26 @@ class BaseMultiThreading(QThread):
 
 def _process_image_part(img_part_data):
     """Memproses bagian gambar (NumPy array). Melakukan konversi warna/tipe jika perlu."""
-    img_part = img_part_data.copy()
-
     try:
-        if img_part.dtype == np.uint16:
-            img_part = (img_part / 256).astype(np.uint8)
-        elif img_part.dtype != np.uint8:
-            raise ValueError(f"Tipe data kuadran tidak valid: {img_part.dtype}")
+        if img_part_data.dtype == np.uint16:
+            img_part = (img_part_data >> 8).astype(np.uint8)
+        elif img_part_data.dtype != np.uint8:
+            img_part = img_part_data.astype(np.uint8)
+        else:
+            img_part = img_part_data
 
-        processed_part = img_part  # Default jika sudah RGB
-
-        # Konversi warna jika perlu
+        # Konversi warna jika perlu menggunakan NumPy murni
         if len(img_part.shape) == 2:  # Grayscale
-            processed_part = cv2.cvtColor(img_part, cv2.COLOR_GRAY2RGB)
-        elif img_part.shape[2] == 4:  # RGBA
-            processed_part = cv2.cvtColor(img_part, cv2.COLOR_RGBA2RGB)
+            processed_part = np.repeat(img_part[:, :, np.newaxis], 3, axis=2)
+        elif len(img_part.shape) == 3 and img_part.shape[2] == 4:  # RGBA
+            processed_part = img_part[:, :, :3]
+        else:
+            processed_part = img_part
 
-        # Pastikan output adalah RGB uint8
-        if (
-            len(processed_part.shape) != 3
-            or processed_part.shape[2] != 3
-            or processed_part.dtype != np.uint8
-        ):
-            pass
-
-        return processed_part
+        return np.ascontiguousarray(processed_part, dtype=np.uint8)
 
     except Exception as e:
-        raise RuntimeError(f"Failed to process quadrant: {e}")
+        raise RuntimeError(f"Failed to process image part: {e}")
 
 
 def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
@@ -213,44 +204,33 @@ class RawImageProcessingThread(BaseMultiThreading):
                 if is_raw:
                     img_array = load_raw_as_8bit_rgb(image_path)
                 else:  # Untuk format non-RAW (JPG, PNG, TIFF, dll.)
-                    img_cv = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-                    if img_cv is None:
-                        raise RuntimeError(f"OpenCV failed to read image: {filename}")
+                    with Image.open(image_path) as pil_raw:
+                        pil_img = ImageOps.exif_transpose(pil_raw)
+                        if pil_img.mode != "RGB":
+                            pil_img = pil_img.convert("RGB")
+                        img_array = np.array(pil_img, dtype=np.uint8)
 
-                    if img_cv.dtype == np.uint16:
-                        img_array = (img_cv / 256).astype(np.uint8)
-                    elif img_cv.dtype == np.uint8:
-                        img_array = img_cv
-                    else:
-                        img_array = img_cv.astype(np.uint8)
-
-                    if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-                        img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-
-                if img_array is None:
+                if img_array is None or img_array.size == 0:
                     raise RuntimeError(
                         f"Image array could not be created for {filename}"
                     )
 
                 if self.low_res_mode:
-                    if len(img_array.shape) == 2:
-                        img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
-                    elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
-                        img_array = cv2.cvtColor(img_array, cv2.COLOR_BGRA2RGB)
-
                     h, w = img_array.shape[:2]
-                    if self.target_size is not None and max(h, w) <= self.target_size:
-                        resized_img = img_array
-                    elif self.target_size is not None:
+                    if self.target_size is not None and max(h, w) > self.target_size:
                         scale = self.target_size / max(h, w)
-                        new_w, new_h = int(w * scale), int(h * scale)
-                        resized_img = cv2.resize(
-                            img_array, (new_w, new_h), interpolation=cv2.INTER_AREA
+                        new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+                        resized_img = np.array(
+                            Image.fromarray(img_array).resize(
+                                (new_w, new_h), Image.Resampling.BILINEAR
+                            )
                         )
                     else:
                         resized_img = img_array
 
-                    height, width, channel = resized_img.shape
+                    resized_img = np.ascontiguousarray(resized_img)
+                    height, width = resized_img.shape[:2]
+                    channel = 3 if len(resized_img.shape) == 3 else 1
                     bytes_per_line = channel * width
                     qimg_low = QImage(
                         resized_img.data,
@@ -262,63 +242,36 @@ class RawImageProcessingThread(BaseMultiThreading):
 
                     return (image_path, qimg_low)
 
-                final_img = None
-                processed_via_parts = (
-                    len(img_array.shape) == 2 or img_array.shape[2] == 4
-                )
-
-                if processed_via_parts:
-                    h, w = img_array.shape[:2]
-                    mid_h, mid_w = h // 2, w // 2
-                    parts = [
-                        img_array[0:mid_h, 0:mid_w],
-                        img_array[0:mid_h, mid_w:w],
-                        img_array[mid_h:h, 0:mid_w],
-                        img_array[mid_h:h, mid_w:w],
-                    ]
-
-                    with ThreadPoolExecutor(
-                        max_workers=self.num_part_workers
-                    ) as executor:
-                        futures = [
-                            executor.submit(_process_image_part, p) for p in parts
-                        ]
-                        processed_parts = [
-                            future.result() for future in as_completed(futures)
-                        ]
-
-                    top_row = np.hstack((processed_parts[0], processed_parts[1]))
-                    bottom_row = np.hstack((processed_parts[2], processed_parts[3]))
-                    final_img = np.vstack((top_row, bottom_row))
+                # Process final image directly via NumPy without buggy quadrant slicing
+                if len(img_array.shape) == 2:
+                    final_img = np.repeat(img_array[:, :, np.newaxis], 3, axis=2)
+                elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
+                    final_img = img_array[:, :, :3]
                 else:
                     final_img = img_array
 
-                if final_img is not None:
-                    if final_img.dtype != np.uint8:
-                        final_img = final_img.astype(np.uint8)
+                if final_img.dtype != np.uint8:
+                    final_img = final_img.astype(np.uint8)
 
-                    height, width, channel = final_img.shape
-                    bytes_per_line = channel * width
-                    qimg = QImage(
-                        final_img.data,
-                        width,
-                        height,
-                        bytes_per_line,
-                        QImage.Format.Format_RGB888,
-                    ).copy()
+                final_img = np.ascontiguousarray(final_img)
+                height, width, channel = final_img.shape
+                bytes_per_line = channel * width
+                qimg = QImage(
+                    final_img.data,
+                    width,
+                    height,
+                    bytes_per_line,
+                    QImage.Format.Format_RGB888,
+                ).copy()
 
-                    if qimg.isNull():
-                        raise RuntimeError(f"Failed to copy QImage for {filename}")
+                if qimg.isNull():
+                    raise RuntimeError(f"Failed to copy QImage for {filename}")
 
-                    pixmap = QPixmap.fromImage(qimg)
-                    if pixmap.isNull():
-                        raise RuntimeError(f"Failed to create QPixmap for {filename}")
+                pixmap = QPixmap.fromImage(qimg)
+                if pixmap.isNull():
+                    raise RuntimeError(f"Failed to create QPixmap for {filename}")
 
-                    return pixmap
-                else:
-                    raise RuntimeError(
-                        f"Final image is None after processing {filename}"
-                    )
+                return pixmap
 
             except Exception as e:
                 print(f"ERROR processing {image_path}: {e}")

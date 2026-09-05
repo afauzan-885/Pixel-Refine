@@ -28,7 +28,8 @@ from PySide6.QtCore import (
     QRunnable,
     QThreadPool,
 )
-import cv2
+from collections import OrderedDict
+import threading
 import numpy as np
 import rawpy
 from PIL import Image, ImageOps
@@ -54,6 +55,7 @@ class GlobalThumbnailCache:
 
     Ukuran cache dibatasi (LRU-like eviction) untuk mengendalikan memori.
     Default: 500 gambar maks (~500 * 128x128 * 3 bytes ≈ 24 MB)
+    Thread-safe menggunakan collections.OrderedDict dan threading.Lock.
     """
 
     _instance = None
@@ -62,39 +64,39 @@ class GlobalThumbnailCache:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._cache: dict = {}  # path -> QImage
-            cls._instance._order: list = []  # insertion order untuk LRU eviction
+            cls._instance._cache = OrderedDict()
+            cls._instance._lock = threading.Lock()
         return cls._instance
 
     def get(self, path: str):
-        """Return cached QImage or None."""
-        return self._cache.get(path)
+        """Return cached QImage or None, updating LRU access order."""
+        with self._lock:
+            if path in self._cache:
+                self._cache.move_to_end(path)
+                return self._cache[path]
+            return None
 
     def put(self, path: str, q_image):
         """Store QImage in cache, evicting oldest if at capacity."""
-        if path in self._cache:
-            # Refresh order
-            try:
-                self._order.remove(path)
-            except ValueError:
-                pass
-        elif len(self._cache) >= self.MAX_SIZE:
-            # Evict least-recently-used entry
-            oldest = self._order.pop(0)
-            self._cache.pop(oldest, None)
-        self._cache[path] = q_image
-        self._order.append(path)
+        with self._lock:
+            if path in self._cache:
+                self._cache.move_to_end(path)
+            elif len(self._cache) >= self.MAX_SIZE:
+                self._cache.popitem(last=False)
+            self._cache[path] = q_image
 
     def has(self, path: str) -> bool:
-        return path in self._cache
+        with self._lock:
+            return path in self._cache
 
     def clear(self):
         """Hapus seluruh cache (misalnya saat aplikasi shutdown)."""
-        self._cache.clear()
-        self._order.clear()
+        with self._lock:
+            self._cache.clear()
 
     def __len__(self):
-        return len(self._cache)
+        with self._lock:
+            return len(self._cache)
 
 
 # Module-level singleton accessor
@@ -236,15 +238,14 @@ class ThumbnailWorker(QRunnable):
             if self._should_abort():
                 return
 
-            # 3. Simpan ke JPG -> muat kembali ke RAM -> emit ke UI
+            # 3. Simpan ke JPG di background -> gunakan RAM image langsung -> emit ke UI
             if pil_thumb:
                 temp_image = convert_pil_to_qimage(pil_thumb)
                 if not temp_image.isNull():
                     repo.save_thumbnail(self.image_path, temp_image)
-                    result_image = repo.get_thumbnail(self.image_path)
+                    result_image = temp_image
                     # Simpan ke L0 cache untuk akses instan ke depannya
-                    if not result_image.isNull():
-                        global_cache.put(self.image_path, result_image)
+                    global_cache.put(self.image_path, result_image)
 
         except Exception as e:
             if not self._should_abort():
@@ -324,16 +325,15 @@ class ThumbnailBulkWorker(QRunnable):
                 if self._should_abort():
                     return
 
-                # 2. Simpan ke JPG di disk -> muat kembali -> emit ke UI (realtime)
+                # 2. Simpan ke JPG di disk background -> gunakan RAM image langsung -> emit ke UI
                 if pil_thumb:
                     temp_image = convert_pil_to_qimage(pil_thumb)
                     if not temp_image.isNull():
                         repo = get_thumbnail_repo()
                         repo.save_thumbnail(path, temp_image)
-                        q_img_to_emit = repo.get_thumbnail(path)
+                        q_img_to_emit = temp_image
                         # Simpan ke L0 untuk akses instan selanjutnya
-                        if not q_img_to_emit.isNull():
-                            global_cache.put(path, q_img_to_emit)
+                        global_cache.put(path, q_img_to_emit)
                 else:
                     print(f"[ThumbnailBulkWorker] Failed to decode image: {path}")
 
@@ -384,13 +384,13 @@ def process_thumbnail_logic(image_path, thumbnail_size):
         pass
 
     try:
-        # 1. Fast path for common formats using OpenCV
-        if image_path.lower().endswith((".jpg", ".jpeg", ".png")):
-            img = cv2.imread(image_path)
-            if img is not None:
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                pil_img = Image.fromarray(img)
-                return ImageOps.fit(pil_img, thumbnail_size, Image.Resampling.BILINEAR)
+        # 1. Fast path for common formats using Pillow
+        if image_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            with Image.open(image_path) as img:
+                img_corrected = ImageOps.exif_transpose(img)
+                return ImageOps.fit(
+                    img_corrected, thumbnail_size, Image.Resampling.BILINEAR
+                )
 
         # 2. Fallback to PIL for TIFF, RAW, etc.
         ext = os.path.splitext(image_path)[1].lower()
@@ -459,7 +459,31 @@ def convert_pil_to_qimage(pil_img):
     except Exception:
         return QImage()
 
-    # Removed old _convert_to_qimage method to avoid duplication
+
+class _AsyncThumbnailFlushRunnable(QRunnable):
+    """Runnable for flushing pending thumbnail saves to disk in the background."""
+
+    def __init__(self, data_to_save, repo):
+        super().__init__()
+        self.data_to_save = data_to_save
+        self.repo = repo
+
+    def run(self):
+        try:
+            total_count = len(self.data_to_save)
+            chunk_size = 50
+            if total_count >= 1499:
+                chunk_size = 400
+            elif total_count >= 999:
+                chunk_size = 200
+            elif total_count >= 500:
+                chunk_size = 100
+
+            for i in range(0, total_count, chunk_size):
+                chunk = self.data_to_save[i : i + chunk_size]
+                self.repo.save_thumbnails_bulk(chunk)
+        except Exception as e:
+            print(f"[ThumbnailProcessor] Background flush error: {e}")
 
 
 class ThumbnailBatchProcessor(QObject):
@@ -782,7 +806,7 @@ class ThumbnailBatchProcessor(QObject):
                     self.saved_count += 1
             self._emit_progress()
 
-    def stop_all(self, persist=True):
+    def stop_all(self, persist=True, async_flush=True):
         """Stop semua background tasks, optionally persisting pending results."""
         # 1. Bersihkan antrean thread pool agar tidak ada task baru mulai
         try:
@@ -793,7 +817,14 @@ class ThumbnailBatchProcessor(QObject):
         # 2. Simpan data tertunda (harus sebelum cleanup), kecuali pembatalan
         # eksplisit akibat thumbnail dinonaktifkan.
         if persist:
-            self.flush_to_disk()
+            if async_flush and self.pending_save_queue:
+                data_to_save = self.pending_save_queue[:]
+                self.pending_save_queue.clear()
+                repo = get_thumbnail_repo()
+                runnable = _AsyncThumbnailFlushRunnable(data_to_save, repo)
+                QThreadPool.globalInstance().start(runnable)
+            else:
+                self.flush_to_disk()
         else:
             self.pending_save_queue.clear()
 
@@ -808,6 +839,6 @@ class ThumbnailBatchProcessor(QObject):
     def __del__(self):
         """Cleanup on deletion."""
         try:
-            self.stop_all()
+            self.stop_all(persist=True, async_flush=False)
         except Exception:
             pass

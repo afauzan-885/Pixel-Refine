@@ -75,13 +75,7 @@ class ImagePreviewHandler(QObject):
                 f"Info: Total RAM: {self._total_system_ram // (1024*1024)} MB. RAM monitoring is active."
             )
 
-        self._persistent_zoom_level = 0
         self._persistent_relative_center: tuple[float, float] | None = None
-
-        self._persistent_zoom_level = 0
-        self._persistent_relative_center: tuple[float, float] | None = (
-            None  # Simpan posisi relatif
-        )
 
         if hasattr(self.preview_view, "view_state_changed"):
             self.preview_view.view_state_changed.connect(self._store_view_state)
@@ -90,60 +84,79 @@ class ImagePreviewHandler(QObject):
 
     @staticmethod
     def get_total_system_ram() -> int:
-        """Ambil total RAM sistem (bytes) tanpa psutil."""
+        """Ambil total RAM sistem (bytes) secara cepat tanpa blocking subprocess."""
+        try:
+            import psutil
+            return psutil.virtual_memory().total
+        except Exception:
+            pass
+
         try:
             if platform.system() == "Windows":
-                output = subprocess.check_output(
-                    ["wmic", "OS", "get", "TotalVisibleMemorySize", "/Value"],
-                    universal_newlines=True,
-                )
-                for line in output.splitlines():
-                    if "TotalVisibleMemorySize" in line:
-                        kb = int(line.split("=")[1].strip())
-                        return kb * 1024
+                import ctypes
+                class MEMORYSTATUSEX(ctypes.Structure):
+                    _fields_ = [
+                        ("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                    ]
+                stat = MEMORYSTATUSEX()
+                stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+                if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                    return int(stat.ullTotalPhys)
             else:
                 return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
         except Exception:
-            return 0
+            pass
+        return 0
 
     def _get_current_process_ram_bytes(self) -> int:
         """
-        Mengambil penggunaan memori saat ini (RSS) dari proses Python
-        tanpa menggunakan psutil.
+        Mengambil penggunaan memori saat ini (RSS) proses Python secara instan
+        tanpa blocking subprocess.
         """
         try:
-            # Untuk Linux & macOS, gunakan modul 'resource'
+            import psutil
+            return psutil.Process(os.getpid()).memory_info().rss
+        except Exception:
+            pass
+
+        try:
             if platform.system() != "Windows":
                 import resource
-
-                # ru_maxrss dilaporkan dalam KB di Linux, dan Bytes di macOS.
                 usage_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 if platform.system() == "Linux":
-                    return usage_kb * 1024  # Konversi KB ke Bytes
-                return usage_kb  # Sudah dalam Bytes di macOS
-
-            # Untuk Windows, gunakan 'tasklist' melalui subprocess
+                    return usage_kb * 1024
+                return usage_kb
             else:
-                pid = os.getpid()
-                # Gunakan format CSV dan tanpa header untuk parsing yang mudah
-                output = subprocess.check_output(
-                    ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                    universal_newlines=True,
-                )
-                # Output CSV: "Image Name","PID","Session Name","Session#","Mem Usage"
-                # Contoh: "python.exe","1234","Console","1","25,123 K"
-                parts = output.strip().split('","')
-                if len(parts) >= 5:
-                    # Ambil bagian memori: '25,123 K"'
-                    mem_usage_str = parts[4].replace('"', "").replace(",", "").strip()
-                    # Pisahkan angka dari unit (K)
-                    mem_val, mem_unit = mem_usage_str.split()
-                    if mem_unit.upper() == "K":
-                        return int(mem_val) * 1024
-                    else:  # Jika unitnya B atau tidak terduga, anggap sebagai byte
-                        return int(mem_val)
+                import ctypes
+                from ctypes import wintypes
+                class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                    _fields_ = [
+                        ("cb", wintypes.DWORD),
+                        ("PageFaultCount", wintypes.DWORD),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t),
+                    ]
+                counters = PROCESS_MEMORY_COUNTERS()
+                counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+                handle = ctypes.windll.kernel32.GetCurrentProcess()
+                if ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                    return int(counters.WorkingSetSize)
         except Exception:
-            return 0  # Kembalikan 0 jika ada kesalahan
+            pass
         return 0
 
     # --- Metode Publik ---

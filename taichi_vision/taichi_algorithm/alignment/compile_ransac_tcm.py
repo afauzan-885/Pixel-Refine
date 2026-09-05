@@ -35,9 +35,11 @@ def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
     # builds.  Treat both as the CPU profile; otherwise the worker can enter
     # the graphics graph path and report a misleading ndim error.
     if arch == ti.cpu or arch == getattr(ti, "x64", None):
-        # CPU consumers currently use only the flow-cleanup entry point.
-        # Avoid compiling the large homography suite here: it is unrelated to
-        # the public CPU graph and made regeneration unnecessarily fragile.
+        # CPU feature alignment uses the same Taichi RANSAC contract as the
+        # graphics backends. The old CPU artifact intentionally omitted these
+        # graphs, which forced the adapter to depend on OpenCV.
+        _register_homography_graphs(module)
+
         g_flow = ti.graph.GraphBuilder()
         # The kernels index the final x/y components explicitly
         # (``flow[iy, ix, 0]``), so the graph ABI is a scalar f32 3-D array
@@ -169,6 +171,75 @@ def compile_ransac_tcm(arch=ti.vulkan, save_path="ransac_vulkan.tcm"):
     module.archive(save_path)
     print(f"Successfully compiled RANSAC/MAGSAC++ AOT and archived to: {save_path}")
     ti.reset()
+
+
+def _register_homography_graphs(module):
+    """Register the homography leaves required by the OpenCV-free adapters."""
+    g_ransac = ti.graph.GraphBuilder()
+    rpts1_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts1", ti.f32, ndim=2)
+    rpts2_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pts2", ti.f32, ndim=2)
+    rnpts_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "n_pts", ti.i32)
+    rnhyp_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "n_hypotheses", ti.i32)
+    rrthresh_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "reproj_threshold", ti.f32
+    )
+    rHcand_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "H_candidates", ti.f32, ndim=2
+    )
+    ricnt_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "inlier_counts", ti.i32, ndim=1
+    )
+    rseed_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "seed_offset", ti.i32)
+    g_ransac.dispatch(
+        ransac_homography_kernel,
+        rpts1_arg,
+        rpts2_arg,
+        rnpts_arg,
+        rnhyp_arg,
+        rrthresh_arg,
+        rHcand_arg,
+        ricnt_arg,
+        rseed_arg,
+    )
+    module.add_graph("ransac_homography", g_ransac.compile())
+
+    g_mask = ti.graph.GraphBuilder()
+    mhbest_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "H_best", ti.f32, ndim=1
+    )
+    mnpts_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "n_pts", ti.i32)
+    mrthresh_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "reproj_threshold", ti.f32
+    )
+    mmask_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "mask_out", ti.i32, ndim=1
+    )
+    g_mask.dispatch(
+        generate_inlier_mask_kernel,
+        rpts1_arg,
+        rpts2_arg,
+        mhbest_arg,
+        mnpts_arg,
+        mrthresh_arg,
+        mmask_arg,
+    )
+    module.add_graph("generate_inlier_mask", g_mask.compile())
+
+    g_refine = ti.graph.GraphBuilder()
+    rfmask_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "mask", ti.i32, ndim=1)
+    rfATA_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ATA_out", ti.f32, ndim=2)
+    rfATb_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "ATb_out", ti.f32, ndim=1)
+    g_refine.dispatch(
+        refine_homography_kernel,
+        rpts1_arg,
+        rpts2_arg,
+        rfmask_arg,
+        mnpts_arg,
+        mrthresh_arg,
+        rfATA_arg,
+        rfATb_arg,
+    )
+    module.add_graph("refine_homography", g_refine.compile())
 
 
 def _register_fundamental_graphs(module):

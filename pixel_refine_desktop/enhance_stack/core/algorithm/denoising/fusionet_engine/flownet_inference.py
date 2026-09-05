@@ -128,8 +128,11 @@ class AOTOpticalFlowAligner:
             elif ref_noise_score >= 0.30:
                 ref_denoised = taichi_aot.box_filter(ref_rgb_f32, kernel_size=3, return_gpu=True)
                 ref_for_pyramid = ref_denoised
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(
+                "Taichi estimate_noise failed while preparing the alignment "
+                f"reference: {exc}"
+            ) from exc
 
         # Pre-compute Reference Pyramid 100% in GPU Dedicated VRAM
         try:
@@ -166,6 +169,7 @@ class AOTOpticalFlowAligner:
         secondary_frame_to_warp: Optional[Union[np.ndarray, "TaichiGPUBuffer"]] = None,
         stop_event: Optional[threading.Event] = None,
         return_gpu: bool = False,
+        stream_primary: bool = False,
     ):
         """Aligns a single support frame to the pre-loaded reference frame using pure GPU VRAM buffers.
         

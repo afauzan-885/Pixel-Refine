@@ -1,3 +1,0 @@
-cgraph:sobel_f32
-cgraph:sobel_vec3_f32
-cgraph:laplacian_f32

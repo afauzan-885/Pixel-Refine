@@ -157,6 +157,154 @@ def _is_gpu_buffer(value):
     )
 
 
+def _dense_flow_spec(
+    dense_mode, *, grid_flow, flow_out, grid_step, border_margin, overlap, max_flow_px
+):
+    """Return the graph name/arguments shared by LK and block matching."""
+    mode = str(dense_mode or "smooth").lower()
+    if mode in (
+        "blocky_clamped",
+        "clamped",
+        "cpu_like_clamped",
+        "cpu-like-clamped",
+    ):
+        return (
+            "_blocky_clamped",
+            "flow_lk_dense_blocky_clamped",
+            {
+                "grid_flow": grid_flow,
+                "flow_out": flow_out,
+                "grid_step": grid_step,
+                "border_margin": border_margin,
+                "max_flow_px": float(max_flow_px),
+            },
+        )
+    if mode in ("blocky", "nearest", "cpu_like", "cpu-like"):
+        return (
+            "_blocky",
+            "flow_lk_dense_blocky",
+            {
+                "grid_flow": grid_flow,
+                "flow_out": flow_out,
+                "grid_step": grid_step,
+                "border_margin": border_margin,
+            },
+        )
+    return (
+        "",
+        "flow_lk_dense_interpolate",
+        {
+            "grid_flow": grid_flow,
+            "flow_out": flow_out,
+            "grid_step": grid_step,
+            "border_margin": border_margin,
+            "overlap": float(overlap),
+        },
+    )
+
+
+def _run_fused_flow_level(
+    mod,
+    track_args,
+    dense_mode,
+    dense_args,
+    *,
+    zero_init=None,
+    use_fused=True,
+):
+    """Run track+dense as one AOT graph, with an explicit direct fallback."""
+    suffix, dense_name, _ = _dense_flow_spec(
+        dense_mode,
+        grid_flow=dense_args["grid_flow"],
+        flow_out=dense_args["flow_out"],
+        grid_step=dense_args["grid_step"],
+        border_margin=dense_args["border_margin"],
+        overlap=dense_args.get("overlap", 0.0),
+        max_flow_px=dense_args.get("max_flow_px", 0.0),
+    )
+    fused_name = (
+        "flow_lk_zero_track_dense" if zero_init is not None else "flow_lk_track_dense"
+    ) + suffix
+    if use_fused:
+        fused_args = dict(track_args)
+        fused_args.update(dense_args)
+        if zero_init is not None:
+            fused_args["init_flow"] = zero_init
+        try:
+            mod.run(fused_name, **fused_args)
+            return True
+        except Exception as exc:
+            # A stale TCM or a driver without graph-sequence support can still
+            # use the established dispatch sequence below.  The outer API
+            # retains its existing same-backend/full-frame error contract.
+            print(
+                f"[AOT Flow] {fused_name} unavailable; using direct dispatch: {exc}"
+            )
+
+    if zero_init is not None:
+        mod.run("flow_lk_zero", init_flow=zero_init)
+    mod.run("flow_lk_grid_track", **track_args)
+    mod.run(dense_name, **dense_args)
+    return False
+
+
+def _validated_flow_reference_pyramid(reference_pyramid, shape, required_levels):
+    """Return a caller-owned reference pyramid when its shapes are valid.
+
+    Block matching is called once per support frame in the resident pipeline,
+    so the reference pyramid can safely be reused between calls.  Keep this
+    validation local to the wrapper: an invalid or stale cache must simply
+    take the established same-backend construction path rather than reaching
+    the native ABI with mismatched shapes.
+    """
+    if reference_pyramid is None:
+        return None
+    try:
+        levels = list(reference_pyramid)
+    except (TypeError, ValueError):
+        return None
+    required = max(1, int(required_levels))
+    if len(levels) < required:
+        return None
+
+    expected_h, expected_w = int(shape[0]), int(shape[1])
+    for level in levels[:required]:
+        level_shape = getattr(level, "shape", None)
+        if level_shape is None or len(level_shape) < 2:
+            return None
+        if tuple(int(value) for value in level_shape[:2]) != (
+            expected_h,
+            expected_w,
+        ):
+            return None
+        if not hasattr(level, "handle"):
+            return None
+        expected_h //= 2
+        expected_w //= 2
+        if expected_h < 1 or expected_w < 1:
+            break
+    return levels[:required]
+
+
+def _vulkan_flow_host_accessible(function):
+    """Make Vulkan flow inputs/outputs mappable for NumPy-compatible calls."""
+    from functools import wraps
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        engine = _get_engine()
+        if str(getattr(engine, "arch", "")).lower() != "vulkan":
+            return function(*args, **kwargs)
+        previous = getattr(engine, "_force_host_accessible", None)
+        engine.set_force_host_accessible(True)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            engine.set_force_host_accessible(previous)
+
+    return wrapped
+
+
 # Import for direct graph execution (bypass AutoBatcher).  AOT compiler
 # workers only need the kernel definitions; importing the bridge here would
 # create an OpenGL context before Taichi's compiler and force a CPU fallback.
@@ -1325,6 +1473,7 @@ def calcOpticalFlowFarneback(
     poly_n=5,
     poly_sigma=1.2,
     flags=0,
+    decoupled_scale=0,
 ):
     """Compute dense optical flow using Farneback method (same as cv2.calcOpticalFlowFarneback).
 
@@ -1347,6 +1496,42 @@ def calcOpticalFlowFarneback(
     mod = _get_module("optical_flow")
     h, w = prev.shape[:2]
     prev_f = prev.astype(np.float32)
+
+    # Strategy A + C: Hybrid Pyramidal Decoupling + Coarse-Motion Early-Exit for High-Res (>= 8MP, e.g. 12MP)
+    backend_name = str(getattr(_get_engine(), 'arch', '')).lower()
+    auto_decouple = (backend_name in {'cuda', 'cpu'}) and (decoupled_scale == 2 or (decoupled_scale == 0 and (h * w >= 8_000_000)))
+    if auto_decouple and h >= 64 and w >= 64:
+        try:
+            pyramid_mod = _get_module("pyramid")
+            prev_dev = _InputArray(prev_f)
+            next_dev = _InputArray(next.astype(np.float32))
+            half_h, half_w = h // 2, w // 2
+            ref_half = _OutputArray((half_h, half_w), np.float32)
+            supp_half = _OutputArray((half_h, half_w), np.float32)
+            pyramid_mod.run("downsample_2x_f32", src=prev_dev, dst=ref_half)
+            pyramid_mod.run("downsample_2x_f32", src=next_dev, dst=supp_half)
+
+            # Early-Exit on Half-Res
+            half_levels = max(1, int(levels) - 1)
+            flow_half = calcOpticalFlowFarneback(
+                ref_half.to_numpy(),
+                supp_half.to_numpy(),
+                pyr_scale=pyr_scale,
+                levels=half_levels,
+                winsize=winsize,
+                iterations=iterations,
+                poly_n=poly_n,
+                poly_sigma=poly_sigma,
+                flags=flags,
+                decoupled_scale=1,
+            )
+            flow_half_dev = _InputArray(flow_half)
+            flow_full = _OutputArray((h, w, 2), np.float32)
+            pyramid_mod.run("upsample_flow_f32", src=flow_half_dev, dst=flow_full, scale=2.0)
+            return flow_full.to_numpy()
+        except Exception:
+            pass # fallback to native execution
+
 
     inp = _InputArray(prev_f)
 
@@ -1395,6 +1580,7 @@ def calcOpticalFlowFarneback(
     return flow_buf
 
 
+@_vulkan_flow_host_accessible
 def calcOpticalFlowPyrLK(
     prev,
     next,
@@ -1413,6 +1599,7 @@ def calcOpticalFlowPyrLK(
     motion_mode="fast",
     dense_mode="smooth",
     max_flow_px=0.0,
+    decoupled_scale=0,
     return_gpu=False,
     return_diagnostics=False,
 ):
@@ -1457,6 +1644,61 @@ def calcOpticalFlowPyrLK(
     is_next_gpu = hasattr(next, "handle")
     prev_f = prev if is_prev_gpu else prev.astype(np.float32)
     next_f = next if is_next_gpu else next.astype(np.float32)
+
+    # Strategy A + C: Hybrid Pyramidal Decoupling + Coarse-Motion Early-Exit for High-Res (>= 8MP, e.g. 12MP)
+    backend_name = str(getattr(_get_engine(), 'arch', '')).lower()
+    auto_decouple = (backend_name in {'cuda', 'cpu'}) and (decoupled_scale == 2 or (decoupled_scale == 0 and (h * w >= 8_000_000)))
+    if auto_decouple and h >= 64 and w >= 64:
+        try:
+            pyramid_mod = _get_module("pyramid")
+            prev_dev = prev_f if is_prev_gpu else _InputArray(prev_f)
+            next_dev = next_f if is_next_gpu else _InputArray(next_f)
+            half_h, half_w = h // 2, w // 2
+            ref_half = _OutputArray((half_h, half_w), np.float32)
+            supp_half = _OutputArray((half_h, half_w), np.float32)
+            pyramid_mod.run("downsample_2x_f32", src=prev_dev, dst=ref_half)
+            pyramid_mod.run("downsample_2x_f32", src=next_dev, dst=supp_half)
+
+            # Coarse-Motion Early-Exit on Half-Res
+            half_max_level = max(1, int(maxLevel) - 1)
+            flow_half = calcOpticalFlowPyrLK(
+                ref_half,
+                supp_half,
+                prevPts=prevPts,
+                nextPts=nextPts,
+                winSize=winSize,
+                maxLevel=half_max_level,
+                criteria=criteria,
+                flags=flags,
+                minEigThreshold=minEigThreshold,
+                grid_step=max(4, grid_step // 2),
+                border_margin=border_margin,
+                overlap=overlap,
+                adaptive=adaptive,
+                adaptive_threshold=adaptive_threshold,
+                motion_mode=motion_mode,
+                dense_mode=dense_mode,
+                max_flow_px=max_flow_px,
+                decoupled_scale=1,
+                return_gpu=True,
+                return_diagnostics=False,
+            )
+            flow_full = _OutputArray((h, w, 2), np.float32)
+            pyramid_mod.run("upsample_flow_f32", src=flow_half, dst=flow_full, scale=2.0)
+
+            if return_gpu:
+                if return_diagnostics:
+                    diagnostics = {"motion_mode": motion_mode, "selected_max_level": half_max_level, "decoupled": True}
+                    return flow_full, diagnostics
+                return flow_full
+            res_np = flow_full.to_numpy()
+            if return_diagnostics:
+                diagnostics = {"motion_mode": motion_mode, "selected_max_level": half_max_level, "decoupled": True}
+                return res_np, diagnostics
+            return res_np
+        except Exception:
+            pass # fallback to native execution
+
     win = winSize[0] if isinstance(winSize, tuple) else int(winSize)
     win_radius = max(2, int(win) // 2)
     if criteria is None:
@@ -1468,7 +1710,10 @@ def calcOpticalFlowPyrLK(
 
     try:
         mod = _get_module("lucas_kanade")
-        pyramid_mod = _get_module("pyramid")
+        try:
+            pyramid_mod = _get_module("pyramid")
+        except Exception:
+            pyramid_mod = None
         grid_step_i = max(4, int(grid_step))
         margin_i = max(0, int(border_margin))
         levels_i = max(1, int(maxLevel) + 1)
@@ -1510,7 +1755,6 @@ def calcOpticalFlowPyrLK(
                 lh, lw = level_shapes[level]
                 if current_flow is None:
                     init_flow = _OutputArray((lh, lw, 2), np.float32)
-                    mod.run("flow_lk_zero", init_flow=init_flow)
                 else:
                     init_flow = _OutputArray((lh, lw, 2), np.float32)
                     prev_h, _prev_w = level_shapes[level + 1]
@@ -1534,20 +1778,32 @@ def calcOpticalFlowPyrLK(
                 grid_meta = _OutputArray((grid_h, grid_w, 4), np.float32)
                 flow_out = _OutputArray((lh, lw, 2), np.float32)
 
-                mod.run(
-                    "flow_lk_grid_track",
-                    prev=prev_levels[level],
-                    next=next_levels[level],
-                    init_flow=init_flow,
+                track_args = {
+                    "prev": prev_levels[level],
+                    "next": next_levels[level],
+                    "init_flow": init_flow,
+                    "grid_flow": grid_flow,
+                    "grid_meta": grid_meta,
+                    "grid_step": level_grid_step,
+                    "border_margin": level_margin,
+                    "win_radius": win_radius,
+                    "iterations": max(1, int(iterations)),
+                    "epsilon": float(epsilon),
+                }
+                _dense_suffix, dense_name, dense_args = _dense_flow_spec(
+                    dense_mode_value,
                     grid_flow=grid_flow,
-                    grid_meta=grid_meta,
+                    flow_out=flow_out,
                     grid_step=level_grid_step,
                     border_margin=level_margin,
-                    win_radius=win_radius,
-                    iterations=max(1, int(iterations)),
-                    epsilon=float(epsilon),
+                    overlap=overlap,
+                    max_flow_px=max_flow_px,
                 )
-                if adaptive and level == 0:
+                adaptive_level = adaptive and level == 0
+                if adaptive_level:
+                    if current_flow is None:
+                        mod.run("flow_lk_zero", init_flow=init_flow)
+                    mod.run("flow_lk_grid_track", **track_args)
                     mod.run(
                         "flow_lk_adaptive_refine",
                         prev=prev_levels[level],
@@ -1560,6 +1816,15 @@ def calcOpticalFlowPyrLK(
                         iterations=max(1, int(iterations) + 2),
                         epsilon=float(epsilon),
                         class_threshold=max(1, int(adaptive_threshold)),
+                    )
+                    mod.run(dense_name, **dense_args)
+                else:
+                    _run_fused_flow_level(
+                        mod,
+                        track_args,
+                        dense_mode_value,
+                        dense_args,
+                        zero_init=init_flow if current_flow is None else None,
                     )
                 if mode == "auto" and level == 0:
                     stats = _OutputArray((8,), np.float32)
@@ -1591,37 +1856,6 @@ def calcOpticalFlowPyrLK(
                         high_ratio > 0.18
                         or (high_ratio + med_ratio) > 0.55
                         or avg_motion > float(grid_step_i) * 0.42
-                    )
-                if dense_mode_value in (
-                    "blocky_clamped",
-                    "clamped",
-                    "cpu_like_clamped",
-                    "cpu-like-clamped",
-                ):
-                    mod.run(
-                        "flow_lk_dense_blocky_clamped",
-                        grid_flow=grid_flow,
-                        flow_out=flow_out,
-                        grid_step=level_grid_step,
-                        border_margin=level_margin,
-                        max_flow_px=float(max_flow_px),
-                    )
-                elif dense_mode_value in ("blocky", "nearest", "cpu_like", "cpu-like"):
-                    mod.run(
-                        "flow_lk_dense_blocky",
-                        grid_flow=grid_flow,
-                        flow_out=flow_out,
-                        grid_step=level_grid_step,
-                        border_margin=level_margin,
-                    )
-                else:
-                    mod.run(
-                        "flow_lk_dense_interpolate",
-                        grid_flow=grid_flow,
-                        flow_out=flow_out,
-                        grid_step=level_grid_step,
-                        border_margin=level_margin,
-                        overlap=float(overlap),
                     )
                 current_flow = flow_out
 
@@ -1715,6 +1949,7 @@ def calcOpticalFlowPyrLK(
 # ══════════════════════════════════════════════════════════════════════════
 
 
+@_vulkan_flow_host_accessible
 def calcOpticalFlowPyrLKGrid(
     prev,
     next,
@@ -1725,11 +1960,57 @@ def calcOpticalFlowPyrLKGrid(
     border_margin=8,
     motion_mode="fast",
     return_diagnostics=False,
+    decoupled_scale=0,
 ):
     """Return compact LK grid flow instead of dense per-pixel flow."""
     h, w = prev.shape[:2]
     prev_f = prev.astype(np.float32)
     next_f = next.astype(np.float32)
+
+    # Strategy A + C: Hybrid Decoupling for High-Res
+    backend_name = str(getattr(_get_engine(), 'arch', '')).lower()
+    auto_decouple = (backend_name in {'cuda', 'cpu'}) and (decoupled_scale == 2 or (decoupled_scale == 0 and (h * w >= 8_000_000)))
+    if auto_decouple and h >= 64 and w >= 64:
+        try:
+            pyramid_mod = _get_module("pyramid")
+            prev_dev = _InputArray(prev_f)
+            next_dev = _InputArray(next_f)
+            half_h, half_w = h // 2, w // 2
+            ref_half = _OutputArray((half_h, half_w), np.float32)
+            supp_half = _OutputArray((half_h, half_w), np.float32)
+            pyramid_mod.run("downsample_2x_f32", src=prev_dev, dst=ref_half)
+            pyramid_mod.run("downsample_2x_f32", src=next_dev, dst=supp_half)
+
+            half_max_level = max(1, int(maxLevel) - 1)
+            half_grid_step = max(4, grid_step // 2)
+            res_half = calcOpticalFlowPyrLKGrid(
+                ref_half.to_numpy(),
+                supp_half.to_numpy(),
+                winSize=winSize,
+                maxLevel=half_max_level,
+                criteria=criteria,
+                grid_step=half_grid_step,
+                border_margin=border_margin // 2,
+                motion_mode=motion_mode,
+                decoupled_scale=1,
+                return_diagnostics=return_diagnostics,
+            )
+            if return_diagnostics:
+                res_half_dict, diag = res_half
+            else:
+                res_half_dict = res_half
+            diag = {"motion_mode": motion_mode, "selected_max_level": half_max_level, "decoupled": True}
+
+            # Scale flow vectors by 2.0x
+            res_half_dict["grid_flow"][..., 0:2] *= 2.0
+            res_half_dict["height"] = h
+            res_half_dict["width"] = w
+            res_half_dict["grid_step"] = grid_step
+            res_half_dict["border_margin"] = border_margin
+            return (res_half_dict, diag) if return_diagnostics else res_half_dict
+        except Exception:
+            pass # fallback to native execution
+
     win = winSize[0] if isinstance(winSize, tuple) else int(winSize)
     win_radius = max(2, int(win) // 2)
     if criteria is None:
@@ -1774,7 +2055,6 @@ def calcOpticalFlowPyrLKGrid(
             lh, lw = level_shapes[level]
             if current_flow is None:
                 init_flow = _OutputArray((lh, lw, 2), np.float32)
-                mod.run("flow_lk_zero", init_flow=init_flow)
             else:
                 init_flow = _OutputArray((lh, lw, 2), np.float32)
                 prev_h, _prev_w = level_shapes[level + 1]
@@ -1795,18 +2075,33 @@ def calcOpticalFlowPyrLKGrid(
             grid_meta = _OutputArray((grid_h, grid_w, 4), np.float32)
             coarse_flow = _OutputArray((lh, lw, 2), np.float32)
 
-            mod.run(
-                "flow_lk_grid_track",
-                prev=prev_levels[level],
-                next=next_levels[level],
-                init_flow=init_flow,
+            track_args = {
+                "prev": prev_levels[level],
+                "next": next_levels[level],
+                "init_flow": init_flow,
+                "grid_flow": grid_flow,
+                "grid_meta": grid_meta,
+                "grid_step": level_grid_step,
+                "border_margin": level_margin,
+                "win_radius": win_radius,
+                "iterations": max(1, int(iterations)),
+                "epsilon": float(epsilon),
+            }
+            _, _, dense_args = _dense_flow_spec(
+                "blocky",
                 grid_flow=grid_flow,
-                grid_meta=grid_meta,
+                flow_out=coarse_flow,
                 grid_step=level_grid_step,
                 border_margin=level_margin,
-                win_radius=win_radius,
-                iterations=max(1, int(iterations)),
-                epsilon=float(epsilon),
+                overlap=0.0,
+                max_flow_px=0.0,
+            )
+            _run_fused_flow_level(
+                mod,
+                track_args,
+                "blocky",
+                dense_args,
+                zero_init=init_flow if current_flow is None else None,
             )
 
             if level == 0:
@@ -1836,13 +2131,6 @@ def calcOpticalFlowPyrLKGrid(
                         "selected_max_level": int(maxLevel),
                     }
 
-            mod.run(
-                "flow_lk_dense_blocky",
-                grid_flow=grid_flow,
-                flow_out=coarse_flow,
-                grid_step=level_grid_step,
-                border_margin=level_margin,
-            )
             current_flow = coarse_flow
 
         grid_np = final_grid.to_numpy()
@@ -1864,6 +2152,7 @@ def calcOpticalFlowPyrLKGrid(
     return result
 
 
+@_vulkan_flow_host_accessible
 def calcOpticalFlowBlockMatching(
     prev,
     next,
@@ -1882,8 +2171,10 @@ def calcOpticalFlowBlockMatching(
     motion_mode="fast",
     dense_mode="smooth",
     max_flow_px=0.0,
+    decoupled_scale=0,
     return_gpu=False,
     return_diagnostics=False,
+    reference_pyramid=None,
 ):
     """Dense block matching with parabolic fit sub-pixel estimation."""
     _prepare_opengl_flow_family("block_matching")
@@ -1919,6 +2210,148 @@ def calcOpticalFlowBlockMatching(
     is_next_gpu = hasattr(next, "handle")
     prev_f = prev if is_prev_gpu else prev.astype(np.float32)
     next_f = next if is_next_gpu else next.astype(np.float32)
+
+    # Strategy A + C: Hybrid pyramidal decoupling + coarse-motion early exit
+    # for high-resolution inputs.  Scale 2 remains the established default;
+    # scale 4 is intentionally opt-in until its motion/parity gate is passed.
+    backend_name = str(getattr(_get_engine(), "arch", "")).lower()
+    requested_decouple = int(decoupled_scale or 0)
+    if requested_decouple in (2, 4):
+        decouple_factor = requested_decouple
+    elif requested_decouple == 0 and h * w >= 8_000_000:
+        decouple_factor = 2
+    else:
+        decouple_factor = 0
+    decouple_levels = {2: 1, 4: 2}.get(decouple_factor, 0)
+    auto_decouple = (
+        backend_name in {"cuda", "cpu"}
+        and decouple_levels > 0
+        and h >= 64
+        and w >= 64
+    )
+    if auto_decouple:
+        try:
+            pyramid_mod = _get_module("pyramid")
+            prev_dev = prev_f if is_prev_gpu else _InputArray(prev_f)
+            next_dev = next_f if is_next_gpu else _InputArray(next_f)
+            recursive_max_level = max(1, int(maxLevel) - decouple_levels)
+            cached_levels = _validated_flow_reference_pyramid(
+                reference_pyramid,
+                (h, w),
+                # Include the coarse base plus the recursive descendants;
+                # the extra level is what lets the recursive call receive a
+                # complete cached pyramid instead of rebuilding its first
+                # reference descendant for every support frame.
+                decouple_levels + recursive_max_level + 1,
+            )
+
+            # The invariant reference levels are supplied by the resident
+            # aligner cache when available.  Otherwise create only the levels
+            # needed by this call and release them on every exit path.
+            ref_owned = []
+            supp_owned = []
+            if cached_levels is not None:
+                ref_coarse = cached_levels[decouple_levels]
+            else:
+                ref_coarse = prev_dev
+                for level in range(decouple_levels):
+                    coarse_h = max(1, h >> (level + 1))
+                    coarse_w = max(1, w >> (level + 1))
+                    ref_next = _OutputArray((coarse_h, coarse_w), np.float32)
+                    pyramid_mod.run(
+                        "downsample_2x_f32", src=ref_coarse, dst=ref_next
+                    )
+                    ref_owned.append(ref_next)
+                    ref_coarse = ref_next
+
+            supp_coarse = next_dev
+            for level in range(decouple_levels):
+                coarse_h = max(1, h >> (level + 1))
+                coarse_w = max(1, w >> (level + 1))
+                supp_next = _OutputArray((coarse_h, coarse_w), np.float32)
+                pyramid_mod.run(
+                    "downsample_2x_f32", src=supp_coarse, dst=supp_next
+                )
+                supp_owned.append(supp_next)
+                supp_coarse = supp_next
+
+            # Preserve the scale-2 contract and apply the same physical grid
+            # spacing at the coarser domain for scale 4.
+            flow_coarse = None
+            flow_full = None
+            try:
+                flow_coarse = calcOpticalFlowBlockMatching(
+                    ref_coarse,
+                    supp_coarse,
+                    prevPts=prevPts,
+                    nextPts=nextPts,
+                    winSize=winSize,
+                    maxLevel=recursive_max_level,
+                    criteria=criteria,
+                    flags=flags,
+                    minEigThreshold=minEigThreshold,
+                    grid_step=max(4, int(grid_step) >> decouple_levels),
+                    border_margin=border_margin,
+                    overlap=overlap,
+                    adaptive=adaptive,
+                    adaptive_threshold=adaptive_threshold,
+                    motion_mode=motion_mode,
+                    dense_mode=dense_mode,
+                    max_flow_px=max_flow_px,
+                    decoupled_scale=1,
+                    return_gpu=True,
+                    return_diagnostics=False,
+                    reference_pyramid=(
+                        cached_levels[decouple_levels:]
+                        if cached_levels is not None
+                        else None
+                    ),
+                )
+                flow_full = _OutputArray((h, w, 2), np.float32)
+                pyramid_mod.run(
+                    "upsample_flow_f32",
+                    src=flow_coarse,
+                    dst=flow_full,
+                    scale=float(decouple_factor),
+                )
+
+                diagnostics = {
+                    "motion_mode": motion_mode,
+                    "selected_max_level": recursive_max_level,
+                    "decoupled": True,
+                    "decoupled_scale": decouple_factor,
+                }
+                if return_gpu:
+                    result = flow_full
+                    flow_full = None
+                    if return_diagnostics:
+                        return result, diagnostics
+                    return result
+                result = flow_full.to_numpy()
+                if return_diagnostics:
+                    return result, diagnostics
+                return result
+            finally:
+                if flow_full is not None:
+                    flow_full.destroy()
+                if flow_coarse is not None:
+                    flow_coarse.destroy()
+        except Exception:
+            # The established native same-backend path below remains the
+            # recovery route for an unavailable optional decoupled graph.
+            pass
+        finally:
+            for buffer in locals().get("supp_owned", ()):
+                try:
+                    buffer.destroy()
+                except Exception:
+                    pass
+            for buffer in locals().get("ref_owned", ()):
+                try:
+                    buffer.destroy()
+                except Exception:
+                    pass
+
     win = winSize[0] if isinstance(winSize, tuple) else int(winSize)
     win_radius = max(2, int(win) // 2)
     if criteria is None:
@@ -1928,7 +2361,10 @@ def calcOpticalFlowBlockMatching(
 
     try:
         mod = _get_module("block_matching")
-        pyramid_mod = _get_module("pyramid")
+        try:
+            pyramid_mod = _get_module("pyramid")
+        except Exception:
+            pyramid_mod = None
         grid_step_i = max(4, int(grid_step))
         margin_i = max(0, int(border_margin))
         levels_i = max(1, int(maxLevel) + 1)
@@ -1938,31 +2374,50 @@ def calcOpticalFlowBlockMatching(
 
         engine = _get_engine()
         with engine._lock:
-            prev_levels = [_InputArray(prev_f)]
+            cached_levels = _validated_flow_reference_pyramid(
+                reference_pyramid,
+                (h, w),
+                max(1, int(maxLevel) + 1),
+            )
+            if cached_levels is not None:
+                prev_levels = [_InputArray(level) for level in cached_levels]
+                level_shapes = [
+                    (int(level.shape[0]), int(level.shape[1]))
+                    for level in cached_levels
+                ]
+            else:
+                prev_levels = [_InputArray(prev_f)]
+                level_shapes = [(h, w)]
             next_levels = [_InputArray(next_f)]
-            level_shapes = [(h, w)]
 
-            for _level in range(1, levels_i):
-                src_h, src_w = level_shapes[-1]
+            # A cached reference pyramid may already contain all requested
+            # levels.  The support frame still needs a matching pyramid; the
+            # previous loop used the reference length as its start index and
+            # therefore left ``next_levels`` at level 0, causing an
+            # IndexError when the cached path was exercised.
+            target_levels = max(len(level_shapes), levels_i)
+            for _level in range(1, target_levels):
+                src_h, src_w = next_levels[-1].shape[:2]
                 dst_h = src_h // 2
                 dst_w = src_w // 2
                 if dst_h < 32 or dst_w < 32:
                     break
-                prev_dst = _OutputArray((dst_h, dst_w), np.float32)
                 next_dst = _OutputArray((dst_h, dst_w), np.float32)
-                pyramid_mod.run(
-                    "downsample_2x_f32",
-                    src=prev_levels[-1],
-                    dst=prev_dst,
-                )
                 pyramid_mod.run(
                     "downsample_2x_f32",
                     src=next_levels[-1],
                     dst=next_dst,
                 )
-                prev_levels.append(prev_dst)
                 next_levels.append(next_dst)
-                level_shapes.append((dst_h, dst_w))
+                if len(prev_levels) < target_levels:
+                    prev_dst = _OutputArray((dst_h, dst_w), np.float32)
+                    pyramid_mod.run(
+                        "downsample_2x_f32",
+                        src=prev_levels[-1],
+                        dst=prev_dst,
+                    )
+                    prev_levels.append(prev_dst)
+                    level_shapes.append((dst_h, dst_w))
 
             coarse_grid_flow = None
             current_flow = None
@@ -1983,37 +2438,28 @@ def calcOpticalFlowBlockMatching(
 
                 if coarse_grid_flow is None:
                     dummy_prev = _OutputArray((1, 1, 3), np.float32)
-                    mod.run(
-                        "flow_lk_grid_track",
-                        prev=prev_levels[level],
-                        next=next_levels[level],
-                        prev_grid_flow=dummy_prev,
-                        grid_flow=grid_flow,
-                        grid_meta=grid_meta,
-                        grid_step=level_grid_step,
-                        border_margin=level_margin,
-                        win_radius=win_radius,
-                        has_prev_flow=0,
-                        epsilon=float(epsilon),
-                    )
+                    prev_grid_flow = dummy_prev
+                    has_prev_flow = 0
                 else:
-                    mod.run(
-                        "flow_lk_grid_track",
-                        prev=prev_levels[level],
-                        next=next_levels[level],
-                        prev_grid_flow=coarse_grid_flow,
-                        grid_flow=grid_flow,
-                        grid_meta=grid_meta,
-                        grid_step=level_grid_step,
-                        border_margin=level_margin,
-                        win_radius=win_radius,
-                        has_prev_flow=1,
-                        epsilon=float(epsilon),
-                    )
+                    prev_grid_flow = coarse_grid_flow
+                    has_prev_flow = 1
+                track_args = {
+                    "prev": prev_levels[level],
+                    "next": next_levels[level],
+                    "prev_grid_flow": prev_grid_flow,
+                    "grid_flow": grid_flow,
+                    "grid_meta": grid_meta,
+                    "grid_step": level_grid_step,
+                    "border_margin": level_margin,
+                    "win_radius": win_radius,
+                    "has_prev_flow": has_prev_flow,
+                    "epsilon": float(epsilon),
+                }
 
                 coarse_grid_flow = grid_flow
 
                 if adaptive and level == 0:
+                    mod.run("flow_lk_grid_track", **track_args)
                     mod.run(
                         "flow_lk_adaptive_refine",
                         prev=prev_levels[level],
@@ -2027,39 +2473,36 @@ def calcOpticalFlowBlockMatching(
                         epsilon=float(epsilon),
                         class_threshold=max(1, int(adaptive_threshold)),
                     )
+                    _dense_suffix, dense_name, dense_args = _dense_flow_spec(
+                        dense_mode_value,
+                        grid_flow=grid_flow,
+                        flow_out=flow_out,
+                        grid_step=level_grid_step,
+                        border_margin=level_margin,
+                        overlap=overlap,
+                        max_flow_px=max_flow_px,
+                    )
+                    mod.run(dense_name, **dense_args)
                 if level == 0:
-                    if dense_mode_value in (
-                        "blocky_clamped",
-                        "clamped",
-                        "cpu_like_clamped",
-                        "cpu-like-clamped",
-                    ):
-                        mod.run(
-                            "flow_lk_dense_blocky_clamped",
+                    if not (adaptive and level == 0):
+                        _dense_suffix, dense_name, dense_args = _dense_flow_spec(
+                            dense_mode_value,
                             grid_flow=grid_flow,
                             flow_out=flow_out,
                             grid_step=level_grid_step,
                             border_margin=level_margin,
-                            max_flow_px=float(max_flow_px),
+                            overlap=overlap,
+                            max_flow_px=max_flow_px,
                         )
-                    elif dense_mode_value in ("blocky", "nearest", "cpu_like", "cpu-like"):
-                        mod.run(
-                            "flow_lk_dense_blocky",
-                            grid_flow=grid_flow,
-                            flow_out=flow_out,
-                            grid_step=level_grid_step,
-                            border_margin=level_margin,
-                        )
-                    else:
-                        mod.run(
-                            "flow_lk_dense_interpolate",
-                            grid_flow=grid_flow,
-                            flow_out=flow_out,
-                            grid_step=level_grid_step,
-                            border_margin=level_margin,
-                            overlap=float(overlap),
+                        _run_fused_flow_level(
+                            mod,
+                            track_args,
+                            dense_mode_value,
+                            dense_args,
                         )
                     current_flow = flow_out
+                elif not (adaptive and level == 0):
+                    mod.run("flow_lk_grid_track", **track_args)
 
         if return_gpu:
             if return_diagnostics:

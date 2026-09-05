@@ -77,6 +77,8 @@ class GridManager:
     def populate_grid_incremental(self, visual_images: List[Any]):
         """
         Start incremental population of grid with images.
+        Mounts the first chunk immediately for instant UI feedback (<2ms),
+        then loads the remaining cards via a fast 16ms timer.
 
         Args:
             visual_images: List of image objects to populate
@@ -93,8 +95,12 @@ class GridManager:
             "display_populate", self._populate_timer
         )
 
-        # 15 gambar per 30ms (Smooth & Fast)
-        self._populate_timer.start(30)
+        # Immediate first chunk for instant UI switch (< 2ms for viewport)
+        self._process_incremental_population()
+
+        # If there are remaining cards beyond the initial chunk, stream them at 16ms (60fps)
+        if self._populate_queue:
+            self._populate_timer.start(16)
 
     def _process_incremental_population(self):
         """Tambah gambar ke grid dalam chunk untuk menghindari UI freeze."""
@@ -110,7 +116,7 @@ class GridManager:
                 self.staged_load_timer.start()
             return
 
-        CHUNK_SIZE = 15
+        CHUNK_SIZE = 25
         for _ in range(CHUNK_SIZE):
             if not self._populate_queue:
                 break
