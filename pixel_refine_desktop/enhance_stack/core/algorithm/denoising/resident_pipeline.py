@@ -1572,6 +1572,9 @@ def _gpu_blend_frame(
     *,
     splat_tile_size: Optional[int] = None,
     uniform_weights: bool = False,
+    block_accumulation: bool = False,
+    finalize: bool = False,
+    uniform_denominator: Optional[float] = None,
 ):
     """Blend one support frame into the GPU-resident accumulator.
 
@@ -1580,7 +1583,8 @@ def _gpu_blend_frame(
     the global sums without materializing an aligned tile.  The full-frame
     path retains the established accumulation graphs for compatibility.
 
-    entirely on GPU on-the-fly — saving 144 MB VRAM per frame.
+    Final block accumulation can normalize in place, removing a separate
+    full-resolution dispatch while preserving the established frame order.
     """
     from taichi_vision.taichi_algorithm.spatial_fusion import (
         accumulate_spatial_merging_taichi,
@@ -1588,25 +1592,73 @@ def _gpu_blend_frame(
 
     if isinstance(supp_aligned_gpu, ResidentWarpedFrame):
         from taichi_vision.taichi_algorithm.spatial_fusion import (
+            remap_accumulate_average_sum_tile_taichi,
             remap_accumulate_tile_taichi,
         )
 
-        tile_size = max(32, int(splat_tile_size or 1024))
+        tile_size = max(32, int(splat_tile_size))
         for y0 in range(0, supp_aligned_gpu.full_h, tile_size):
             for x0 in range(0, supp_aligned_gpu.full_w, tile_size):
                 tile_h = min(tile_size, supp_aligned_gpu.full_h - y0)
                 tile_w = min(tile_size, supp_aligned_gpu.full_w - x0)
-                remap_accumulate_tile_taichi(
-                    source_full=supp_aligned_gpu.source_gpu,
-                    flow_work=supp_aligned_gpu.flow_gpu,
-                    final_image_sum=sum_img_gpu,
-                    weight_map_sum_full=weight_sum_gpu,
-                    full_shape=(supp_aligned_gpu.full_h, supp_aligned_gpu.full_w),
-                    offset=(y0, x0),
-                    tile_shape=(tile_h, tile_w),
-                    weight_map_work=None if uniform_weights else weight_work_gpu,
+                if uniform_weights and block_accumulation:
+                    remap_accumulate_average_sum_tile_taichi(
+                        source_full=supp_aligned_gpu.source_gpu,
+                        flow_work=supp_aligned_gpu.flow_gpu,
+                        final_image_sum=sum_img_gpu,
+                        full_shape=(supp_aligned_gpu.full_h, supp_aligned_gpu.full_w),
+                        offset=(y0, x0),
+                        tile_shape=(tile_h, tile_w),
+                        finalize=finalize,
+                        denominator=uniform_denominator,
+                    )
+                else:
+                    remap_accumulate_tile_taichi(
+                        source_full=supp_aligned_gpu.source_gpu,
+                        flow_work=supp_aligned_gpu.flow_gpu,
+                        final_image_sum=sum_img_gpu,
+                        weight_map_sum_full=weight_sum_gpu,
+                        full_shape=(supp_aligned_gpu.full_h, supp_aligned_gpu.full_w),
+                        offset=(y0, x0),
+                        tile_shape=(tile_h, tile_w),
+                        weight_map_work=None if uniform_weights else weight_work_gpu,
+                    )
+        return bool(finalize and uniform_weights and block_accumulation)
+
+    if block_accumulation:
+        from taichi_vision.taichi_algorithm.spatial_fusion import (
+            accumulate_average_sum_region_taichi,
+            accumulate_spatial_merging_region_taichi,
+        )
+
+        tile_size = max(32, int(splat_tile_size))
+        full_h, full_w = (int(sum_img_gpu.shape[0]), int(sum_img_gpu.shape[1]))
+        for y0 in range(0, full_h, tile_size):
+            for x0 in range(0, full_w, tile_size):
+                tile_shape = (
+                    min(tile_size, full_h - y0),
+                    min(tile_size, full_w - x0),
                 )
-        return
+                if uniform_weights:
+                    accumulate_average_sum_region_taichi(
+                        current_image_full=supp_aligned_gpu,
+                        final_image_sum=sum_img_gpu,
+                        offset=(y0, x0),
+                        tile_shape=tile_shape,
+                        finalize=finalize,
+                        denominator=uniform_denominator,
+                    )
+                else:
+                    accumulate_spatial_merging_region_taichi(
+                        current_image_full=supp_aligned_gpu,
+                        weight_map_work=weight_work_gpu,
+                        final_image_sum=sum_img_gpu,
+                        weight_map_sum_full=weight_sum_gpu,
+                        offset=(y0, x0),
+                        tile_shape=tile_shape,
+                        finalize=finalize,
+                    )
+        return bool(finalize)
 
     if uniform_weights:
         from taichi_vision.taichi_algorithm.spatial_fusion import (
@@ -1625,6 +1677,106 @@ def _gpu_blend_frame(
             final_image_sum=sum_img_gpu.view_as_vector(False),
             weight_map_sum_full=weight_sum_gpu.view_as_vector(False),
         )
+    return False
+
+
+def _resolve_resident_accumulation_plan(
+    engine,
+    *,
+    mode,
+    weight_engine,
+    shape,
+    requested_tile_size,
+    performance_block_size=None,
+    performance_threshold_mp=None,
+):
+    """Resolve block accumulation against engine policy and TCM capability."""
+    from taichi_vision.taichi_algorithm.aot_api import aot_graph_available
+
+    clean_mode = str(mode or "auto").strip().casefold().replace("-", "_")
+    if clean_mode in {"full", "full_frame", "off", "disabled", "none"}:
+        return {"enabled": False, "reason": "full-frame mode requested"}
+
+    block_config = engine.get_block_config()
+    memory = engine.get_memory_status(force=True)
+    configured_size = block_config.normalized_size()
+    if isinstance(configured_size, (tuple, list)):
+        configured_size = max(int(configured_size[0]), int(configured_size[1]))
+    recommended = int(memory.get("recommended_block_size", 0) or 0)
+    if performance_block_size is not None:
+        selected_size = performance_block_size
+    elif block_config.enabled:
+        selected_size = configured_size
+    elif clean_mode == "auto" and recommended:
+        selected_size = recommended
+    else:
+        selected_size = requested_tile_size or recommended or configured_size
+    tile_size = max(32, int(selected_size))
+
+    force_block = clean_mode in {"block", "tile", "tiled", "force"}
+    backend = str(getattr(engine, "arch", "")).strip().casefold()
+    # Current measured speed qualification is deliberately narrow.  Average
+    # removes an entire RGB weight accumulator, while weighted engines retain
+    # their scalar/vec3 sums and therefore do not yet offset region-dispatch
+    # overhead under healthy memory conditions.
+    performance_qualified = (
+        backend in {"cpu", "cuda"} and weight_engine == "average"
+    )
+    pixel_count = int(shape[0]) * int(shape[1])
+    if performance_threshold_mp is not None:
+        threshold_pixels = int(max(0.1, float(performance_threshold_mp)) * 1_000_000)
+    else:
+        threshold_pixels = int(
+            os.environ.get("PIXEL_REFINE_RESIDENT_BLOCK_PIXELS", "4000000")
+        )
+    large_frame = pixel_count >= threshold_pixels
+    memory_pressure = str(memory.get("pressure", "healthy")).lower()
+    automatic = bool(
+        force_block
+        or memory_pressure != "healthy"
+        or (performance_qualified and (block_config.enabled or large_frame))
+    )
+    if not automatic:
+        reason = (
+            f"block speed is not qualified on {backend or 'this backend'}"
+            if large_frame
+            else "frame is below the block threshold"
+        )
+        return {"enabled": False, "reason": reason}
+
+    if weight_engine == "average":
+        required = (
+            "accumulate_average_sum_region",
+            "remap_accumulate_average_sum_tile",
+            "normalize_accumulator_uniform_region",
+        )
+    elif weight_engine == "spatial_fusion":
+        required = (
+            "accumulate_spatial_merging_region",
+            "normalize_accumulator_scalar_region",
+        )
+    else:
+        required = (
+            "accumulate_spatial_merging_vec3_region",
+            "normalize_accumulator_vec3_region",
+        )
+    missing = tuple(
+        graph
+        for graph in required
+        if not aot_graph_available("spatial_fusion", graph)
+    )
+    if missing:
+        return {
+            "enabled": False,
+            "reason": "target TCM lacks block graph(s): " + ", ".join(missing),
+        }
+    return {
+        "enabled": True,
+        "tile_size": tile_size,
+        "required_graphs": required,
+        "memory_pressure": memory_pressure,
+        "performance_qualified": performance_qualified,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1648,11 +1800,13 @@ def run_gpu_resident_pipeline(
     chroma_sensitivity: float = 6.0,
     is_raw: bool = False,
     storage_mode: str = "direct",
+    accumulation_mode: str = "auto",
     alignment_only: bool = False,
     batch_queue: int = 3,
     auto_params: Optional[dict] = None,
     stop_event: Optional[threading.Event] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    accumulation_block_size: Optional[int] = None,
 ) -> Tuple[Optional[np.ndarray], float]:
     """Execute the full GPU-resident FusionNet / SpatialFusion / Streaming Burst pipeline.
 
@@ -1677,6 +1831,7 @@ def run_gpu_resident_pipeline(
         chroma_sensitivity: Color deviation protection scale.
         is_raw: Whether images are RAW/DNG.
         storage_mode: "direct" (RAM/VRAM stream).
+        accumulation_mode: "auto", "block", or "full" accumulation policy.
         alignment_only: If True, executes pure alignment without blending.
         auto_params: Pre-computed auto_enhance params (analyzed on first frame if None).
         stop_event: Cancellation signal.
@@ -1697,6 +1852,21 @@ def run_gpu_resident_pipeline(
     )
 
     engine = get_engine()
+    try:
+        from config import get_compute_block_settings
+
+        performance_block_settings = get_compute_block_settings()
+    except Exception:
+        # Headless/legacy callers still retain the runtime defaults below.
+        performance_block_settings = {}
+    if accumulation_block_size is not None:
+        performance_block_settings = dict(performance_block_settings)
+        performance_block_settings["block_size"] = int(accumulation_block_size)
+    requested_accumulation_mode = str(accumulation_mode or "auto").strip().casefold()
+    if requested_accumulation_mode in {"auto", "automatic"}:
+        configured_mode = performance_block_settings.get("mode")
+        if configured_mode:
+            accumulation_mode = configured_mode
     num_images = len(image_paths)
     if num_images < 2:
         raise ValueError(f"Need at least 2 images, got {num_images}")
@@ -2072,7 +2242,7 @@ def run_gpu_resident_pipeline(
     # by assumption.  If the fused remap/accumulation graph is missing from
     # the active target artifact, the aligner keeps the established
     # same-backend full-frame route.
-    splat_tile_size = 1024
+    splat_tile_size = None
     stream_root_cfg = alignment_config if isinstance(alignment_config, dict) else {}
     stream_cfg = stream_root_cfg
     try:
@@ -2087,13 +2257,20 @@ def run_gpu_resident_pipeline(
                     "splat_tile_size",
                     stream_root_cfg.get(
                         "splat_tile_size",
-                        os.environ.get("PIXEL_REFINE_RESIDENT_SPLAT_TILE_SIZE", "1024"),
+                        os.environ.get("PIXEL_REFINE_RESIDENT_SPLAT_TILE_SIZE", ""),
                     ),
                 )
             ),
         )
     except (TypeError, ValueError):
-        splat_tile_size = 1024
+        splat_tile_size = None
+    if splat_tile_size is None:
+        configured_size = performance_block_settings.get("block_size")
+        if configured_size is None:
+            configured_size = max(
+                int(value) for value in engine.get_block_config().normalized_size()
+            )
+        splat_tile_size = max(32, int(configured_size))
 
     stream_primary = False
     if isinstance(aligner, BlockMatchingGPUResidentAligner):
@@ -2130,7 +2307,7 @@ def run_gpu_resident_pipeline(
             stream_primary = bool(
                 stream_requested
                 and int(target_h) * int(target_w) >= 4_000_000
-                and aot_graph_available("spatial", fused_splat_graph)
+                and aot_graph_available("spatial_fusion", fused_splat_graph)
             )
         except Exception as exc:
             pass
@@ -2141,6 +2318,29 @@ def run_gpu_resident_pipeline(
     elif isinstance(aligner, BlockMatchingGPUResidentAligner):
         pass
 
+    accumulation_plan = _resolve_resident_accumulation_plan(
+        engine,
+        mode=accumulation_mode,
+        weight_engine=weight_engine,
+        shape=(target_h, target_w),
+        requested_tile_size=splat_tile_size,
+        performance_block_size=performance_block_settings.get("block_size"),
+        performance_threshold_mp=performance_block_settings.get("threshold_mp"),
+    )
+    block_accumulation = bool(accumulation_plan.get("enabled"))
+    if block_accumulation:
+        splat_tile_size = int(accumulation_plan["tile_size"])
+        print(
+            f"[GPU Pipeline] Block accumulation active: tile={splat_tile_size} "
+            f"source=Performance Settings "
+            f"pressure={accumulation_plan.get('memory_pressure', 'healthy')}"
+        )
+    else:
+        print(
+            "[GPU Pipeline] Full-frame accumulation retained: "
+            f"{accumulation_plan.get('reason', 'block path unavailable')}"
+        )
+
     if ref_analysis_gpu is not ref_gpu:
         ref_analysis_gpu.destroy()
 
@@ -2149,14 +2349,19 @@ def run_gpu_resident_pipeline(
     # ------------------------------------------------------------------
     # Directly use ref_gpu as sum_img_gpu accumulator to save 144MB VRAM
     sum_img_gpu = ref_gpu
-    if weight_engine == "spatial_fusion":
+    if use_uniform_weight_accumulation := weight_engine == "average":
+        # Uniform averaging only needs the scalar number of accepted frames.
+        # The block path therefore avoids a full RGB all-ones weight buffer.
+        weight_sum_gpu = None if block_accumulation else engine.upload(
+            np.ones((target_h, target_w, 3), dtype=np.float32)
+        )
+    elif weight_engine == "spatial_fusion":
         weight_sum_gpu = engine.upload(np.ones((target_h, target_w), dtype=np.float32))
     else:
         # FusionNet/WeightNet outputs a 3-channel (vec3) weightmap [H, W, 3]
         weight_sum_gpu = engine.upload(
             np.ones((target_h, target_w, 3), dtype=np.float32)
         )
-    use_uniform_weight_accumulation = weight_engine == "average"
 
     alpha_total = 0.0
     total_supp = num_images - 1
@@ -2552,6 +2757,7 @@ def run_gpu_resident_pipeline(
         finally:
             weighted_queue.put(_SENTINEL)
 
+    accumulator_normalized = False
     is_thread_affine = str(getattr(engine, "arch", "")).lower() in ("opengl", "gles")
 
     if is_thread_affine:
@@ -2667,14 +2873,17 @@ def run_gpu_resident_pipeline(
                     weight_work_gpu = engine.upload(weight_work_item)
                     del weight_work_item
 
-                _gpu_blend_frame(
+                accumulator_normalized = _gpu_blend_frame(
                     sum_img_gpu,
                     weight_sum_gpu,
                     supp_aligned_linear_gpu,
                     weight_work_gpu,
                     splat_tile_size=splat_tile_size,
                     uniform_weights=use_uniform_weight_accumulation,
-                )
+                    block_accumulation=block_accumulation,
+                    finalize=processed_count == total_supp,
+                    uniform_denominator=float(processed_count + 1),
+                ) or accumulator_normalized
 
                 supp_aligned_linear_gpu.destroy()
                 if weight_work_gpu is not None:
@@ -2722,7 +2931,8 @@ def run_gpu_resident_pipeline(
             aligner.close()
             ref_gpu.destroy()
             sum_img_gpu.destroy()
-            weight_sum_gpu.destroy()
+            if weight_sum_gpu is not None:
+                weight_sum_gpu.destroy()
             if ref_spatial_gray_gpu is not None:
                 ref_spatial_gray_gpu.destroy()
             if spatial_rows_gpu is not None:
@@ -2791,14 +3001,17 @@ def run_gpu_resident_pipeline(
                         weight_work_gpu = engine.upload(weight_work_item)
                         del weight_work_item
 
-                    _gpu_blend_frame(
+                    accumulator_normalized = _gpu_blend_frame(
                         sum_img_gpu,
                         weight_sum_gpu,
                         supp_aligned_linear_gpu,
                         weight_work_gpu,
                         splat_tile_size=splat_tile_size,
                         uniform_weights=use_uniform_weight_accumulation,
-                    )
+                        block_accumulation=block_accumulation,
+                        finalize=processed_count == total_supp,
+                        uniform_denominator=float(processed_count + 1),
+                    ) or accumulator_normalized
 
                     supp_aligned_linear_gpu.destroy()
                 if weight_work_gpu is not None:
@@ -2835,7 +3048,8 @@ def run_gpu_resident_pipeline(
             if _is_stopped():
                 try:
                     sum_img_gpu.destroy()
-                    weight_sum_gpu.destroy()
+                    if weight_sum_gpu is not None:
+                        weight_sum_gpu.destroy()
                     ref_gpu.destroy()
                     aligner.close()
                     if ref_spatial_gray_gpu is not None:
@@ -2871,34 +3085,114 @@ def run_gpu_resident_pipeline(
             console="Finalisasi GPU-resident fusion & normalisasi pembagian bobot...",
         )
 
-    # Normalization with reference fallback. Both the vec3 and scalar-weight
-    # forms stay on the GPU; ``common.mean_division_vec3_f32`` accepts a 2D
-    # weight map and broadcasts it across RGB without a CPU repeat/upload.
+    _final_linear_gpu = None
+    normalization_report = None
+    if block_accumulation and accumulator_normalized:
+        _final_linear_gpu = sum_img_gpu
+        normalization_report = {
+            "tile_shape": (splat_tile_size, splat_tile_size),
+            "dispatches": (
+                ((target_h + splat_tile_size - 1) // splat_tile_size)
+                * ((target_w + splat_tile_size - 1) // splat_tile_size)
+            ),
+        }
+        engine.set_last_block_execution(
+            {
+                "operation": "resident_accumulate_normalize",
+                "selected": True,
+                "backend": str(getattr(engine, "arch", "")),
+                "shape": (target_h, target_w, 3),
+                "tile_shape": normalization_report["tile_shape"],
+                "computed": normalization_report["dispatches"],
+                "fallback": "none",
+                "normalization": "fused_last_frame",
+            }
+        )
+    elif block_accumulation:
+        try:
+            from taichi_vision.taichi_algorithm.spatial_fusion import (
+                normalize_accumulator_regions_taichi,
+            )
 
-    if getattr(weight_sum_gpu, "ndim", 2) == 2 or (len(weight_sum_gpu.shape) == 2):
-        _final_linear_gpu = taichi_aot.mean_division(
-            sum_img=sum_img_gpu,
-            sum_weight=weight_sum_gpu,
-            ref_img=ref_gpu,
-        )
-    else:
-        from taichi_vision.taichi_algorithm.spatial_fusion import (
-            mean_division_vec3_weight_taichi,
-        )
+            with taichi_aot.compute_block(
+                block_size=(splat_tile_size, splat_tile_size),
+                halo=0,
+                mode="force",
+                fallback="error",
+                cache=False,
+            ):
+                normalization_report = normalize_accumulator_regions_taichi(
+                    sum_img_gpu,
+                    weight_sum_gpu,
+                    uniform_weight=(processed_count + 1)
+                    if use_uniform_weight_accumulation
+                    else None,
+                )
+            _final_linear_gpu = sum_img_gpu
+            engine.set_last_block_execution(
+                {
+                    "operation": "resident_accumulate_normalize",
+                    "selected": True,
+                    "backend": str(getattr(engine, "arch", "")),
+                    "shape": (target_h, target_w, 3),
+                    "tile_shape": normalization_report["tile_shape"],
+                    "computed": normalization_report["dispatches"],
+                    "fallback": "none",
+                }
+            )
+        except Exception as exc:
+            # Keep recovery on the active backend.  For Average, reconstruct
+            # the uniform denominator only on this exceptional path.
+            print(
+                "[GPU Pipeline] Block normalization unavailable; "
+                f"using same-backend full-frame recovery ({exc})."
+            )
+            if weight_sum_gpu is None:
+                weight_sum_gpu = engine.upload(
+                    np.full(
+                        (target_h, target_w, 3),
+                        float(processed_count + 1),
+                        dtype=np.float32,
+                    )
+                )
+            engine.set_last_block_execution(
+                {
+                    "operation": "resident_accumulate_normalize",
+                    "selected": False,
+                    "backend": str(getattr(engine, "arch", "")),
+                    "shape": (target_h, target_w, 3),
+                    "fallback": "same_backend_full_frame",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
+            )
 
-        _final_linear_gpu = mean_division_vec3_weight_taichi(
-            sum_img=sum_img_gpu,
-            sum_weight=weight_sum_gpu,
-            ref_img=ref_gpu,
-        )
+    if _final_linear_gpu is None:
+        if len(weight_sum_gpu.shape) == 2:
+            _final_linear_gpu = taichi_aot.mean_division(
+                sum_img=sum_img_gpu,
+                sum_weight=weight_sum_gpu,
+                ref_img=ref_gpu,
+            )
+        else:
+            from taichi_vision.taichi_algorithm.spatial_fusion import (
+                mean_division_vec3_weight_taichi,
+            )
+
+            _final_linear_gpu = mean_division_vec3_weight_taichi(
+                sum_img=sum_img_gpu,
+                sum_weight=weight_sum_gpu,
+                ref_img=ref_gpu,
+            )
 
     result_hwc = np.ascontiguousarray(_final_linear_gpu.to_numpy(), dtype=np.float32)
-    _final_linear_gpu.destroy()
+    if _final_linear_gpu is not sum_img_gpu:
+        _final_linear_gpu.destroy()
 
     # Cleanup GPU resources and flush buffer pool back to baseline
     try:
         sum_img_gpu.destroy()
-        weight_sum_gpu.destroy()
+        if weight_sum_gpu is not None:
+            weight_sum_gpu.destroy()
         ref_gpu.destroy()
         aligner.close()
         if ref_spatial_gray_gpu is not None:

@@ -541,6 +541,10 @@ def register_mlri_graphs(module, kernels, arch):
                 kernels["admm2"],
                 wb_bayer, green, r_diff, b_diff, temp_a, temp_b, s["h"], s["w"], *cfa,
             )
+        graph.dispatch(
+            kernels["suppress_outliers"],
+            wb_bayer, green, r_diff, b_diff, s["h"], s["w"], *cfa,
+        )
 
     def dispatch_reconstruct(graph, grayscale=False):
         if is_vulkan:

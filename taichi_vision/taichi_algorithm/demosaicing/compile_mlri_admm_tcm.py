@@ -161,7 +161,37 @@ def _gbtf_green_interpolation_kernel(
             val_N = wb_bayer[r_u1, c] + (wb_bayer[r, c] - wb_bayer[r_u2, c]) * 0.5
             val_S = wb_bayer[r_d1, c] + (wb_bayer[r, c] - wb_bayer[r_d2, c]) * 0.5
 
-            green[r, c] = (w_E*val_E + w_W*val_W + w_N*val_N + w_S*val_S) / (w_E + w_W + w_N + w_S)
+            horizontal = (w_E * val_E + w_W * val_W) / (w_E + w_W)
+            vertical = (w_N * val_N + w_S * val_S) / (w_N + w_S)
+            horizontal_bounded = ti.math.clamp(
+                horizontal,
+                ti.min(wb_bayer[r, c_l1], wb_bayer[r, c_r1]),
+                ti.max(wb_bayer[r, c_l1], wb_bayer[r, c_r1]),
+            )
+            vertical_bounded = ti.math.clamp(
+                vertical,
+                ti.min(wb_bayer[r_u1, c], wb_bayer[r_d1, c]),
+                ti.max(wb_bayer[r_u1, c], wb_bayer[r_d1, c]),
+            )
+            grad_h = g_E + g_W
+            grad_v = g_N + g_S
+            hard = ti.select(
+                grad_h < grad_v,
+                horizontal_bounded,
+                ti.select(
+                    grad_v < grad_h,
+                    vertical_bounded,
+                    (horizontal_bounded + vertical_bounded) * 0.5,
+                ),
+            )
+            weight_h = 1.0 / (0.01 + grad_h)
+            weight_v = 1.0 / (0.01 + grad_v)
+            soft = (weight_h * horizontal + weight_v * vertical) / (
+                weight_h + weight_v
+            )
+            texture = ti.math.clamp((ti.min(grad_h, grad_v) - 1.5) / 2.0, 0.0, 1.0)
+            texture = texture * texture * (3.0 - 2.0 * texture)
+            green[r, c] = hard * (1.0 - texture) + soft * texture
 
 @ti.kernel
 def _initial_color_difference_kernel(
@@ -503,8 +533,57 @@ def _admm_step2_green_kernel(
             color_idx = c00 if c % 2 == 0 else c01
         else:
             color_idx = c10 if c % 2 == 0 else c11
-        if color_idx == 1:
+        if color_idx == 1 or color_idx == 3:
             green[r, c] = wb_bayer[r, c]
+
+
+@ti.kernel
+def _mlri_suppress_opponent_outliers_kernel(
+    wb_bayer: ti.types.ndarray(),
+    green: ti.types.ndarray(),
+    red: ti.types.ndarray(),
+    blue: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+    c00: ti.i32,
+    c01: ti.i32,
+    c10: ti.i32,
+    c11: ti.i32,
+):
+    """Project dense opponent-colour aliases while preserving CFA samples."""
+    for r, c in ti.ndrange(h, w):
+        color_idx = c00
+        if r % 2 == 0:
+            color_idx = c00 if c % 2 == 0 else c01
+        else:
+            color_idx = c10 if c % 2 == 0 else c11
+
+        G = green[r, c]
+        R = red[r, c]
+        B = blue[r, c]
+        ru, rd = ti.max(0, r - 1), ti.min(h - 1, r + 1)
+        cl, cr = ti.max(0, c - 1), ti.min(w - 1, c + 1)
+        g_min = ti.min(G, ti.min(green[ru, c], ti.min(green[rd, c], ti.min(green[r, cl], green[r, cr]))))
+        g_max = ti.max(G, ti.max(green[ru, c], ti.max(green[rd, c], ti.max(green[r, cl], green[r, cr]))))
+        texture = ti.math.clamp((g_max - g_min - 0.16) / 0.39, 0.0, 1.0)
+        texture = texture * texture * (3.0 - 2.0 * texture)
+        rg, bg = R - G, B - G
+        magnitude = ti.min(ti.abs(rg), ti.abs(bg))
+        opponent = ti.math.clamp((magnitude - 0.015) / 0.155, 0.0, 1.0)
+        opponent = opponent * opponent * (3.0 - 2.0 * opponent)
+        blend = texture * opponent
+        if rg * bg < 0.0:
+            if color_idx == 0:
+                R = wb_bayer[r, c]
+                B = G + bg * (1.0 - blend) + rg * blend
+            elif color_idx == 2:
+                B = wb_bayer[r, c]
+                R = G + rg * (1.0 - blend) + bg * blend
+            else:
+                R = G + rg * (1.0 - blend)
+                B = G + bg * (1.0 - blend)
+        red[r, c] = R
+        blue[r, c] = B
 
 @ti.kernel
 def _mlri_admm_reconstruct_and_postprocess_kernel(
@@ -553,6 +632,9 @@ def _mlri_admm_reconstruct_and_postprocess_kernel(
         B = B * (1.0 - final_factor) + L * final_factor
 
         # Algebraic Sigmoid Dynamic Range Compression
+        R = ti.max(0.0, R)
+        G = ti.max(0.0, G)
+        B = ti.max(0.0, B)
         dst[r, c, 0] = R / ti.math.sqrt(1.0 + R * R)
         dst[r, c, 1] = G / ti.math.sqrt(1.0 + G * G)
         dst[r, c, 2] = B / ti.math.sqrt(1.0 + B * B)
@@ -621,6 +703,9 @@ def _mlri_admm_reconstruct_portable_kernel(
         R = R * (1.0 - final_factor) + L * final_factor
         G = G * (1.0 - final_factor) + L * final_factor
         B = B * (1.0 - final_factor) + L * final_factor
+        R = ti.max(0.0, R)
+        G = ti.max(0.0, G)
+        B = ti.max(0.0, B)
         dst[r, c, 0] = R / ti.math.sqrt(1.0 + R * R)
         dst[r, c, 1] = G / ti.math.sqrt(1.0 + G * G)
         dst[r, c, 2] = B / ti.math.sqrt(1.0 + B * B)
@@ -934,6 +1019,7 @@ def compile_mlri_admm_tcm(arch, save_path):
             "admm2_red": _admm_step2_red_kernel,
             "admm2_blue": _admm_step2_blue_kernel,
             "admm2_green": _admm_step2_green_kernel,
+            "suppress_outliers": _mlri_suppress_opponent_outliers_kernel,
             "reconstruct": _mlri_admm_reconstruct_and_postprocess_kernel,
             "reconstruct_portable": _mlri_admm_reconstruct_portable_kernel,
             "srgb_tonemap": _mlri_admm_srgb_tonemap,

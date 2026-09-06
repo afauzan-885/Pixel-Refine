@@ -76,17 +76,16 @@ class DatabaseManager:
         Creates the necessary tables and ensures the 'is_reference' column exists
         in 'single_process_image' and 'is_reference_batch' in 'batch_process_image'.
         """
-        db_dir_exists = True
-        if not os.path.exists(self.db_path):
-            print("Database not found. Creating database...")
+        database_created = not os.path.exists(self.db_path)
+        if database_created:
             db_dir = os.path.dirname(self.db_path)
             if db_dir:
                 os.makedirs(db_dir, exist_ok=True)
-            db_dir_exists = False  # Database is newly created
 
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                created_tables = 0
 
                 # Create images table (if not exists)
                 cursor.execute(
@@ -101,7 +100,7 @@ class DatabaseManager:
                         )
                     """
                     )
-                    print("Table 'images' created.")
+                    created_tables += 1
 
                 # Create single_process_image table (if not exists)
                 cursor.execute(
@@ -118,9 +117,7 @@ class DatabaseManager:
                         )
                     """
                     )
-                    print(
-                        "Table 'single_process_image' created with 'is_reference' column."
-                    )
+                    created_tables += 1
                 else:
                     self._add_column_if_not_exists(
                         cursor,
@@ -142,7 +139,7 @@ class DatabaseManager:
                         );
                     """
                     )
-                    print("Table 'batch_process' created.")
+                    created_tables += 1
 
                 # Create batch_process_image table
                 cursor.execute(
@@ -162,9 +159,7 @@ class DatabaseManager:
                         );
                     """
                     )
-                    print(
-                        "Table 'batch_process_image' created with 'is_reference_batch' column."
-                    )
+                    created_tables += 1
                 else:
                     # Jika tabel sudah ada, pastikan kolom is_reference_batch ada
                     self._add_column_if_not_exists(
@@ -175,6 +170,10 @@ class DatabaseManager:
                     )
 
                 conn.commit()
+                if database_created:
+                    print("[Pixel Refine] Database baru siap digunakan.")
+                elif created_tables:
+                    print("[Pixel Refine] Struktur database diperbarui.")
         except sqlite3.Error as e:
             print(f"Error during database/table creation or modification: {e}")
 

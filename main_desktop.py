@@ -621,7 +621,8 @@ class PixelRefineMain(QMainWindow):
             getattr(language_config, "SPLASH_STATUS_MODULES_READY", "Modul siap"),
             40,
         )
-        print(f"Loaded algorithms: {algo_summary}")
+        if os.environ.get("PIXEL_REFINE_VERBOSE_LOGS", "0") == "1":
+            print(f"[Pixel Refine - Detail] Modul dimuat: {algo_summary}")
 
     def _configure_window(self, splash: SplashScreen):
         """Configure window properties and settings."""

@@ -23,6 +23,14 @@ _GLOBAL_WARMUP_WORKER = None
 _GLOBAL_LOCK = threading.Lock()
 
 
+def _warmup_log(message: str, *, detail: bool = False) -> None:
+    """Keep normal startup output useful while preserving opt-in diagnostics."""
+    if detail and os.environ.get("PIXEL_REFINE_AOT_VERBOSE_LOGS", "0") != "1":
+        return
+    prefix = "[Taichi Vision - Detail]" if detail else "[Taichi Vision]"
+    print(f"{prefix} {message}", flush=True)
+
+
 def _startup_warmup_allowed() -> bool:
     """Return whether the optional startup TCM warm-up is safe to run.
 
@@ -151,7 +159,13 @@ class AOTSilentWarmupWorker(QThread):
                     elif hasattr(taichi_aot, "engine"):
                         _ = taichi_aot.engine
                 except Exception as exc:
-                    print(f"[AOT Warmup] GPU/Vulkan engine check: {exc}", flush=True)
+                    _warmup_log(
+                        "Komponen awal akan dimuat saat diperlukan.",
+                    )
+                    _warmup_log(
+                        f"Warmup engine check: {type(exc).__name__}: {exc}",
+                        detail=True,
+                    )
 
             if self._stop_requested:
                 return
@@ -167,17 +181,29 @@ class AOTSilentWarmupWorker(QThread):
                         _mod(mod_name)
                         stats["loaded_modules"] += 1
                     except Exception as exc:
-                        print(f"[AOT Warmup] Module {mod_name} deferred: {exc}", flush=True)
+                        _warmup_log(
+                            f"Warmup module deferred: {mod_name}: {type(exc).__name__}: {exc}",
+                            detail=True,
+                        )
 
         except Exception as exc:
-            print(f"[AOT Warmup] Non-critical warmup notification: {exc}", flush=True)
+            _warmup_log("Komponen awal akan dimuat saat diperlukan.")
+            _warmup_log(
+                f"Warmup notification: {type(exc).__name__}: {exc}", detail=True
+            )
 
         stats["elapsed_s"] = round(time.perf_counter() - t0, 3)
         if not self._stop_requested:
-            print(
-                f"[AOT Warmup] Pack 1 (Preview & Playback) ready in {stats['elapsed_s']}s "
-                f"({stats['loaded_modules']} core modules: {', '.join(self._modules)}, VRAM load: 0MB)",
-                flush=True,
+            if stats["loaded_modules"] == stats["total_modules"]:
+                _warmup_log(
+                    f"Komponen awal siap dalam {stats['elapsed_s']} dtk."
+                )
+            else:
+                _warmup_log("Sebagian komponen akan dimuat saat diperlukan.")
+            _warmup_log(
+                f"Warmup: {stats['loaded_modules']}/{stats['total_modules']} modules "
+                f"ready in {stats['elapsed_s']}s ({', '.join(self._modules)})",
+                detail=True,
             )
             self.warmup_finished.emit(stats)
 
@@ -199,19 +225,13 @@ def start_silent_aot_warmup(delay_ms: int = 200, parent: QObject | None = None) 
         ).strip().lower()
         if backend == "opengl" and "intel" in vendor:
             message = (
-                "[AOT Warmup] Intel OpenGL compatibility mode active; "
-                "background preloading is deferred because the native context "
-                "is thread-affine. Modules load on demand."
+                "Persiapan grafis akan dilakukan saat diperlukan untuk menjaga stabilitas Intel."
             )
         else:
             message = (
-                "[AOT Warmup] Intel graphics warmup deferred by strict policy; "
-                "runtime remains lazy."
+                "Persiapan grafis akan dilakukan saat diperlukan untuk menjaga stabilitas perangkat."
             )
-        print(
-            message,
-            flush=True,
-        )
+        _warmup_log(message)
         return
 
     def _launch():

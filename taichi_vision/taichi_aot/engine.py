@@ -61,6 +61,14 @@ _CPU_AOT_EXTRACTION_LOCK = threading.RLock()
 _OPENGL_VENDOR_INJECTED = None
 
 
+def _aot_log(message, *, detail=False):
+    """Print a concise runtime status, with diagnostics available on demand."""
+    if detail and os.environ.get("PIXEL_REFINE_AOT_VERBOSE_LOGS", "0") != "1":
+        return
+    prefix = "[Taichi Vision - Detail]" if detail else "[Taichi Vision]"
+    print(f"{prefix} {message}", flush=True)
+
+
 def _materialize_cpu_aot_directory(artifact_path):
     """Return a safe directory form of a packed CPU AOT artifact.
 
@@ -368,20 +376,25 @@ def _schedule_intel_vulkan_qualification(device_id):
         if notice_key not in _QUALIFICATION_NOTICES:
             _QUALIFICATION_NOTICES.add(notice_key)
             if report.get("scheduled"):
-                print(
-                    "[AOTEngine] Intel Vulkan qualification scheduled after "
-                    "application shutdown; OpenGL remains active for this run."
+                _aot_log(
+                    "Pemeriksaan kompatibilitas Vulkan Intel dijadwalkan setelah aplikasi ditutup."
                 )
             elif report.get("status") == "cooldown":
-                print(
-                    "[AOTEngine] Intel Vulkan qualification is in retry "
-                    f"cooldown: {report.get('reason', 'previous gate failed')}"
+                _aot_log(
+                    "Pemeriksaan kompatibilitas Vulkan Intel akan dicoba kembali nanti.",
+                )
+                _aot_log(
+                    f"Intel Vulkan qualification cooldown: {report.get('reason', 'previous gate failed')}",
+                    detail=True,
                 )
         return report
     except Exception as exc:
-        print(
-            "[AOTEngine] Intel Vulkan auto-qualification could not be "
-            f"scheduled: {type(exc).__name__}: {exc}"
+        _aot_log(
+            "Pemeriksaan kompatibilitas Vulkan Intel tidak dapat dijadwalkan.",
+        )
+        _aot_log(
+            f"Intel Vulkan qualification scheduling failed: {type(exc).__name__}: {exc}",
+            detail=True,
         )
         return None
 
@@ -1196,7 +1209,7 @@ def _init_aot_bridge(backend=None):
         staged_bundle = None
     if staged_bundle is not None:
         aot_dll_dir = str(staged_bundle)
-        print(f"[AOTEngine] LLVM20 runtime bundle selected: {aot_dll_dir}")
+        _aot_log(f"Runtime bundle: {aot_dll_dir}", detail=True)
     target_dir = os.path.join(aot_dll_dir, target.target_id)
     backend_dir = (
         aot_dll_dir
@@ -1259,7 +1272,7 @@ def _init_aot_bridge(backend=None):
 
     try:
         _LIB = ctypes.CDLL(engine_dll_path)
-        print(f"[AOTEngine] Successfully loaded backend bridge: {engine_dll_path}")
+        _aot_log(f"Backend bridge loaded: {engine_dll_path}", detail=True)
     except Exception as e:
         raise RuntimeError(
             f"Failed to load Generic AOT Engine DLL at {engine_dll_path}\nError: {e}"
@@ -1637,9 +1650,8 @@ def resolve_backend_config(arch=None, device_id=None, *, prefer=None, strict=Non
                     "execution, use CPU/OpenGL, or run the isolated Intel "
                     "qualification probe."
                 )
-            print(
-                "[AOTEngine] Native Intel Vulkan admitted in legacy graphics "
-                "compatibility mode; qualification continues independently."
+            _aot_log(
+                "Vulkan Intel memakai mode kompatibilitas untuk menjaga stabilitas."
             )
 
     config = BackendConfig(
@@ -2884,13 +2896,13 @@ class AOTEngine:
                         "vendor libEGL.dll. WGL is not supported."
                     )
             if gpu_name:
-                print(
-                    f"[AOTEngine] Runtime initialized on '{arch.upper()}' ({gpu_name})"
-                )
+                _aot_log(f"Backend siap: {arch.upper()} ({gpu_name})")
                 if arch.lower() == "opengl":
                     context_backend = _get_runtime_context_backend(instance.runtime)
                     if context_backend:
-                        print(f"[AOTEngine] OpenGL context provider: {context_backend}")
+                        _aot_log(
+                            f"OpenGL context provider: {context_backend}", detail=True
+                        )
                 # Intel's legacy native Vulkan allocator (not Dozen) can assert
                 # during Taichi context teardown when AOT memory blocks are
                 # still tracked internally.  Keep the process alive by letting
@@ -2907,9 +2919,7 @@ class AOTEngine:
                     # os.environ.setdefault("AOT_INTEL_UNSAFE", "1")
                     os.environ.setdefault("VULKAN_SERIALIZE_SUBMIT", "1")
             else:
-                print(
-                    f"[AOTEngine] Runtime initialized on '{arch.upper()}' (Device {device_id})"
-                )
+                _aot_log(f"Backend siap: {arch.upper()} (perangkat {device_id})")
 
             instance.gpu_name = gpu_name or ""
             instance._graphics_compatibility_mode = _graphics_compatibility_enabled(
@@ -2922,9 +2932,8 @@ class AOTEngine:
                 # device-local ti_map_memory path without changing algorithms
                 # or silently moving execution to CPU.
                 instance._force_host_accessible = True
-                print(
-                    "[AOTEngine] Legacy graphics compatibility active: "
-                    "host-visible buffers, serialized direct graph dispatch."
+                _aot_log(
+                    "Mode kompatibilitas perangkat lama aktif untuk menjaga stabilitas."
                 )
             # The bridge is the source of truth for the actual OpenGL ICD and
             # Vulkan physical-device name.  Refresh the immutable selection
@@ -3016,15 +3025,19 @@ class AOTEngine:
             initial_memory = instance._memory_governor.refresh(force=True)
             instance.buffer_pool.set_budget(initial_memory.device_pool_budget)
             instance._apply_lifecycle_limits(initial_memory, trim=False)
-            print(
-                "[AOTEngine Memory] "
-                f"pressure={initial_memory.pressure.name.lower()} "
+            memory_detail = (
+                f"Memory: pressure={initial_memory.pressure.name.lower()} "
                 f"shared_budget={initial_memory.shared_device_budget // (1024 ** 2)}MB "
                 f"device_available={initial_memory.device_heap_available // (1024 ** 2)}MB "
                 f"source={initial_memory.device_budget_source} "
                 f"pipeline_limit={initial_memory.pipeline_resident_limit // (1024 ** 2)}MB "
                 f"block={initial_memory.recommended_block_size}"
             )
+            if initial_memory.pressure.name.lower() != "healthy":
+                _aot_log(
+                    "Memori grafis terbatas; ukuran pemrosesan disesuaikan agar tetap stabil."
+                )
+            _aot_log(memory_detail, detail=True)
             instance._block_cache = BlockCache(
                 instance._block_config.cache_entries,
                 max_bytes=initial_memory.host_cache_budget,
@@ -5707,7 +5720,7 @@ class AOTEngine:
                     f"  HINT: Ensure the .tcm file exists and is compatible with the active GPU backend ({self.arch.upper()})."
                     f"{detail}"
                 )
-            print(f"[AOTEngine] Loaded TCM module: {os.path.basename(p)}")
+            _aot_log(f"TCM module loaded: {os.path.basename(p)}", detail=True)
             set_status(cache_key, "valid", backend=self.arch, device=device_name)
             self.modules[p] = AOTModuleWrapper(ptr, self)
             return self.modules[p]
@@ -6358,8 +6371,9 @@ def _global_cleanup(reason: str = "atexit", force: bool = False):
         _CLEANUP_DONE = True
 
     try:
-        sys.stderr.write(f"[AOTEngine] GPU cleanup triggered (reason={reason})\n")
-        sys.stderr.flush()
+        if os.environ.get("PIXEL_REFINE_AOT_VERBOSE_LOGS", "0") == "1":
+            sys.stderr.write(f"[Taichi Vision - Detail] GPU cleanup: {reason}\n")
+            sys.stderr.flush()
     except Exception:
         pass
 

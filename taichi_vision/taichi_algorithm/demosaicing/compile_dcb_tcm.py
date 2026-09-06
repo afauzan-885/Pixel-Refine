@@ -109,13 +109,48 @@ def _dcb_green(
             yr = ti.min(h - 1, y + 1)
             xl = ti.max(0, x - 1)
             xr = ti.min(w - 1, x + 1)
-            gh = (mosaic[y, xl] + mosaic[y, xr]) * 0.5
-            gv = (mosaic[yl, x] + mosaic[yr, x]) * 0.5
-            dh = ti.abs(mosaic[y, xl] - mosaic[y, xr])
-            dv = ti.abs(mosaic[yl, x] - mosaic[yr, x])
-            weight_h = 1.0 / (1e-4 + dh)
-            weight_v = 1.0 / (1e-4 + dv)
-            green[y, x] = (gh * weight_h + gv * weight_v) / (weight_h + weight_v)
+            center = mosaic[y, x]
+            g_l, g_r = mosaic[y, xl], mosaic[y, xr]
+            g_u, g_d = mosaic[yl, x], mosaic[yr, x]
+            if y > 2 and y < h - 3 and x > 2 and x < w - 3:
+                c_l2, c_r2 = mosaic[y, x - 2], mosaic[y, x + 2]
+                c_u2, c_d2 = mosaic[y - 2, x], mosaic[y + 2, x]
+                g_l3, g_r3 = mosaic[y, x - 3], mosaic[y, x + 3]
+                g_u3, g_d3 = mosaic[y - 3, x], mosaic[y + 3, x]
+                dh = 3.0 * (
+                    ti.abs(c_l2 - center)
+                    + ti.abs(c_r2 - center)
+                    + ti.abs(g_l - g_r)
+                ) + 2.0 * (ti.abs(g_l3 - g_l) + ti.abs(g_r3 - g_r))
+                dv = 3.0 * (
+                    ti.abs(c_u2 - center)
+                    + ti.abs(c_d2 - center)
+                    + ti.abs(g_u - g_d)
+                ) + 2.0 * (ti.abs(g_u3 - g_u) + ti.abs(g_d3 - g_d))
+                gh = (g_l + g_r) * 0.5 + (2.0 * center - c_l2 - c_r2) * 0.25
+                gv = (g_u + g_d) * 0.5 + (2.0 * center - c_u2 - c_d2) * 0.25
+                gh_bounded = ti.math.clamp(gh, ti.min(g_l, g_r), ti.max(g_l, g_r))
+                gv_bounded = ti.math.clamp(gv, ti.min(g_u, g_d), ti.max(g_u, g_d))
+                hard = ti.select(
+                    dh < dv,
+                    gh_bounded,
+                    ti.select(dv < dh, gv_bounded, (gh_bounded + gv_bounded) * 0.5),
+                )
+                weight_h = 1.0 / (0.01 + dh)
+                weight_v = 1.0 / (0.01 + dv)
+                soft = (weight_h * gh + weight_v * gv) / (weight_h + weight_v)
+                texture = ti.math.clamp((ti.min(dh, dv) - 4.0) * 0.25, 0.0, 1.0)
+                texture = texture * texture * (3.0 - 2.0 * texture)
+                green[y, x] = hard * (1.0 - texture) + soft * texture
+            else:
+                dh = ti.abs(g_l - g_r)
+                dv = ti.abs(g_u - g_d)
+                weight_h = 1.0 / (1e-4 + dh)
+                weight_v = 1.0 / (1e-4 + dv)
+                green[y, x] = (
+                    (g_l + g_r) * 0.5 * weight_h
+                    + (g_u + g_d) * 0.5 * weight_v
+                ) / (weight_h + weight_v)
 
 
 @ti.kernel
@@ -170,20 +205,47 @@ def _dcb_refine_chroma(
         g = src[y, x, 1]
         r_diff = 0.0
         b_diff = 0.0
-        count = 0.0
+        sum_w = 0.0
         for dy, dx in ti.static(ti.ndrange(3, 3)):
             ny = ti.math.clamp(y + dy - 1, 0, h - 1)
             nx = ti.math.clamp(x + dx - 1, 0, w - 1)
-            r_diff += src[ny, nx, 0] - src[ny, nx, 1]
-            b_diff += src[ny, nx, 2] - src[ny, nx, 1]
-            count += 1.0
-        r = g + r_diff / count
-        b = g + b_diff / count
+            neighbor_g = src[ny, nx, 1]
+            weight = 1.0 / (0.005 + ti.abs(neighbor_g - g))
+            r_diff += (src[ny, nx, 0] - neighbor_g) * weight
+            b_diff += (src[ny, nx, 2] - neighbor_g) * weight
+            sum_w += weight
+        r = g + r_diff / sum_w
+        b = g + b_diff / sum_w
         colour = _cfa_color(y, x, c00, c01, c10, c11)
         if colour == 0:
             r = mosaic[y, x]
         elif colour == 2:
             b = mosaic[y, x]
+
+        # Dense Bayer aliases usually create opposing R-G/B-G excursions.
+        # Preserve the measured CFA channel and attenuate only reconstructed
+        # opponent chroma where local green structure is strong.
+        yl = ti.max(0, y - 1)
+        yr = ti.min(h - 1, y + 1)
+        xl = ti.max(0, x - 1)
+        xr = ti.min(w - 1, x + 1)
+        g_min = ti.min(g, ti.min(src[yl, x, 1], ti.min(src[yr, x, 1], ti.min(src[y, xl, 1], src[y, xr, 1]))))
+        g_max = ti.max(g, ti.max(src[yl, x, 1], ti.max(src[yr, x, 1], ti.max(src[y, xl, 1], src[y, xr, 1]))))
+        texture = ti.math.clamp((g_max - g_min - 0.16) / 0.39, 0.0, 1.0)
+        texture = texture * texture * (3.0 - 2.0 * texture)
+        rg, bg = r - g, b - g
+        magnitude = ti.min(ti.abs(rg), ti.abs(bg))
+        opponent = ti.math.clamp((magnitude - 0.015) / 0.155, 0.0, 1.0)
+        opponent = opponent * opponent * (3.0 - 2.0 * opponent)
+        blend = texture * opponent
+        if rg * bg < 0.0:
+            if colour == 0:
+                b = g + bg * (1.0 - blend) + rg * blend
+            elif colour == 2:
+                r = g + rg * (1.0 - blend) + bg * blend
+            else:
+                r = g + rg * (1.0 - blend)
+                b = g + bg * (1.0 - blend)
         dst[y, x, 0] = ti.max(r, 0.0)
         dst[y, x, 1] = ti.max(g, 0.0)
         dst[y, x, 2] = ti.max(b, 0.0)

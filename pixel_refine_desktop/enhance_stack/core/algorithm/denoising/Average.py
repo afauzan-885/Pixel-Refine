@@ -65,6 +65,9 @@ class AverageDenoisingAlgorithm:
                 work_scale=work_scale,
                 is_raw=is_raw,
                 storage_mode=storage_mode,
+                accumulation_mode=getattr(ctx, "params", {}).get(
+                    "processing_mode", "auto"
+                ),
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=getattr(ctx, "update_progress", None),

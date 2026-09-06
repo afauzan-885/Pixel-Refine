@@ -261,7 +261,10 @@ def schedule_intel_vulkan_qualification(
     launcher=None,
 ) -> dict:
     """Schedule comprehensive qualification after the current app exits."""
-    if os.environ.get("PIXEL_REFINE_INTEL_VULKAN_AUTO_QUALIFY", "1") == "0":
+    # Qualification is an opt-in maintenance task.  It can launch a detached
+    # worker after the application exits, so normal application startup must
+    # never create a command window or background qualification process.
+    if os.environ.get("PIXEL_REFINE_INTEL_VULKAN_AUTO_QUALIFY", "0") != "1":
         return {"status": "disabled", "scheduled": False}
     root = Path(project_root or _project_root()).resolve()
     status = qualification_status(

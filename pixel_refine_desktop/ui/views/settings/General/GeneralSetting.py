@@ -466,12 +466,17 @@ class HardwareBackendTestWorker(QObject):
                     if skipped_match:
                         benchmark_skipped = int(skipped_match.group(1))
                     renderer_match = re.search(
-                        r"Runtime initialized on '[^']+'\s*\((.+)\)\s*$",
+                        r"(?:Runtime initialized on '[^']+'\s*\((.+)\)|"
+                        r"\[Taichi Vision\] Backend siap:\s*[^\n(]+\((.+)\))\s*$",
                         output,
                         re.MULTILINE,
                     )
                     if renderer_match:
-                        renderer = renderer_match.group(1).strip()
+                        renderer = next(
+                            group.strip()
+                            for group in renderer_match.groups()
+                            if group
+                        )
                     else:
                         mismatch = re.search(
                             r"(?:Windows created the context on|context provider selected) '([^']+)'",

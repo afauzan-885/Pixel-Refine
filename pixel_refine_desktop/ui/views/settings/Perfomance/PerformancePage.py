@@ -91,6 +91,9 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             self.device_group.input.currentTextChanged.connect(
                 self.update_device_dropdown_style
             )
+            self.device_group.input.currentIndexChanged.connect(
+                self._on_device_selection_changed
+            )
         self.device_group.bind_store(self.store, "device_backend")
         self._restore_saved_backend_selection(hardware_backends)
         self._add_backend_info_action()
@@ -156,9 +159,8 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         right_form.add_row(self.compute_block_size_group)
 
         self.onnx_runtime_group = FormGroup(
-            label="ONNX Runtime", input_type="select", auto_sync=True
+            label="ONNX Runtime", input_type="select", auto_sync=False
         )
-        self.onnx_runtime_group.input.addItems(["Auto", "DirectML (GPU)", "CPU"])
         onnx_tip = (
             "Select the execution provider for AI inference models (WeightNet FusionNet).\n"
             "Auto: uses DirectML when available, falls back to CPU.\n"
@@ -166,8 +168,8 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             "CPU: forces CPU-only execution."
         )
         self.onnx_runtime_group.input.setToolTip(onnx_tip)
-        self.onnx_runtime_group.bind_store(self.store, "onnx_runtime")
-        self.onnx_runtime_group.input.currentTextChanged.connect(
+        self._setup_onnx_runtime_options()
+        self.onnx_runtime_group.input.currentIndexChanged.connect(
             self._on_onnx_runtime_changed
         )
         right_form.add_row(self.onnx_runtime_group)
@@ -474,11 +476,101 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.store.set("compute_block_mode", self._block_mode_value())
         self._update_block_processing_controls()
 
-    def _on_onnx_runtime_changed(self, text):
-        value = {"Auto": "auto", "DirectML (GPU)": "dml", "CPU": "cpu"}.get(
-            text, "auto"
+    def _on_device_selection_changed(self, _index=None):
+        self._update_onnx_auto_label()
+
+    def _get_current_selected_gpu_vendor(self) -> str:
+        combo = getattr(getattr(self, "device_group", None), "input", None)
+        if combo is not None and isinstance(combo, QComboBox):
+            opt = combo.currentData()
+            if isinstance(opt, dict):
+                vendor = str(opt.get("vendor") or "").lower()
+                if vendor in ("intel", "nvidia", "amd", "cpu"):
+                    return vendor
+                backend = str(opt.get("backend") or "").lower()
+                if backend == "cuda":
+                    return "nvidia"
+                if backend == "cpu":
+                    return "cpu"
+        from pixel_refine_desktop.enhance_stack.core.algorithm.onnx_utils import (
+            get_selected_gpu_vendor,
         )
-        self.store.set("onnx_runtime", value)
+        return get_selected_gpu_vendor(self.store)
+
+    def _get_onnx_auto_label(self, vendor=None) -> str:
+        try:
+            from pixel_refine_desktop.enhance_stack.core.algorithm.onnx_utils import (
+                scan_directml_adapters,
+                resolve_onnx_runtime_and_providers,
+            )
+            target_vendor = (
+                str(vendor).lower()
+                if vendor
+                else self._get_current_selected_gpu_vendor()
+            )
+
+            if target_vendor == "cpu":
+                return "Auto (CPU)"
+
+            dml_adapters = scan_directml_adapters()
+            matching_adapter = next(
+                (a for a in dml_adapters if a.get("vendor") == target_vendor), None
+            )
+            if matching_adapter is None and target_vendor not in ("intel", "cpu") and dml_adapters:
+                matching_adapter = next(
+                    (a for a in dml_adapters if a.get("vendor") in ("nvidia", "amd")),
+                    dml_adapters[0],
+                )
+
+            if matching_adapter is not None and matching_adapter.get("name"):
+                return f"Auto (GPU: {matching_adapter['name']})"
+
+            runtime, providers = resolve_onnx_runtime_and_providers("auto", store=self.store)
+            if runtime == "cpu" or not providers or providers[0] == "CPUExecutionProvider":
+                return "Auto (CPU)"
+            return "Auto (GPU)"
+        except Exception:
+            return "Auto"
+
+    def _update_onnx_auto_label(self):
+        combo = getattr(getattr(self, "onnx_runtime_group", None), "input", None)
+        if combo is None or not isinstance(combo, QComboBox):
+            return
+        new_label = self._get_onnx_auto_label()
+        combo.blockSignals(True)
+        for i in range(combo.count()):
+            if combo.itemData(i) == "auto":
+                combo.setItemText(i, new_label)
+                break
+        combo.blockSignals(False)
+        self._compact_performance_inputs()
+
+    def _setup_onnx_runtime_options(self):
+        combo = getattr(getattr(self, "onnx_runtime_group", None), "input", None)
+        if combo is None or not isinstance(combo, QComboBox):
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        auto_label = self._get_onnx_auto_label()
+        combo.addItem(auto_label, "auto")
+        combo.addItem("DirectML (GPU)", "dml")
+        combo.addItem("CPU", "cpu")
+
+        saved_val = str(self.store.get("onnx_runtime", "auto")).strip().lower()
+        idx = combo.findData(saved_val)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        else:
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _on_onnx_runtime_changed(self, index: int):
+        combo = getattr(getattr(self, "onnx_runtime_group", None), "input", None)
+        if combo is None or not isinstance(combo, QComboBox):
+            return
+        value = combo.itemData(index)
+        if value in ("auto", "dml", "cpu"):
+            self.store.set("onnx_runtime", value)
 
     def _on_performance_store_changed(self, key, _value):
         if key is None or key == "compute_block_mode":
@@ -491,15 +583,14 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             combo.blockSignals(False)
             self._update_block_processing_controls()
         if key is None or key == "onnx_runtime":
-            onnx_text = {
-                "dml": "DirectML (GPU)",
-                "cpu": "CPU",
-                "auto": "Auto",
-            }.get(self.store.get("onnx_runtime", "auto"), "Auto")
-            combo = self.onnx_runtime_group.input
-            combo.blockSignals(True)
-            combo.setCurrentText(onnx_text)
-            combo.blockSignals(False)
+            saved_val = str(self.store.get("onnx_runtime", "auto")).strip().lower()
+            combo = getattr(getattr(self, "onnx_runtime_group", None), "input", None)
+            if combo is not None and isinstance(combo, QComboBox):
+                idx = combo.findData(saved_val)
+                if idx >= 0 and combo.currentIndex() != idx:
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(idx)
+                    combo.blockSignals(False)
 
     def _update_block_processing_controls(self):
         """Apply the mode-dependent visibility/enabled contract."""

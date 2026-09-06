@@ -3,6 +3,7 @@ Base repository class for database operations.
 Provides common database connection and transaction management.
 """
 
+import os
 import sqlite3
 from typing import Optional, overload, Any, List, Union, Literal
 from contextlib import contextmanager
@@ -193,6 +194,10 @@ class BaseRepository:
         if not self.column_exists(table_name, column_name):
             query = f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}"
             self.execute_update(query)
-            print(f"Added column '{column_name}' to table '{table_name}'")
+            if os.environ.get("PIXEL_REFINE_VERBOSE_LOGS", "0") == "1":
+                print(
+                    f"[Pixel Refine - Detail] Database column added: "
+                    f"{table_name}.{column_name}"
+                )
             return True
         return False

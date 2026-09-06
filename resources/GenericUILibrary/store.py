@@ -186,9 +186,11 @@ class DataStore(QObject):
                     # Direct assignment to reflect EXACT state from file (including deletions)
                     self._data = new_data
                     self.changed.emit(None, self._data)
-                    print(
-                        f"[OK] DataStore: Sync success from {os.path.basename(self._file_path)}"
-                    )
+                    if os.environ.get("PIXEL_REFINE_VERBOSE_LOGS", "0") == "1":
+                        print(
+                            f"[Pixel Refine - Detail] Pengaturan disinkronkan: "
+                            f"{os.path.basename(self._file_path)}"
+                        )
         except (json.JSONDecodeError, IOError) as e:
             print(f"[ERROR] DataStore: Error loading file {self._file_path}: {e}")
 

@@ -169,6 +169,7 @@ class FusionNetDenoisingAlgorithm:
                 chroma_sensitivity=chroma_sens,
                 is_raw=is_raw,
                 storage_mode="direct",
+                accumulation_mode=params_cfg.get("processing_mode", "auto"),
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=update_prog,

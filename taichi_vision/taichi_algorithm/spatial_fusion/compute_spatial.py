@@ -535,6 +535,129 @@ def accumulate_average_kernel(
 
 
 @ti.kernel
+def accumulate_average_sum_region_kernel(
+    current_image_full: ti.types.ndarray(),
+    final_image_sum: ti.types.ndarray(),
+    h_full: ti.i32,
+    w_full: ti.i32,
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    offset_y: ti.i32,
+    offset_x: ti.i32,
+    finalize: ti.i32,
+    denominator: ti.f32,
+):
+    """Accumulate one disjoint region without a redundant uniform weight map."""
+    for i, j in ti.ndrange(tile_h, tile_w):
+        gi = i + offset_y
+        gj = j + offset_x
+        if gi < h_full and gj < w_full:
+            for c in ti.static(range(3)):
+                value = final_image_sum[gi, gj, c] + current_image_full[gi, gj, c]
+                if finalize != 0:
+                    value /= ti.max(denominator, 1e-8)
+                final_image_sum[gi, gj, c] = value
+
+
+@ti.kernel
+def accumulate_spatial_merging_region_kernel(
+    current_image_full: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_image_sum: ti.types.ndarray(),
+    weight_map_sum_full: ti.types.ndarray(),
+    h_full: ti.i32,
+    w_full: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    offset_y: ti.i32,
+    offset_x: ti.i32,
+    finalize: ti.i32,
+):
+    """Accumulate a region from a resident full frame using global coordinates."""
+    y_scale = float(h_work) / float(h_full)
+    x_scale = float(w_work) / float(w_full)
+    for i, j in ti.ndrange(tile_h, tile_w):
+        gi = i + offset_y
+        gj = j + offset_x
+        if gi < h_full and gj < w_full:
+            y_work_f = float(gi) * y_scale
+            x_work_f = float(gj) * x_scale
+            y0 = ti.max(0, ti.cast(ti.floor(y_work_f), ti.i32))
+            x0 = ti.max(0, ti.cast(ti.floor(x_work_f), ti.i32))
+            y1 = ti.min(y0 + 1, h_work - 1)
+            x1 = ti.min(x0 + 1, w_work - 1)
+            wy = y_work_f - float(y0)
+            wx = x_work_f - float(x0)
+            weight = (
+                (1.0 - wy) * (1.0 - wx) * weight_map_work[y0, x0]
+                + (1.0 - wy) * wx * weight_map_work[y0, x1]
+                + wy * (1.0 - wx) * weight_map_work[y1, x0]
+                + wy * wx * weight_map_work[y1, x1]
+            )
+            total_weight = weight_map_sum_full[gi, gj] + weight
+            weight_map_sum_full[gi, gj] = total_weight
+            for c in ti.static(range(3)):
+                value = (
+                    final_image_sum[gi, gj, c]
+                    + current_image_full[gi, gj, c] * weight
+                )
+                if finalize != 0:
+                    value /= ti.max(total_weight, 1e-6)
+                final_image_sum[gi, gj, c] = value
+
+
+@ti.kernel
+def accumulate_spatial_merging_vec3_region_kernel(
+    current_image_full: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_image_sum: ti.types.ndarray(),
+    weight_map_sum_full: ti.types.ndarray(),
+    h_full: ti.i32,
+    w_full: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    offset_y: ti.i32,
+    offset_x: ti.i32,
+    finalize: ti.i32,
+):
+    """Per-channel weight variant of region-based resident accumulation."""
+    y_scale = float(h_work) / float(h_full)
+    x_scale = float(w_work) / float(w_full)
+    for i, j in ti.ndrange(tile_h, tile_w):
+        gi = i + offset_y
+        gj = j + offset_x
+        if gi < h_full and gj < w_full:
+            y_work_f = float(gi) * y_scale
+            x_work_f = float(gj) * x_scale
+            y0 = ti.max(0, ti.cast(ti.floor(y_work_f), ti.i32))
+            x0 = ti.max(0, ti.cast(ti.floor(x_work_f), ti.i32))
+            y1 = ti.min(y0 + 1, h_work - 1)
+            x1 = ti.min(x0 + 1, w_work - 1)
+            wy = y_work_f - float(y0)
+            wx = x_work_f - float(x0)
+            for c in ti.static(range(3)):
+                weight = (
+                    (1.0 - wy) * (1.0 - wx) * weight_map_work[y0, x0, c]
+                    + (1.0 - wy) * wx * weight_map_work[y0, x1, c]
+                    + wy * (1.0 - wx) * weight_map_work[y1, x0, c]
+                    + wy * wx * weight_map_work[y1, x1, c]
+                )
+                total_weight = weight_map_sum_full[gi, gj, c] + weight
+                value = (
+                    final_image_sum[gi, gj, c]
+                    + current_image_full[gi, gj, c] * weight
+                )
+                if finalize != 0:
+                    value /= ti.max(total_weight, 1e-8)
+                weight_map_sum_full[gi, gj, c] = total_weight
+                final_image_sum[gi, gj, c] = value
+
+
+@ti.kernel
 def accumulate_average_offset_kernel(
     current_image_tile: ti.types.ndarray(),
     final_image_sum: ti.types.ndarray(),
@@ -594,6 +717,48 @@ def remap_accumulate_average_tile_kernel(
                     source_full, src_x, src_y, h_src, w_src, channel
                 )
                 weight_map_sum_full[gr, gc, channel] += 1.0
+
+
+@ti.kernel
+def remap_accumulate_average_sum_tile_kernel(
+    source_full: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    final_image_sum: ti.types.ndarray(),
+    h_src: ti.i32,
+    w_src: ti.i32,
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    offset_y: ti.i32,
+    offset_x: ti.i32,
+    finalize: ti.i32,
+    denominator: ti.f32,
+):
+    """Remap and accumulate an average tile without storing uniform weights."""
+    flow_x_scale = float(w_flow - 1) / float(w_dst - 1)
+    flow_y_scale = float(h_flow - 1) / float(h_dst - 1)
+    for r, c in ti.ndrange(tile_h, tile_w):
+        gr = r + offset_y
+        gc = c + offset_x
+        if gr < h_dst and gc < w_dst:
+            fx = float(gc) * flow_x_scale
+            fy = float(gr) * flow_y_scale
+            dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+            dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+            src_x = float(gc) + dx * scale_x
+            src_y = float(gr) + dy * scale_y
+            for channel in ti.static(range(3)):
+                value = final_image_sum[gr, gc, channel] + bilinear_at_3ch(
+                    source_full, src_x, src_y, h_src, w_src, channel
+                )
+                if finalize != 0:
+                    value /= ti.max(denominator, 1e-8)
+                final_image_sum[gr, gc, channel] = value
 
 
 @ti.kernel
@@ -738,6 +903,69 @@ def mean_division_vec3_weight_kernel(
                 dst[i, j, c] = sum_img[i, j, c] / w_sum
             else:
                 dst[i, j, c] = ref_img[i, j, c]
+
+
+@ti.kernel
+def normalize_accumulator_scalar_region_kernel(
+    sum_img: ti.types.ndarray(),
+    sum_weight: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    offset_y: ti.i32,
+    offset_x: ti.i32,
+):
+    """Normalize an RGB accumulator in place from one scalar weight region."""
+    for i, j in ti.ndrange(tile_h, tile_w):
+        gi = i + offset_y
+        gj = j + offset_x
+        if gi < h and gj < w:
+            weight = ti.max(sum_weight[gi, gj], 1e-6)
+            for c in ti.static(range(3)):
+                sum_img[gi, gj, c] /= weight
+
+
+@ti.kernel
+def normalize_accumulator_vec3_region_kernel(
+    sum_img: ti.types.ndarray(),
+    sum_weight: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    offset_y: ti.i32,
+    offset_x: ti.i32,
+):
+    """Normalize an RGB accumulator in place from per-channel weights."""
+    for i, j in ti.ndrange(tile_h, tile_w):
+        gi = i + offset_y
+        gj = j + offset_x
+        if gi < h and gj < w:
+            for c in ti.static(range(3)):
+                weight = ti.max(sum_weight[gi, gj, c], 1e-8)
+                sum_img[gi, gj, c] /= weight
+
+
+@ti.kernel
+def normalize_accumulator_uniform_region_kernel(
+    sum_img: ti.types.ndarray(),
+    denominator: ti.f32,
+    h: ti.i32,
+    w: ti.i32,
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    offset_y: ti.i32,
+    offset_x: ti.i32,
+):
+    """Normalize an average accumulator in place from its scalar frame count."""
+    inverse = 1.0 / ti.max(denominator, 1e-8)
+    for i, j in ti.ndrange(tile_h, tile_w):
+        gi = i + offset_y
+        gj = j + offset_x
+        if gi < h and gj < w:
+            for c in ti.static(range(3)):
+                sum_img[gi, gj, c] *= inverse
 
 
 @ti.kernel
@@ -930,6 +1158,54 @@ def _compile_graphs(module):
     )
     module.add_graph("accumulate_spatial_merging_vec3", g_accum_v3.compile())
 
+    # Full-frame sources can be consumed in disjoint output regions.  Unlike
+    # the local-tile graphs below, these variants do not allocate or upload an
+    # intermediate source tile.
+    sym_region_tile_h = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "tile_h", dtype=ti.i32
+    )
+    sym_region_tile_w = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "tile_w", dtype=ti.i32
+    )
+    sym_region_offset_y = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "offset_y", dtype=ti.i32
+    )
+    sym_region_offset_x = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "offset_x", dtype=ti.i32
+    )
+    sym_region_finalize = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "finalize", dtype=ti.i32
+    )
+    sym_region_denominator = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "denominator", dtype=ti.f32
+    )
+
+    g_accum_region = ti.graph.GraphBuilder()
+    g_accum_region.dispatch(
+        accumulate_spatial_merging_region_kernel,
+        sym_curr_img_full, sym_weight_work,
+        sym_final_img_sum, sym_weight_sum_full,
+        sym_h_full, sym_w_full, sym_h_work, sym_w_work,
+        sym_region_tile_h, sym_region_tile_w,
+        sym_region_offset_y, sym_region_offset_x,
+        sym_region_finalize,
+    )
+    module.add_graph("accumulate_spatial_merging_region", g_accum_region.compile())
+
+    g_accum_region_v3 = ti.graph.GraphBuilder()
+    g_accum_region_v3.dispatch(
+        accumulate_spatial_merging_vec3_region_kernel,
+        sym_curr_img_full_v3, sym_weight_work_v3,
+        sym_final_img_sum_v3, sym_weight_sum_full_v3,
+        sym_h_full_v3, sym_w_full_v3, sym_h_work_v3, sym_w_work_v3,
+        sym_region_tile_h, sym_region_tile_w,
+        sym_region_offset_y, sym_region_offset_x,
+        sym_region_finalize,
+    )
+    module.add_graph(
+        "accumulate_spatial_merging_vec3_region", g_accum_region_v3.compile()
+    )
+
     # 4c. Output-tile accumulation graphs. The current image is a local tile;
     # the weight and accumulation maps remain global. These graphs are used by
     # the resident pipeline to avoid materializing an aligned full-resolution
@@ -998,6 +1274,17 @@ def _compile_graphs(module):
     )
     module.add_graph("accumulate_average", g_average.compile())
 
+    g_average_sum_region = ti.graph.GraphBuilder()
+    g_average_sum_region.dispatch(
+        accumulate_average_sum_region_kernel,
+        sym_curr_img_full_v3, sym_final_img_sum_v3,
+        sym_h_full_v3, sym_w_full_v3,
+        sym_region_tile_h, sym_region_tile_w,
+        sym_region_offset_y, sym_region_offset_x,
+        sym_region_finalize, sym_region_denominator,
+    )
+    module.add_graph("accumulate_average_sum_region", g_average_sum_region.compile())
+
     g_average_offset = ti.graph.GraphBuilder()
     g_average_offset.dispatch(
         accumulate_average_offset_kernel,
@@ -1060,6 +1347,31 @@ def _compile_graphs(module):
         sym_fused_offset_x,
     )
     module.add_graph("remap_accumulate_average_tile", g_fused_average.compile())
+
+    g_fused_average_sum = ti.graph.GraphBuilder()
+    g_fused_average_sum.dispatch(
+        remap_accumulate_average_sum_tile_kernel,
+        sym_fused_source,
+        sym_fused_flow,
+        sym_fused_sum,
+        sym_fused_h_src,
+        sym_fused_w_src,
+        sym_fused_h_dst,
+        sym_fused_w_dst,
+        sym_fused_h_flow,
+        sym_fused_w_flow,
+        sym_fused_scale_x,
+        sym_fused_scale_y,
+        sym_fused_tile_h,
+        sym_fused_tile_w,
+        sym_fused_offset_y,
+        sym_fused_offset_x,
+        sym_region_finalize,
+        sym_region_denominator,
+    )
+    module.add_graph(
+        "remap_accumulate_average_sum_tile", g_fused_average_sum.compile()
+    )
 
     sym_fused_weight_2d = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "weight_map_work", dtype=ti.f32, ndim=2
@@ -1136,6 +1448,58 @@ def _compile_graphs(module):
         sym_h_md, sym_w_md,
     )
     module.add_graph("mean_division_vec3_weight", g_md_v3.compile())
+
+    # In-place block normalization.  The resident pipeline seeds every lane
+    # with reference weight 1, so no separate full-resolution reference/output
+    # buffer is required during this terminal pass.
+    sym_norm_sum = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "sum_img", dtype=ti.f32, ndim=3
+    )
+    sym_norm_weight_2d = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "sum_weight", dtype=ti.f32, ndim=2
+    )
+    sym_norm_weight_3d = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "sum_weight", dtype=ti.f32, ndim=3
+    )
+    sym_norm_denominator = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "denominator", dtype=ti.f32
+    )
+
+    g_norm_scalar_region = ti.graph.GraphBuilder()
+    g_norm_scalar_region.dispatch(
+        normalize_accumulator_scalar_region_kernel,
+        sym_norm_sum, sym_norm_weight_2d,
+        sym_h_md, sym_w_md,
+        sym_region_tile_h, sym_region_tile_w,
+        sym_region_offset_y, sym_region_offset_x,
+    )
+    module.add_graph(
+        "normalize_accumulator_scalar_region", g_norm_scalar_region.compile()
+    )
+
+    g_norm_vec3_region = ti.graph.GraphBuilder()
+    g_norm_vec3_region.dispatch(
+        normalize_accumulator_vec3_region_kernel,
+        sym_norm_sum, sym_norm_weight_3d,
+        sym_h_md, sym_w_md,
+        sym_region_tile_h, sym_region_tile_w,
+        sym_region_offset_y, sym_region_offset_x,
+    )
+    module.add_graph(
+        "normalize_accumulator_vec3_region", g_norm_vec3_region.compile()
+    )
+
+    g_norm_uniform_region = ti.graph.GraphBuilder()
+    g_norm_uniform_region.dispatch(
+        normalize_accumulator_uniform_region_kernel,
+        sym_norm_sum, sym_norm_denominator,
+        sym_h_md, sym_w_md,
+        sym_region_tile_h, sym_region_tile_w,
+        sym_region_offset_y, sym_region_offset_x,
+    )
+    module.add_graph(
+        "normalize_accumulator_uniform_region", g_norm_uniform_region.compile()
+    )
 
     # 4f. Spatial weight postprocess (ghost penalty + cutoff)
     sym_weight_src_pp = ti.graph.Arg(
@@ -2225,6 +2589,67 @@ def accumulate_spatial_merging_taichi(
         )
 
 
+def accumulate_spatial_merging_region_taichi(
+    current_image_full,
+    weight_map_work,
+    final_image_sum,
+    weight_map_sum_full,
+    *,
+    offset,
+    tile_shape,
+    finalize=False,
+):
+    """Accumulate one disjoint output region from a resident RGB frame."""
+    import taichi_vision.taichi_aot as taichi_aot
+
+    engine = taichi_aot.engine
+    tcm_path = _resolve_spatial_tcm(engine)
+    h_full, w_full = (int(final_image_sum.shape[0]), int(final_image_sum.shape[1]))
+    offset_y, offset_x = (int(offset[0]), int(offset[1]))
+    tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
+    h_work, w_work = (int(weight_map_work.shape[0]), int(weight_map_work.shape[1]))
+    if tuple(int(v) for v in current_image_full.shape) != (h_full, w_full, 3):
+        raise ValueError("region accumulation expects matching full-resolution RGB buffers")
+    if tile_h <= 0 or tile_w <= 0:
+        raise ValueError("region dimensions must be positive")
+    if offset_y < 0 or offset_x < 0 or offset_y + tile_h > h_full or offset_x + tile_w > w_full:
+        raise ValueError("accumulation region is outside the full output")
+
+    is_vec3_weight = len(weight_map_work.shape) == 3
+    graph_name = (
+        "accumulate_spatial_merging_vec3_region"
+        if is_vec3_weight
+        else "accumulate_spatial_merging_region"
+    )
+    if not _tcm_graph_available(tcm_path, graph_name):
+        raise RuntimeError(
+            f"{graph_name} requested but the resolved spatial TCM lacks the graph: "
+            f"{tcm_path}. Recompile the spatial TCM for the active backend."
+        )
+
+    def _scalar_3d(buf):
+        return buf.view_as_vector(False) if getattr(buf, "is_vector", False) else buf
+
+    engine.load(tcm_path).run(
+        graph_name,
+        current_image_full=_scalar_3d(current_image_full),
+        weight_map_work=_scalar_3d(weight_map_work) if is_vec3_weight else weight_map_work,
+        final_image_sum=_scalar_3d(final_image_sum),
+        weight_map_sum_full=(
+            _scalar_3d(weight_map_sum_full) if is_vec3_weight else weight_map_sum_full
+        ),
+        h_full=h_full,
+        w_full=w_full,
+        h_work=h_work,
+        w_work=w_work,
+        tile_h=tile_h,
+        tile_w=tile_w,
+        offset_y=offset_y,
+        offset_x=offset_x,
+        finalize=int(bool(finalize)),
+    )
+
+
 def accumulate_spatial_merging_tile_taichi(
     current_image_tile,
     weight_map_work,
@@ -2339,6 +2764,55 @@ def accumulate_average_taichi(
         h_full=int(current_image_full.shape[0]),
         w_full=int(current_image_full.shape[1]),
         num_channels=3,
+    )
+
+
+def accumulate_average_sum_region_taichi(
+    current_image_full,
+    final_image_sum,
+    *,
+    offset,
+    tile_shape,
+    finalize=False,
+    denominator=None,
+):
+    """Accumulate a uniform-weight RGB region without a weight-map buffer."""
+    import taichi_vision.taichi_aot as taichi_aot
+
+    engine = taichi_aot.engine
+    tcm_path = _resolve_spatial_tcm(engine)
+    graph_name = "accumulate_average_sum_region"
+    if not _tcm_graph_available(tcm_path, graph_name):
+        raise RuntimeError(
+            f"{graph_name} requested but the resolved spatial TCM lacks the graph: "
+            f"{tcm_path}. Recompile the spatial TCM for the active backend."
+        )
+    h_full, w_full = (int(final_image_sum.shape[0]), int(final_image_sum.shape[1]))
+    offset_y, offset_x = (int(offset[0]), int(offset[1]))
+    tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
+    if tuple(int(v) for v in current_image_full.shape) != (h_full, w_full, 3):
+        raise ValueError("average region expects matching full-resolution RGB buffers")
+    if offset_y < 0 or offset_x < 0 or offset_y + tile_h > h_full or offset_x + tile_w > w_full:
+        raise ValueError("average region is outside the full output")
+    denominator_value = float(denominator if denominator is not None else 1.0)
+    if bool(finalize) and denominator_value <= 0.0:
+        raise ValueError("final average denominator must be positive")
+
+    def _scalar_3d(buf):
+        return buf.view_as_vector(False) if getattr(buf, "is_vector", False) else buf
+
+    engine.load(tcm_path).run(
+        graph_name,
+        current_image_full=_scalar_3d(current_image_full),
+        final_image_sum=_scalar_3d(final_image_sum),
+        h_full=h_full,
+        w_full=w_full,
+        tile_h=tile_h,
+        tile_w=tile_w,
+        offset_y=offset_y,
+        offset_x=offset_x,
+        finalize=int(bool(finalize)),
+        denominator=denominator_value,
     )
 
 
@@ -2510,6 +2984,130 @@ def remap_accumulate_tile_taichi(
             )
         else:
             mod.run(graph_name, **args)
+
+
+def remap_accumulate_average_sum_tile_taichi(
+    source_full,
+    flow_work,
+    final_image_sum,
+    *,
+    full_shape,
+    offset,
+    tile_shape,
+    finalize=False,
+    denominator=None,
+):
+    """Remap and average-accumulate one tile without uniform weight storage."""
+    import taichi_vision.taichi_aot as taichi_aot
+
+    engine = taichi_aot.engine
+    tcm_path = _resolve_spatial_tcm(engine)
+    graph_name = "remap_accumulate_average_sum_tile"
+    if not _tcm_graph_available(tcm_path, graph_name):
+        raise RuntimeError(
+            f"{graph_name} requested but the resolved spatial TCM lacks the graph: "
+            f"{tcm_path}. Recompile the spatial TCM for the active backend."
+        )
+    h_dst, w_dst = (int(full_shape[0]), int(full_shape[1]))
+    offset_y, offset_x = (int(offset[0]), int(offset[1]))
+    tile_h, tile_w = (int(tile_shape[0]), int(tile_shape[1]))
+    if tuple(int(v) for v in source_full.shape) != (h_dst, w_dst, 3):
+        raise ValueError("remap average source must match full_shape and be RGB")
+    if len(flow_work.shape) != 3 or int(flow_work.shape[2]) != 2:
+        raise ValueError("flow must have shape (H, W, 2)")
+    if offset_y < 0 or offset_x < 0 or offset_y + tile_h > h_dst or offset_x + tile_w > w_dst:
+        raise ValueError("remap average tile is outside full_shape")
+    denominator_value = float(denominator if denominator is not None else 1.0)
+    if bool(finalize) and denominator_value <= 0.0:
+        raise ValueError("final average denominator must be positive")
+
+    def _scalar_3d(buf):
+        return buf.view_as_vector(False) if getattr(buf, "is_vector", False) else buf
+
+    engine.load(tcm_path).run(
+        graph_name,
+        source_full=_scalar_3d(source_full),
+        flow_work=_scalar_3d(flow_work),
+        final_image_sum=_scalar_3d(final_image_sum),
+        h_src=int(source_full.shape[0]),
+        w_src=int(source_full.shape[1]),
+        h_dst=h_dst,
+        w_dst=w_dst,
+        h_flow=int(flow_work.shape[0]),
+        w_flow=int(flow_work.shape[1]),
+        scale_x=float(w_dst) / float(flow_work.shape[1]),
+        scale_y=float(h_dst) / float(flow_work.shape[0]),
+        tile_h=tile_h,
+        tile_w=tile_w,
+        offset_y=offset_y,
+        offset_x=offset_x,
+        finalize=int(bool(finalize)),
+        denominator=denominator_value,
+    )
+
+
+def normalize_accumulator_regions_taichi(
+    sum_img,
+    sum_weight=None,
+    *,
+    uniform_weight=None,
+    tile_size=None,
+):
+    """Normalize a resident RGB accumulator in place over disjoint regions."""
+    import taichi_vision.taichi_aot as taichi_aot
+
+    engine = taichi_aot.engine
+    tcm_path = _resolve_spatial_tcm(engine)
+    h, w = int(sum_img.shape[0]), int(sum_img.shape[1])
+    if tuple(int(v) for v in sum_img.shape) != (h, w, 3):
+        raise ValueError("resident accumulator normalization expects RGB float32")
+
+    if uniform_weight is not None:
+        graph_name = "normalize_accumulator_uniform_region"
+    elif sum_weight is not None and len(sum_weight.shape) == 2:
+        graph_name = "normalize_accumulator_scalar_region"
+    elif sum_weight is not None and len(sum_weight.shape) == 3:
+        graph_name = "normalize_accumulator_vec3_region"
+    else:
+        raise ValueError("sum_weight or uniform_weight is required")
+    if not _tcm_graph_available(tcm_path, graph_name):
+        raise RuntimeError(
+            f"{graph_name} requested but the resolved spatial TCM lacks the graph: "
+            f"{tcm_path}. Recompile the spatial TCM for the active backend."
+        )
+
+    scope = taichi_aot.current_compute_block_scope() or {}
+    requested = tile_size if tile_size is not None else scope.get("block_size", 1024)
+    if isinstance(requested, (tuple, list)):
+        tile_h, tile_w = int(requested[0]), int(requested[1])
+    else:
+        tile_h = tile_w = int(requested)
+    tile_h = min(h, max(32, tile_h))
+    tile_w = min(w, max(32, tile_w))
+
+    def _scalar_3d(buf):
+        return buf.view_as_vector(False) if getattr(buf, "is_vector", False) else buf
+
+    mod = engine.load(tcm_path)
+    dispatches = 0
+    for offset_y in range(0, h, tile_h):
+        for offset_x in range(0, w, tile_w):
+            args = {
+                "sum_img": _scalar_3d(sum_img),
+                "h": h,
+                "w": w,
+                "tile_h": min(tile_h, h - offset_y),
+                "tile_w": min(tile_w, w - offset_x),
+                "offset_y": offset_y,
+                "offset_x": offset_x,
+            }
+            if uniform_weight is not None:
+                args["denominator"] = float(uniform_weight)
+            else:
+                args["sum_weight"] = _scalar_3d(sum_weight)
+            mod.run(graph_name, **args)
+            dispatches += 1
+    return {"graph": graph_name, "dispatches": dispatches, "tile_shape": (tile_h, tile_w)}
 
 
 def mean_division_vec3_weight_taichi(

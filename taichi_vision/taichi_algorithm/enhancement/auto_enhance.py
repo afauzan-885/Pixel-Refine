@@ -263,9 +263,15 @@ def apply_auto_enhance_np(
     ratio = (lum_final / (lum + 1e-6))[:, :, np.newaxis]
     rgb_out = img * ratio
 
-    # 8. Adaptive Highlight Desaturation (Anti-Chromatic Aberration Fringe)
-    desat_factor = np.clip((lum_final - 0.55) / 0.40, 0.0, 1.0)
-    desat_smooth = desat_factor * desat_factor * (3.0 - 2.0 * desat_factor)
+    # 8. Soft Highlight Desaturation with Whiteness/Chroma Gating
+    # Only desaturate peak blown/specular highlights (where min channel is high),
+    # preserving rich saturation in colored light sources (e.g. red car taillights).
+    min_c = np.min(img, axis=2)
+    whiteness = np.clip((min_c - 0.10) / 0.40, 0.0, 1.0)
+
+    # Smooth raised-cosine (Hann) taper for peak highlights (> 0.78)
+    t_hl = np.clip((lum_final - 0.78) / 0.22, 0.0, 1.0)
+    desat_smooth = 0.5 * (1.0 - np.cos(np.pi * t_hl)) * whiteness
     eff_sat = (
         (1.0 + (saturation - 1.0) * (1.0 - desat_smooth))
         * (1.0 - desat_smooth)
@@ -274,7 +280,14 @@ def apply_auto_enhance_np(
     lum_3d = lum_final[:, :, np.newaxis]
     rgb_out = lum_3d + (rgb_out - lum_3d) * eff_sat
 
-    return np.ascontiguousarray(np.clip(rgb_out, 0.0, 1.0), dtype=np.float32)
+    # 9. Filmic Soft Knee Highlight Rolloff (replaces hard clipping)
+    # Provides smooth photographic falloff towards 1.0 with no flat clipping plateaus or hard borders.
+    T = 0.85
+    diff = np.maximum(0.0, rgb_out - T)
+    scale = 1.0 - T
+    rgb_soft = np.where(rgb_out <= T, rgb_out, T + diff * scale / (scale + diff))
+
+    return np.ascontiguousarray(np.clip(rgb_soft, 0.0, 1.0), dtype=np.float32)
 
 
 # =========================================================================
@@ -344,19 +357,36 @@ if TAICHI_AVAILABLE:
             g_out = g * ratio
             b_out = b * ratio
 
-            # Adaptive Highlight Desaturation (Anti-Chromatic Aberration Fringe)
-            desat_factor = tm.clamp((lum_final - 0.55) / 0.40, 0.0, 1.0)
-            desat_smooth = desat_factor * desat_factor * (3.0 - 2.0 * desat_factor)
+            # 8. Soft Highlight Desaturation with Whiteness/Chroma Gating
+            min_c = tm.min(tm.min(r, g), b)
+            whiteness = tm.clamp((min_c - 0.10) / 0.40, 0.0, 1.0)
+
+            # Smooth raised-cosine (Hann) taper for peak highlights (> 0.78)
+            t_hl = tm.clamp((lum_final - 0.78) / 0.22, 0.0, 1.0)
+            desat_smooth = 0.5 * (1.0 - tm.cos(3.141592653589793 * t_hl)) * whiteness
             eff_sat = (1.0 + (saturation - 1.0) * (1.0 - desat_smooth)) * (1.0 - desat_smooth)
 
             r_out = lum_final + (r_out - lum_final) * eff_sat
             g_out = lum_final + (g_out - lum_final) * eff_sat
             b_out = lum_final + (b_out - lum_final) * eff_sat
 
+            # 9. Filmic Soft Knee Highlight Rolloff (replaces hard clipping)
+            T = 0.85
+            scale = 0.15
+
+            diff_r = tm.max(0.0, r_out - T)
+            r_soft = r_out if r_out <= T else T + diff_r * scale / (scale + diff_r)
+
+            diff_g = tm.max(0.0, g_out - T)
+            g_soft = g_out if g_out <= T else T + diff_g * scale / (scale + diff_g)
+
+            diff_b = tm.max(0.0, b_out - T)
+            b_soft = b_out if b_out <= T else T + diff_b * scale / (scale + diff_b)
+
             dst[i, j] = tm.vec3(
-                tm.clamp(r_out, 0.0, 1.0),
-                tm.clamp(g_out, 0.0, 1.0),
-                tm.clamp(b_out, 0.0, 1.0),
+                tm.clamp(r_soft, 0.0, 1.0),
+                tm.clamp(g_soft, 0.0, 1.0),
+                tm.clamp(b_soft, 0.0, 1.0),
             )
 
 
