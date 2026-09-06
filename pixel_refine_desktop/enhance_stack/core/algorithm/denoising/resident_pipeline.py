@@ -37,13 +37,44 @@ def get_configured_processing_format() -> str:
         return "RGB Linear"
 
 
-def resolve_resident_processor(processing_format=None):
-    """Resolve a processor; no image pixels are decoded at this layer."""
+def _is_supported_cfa_dng_request(image_paths, is_raw: bool, weight_engine) -> bool:
+    """Return whether this request can use the shared sensor-CFA pipeline.
+
+    The native reader currently has an exact contract for DNG mosaics.  Other
+    RAW containers and all non-RAW images deliberately retain the established
+    RGB Linear processor until they have the same contract.
+    """
+    if (
+        not is_raw
+        or not image_paths
+        or str(weight_engine or "").strip().casefold() != "average"
+    ):
+        return False
+    from pathlib import Path
+
+    return all(Path(path).suffix.casefold() == ".dng" for path in image_paths)
+
+
+def resolve_resident_processor(
+    processing_format=None, *, image_paths=None, is_raw=False, weight_engine="average"
+):
+    """Resolve a processor; no image pixels are decoded at this layer.
+
+    DNG Average bursts share the CFA-aware fusion path. ``processing_format``
+    selects only the final materialization: mosaiced DNG for RAW Native, or a
+    once-demosaiced linear TIFF for RGB Linear. Non-RAW images and RGB Linear
+    mergers without a CFA implementation retain their proven RGB route.
+    """
     if processing_format is None:
         processing_format = get_configured_processing_format()
     canonical = normalize_processing_format(processing_format)
+    if _is_supported_cfa_dng_request(image_paths, bool(is_raw), weight_engine):
+        return RawNativeResidentProcessor(output_format=canonical)
     if canonical == "RAW Native":
-        return RawNativeResidentProcessor()
+        raise RawNativePipelineNotReadyError(
+            "RAW Native requires a DNG burst. Non-RAW inputs remain on the "
+            "established RGB Linear pipeline."
+        )
     return _rgb_linear.RGBLinearResidentProcessor()
 
 
@@ -73,7 +104,12 @@ def run_gpu_resident_pipeline(
     processing_format=None,
 ):
     """Dispatch a uniform resident request to its selected processor."""
-    processor = resolve_resident_processor(processing_format)
+    processor = resolve_resident_processor(
+        processing_format,
+        image_paths=image_paths,
+        is_raw=is_raw,
+        weight_engine=weight_engine,
+    )
     return processor.run(
         image_paths,
         session,

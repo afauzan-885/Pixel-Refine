@@ -9,6 +9,7 @@ step in :mod:`Average`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -685,7 +686,7 @@ def _run_dense_flow_aligned_average(
 
 
 class RawNativeResidentProcessor:
-    """Run truthful RAW Native algorithms and materialize DNG only at the end."""
+    """Run the shared CFA pipeline and select its final output representation."""
 
     process_format = "RAW Native"
     _FEATURE_PLANS = {"ofb", "orb", "akaze", "feature matching"}
@@ -700,6 +701,16 @@ class RawNativeResidentProcessor:
         "block matching",
     }
     _NO_ALIGNMENT = {"no alignment", "none", "off", ""}
+
+    def __init__(self, output_format: str = "RAW Native"):
+        normalized = str(output_format or "RAW Native").strip().casefold()
+        if normalized not in {"raw native", "rgb linear"}:
+            raise ValueError(f"Unsupported CFA output format: {output_format!r}")
+        self.output_format = "RAW Native" if normalized == "raw native" else "RGB Linear"
+
+    def _result_for_output(self, result):
+        """Keep one CFA computation while recording its requested final form."""
+        return replace(result, output_format=self.output_format)
 
     def run(self, image_paths, session=None, **kwargs):
         weight_engine = str(kwargs.get("weight_engine", "")).casefold()
@@ -718,7 +729,7 @@ class RawNativeResidentProcessor:
                 stop_event=kwargs.get("stop_event"),
                 progress_callback=kwargs.get("progress_callback"),
             )
-            return result, 1.0
+            return self._result_for_output(result), 1.0
         if alignment in self._DENSE_FLOW_PLANS:
             session = RawNativeSession.load(image_paths)
             result = _run_dense_flow_aligned_average(
@@ -730,7 +741,7 @@ class RawNativeResidentProcessor:
                 stop_event=kwargs.get("stop_event"),
                 progress_callback=kwargs.get("progress_callback"),
             )
-            return result, 1.0
+            return self._result_for_output(result), 1.0
         if alignment not in self._FEATURE_PLANS:
             raise RawNativePipelineNotReadyError(
                 "RAW Native alignment supports OFB/ORB, AKAZE, Farneback, "
@@ -746,4 +757,4 @@ class RawNativeResidentProcessor:
             stop_event=kwargs.get("stop_event"),
             progress_callback=kwargs.get("progress_callback"),
         )
-        return result, 1.0
+        return self._result_for_output(result), 1.0

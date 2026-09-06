@@ -151,13 +151,20 @@ def _source_capture_exif_tags(path: str):
 
 @dataclass(frozen=True)
 class RawNativeAverageResult:
-    """One pre-demosaic average plus its display-only RGB preview."""
+    """One CFA fusion with one final RGB-linear materialization.
+
+    ``normalized_mosaic`` is the sole sensor-domain result.  ``linear_rgb``
+    is demosaiced exactly once from its baked-orientation mosaic; the UI
+    preview is only an AutoEnhance view derived from that linear RGB data.
+    """
 
     preview_rgb: np.ndarray
     normalized_mosaic: np.ndarray
     reference_frame: object
     source_paths: tuple[str, ...]
     report: object
+    linear_rgb: np.ndarray | None = None
+    output_format: str = "RAW Native"
 
     def _quantized_mosaic(self) -> np.ndarray:
         """Encode normalized CFA values in a derived full-range RAW space.
@@ -225,6 +232,21 @@ class RawNativeAverageResult:
         )
         return str(target)
 
+    def save_linear_tiff(self, path: str | Path) -> str:
+        """Persist the one-demosaic RGB-linear result without display tuning."""
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+            save_image,
+        )
+
+        rgb = self.linear_rgb if self.linear_rgb is not None else self.preview_rgb
+        encoded = np.clip(np.asarray(rgb, dtype=np.float32), 0.0, 1.0)
+        encoded = np.rint(encoded * 65535.0).astype(np.uint16)
+        # Pixels are already baked into their final orientation.  Passing no
+        # reference prevents the generic TIFF helper from rotating them again.
+        if not save_image(encoded, str(path), reference_image_path=None):
+            raise OSError(f"Failed to save RGB Linear TIFF: {path}")
+        return str(path)
+
 
 def _raw_native_block_size(value) -> int:
     if value is not None:
@@ -270,7 +292,7 @@ def create_raw_native_average_result(
     preview_mosaic, preview_cfa = result.baked_oriented_mosaic()
     if progress_callback:
         progress_callback(88, "Membuat pratinjau RGB dari RAW hasil fusion...")
-    preview = taichi_aot.demosaic(
+    linear_rgb = taichi_aot.demosaic(
         preview_mosaic.astype(np.float32, copy=False),
         method="hamilton",
         return_gpu=False,
@@ -289,9 +311,10 @@ def create_raw_native_average_result(
     # Natural AutoEnhance is display-only.  Do not feed this RGB result back
     # into the RAW Native accumulator or DNG writer: the persisted file must
     # remain a linear, mosaiced sensor-domain fusion.
+    linear_rgb = np.ascontiguousarray(linear_rgb, dtype=np.float32)
     preview = apply_auto_enhance_np(
-        np.ascontiguousarray(preview, dtype=np.float32),
-        params=analyze_auto_enhance_params(preview, mode="natural"),
+        linear_rgb,
+        params=analyze_auto_enhance_params(linear_rgb, mode="natural"),
     )
     if progress_callback:
         progress_callback(92, "Pratinjau RAW native siap.")
@@ -301,6 +324,7 @@ def create_raw_native_average_result(
         reference_frame=reference_frame,
         source_paths=tuple(source_paths),
         report=report,
+        linear_rgb=linear_rgb,
     )
 
 

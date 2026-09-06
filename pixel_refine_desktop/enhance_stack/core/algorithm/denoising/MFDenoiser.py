@@ -520,6 +520,10 @@ class MFDenoiserAlgorithm:
         output_path = os.path.join(output_folder, f"{safe_name}_{output_suffix}.tif")
         raw_native_result = getattr(ctx, "raw_native_result", None)
         if raw_native_result is not None:
+            if getattr(raw_native_result, "output_format", "RAW Native") == "RGB Linear":
+                raw_native_result.save_linear_tiff(output_path)
+                print(f"[MFDenoiser] Saved RGB Linear TIFF to: {output_path}")
+                return output_path
             raw_output_path = os.path.splitext(output_path)[0] + ".dng"
             raw_native_result.save_dng(raw_output_path)
             print(f"[MFDenoiser] Saved RAW Native DNG to: {raw_output_path}")
