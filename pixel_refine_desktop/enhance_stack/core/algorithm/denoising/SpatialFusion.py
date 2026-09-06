@@ -8,17 +8,9 @@ selection into the CPU or GPU execution lane of ``SpatialFusionProcessor``.
 import os
 from contextlib import contextmanager
 
-# (h5py removed)
 import numpy as np
 
 from ._common_helpers import active_backend, restore_output_dtype
-
-
-def _sorted_image_keys(h5f):
-    return sorted(
-        (key for key in h5f.keys() if key.startswith("image_")),
-        key=lambda item: int(item.split("_", 1)[1]),
-    )
 
 
 @contextmanager

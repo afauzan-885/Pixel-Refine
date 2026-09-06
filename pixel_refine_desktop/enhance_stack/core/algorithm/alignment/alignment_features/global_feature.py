@@ -628,45 +628,42 @@ def load_images_from_paths(
 def load_single_image(
     data_source, index, stop_requested=None, linear_mode=True, capture_ref_proxy=False
 ):
-    """Loads a single image at the given index from HDF5 or filesystem."""
-    # (h5py removed)
-
+    """Loads a single image at the given index from filesystem."""
     ref_proxy = None
 
-    if isinstance(data_source, str) and data_source.endswith(".h5"):
-        with h5py.File(data_source, "r") as h5f:
-            key = list(h5f.keys())[index]
-            img = np.array(h5f[key])
-            return (img, None) if capture_ref_proxy else img
-
-    elif isinstance(data_source, list):
+    if isinstance(data_source, (list, tuple)):
         path = data_source[index]
-        load_res = load_images_from_paths(
-            [path],
-            stop_requested,
-            linear_mode=linear_mode,
-            capture_ref_proxy=capture_ref_proxy,
-        )
+    elif isinstance(data_source, (str, os.PathLike)):
+        path = str(data_source)
+    else:
+        path = data_source
 
-        if capture_ref_proxy and isinstance(load_res, tuple):
-            batch_images, ref_proxy = load_res
-        else:
-            batch_images = load_res
+    load_res = load_images_from_paths(
+        [path],
+        stop_requested,
+        linear_mode=linear_mode,
+        capture_ref_proxy=capture_ref_proxy,
+    )
 
-        # Automatic resizing for consistency
-        resize_res = resize_all_with_padding(
-            batch_images,
-            method="preserve",
-            stop_requested=stop_requested,
-            force_even=True,
-        )
-        if resize_res and resize_res[0]:
-            batch_images = resize_res[0]
+    if capture_ref_proxy and isinstance(load_res, tuple):
+        batch_images, ref_proxy = load_res
+    else:
+        batch_images = load_res
 
-        img = batch_images[0] if batch_images else None
-        if capture_ref_proxy:
-            return img, ref_proxy
-        return img
+    # Automatic resizing for consistency
+    resize_res = resize_all_with_padding(
+        batch_images,
+        method="preserve",
+        stop_requested=stop_requested,
+        force_even=True,
+    )
+    if resize_res and resize_res[0]:
+        batch_images = resize_res[0]
+
+    img = batch_images[0] if batch_images else None
+    if capture_ref_proxy:
+        return img, ref_proxy
+    return img
 
 
 def save_to_hdf5(h5f, dataset_name, cropped, metadata=None):
@@ -2767,53 +2764,8 @@ def is_hdf5_cache_valid(
     Returns:
         True jika cache valid (referensi sama), False jika tidak valid.
     """
-    try:
-        # (h5py removed)
-
-        with h5py.File(hdf5_path, "r") as f:
-            stored_ref = f.attrs.get("ref_image_path", "")
-            if not stored_ref:
-                # Tidak ada atribut referensi — cache lama, anggap tidak valid
-                return False
-
-            stored_basename = os.path.basename(str(stored_ref))
-            current_basename = os.path.basename(ref_image_path)
-            is_valid = stored_basename == current_basename
-
-            if not is_valid:
-                print(
-                    f"[CacheValidation] Cache HDF5 tidak valid. "
-                    f"Tersimpan: '{stored_basename}', Sekarang: '{current_basename}'"
-                )
-                return False
-
-            # Optional: validate alignment algorithm name
-            if expected_alignment_name is not None:
-                stored_align = f.attrs.get("alignment_selection", "")
-                if stored_align and stored_align != expected_alignment_name:
-                    print(
-                        f"[CacheValidation] Alignment mismatch: stored='{stored_align}' "
-                        f"expected='{expected_alignment_name}'"
-                    )
-                    return False
-
-            # Optional: validate config cache key
-            if expected_cache_key is not None:
-                stored_key = f.attrs.get("alignment_cache_key", "")
-                if stored_key and stored_key != expected_cache_key:
-                    print(
-                        f"[CacheValidation] Cache key mismatch: stored='{stored_key}' "
-                        f"expected='{expected_cache_key}'"
-                    )
-                    return False
-
-            print(
-                f"[CacheValidation] Cache HDF5 valid. Referensi cocok: {current_basename}"
-            )
-            return True
-    except Exception as e:
-        print(f"[CacheValidation] Gagal membaca atribut HDF5: {e}")
-        return False
+    # HDF5 cache tidak lagi digunakan; selalu kembalikan False
+    return False
 
 
 def build_alignment_cache_key(alignment_name: str, config: dict):

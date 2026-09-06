@@ -1686,10 +1686,8 @@ def main(
         if update_progress:
             update_progress(5, "Loading image files...")
 
-        if isinstance(data_source, str) and data_source.endswith(".h5"):
-            with h5py.File(data_source, "r") as h5f:
-                keys = list(h5f.keys())
-                images = [np.array(h5f[key]) for key in keys]
+        if isinstance(data_source, (list, tuple)):
+            images = list(data_source)
         else:
             images = _load_mfdenoiser_frames(
                 image_paths,

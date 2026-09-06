@@ -204,7 +204,7 @@ class DisplayLogic:
     def detect_processed_results(self, original_path):
         """
         Detect processed result files related to an original image.
-        Assumes naming convention: [OriginalName]_[Process].tif
+        Supports RGB Linear TIFF and mosaiced RAW Native DNG output.
 
         Args:
             original_path: Path to original image
@@ -229,9 +229,11 @@ class DisplayLogic:
         if not os.path.exists(stack_dir):
             return []
 
-        # Search pattern
-        pattern = os.path.join(stack_dir, f"{safe_name}_*.tif")
-        matches = glob.glob(pattern)
+        # Search both persisted output domains.  The filename stem remains
+        # shared so batch history and display selection stay format-agnostic.
+        matches = []
+        for extension in (".tif", ".dng"):
+            matches.extend(glob.glob(os.path.join(stack_dir, f"{safe_name}_*{extension}")))
 
         for path in matches:
             filename = os.path.basename(path)

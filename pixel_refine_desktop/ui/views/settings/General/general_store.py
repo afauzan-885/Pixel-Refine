@@ -22,6 +22,9 @@ DEFAULTS = {
     "compute_block_size": 1024,
     "compute_block_threshold_mp": 12.0,
     "compute_block_mode": "auto",
+    # The current resident pipeline processes decoded RGB.  Keep that route as
+    # the compatible default while the pre-demosaic RAW fusion route is added.
+    "processing_format": "RGB Linear",
     "onnx_runtime": "auto",
 }
 

@@ -322,23 +322,29 @@ class LeftPanel(QWidget):
             c for c in first_image_name if c.isalnum() or c in ("_", "-")
         ).rstrip()
 
-        # Construct expected path
-        # Pattern: database/stack/[safe_name]_[process].tif
+        # Construct expected path.  RGB Linear saves TIFF, while RAW Native
+        # deliberately persists a mosaiced DNG with the same safe basename.
         # Note: We need absolute path. Assuming database is relative to CWD (root of execution)
         # Or using self.controller.db_path's directory as base?
         # Standard app runs from root, so 'database/stack' should work relative to CWD.
 
         stack_dir = os.path.abspath("database/stack")
-        expected_filename = f"{output_name_safe}_{process_suffix}.tif"
-        expected_path = os.path.join(stack_dir, expected_filename)
+        expected_stem = os.path.join(stack_dir, f"{output_name_safe}_{process_suffix}")
+        expected_paths = (expected_stem + ".tif", expected_stem + ".dng")
 
         # Fallback/Loose search if exact match fails (e.g. timestamp differences?)
         # But try exact first.
 
-        if os.path.exists(expected_path):
+        expected_path = next(
+            (path for path in expected_paths if os.path.exists(path)), None
+        )
+        if expected_path is not None:
             self.display_panel.display_processed_result(expected_path)
         else:
-            print(f"[LeftPanel] Result file not found: {expected_path}")
+            print(
+                "[LeftPanel] Result file not found: "
+                + " or ".join(expected_paths)
+            )
             # Fallback disabled for tracking debugging purposes.
             # results = self.display_panel.logic.detect_processed_results(
             #     first_image_path

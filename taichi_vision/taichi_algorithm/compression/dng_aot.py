@@ -103,6 +103,32 @@ def _build_ifd(entries: list[tuple[int, int, int, object]], ifd_offset: int, str
     return bytes(out)
 
 
+def _metadata_ifd_entries(metadata: Mapping[str, Any], key: str) -> list[tuple[int, int, int, object]]:
+    """Validate caller-supplied TIFF entries for the DNG or Exif IFD.
+
+    The native writer owns image-layout tags; this narrowly scoped escape hatch
+    preserves camera colour and capture metadata for derived RAW files.
+    """
+    entries = []
+    for item in metadata.get(key, ()):
+        if not isinstance(item, (tuple, list)) or len(item) != 4:
+            raise ValueError(f"{key} entries must be (tag, type, count, value)")
+        tag, type_id, count, value = item
+        tag, type_id, count = int(tag), int(type_id), int(count)
+        if not 1 <= tag <= 0xFFFF or type_id not in _TYPE_SIZE or count < 1:
+            raise ValueError(f"invalid {key} TIFF entry: {item!r}")
+        if type_id in (5, 10) and count == 1 and isinstance(value, (tuple, list)) and len(value) == 2:
+            # The native reader represents a single RATIONAL/SRATIONAL as one
+            # pair, while the TIFF encoder consumes a sequence of pairs.
+            value = (value,)
+        # Validate the value now, before IFD layout calculations.
+        _pack_value(value, type_id, count, "II")
+        entries.append((tag, type_id, count, value))
+    if len({entry[0] for entry in entries}) != len(entries):
+        raise ValueError(f"{key} contains duplicate TIFF tags")
+    return entries
+
+
 def _row_bytes(raw: Any, endian: str) -> bytes:
     np = _numpy()
     if raw.dtype == np.uint8:
@@ -1129,12 +1155,25 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
     if "xmp" in metadata:
         xmp = bytes(metadata["xmp"])
         entries.append((700, 7, len(xmp), xmp))
+    extra_entries = _metadata_ifd_entries(metadata, "dng_extra_tags")
+    reserved_tags = {entry[0] for entry in entries}
+    collisions = reserved_tags.intersection(entry[0] for entry in extra_entries)
+    if collisions:
+        raise ValueError(f"dng_extra_tags cannot replace native layout tags: {sorted(collisions)}")
+    entries.extend(extra_entries)
+    exif_entries = _metadata_ifd_entries(metadata, "exif_tags")
+    if exif_entries:
+        entries.append((34665, 4, 1, 0))  # patched after its IFD is laid out
     entries.sort(key=lambda item: item[0])
     ifd_offset = 8
-    # Build once with a conservative strip offset, then rebuild with the
-    # actual end of the IFD/extra-value area.
+    # Build the root IFD once with a placeholder Exif pointer.  The pointer is
+    # inline, so replacing it does not change layout.
     provisional = _build_ifd(entries, ifd_offset, tuple(0 for _ in strips), "II")
-    strip_offset = ifd_offset + len(provisional)
+    exif_offset = ifd_offset + len(provisional)
+    if exif_offset & 1:
+        exif_offset += 1
+    exif_directory = _build_ifd(exif_entries, exif_offset, (), "II") if exif_entries else b""
+    strip_offset = exif_offset + len(exif_directory)
     if strip_offset & 1:
         strip_offset += 1
     strip_offsets = []
@@ -1142,9 +1181,17 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
     for strip in strips:
         strip_offsets.append(cursor)
         cursor += len(strip)
+    if exif_entries:
+        entries = [
+            (tag, type_id, count, exif_offset if tag == 34665 else value)
+            for tag, type_id, count, value in entries
+        ]
     directory = _build_ifd(entries, ifd_offset, tuple(strip_offsets), "II")
     output = bytearray(b"II" + struct.pack("<H", 42) + struct.pack("<I", ifd_offset))
     output.extend(directory)
+    while len(output) < exif_offset:
+        output.append(0)
+    output.extend(exif_directory)
     while len(output) < strip_offset:
         output.append(0)
     for strip in strips:

@@ -5,17 +5,12 @@ Delegates multi-frame processing (preloading, alignment, weighting, and accumula
 to the high-performance GPU-resident pipeline (resident_pipeline.py).
 """
 
-import gc
 import json
 import os
-import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Optional
-
 import numpy as np
-
-from ._common_helpers import frame_info as _frame_info
 
 from config import GENERAL_SETTINGS_FILE
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
@@ -523,6 +518,13 @@ class MFDenoiserAlgorithm:
         )
         output_suffix = ctx.params.get("output_suffix", "mf_denoiser")
         output_path = os.path.join(output_folder, f"{safe_name}_{output_suffix}.tif")
+        raw_native_result = getattr(ctx, "raw_native_result", None)
+        if raw_native_result is not None:
+            raw_output_path = os.path.splitext(output_path)[0] + ".dng"
+            raw_native_result.save_dng(raw_output_path)
+            print(f"[MFDenoiser] Saved RAW Native DNG to: {raw_output_path}")
+            return raw_output_path
+
         print(f"[MFDenoiser] Saved output to: {output_path}")
 
         if ctx.is_linear_mode:
@@ -583,6 +585,19 @@ class MFDenoiserAlgorithm:
             stop_requested=stop_requested,
         )
         ctx.params = self._load_params(batch_id=batch_id)
+        # General Settings owns the default processing domain. A batch-level
+        # value remains authoritative so saved jobs can opt in explicitly.
+        if "processing_format" not in ctx.params:
+            try:
+                from pixel_refine_desktop.ui.views.settings.General.general_store import (
+                    get_general_store,
+                )
+
+                ctx.params["processing_format"] = get_general_store().get(
+                    "processing_format", "RGB Linear"
+                )
+            except Exception:
+                ctx.params["processing_format"] = "RGB Linear"
         if merging_mode is not None:
             ctx.params["merge_plan"] = merging_mode
         if output_suffix is not None:

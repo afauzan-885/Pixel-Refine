@@ -173,6 +173,9 @@ class FusionNetDenoisingAlgorithm:
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=update_prog,
+                processing_format=getattr(ctx, "params", {}).get(
+                    "processing_format", "RGB Linear"
+                ),
             )
 
             if result_fp32 is None:
