@@ -18,6 +18,7 @@ Graphs packaged by ``compile_spatial_tcm`` (all float32):
     remap_accumulate_average_tile,
     remap_accumulate_spatial_tile,
     remap_accumulate_spatial_vec3_tile,
+    remap_accumulate_cfa_weighted_plane, normalize_accumulator_cfa,
     mean_division_vec3_weight, fine_analysis_and_accumulate,
     generate_fine_weights_4passes, postprocess_spatial_weight
 """
@@ -886,6 +887,96 @@ def remap_accumulate_spatial_vec3_tile_kernel(
 
 
 @ti.kernel
+def remap_accumulate_cfa_weighted_plane_kernel(
+    source_plane: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    plane_origin_y: ti.i32,
+    plane_origin_x: ti.i32,
+    cfa_channel: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+):
+    """Warp and accumulate one Bayer plane without leaving the active backend.
+
+    ``source_plane`` contains one colour lattice, not a full mosaiced image.
+    Interpolation is therefore always between samples of the same CFA colour.
+    Flow is sampled in the RGB-analysis domain and converted from full-sensor
+    pixels into this half-resolution lattice before the source lookup.
+    """
+    flow_x_scale = float(w_flow - 1) / float(w_dst - 1)
+    flow_y_scale = float(h_flow - 1) / float(h_dst - 1)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        gr = r * 2 + plane_origin_y
+        gc = c * 2 + plane_origin_x
+        if gr < h_dst and gc < w_dst:
+            fx = float(gc) * flow_x_scale
+            fy = float(gr) * flow_y_scale
+            dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+            dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+            src_x = float(c) + dx * scale_x * 0.5
+            src_y = float(r) + dy * scale_y * 0.5
+
+            # Source validity is calculated in this graph, replacing the
+            # historical remapped all-ones mask and its host readback.
+            if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                sx1 = ti.min(sx0 + 1, w_plane - 1)
+                sy1 = ti.min(sy0 + 1, h_plane - 1)
+                tx = src_x - float(sx0)
+                ty = src_y - float(sy0)
+                value = (
+                    (1.0 - ty) * (1.0 - tx) * source_plane[sy0, sx0]
+                    + (1.0 - ty) * tx * source_plane[sy0, sx1]
+                    + ty * (1.0 - tx) * source_plane[sy1, sx0]
+                    + ty * tx * source_plane[sy1, sx1]
+                )
+
+                wx = float(gc) * weight_x_scale
+                wy = float(gr) * weight_y_scale
+                wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                wx1 = ti.min(wx0 + 1, w_work - 1)
+                wy1 = ti.min(wy0 + 1, h_work - 1)
+                txw = wx - float(wx0)
+                tyw = wy - float(wy0)
+                weight = (
+                    (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0, cfa_channel]
+                    + (1.0 - tyw) * txw * weight_map_work[wy0, wx1, cfa_channel]
+                    + tyw * (1.0 - txw) * weight_map_work[wy1, wx0, cfa_channel]
+                    + tyw * txw * weight_map_work[wy1, wx1, cfa_channel]
+                )
+                weight = ti.max(0.0, ti.min(1.0, weight))
+                final_cfa_sum[gr, gc] += value * weight
+                final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
+def normalize_accumulator_cfa_kernel(
+    cfa_sum: ti.types.ndarray(),
+    cfa_weight: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+):
+    """Normalize a scalar CFA accumulator in place on the active backend."""
+    for y, x in ti.ndrange(h, w):
+        cfa_sum[y, x] /= ti.max(cfa_weight[y, x], 1.0e-6)
+
+
+@ti.kernel
 def mean_division_vec3_weight_kernel(
     sum_img: ti.types.ndarray(),
     sum_weight: ti.types.ndarray(),
@@ -1432,6 +1523,84 @@ def _compile_graphs(module):
     module.add_graph(
         "remap_accumulate_spatial_vec3_tile", g_fused_spatial_vec3.compile()
     )
+
+    # CFA FusionNet path.  Four dispatches (one per Bayer lattice) replace
+    # the old per-tile remap/download/NumPy accumulation loop.  The source,
+    # sums and denominator remain scalar 2D buffers, while flow and WeightNet
+    # confidence remain work-resolution vector fields.
+    sym_cfa_source_plane = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source_plane", dtype=ti.f32, ndim=2
+    )
+    sym_cfa_sum = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "final_cfa_sum", dtype=ti.f32, ndim=2
+    )
+    sym_cfa_weight_sum = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "final_cfa_weight", dtype=ti.f32, ndim=2
+    )
+    sym_cfa_h_plane = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "h_plane", dtype=ti.i32
+    )
+    sym_cfa_w_plane = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "w_plane", dtype=ti.i32
+    )
+    sym_cfa_origin_y = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "plane_origin_y", dtype=ti.i32
+    )
+    sym_cfa_origin_x = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "plane_origin_x", dtype=ti.i32
+    )
+    sym_cfa_channel = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "cfa_channel", dtype=ti.i32
+    )
+    g_fused_cfa = ti.graph.GraphBuilder()
+    g_fused_cfa.dispatch(
+        remap_accumulate_cfa_weighted_plane_kernel,
+        sym_cfa_source_plane,
+        sym_fused_flow,
+        sym_fused_weight_3d,
+        sym_cfa_sum,
+        sym_cfa_weight_sum,
+        sym_fused_h_dst,
+        sym_fused_w_dst,
+        sym_fused_h_flow,
+        sym_fused_w_flow,
+        sym_fused_h_work,
+        sym_fused_w_work,
+        sym_cfa_h_plane,
+        sym_cfa_w_plane,
+        sym_cfa_origin_y,
+        sym_cfa_origin_x,
+        sym_cfa_channel,
+        sym_fused_scale_x,
+        sym_fused_scale_y,
+    )
+    module.add_graph("remap_accumulate_cfa_weighted_plane", g_fused_cfa.compile())
+
+    # Normalization has its own runtime argument names.  Do not reuse the
+    # fused-accumulation symbols above: AOT binds arguments by name, so using
+    # ``final_cfa_sum`` here would make ``normalize_accumulator_cfa`` require
+    # a value that its public wrapper never supplies.
+    sym_norm_cfa_sum = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "cfa_sum", dtype=ti.f32, ndim=2
+    )
+    sym_norm_cfa_weight = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "cfa_weight", dtype=ti.f32, ndim=2
+    )
+    sym_norm_cfa_h = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "h", dtype=ti.i32
+    )
+    sym_norm_cfa_w = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "w", dtype=ti.i32
+    )
+    g_norm_cfa = ti.graph.GraphBuilder()
+    g_norm_cfa.dispatch(
+        normalize_accumulator_cfa_kernel,
+        sym_norm_cfa_sum,
+        sym_norm_cfa_weight,
+        sym_norm_cfa_h,
+        sym_norm_cfa_w,
+    )
+    module.add_graph("normalize_accumulator_cfa", g_norm_cfa.compile())
 
     # 4e. Mean Division Vec3 Weight Graph (per-channel normalization)
     sym_sum_img_md = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "sum_img", dtype=ti.f32, ndim=3)
@@ -3043,6 +3212,133 @@ def remap_accumulate_average_sum_tile_taichi(
         offset_x=offset_x,
         finalize=int(bool(finalize)),
         denominator=denominator_value,
+    )
+
+
+def remap_accumulate_cfa_weighted_taichi(
+    source_planes,
+    flow_work,
+    weight_map_work,
+    final_cfa_sum,
+    final_cfa_weight,
+    *,
+    full_shape,
+    cfa_pattern,
+    phase_origin=(0, 0),
+):
+    """Fuse one RAW support into scalar CFA accumulators without host tiles.
+
+    ``source_planes`` are the four phase-correct Bayer lattices in row-major
+    2x2 order.  The model weight map stays at its analysis resolution; each
+    dispatch selects only the R, G, or B confidence belonging to its lattice.
+    The function performs no download and leaves all supplied buffers owned by
+    the caller.
+    """
+    import taichi_vision.taichi_aot as taichi_aot
+
+    engine = taichi_aot.engine
+    tcm_path = _resolve_spatial_tcm(engine)
+    graph_name = "remap_accumulate_cfa_weighted_plane"
+    if not _tcm_graph_available(tcm_path, graph_name):
+        raise RuntimeError(
+            f"{graph_name} requested but the resolved spatial TCM lacks the graph: "
+            f"{tcm_path}. Recompile the spatial TCM for the active backend."
+        )
+    if len(source_planes) != 4:
+        raise ValueError("CFA weighted accumulation requires four Bayer source planes")
+    h_dst, w_dst = (int(full_shape[0]), int(full_shape[1]))
+    if tuple(int(v) for v in final_cfa_sum.shape) != (h_dst, w_dst):
+        raise ValueError("final_cfa_sum must be a scalar buffer matching full_shape")
+    if tuple(int(v) for v in final_cfa_weight.shape) != (h_dst, w_dst):
+        raise ValueError("final_cfa_weight must be a scalar buffer matching full_shape")
+    if len(flow_work.shape) != 3 or int(flow_work.shape[2]) != 2:
+        raise ValueError("flow_work must have shape (H, W, 2)")
+    if len(weight_map_work.shape) != 3 or int(weight_map_work.shape[2]) < 3:
+        raise ValueError("weight_map_work must have shape (H, W, >=3)")
+    if len(cfa_pattern) != 4 or len(phase_origin) != 2:
+        raise ValueError("cfa_pattern must have four entries and phase_origin two")
+    if any(np.dtype(buf.dtype) != np.dtype(np.float32) for buf in source_planes):
+        raise TypeError("CFA source planes must be float32")
+    if (
+        np.dtype(flow_work.dtype) != np.dtype(np.float32)
+        or np.dtype(weight_map_work.dtype) != np.dtype(np.float32)
+        or np.dtype(final_cfa_sum.dtype) != np.dtype(np.float32)
+        or np.dtype(final_cfa_weight.dtype) != np.dtype(np.float32)
+    ):
+        raise TypeError("CFA fusion requires float32 buffers")
+
+    def _scalar_3d(buf):
+        return buf.view_as_vector(False) if getattr(buf, "is_vector", False) else buf
+
+    phase_y, phase_x = (int(phase_origin[0]) & 1, int(phase_origin[1]) & 1)
+    mod = engine.load(tcm_path)
+    for index, source_plane in enumerate(source_planes):
+        plane_row, plane_col = divmod(index, 2)
+        origin_y = (plane_row - phase_y) & 1
+        origin_x = (plane_col - phase_x) & 1
+        channel = int(cfa_pattern[index])
+        if channel < 0 or channel > 2:
+            raise ValueError(
+                "CFA FusionNet requires RGB CFA codes in [0, 2], got "
+                f"{channel} at plane {index}"
+            )
+        expected_shape = (
+            len(range(origin_y, h_dst, 2)),
+            len(range(origin_x, w_dst, 2)),
+        )
+        if tuple(int(v) for v in source_plane.shape) != expected_shape:
+            raise ValueError(
+                f"CFA plane {index} shape {tuple(source_plane.shape)} does not match "
+                f"phase-correct expected shape {expected_shape}"
+            )
+        mod.run(
+            graph_name,
+            source_plane=source_plane,
+            flow_work=_scalar_3d(flow_work),
+            weight_map_work=_scalar_3d(weight_map_work),
+            final_cfa_sum=final_cfa_sum,
+            final_cfa_weight=final_cfa_weight,
+            h_dst=h_dst,
+            w_dst=w_dst,
+            h_flow=int(flow_work.shape[0]),
+            w_flow=int(flow_work.shape[1]),
+            h_work=int(weight_map_work.shape[0]),
+            w_work=int(weight_map_work.shape[1]),
+            h_plane=int(source_plane.shape[0]),
+            w_plane=int(source_plane.shape[1]),
+            plane_origin_y=origin_y,
+            plane_origin_x=origin_x,
+            cfa_channel=channel,
+            scale_x=float(w_dst) / float(flow_work.shape[1]),
+            scale_y=float(h_dst) / float(flow_work.shape[0]),
+        )
+
+
+def normalize_accumulator_cfa_taichi(cfa_sum, cfa_weight):
+    """Normalize a scalar RAW accumulator in place without a host round-trip."""
+    import taichi_vision.taichi_aot as taichi_aot
+
+    engine = taichi_aot.engine
+    tcm_path = _resolve_spatial_tcm(engine)
+    graph_name = "normalize_accumulator_cfa"
+    if not _tcm_graph_available(tcm_path, graph_name):
+        raise RuntimeError(
+            f"{graph_name} requested but the resolved spatial TCM lacks the graph: "
+            f"{tcm_path}. Recompile the spatial TCM for the active backend."
+        )
+    h, w = (int(cfa_sum.shape[0]), int(cfa_sum.shape[1]))
+    if tuple(int(v) for v in cfa_sum.shape) != (h, w):
+        raise ValueError("cfa_sum must be a scalar 2D buffer")
+    if tuple(int(v) for v in cfa_weight.shape) != (h, w):
+        raise ValueError("cfa_weight must match cfa_sum")
+    if np.dtype(cfa_sum.dtype) != np.dtype(np.float32) or np.dtype(cfa_weight.dtype) != np.dtype(np.float32):
+        raise TypeError("CFA normalization requires float32 buffers")
+    engine.load(tcm_path).run(
+        graph_name,
+        cfa_sum=cfa_sum,
+        cfa_weight=cfa_weight,
+        h=h,
+        w=w,
     )
 
 

@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
+import queue
+import threading
 
 import numpy as np
 
@@ -472,6 +474,659 @@ def _accumulate_cfa_flow_tiles(
             _release(buffer)
 
 
+def _accumulate_weighted_cfa_flow_tiles(
+    sums: np.ndarray,
+    weights: np.ndarray,
+    source: np.ndarray,
+    frame,
+    flow_gpu,
+    weight_rgb: np.ndarray,
+    *,
+    block_size: int,
+) -> int:
+    """Accumulate a WeightNet confidence map into matching CFA samples only.
+
+    ``weight_rgb`` is analysis-only model output at sensor resolution.  Its
+    R/G/B channels are selected by the source CFA tile (both green planes use
+    G), while the source samples remain independent float32 Bayer planes.
+    """
+    from taichi_vision import taichi_aot
+
+    full_weight = np.asarray(weight_rgb, dtype=np.float32)
+    if full_weight.shape != (*frame.shape, 3):
+        raise ValueError(
+            "FusionNet RAW Native weight map must have shape "
+            f"{(*frame.shape, 3)}, got {full_weight.shape}"
+        )
+    height, width = frame.shape
+    sources = []
+    masks = []
+    try:
+        for index in range(4):
+            rows, columns = _plane_slice(frame, index)
+            plane = np.ascontiguousarray(source[rows, columns], dtype=np.float32)
+            sources.append(taichi_aot.upload(plane))
+            masks.append(taichi_aot.upload(np.ones(plane.shape, dtype=np.float32)))
+        block_count = 0
+        for y0 in range(0, height, int(block_size)):
+            y1 = min(height, y0 + int(block_size))
+            for x0 in range(0, width, int(block_size)):
+                x1 = min(width, x0 + int(block_size))
+                tile_h, tile_w = y1 - y0, x1 - x0
+                sum_tile = sums[y0:y1, x0:x1]
+                weight_tile = weights[y0:y1, x0:x1]
+                model_tile = full_weight[y0:y1, x0:x1]
+                for index in range(4):
+                    rows, columns, plane_h, plane_w, out_y, out_x = _tile_plane_selector(
+                        frame, index, y0, x0, tile_h, tile_w
+                    )
+                    if plane_h == 0 or plane_w == 0:
+                        continue
+                    warped_gpu = valid_gpu = None
+                    try:
+                        warped_gpu = taichi_aot.remap_with_flow_tile(
+                            sources[index], flow_gpu, int(sources[index].shape[0]),
+                            int(sources[index].shape[1]), out_y, out_x, plane_h, plane_w,
+                        )
+                        valid_gpu = taichi_aot.remap_with_flow_tile(
+                            masks[index], flow_gpu, int(masks[index].shape[0]),
+                            int(masks[index].shape[1]), out_y, out_x, plane_h, plane_w,
+                        )
+                        warped = np.asarray(warped_gpu.to_numpy(), dtype=np.float32)
+                        valid = (
+                            np.asarray(valid_gpu.to_numpy(), dtype=np.float32) > 0.999
+                        ) & np.isfinite(warped)
+                        channel = int(frame.cfa_pattern[index])
+                        confidence = np.clip(model_tile[rows, columns, channel], 0.0, 1.0)
+                        contribution = np.where(valid, confidence, 0.0)
+                        sum_tile[rows, columns] += np.where(valid, warped * confidence, 0.0)
+                        weight_tile[rows, columns] += contribution
+                    finally:
+                        _release(warped_gpu)
+                        _release(valid_gpu)
+                block_count += 1
+        return block_count
+    finally:
+        for buffer in sources:
+            _release(buffer)
+        for buffer in masks:
+            _release(buffer)
+
+
+def _accumulate_weighted_cfa_flow_resident(
+    source: np.ndarray,
+    frame,
+    flow_gpu,
+    weight_work_gpu,
+    sum_gpu,
+    weight_gpu,
+) -> int:
+    """Fuse one support directly into resident CFA sums.
+
+    The four uploads are source Bayer lattices only.  Once uploaded, flow
+    sampling, WeightNet channel selection, validity testing, warp, weighted
+    accumulation, and normalization ownership remain in Taichi.  In
+    particular, this path has no per-tile host download.
+    """
+    from taichi_vision import taichi_aot
+    from taichi_vision.taichi_algorithm.spatial_fusion import (
+        remap_accumulate_cfa_weighted_taichi,
+    )
+
+    source_planes = []
+    try:
+        for index in range(4):
+            rows, columns = _plane_slice(frame, index)
+            source_planes.append(
+                taichi_aot.upload(
+                    np.ascontiguousarray(source[rows, columns], dtype=np.float32)
+                )
+            )
+        remap_accumulate_cfa_weighted_taichi(
+            source_planes,
+            flow_gpu,
+            weight_work_gpu,
+            sum_gpu,
+            weight_gpu,
+            full_shape=frame.shape,
+            cfa_pattern=frame.cfa_pattern,
+            phase_origin=frame.phase_origin,
+        )
+        return len(source_planes)
+    finally:
+        for plane in source_planes:
+            _release(plane)
+
+
+def _analysis_proxy_numpy(session, index: int, *, work_scale: float):
+    """Materialize only the aligned-stage RGB proxy at the GPU boundary."""
+    from taichi_vision import taichi_aot
+
+    proxy_gpu = session.analysis_proxy(index, work_scale=work_scale)
+    try:
+        proxy = np.ascontiguousarray(proxy_gpu.to_numpy(), dtype=np.float32)
+    finally:
+        _release(proxy_gpu)
+    return proxy
+
+
+def _weightnet_analysis_proxy(session, index: int, *, work_scale: float, params=None):
+    """Build a disposable AutoEnhance RGB proxy for alignment and WeightNet."""
+    from taichi_vision.taichi_algorithm.enhancement.auto_enhance import (
+        analyze_auto_enhance_params,
+        apply_auto_enhance_np,
+    )
+
+    proxy = _analysis_proxy_numpy(session, index, work_scale=work_scale)
+    if params is None:
+        params = analyze_auto_enhance_params(proxy, mode="analysis")
+    enhanced = apply_auto_enhance_np(proxy, params=params)
+    return np.ascontiguousarray(enhanced, dtype=np.float32), params
+
+
+def _legacy_weightnet_proxy_gpu(path, *, shape, params=None):
+    """Build the commit-50e2e8a WeightNet analysis proxy on GPU.
+
+    This path is intentionally isolated from alignment.  It reuses the
+    established RGB resident loader/demosaic contract, then applies the
+    analysis AutoEnhance parameters before the caller supplies the already
+    estimated alignment flow.
+    """
+    from taichi_vision import taichi_aot
+    from .rgb_linear_resident import load_frame_to_gpu, apply_auto_enhance_on_gpu
+
+    source_gpu = load_frame_to_gpu(path, is_raw=True)
+    try:
+        target_h, target_w = int(shape[0]), int(shape[1])
+        if tuple(int(v) for v in source_gpu.shape[:2]) != (target_h, target_w):
+            resized = taichi_aot.resize(
+                source_gpu,
+                (target_w, target_h),
+                interpolation=taichi_aot.INTER_AREA,
+                return_gpu=True,
+            )
+            _release(source_gpu)
+            source_gpu = resized
+        if params is not None:
+            enhanced = apply_auto_enhance_on_gpu(
+                source_gpu, params
+            )
+            if enhanced is not source_gpu:
+                _release(source_gpu)
+            source_gpu = enhanced
+        return source_gpu
+    except Exception:
+        _release(source_gpu)
+        raise
+
+
+def _run_weightnet_cfa_fusion_serial(
+    raw_session: RawNativeSession,
+    weightnet_session,
+    *,
+    alignment_plan: str,
+    alignment_config=None,
+    work_scale: float = 0.50,
+    tile_size: int = 256,
+    overlap: float = 0.30,
+    ghost_penalty: float = 1.0,
+    ghost_cutoff: float = 0.05,
+    chroma_sensitivity: float = 1.0,
+    block_size=None,
+    stop_event=None,
+    progress_callback=None,
+):
+    """WeightNet RGB analysis with weighted CFA-float32 sensor fusion."""
+    from taichi_vision import taichi_aot
+    from .Average import create_raw_native_average_result
+    from .fusionet_engine.flownet_inference import AOTOpticalFlowAligner
+    from .fusionet_engine.weightnet_inference import infer_single_support_weight_map
+    from .resident_alignment import resolve_fusionnet_alignment_plan
+    from .rgb_linear_resident import BlockMatchingGPUResidentAligner
+
+    plan = resolve_fusionnet_alignment_plan(alignment_plan)
+    reference = raw_session.reference
+    ref_analysis, analysis_params = _weightnet_analysis_proxy(
+        raw_session, 0, work_scale=work_scale
+    )
+    ref_gpu = taichi_aot.upload(ref_analysis)
+    # CFA FusionNet currently uses one resident dispatch per Bayer plane.
+    # Region/block dispatch remains disabled until this fused path has parity
+    # and throughput evidence on every backend.
+    selected_block = None
+    sums_gpu = taichi_aot.upload(raw_session.normalized(0))
+    weights_gpu = taichi_aot.upload(
+        np.ones(reference.shape, dtype=np.float32)
+    )
+    aligned_supports = 0
+    block_count = 0
+    aligner = None
+    accumulation_complete = False
+    try:
+        if plan == "block matching gpu":
+            aligner = BlockMatchingGPUResidentAligner(
+                ref_gpu, full_shape=reference.shape, alignment_config=alignment_config
+            )
+        else:
+            # compute_flow operates entirely on the RGB proxy. The same flow
+            # is then consumed by CFA-plane remapping below.
+            aligner = AOTOpticalFlowAligner(
+                ref_gpu, work_scale=1.0, full_shape=ref_analysis.shape[:2]
+            )
+        total = max(1, raw_session.frame_count - 1)
+        ref_chw = np.ascontiguousarray(np.transpose(ref_analysis, (2, 0, 1)), dtype=np.float32)
+        for index in range(1, raw_session.frame_count):
+            if stop_event is not None and (stop_event() if callable(stop_event) else stop_event.is_set()):
+                raise RuntimeError("RAW Native FusionNet cancelled")
+            supp_analysis, _ = _weightnet_analysis_proxy(
+                raw_session, index, work_scale=work_scale, params=analysis_params
+            )
+            supp_gpu = taichi_aot.upload(supp_analysis)
+            flow_gpu = aligned_gpu = weight_work_gpu = None
+            try:
+                if plan == "block matching gpu":
+                    estimate = aligner.estimate_alignment(supp_gpu, stop_event=stop_event)
+                    flow_gpu = estimate.flow_gpu
+                    estimate.flow_gpu = None
+                    aligned_gpu = taichi_aot.remap_with_flow(
+                        supp_gpu, flow_gpu, ref_analysis.shape[0], ref_analysis.shape[1], return_gpu=True
+                    )
+                    estimate.release()
+                else:
+                    aligned_gpu = aligner.align_frame(
+                        supp_gpu, stop_event=stop_event, return_gpu=True, keep_flow=True
+                    )
+                    flow_gpu = aligner.take_last_flow()
+                supp_aligned = np.ascontiguousarray(aligned_gpu.to_numpy(), dtype=np.float32)
+                weight_work, _alpha = infer_single_support_weight_map(
+                    weightnet_session, ref_chw,
+                    np.ascontiguousarray(np.transpose(supp_aligned, (2, 0, 1)), dtype=np.float32),
+                    tile_size=tile_size, overlap=overlap, ghost_penalty=ghost_penalty,
+                    ghost_cutoff=ghost_cutoff, chroma_sensitivity=chroma_sensitivity,
+                    stop_event=stop_event,
+                )
+                weight_hwc = np.ascontiguousarray(np.transpose(weight_work, (1, 2, 0)), dtype=np.float32)
+                weight_work_gpu = taichi_aot.upload(weight_hwc)
+                block_count += _accumulate_weighted_cfa_flow_resident(
+                    raw_session.normalized(index),
+                    reference,
+                    flow_gpu,
+                    weight_work_gpu,
+                    sums_gpu,
+                    weights_gpu,
+                )
+                aligned_supports += 1
+            finally:
+                _release(weight_work_gpu)
+                _release(flow_gpu)
+                _release(aligned_gpu)
+                _release(supp_gpu)
+            if progress_callback:
+                progress_callback(
+                    5 + int(78 * index / total),
+                    f"Fusion RAW native {index}/{total}: alignment dan confidence...",
+                )
+        accumulation_complete = True
+    finally:
+        if aligner is not None:
+            aligner.close()
+        _release(ref_gpu)
+        if not accumulation_complete:
+            _release(sums_gpu)
+            _release(weights_gpu)
+    try:
+        from taichi_vision.taichi_algorithm.spatial_fusion import (
+            normalize_accumulator_cfa_taichi,
+        )
+
+        normalize_accumulator_cfa_taichi(sums_gpu, weights_gpu)
+        fused_cfa = np.ascontiguousarray(sums_gpu.to_numpy(), dtype=np.float32)
+    finally:
+        _release(sums_gpu)
+        _release(weights_gpu)
+    report = RawNativeAlignmentReport(
+        alignment_plan=plan, frames=raw_session.frame_count,
+        aligned_supports=aligned_supports, identity_supports=0,
+        block_size=selected_block, block_count=block_count,
+    )
+    return create_raw_native_average_result(
+        fused_cfa, reference, raw_session.paths,
+        report=report, progress_callback=progress_callback,
+    )
+
+
+def _run_weightnet_cfa_fusion(
+    raw_session: RawNativeSession,
+    weightnet_session,
+    **kwargs,
+):
+    """Run RAW FusionNet through the bounded resident coordinator.
+
+    The ONNX boundary still requires a NumPy work-resolution proxy, but that
+    boundary is overlapped with alignment of the next support frame.  Only
+    one aligned packet and one weighted packet are retained, matching the
+    proven RGB resident contract: ``in_flight=1`` without unbounded VRAM use.
+    """
+    from taichi_vision import taichi_aot
+    from .Average import create_raw_native_average_result
+    from .fusionet_engine.flownet_inference import AOTOpticalFlowAligner
+    from .fusionet_engine.weightnet_inference import infer_single_support_weight_map
+    from .resident_alignment import resolve_fusionnet_alignment_plan
+    from .rgb_linear_resident import BlockMatchingGPUResidentAligner
+    from taichi_vision.taichi_algorithm.spatial_fusion import normalize_accumulator_cfa_taichi
+
+    alignment_plan = kwargs.get("alignment_plan", "optical_flow")
+    alignment_config = kwargs.get("alignment_config")
+    work_scale = float(kwargs.get("work_scale", 0.50))
+    tile_size = int(kwargs.get("tile_size", 256))
+    overlap = float(kwargs.get("overlap", 0.30))
+    ghost_penalty = float(kwargs.get("ghost_penalty", 1.0))
+    ghost_cutoff = float(kwargs.get("ghost_cutoff", 0.05))
+    chroma_sensitivity = float(kwargs.get("chroma_sensitivity", 1.0))
+    stop_event = kwargs.get("stop_event")
+    progress_callback = kwargs.get("progress_callback")
+    plan = resolve_fusionnet_alignment_plan(alignment_plan)
+    reference = raw_session.reference
+    ref_analysis, analysis_params = _weightnet_analysis_proxy(
+        raw_session, 0, work_scale=work_scale
+    )
+    ref_chw = np.ascontiguousarray(
+        np.transpose(ref_analysis, (2, 0, 1)), dtype=np.float32
+    )
+    ref_gpu = taichi_aot.upload(ref_analysis)
+    # Keep alignment on the existing proxy.  WeightNet receives a separate
+    # proxy built with the metadata-aware RGB resident loader used by the
+    # 50e2e8a pipeline, so this experiment does not alter flow estimation.
+    from .rgb_linear_resident import analyze_auto_enhance_on_gpu, apply_auto_enhance_on_gpu
+    legacy_ref_base_gpu = _legacy_weightnet_proxy_gpu(
+        raw_session.paths[0], shape=ref_analysis.shape[:2]
+    )
+    try:
+        legacy_analysis_params = analyze_auto_enhance_on_gpu(
+            legacy_ref_base_gpu, mode="natural"
+        )
+        legacy_ref_gpu = apply_auto_enhance_on_gpu(
+            legacy_ref_base_gpu, legacy_analysis_params
+        )
+        if legacy_ref_gpu is not legacy_ref_base_gpu:
+            _release(legacy_ref_base_gpu)
+        legacy_ref_base_gpu = None
+        legacy_ref_chw = np.ascontiguousarray(
+            np.transpose(legacy_ref_gpu.to_numpy(), (2, 0, 1)), dtype=np.float32
+        )
+    finally:
+        _release(legacy_ref_base_gpu)
+        _release(locals().get("legacy_ref_gpu"))
+    sums_gpu = taichi_aot.upload(raw_session.normalized(0))
+    weights_gpu = taichi_aot.upload(np.ones(reference.shape, dtype=np.float32))
+    aligner = None
+    state_lock = threading.Lock()
+    stop_requested = threading.Event()
+    failure = []
+    sentinel = object()
+    preloaded_queue = queue.Queue(maxsize=3)
+    aligned_queue = queue.Queue(maxsize=1)
+    weighted_queue = queue.Queue(maxsize=1)
+    gpu_lock = threading.Lock()
+
+    def stopped():
+        if stop_requested.is_set():
+            return True
+        if stop_event is None:
+            return False
+        return bool(stop_event() if callable(stop_event) else stop_event.is_set())
+
+    def fail(exc):
+        with state_lock:
+            if not failure:
+                failure.append(exc)
+        stop_requested.set()
+
+    def put_until(q, item):
+        while not stopped():
+            try:
+                q.put(item, timeout=0.05)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def preloader_worker():
+        try:
+            for index in range(1, raw_session.frame_count):
+                if not put_until(preloaded_queue, index):
+                    return
+            # The producer owns the input sentinel.  Downstream stages emit
+            # their own sentinel after draining their input queue.
+            while not stopped():
+                try:
+                    preloaded_queue.put(sentinel, timeout=0.05)
+                    return
+                except queue.Full:
+                    continue
+        except Exception as exc:
+            fail(exc)
+
+    def alignment_worker():
+        local_aligner = None
+        try:
+            try:
+                taichi_aot.ensure_cuda_context()
+            except Exception:
+                pass
+            with gpu_lock:
+                if plan == "block matching gpu":
+                    local_aligner = BlockMatchingGPUResidentAligner(
+                        ref_gpu, full_shape=reference.shape,
+                        alignment_config=alignment_config,
+                    )
+                else:
+                    local_aligner = AOTOpticalFlowAligner(
+                        ref_gpu, work_scale=1.0,
+                        full_shape=ref_analysis.shape[:2],
+                    )
+            while not stopped():
+                try:
+                    index = preloaded_queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if index is sentinel:
+                    break
+                # Serialize only the Taichi proxy/readback. The CPU
+                # AutoEnhance work remains outside the lock so ONNX and the
+                # next GPU alignment can overlap it.
+                with gpu_lock:
+                    proxy = _analysis_proxy_numpy(
+                        raw_session, index, work_scale=work_scale
+                    )
+                from taichi_vision.taichi_algorithm.enhancement.auto_enhance import (
+                    apply_auto_enhance_np,
+                )
+                supp_analysis = np.ascontiguousarray(
+                    apply_auto_enhance_np(proxy, params=analysis_params),
+                    dtype=np.float32,
+                )
+                supp_gpu = flow_gpu = aligned_gpu = None
+                onnx_aligned_gpu = None
+                try:
+                    supp_gpu = taichi_aot.upload(supp_analysis)
+                    with gpu_lock:
+                        if plan == "block matching gpu":
+                            estimate = local_aligner.estimate_alignment(
+                                supp_gpu, stop_event=stop_event
+                            )
+                            flow_gpu = estimate.flow_gpu
+                            estimate.flow_gpu = None
+                            aligned_gpu = taichi_aot.remap_with_flow(
+                                supp_gpu, flow_gpu,
+                                ref_analysis.shape[0], ref_analysis.shape[1],
+                                return_gpu=True,
+                            )
+                            estimate.release()
+                        else:
+                            aligned_gpu = local_aligner.align_frame(
+                                supp_gpu, stop_event=stop_event,
+                                return_gpu=True, keep_flow=True,
+                            )
+                            flow_gpu = local_aligner.take_last_flow()
+                    # Rebuild only the WeightNet input with the legacy
+                    # metadata-aware demosaic/preprocessing path. The flow
+                    # itself remains the one estimated above.
+                    with gpu_lock:
+                        legacy_support_gpu = _legacy_weightnet_proxy_gpu(
+                            raw_session.paths[index],
+                            shape=ref_analysis.shape[:2],
+                            params=legacy_analysis_params,
+                        )
+                        try:
+                            onnx_aligned_gpu = taichi_aot.remap_with_flow(
+                                legacy_support_gpu, flow_gpu,
+                                ref_analysis.shape[0], ref_analysis.shape[1],
+                                return_gpu=True,
+                            )
+                        finally:
+                            _release(legacy_support_gpu)
+                    _release(aligned_gpu)
+                    aligned_gpu = None
+                    _release(supp_gpu)
+                    supp_gpu = None
+                    if not put_until(aligned_queue, (index, flow_gpu, onnx_aligned_gpu)):
+                        _release(flow_gpu)
+                        _release(onnx_aligned_gpu)
+                        break
+                    flow_gpu = onnx_aligned_gpu = None
+                finally:
+                    _release(flow_gpu)
+                    _release(aligned_gpu)
+                    _release(supp_gpu)
+                    _release(onnx_aligned_gpu)
+        except Exception as exc:
+            fail(exc)
+        finally:
+            if local_aligner is not None:
+                try:
+                    local_aligner.close()
+                except Exception:
+                    pass
+            put_until(aligned_queue, sentinel)
+
+    def weight_worker():
+        try:
+            try:
+                taichi_aot.ensure_cuda_context()
+            except Exception:
+                pass
+            while not stopped():
+                try:
+                    packet = aligned_queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if packet is sentinel:
+                    break
+                index, flow_gpu, onnx_aligned_gpu = packet
+                weight_gpu = None
+                try:
+                    # This is the ONNX boundary. It is intentionally outside
+                    # gpu_lock so the alignment worker can prepare the next
+                    # frame while WeightNet is running.
+                    with gpu_lock:
+                        supp_aligned = np.ascontiguousarray(
+                            onnx_aligned_gpu.to_numpy(), dtype=np.float32
+                        )
+                    weight_work, _alpha = infer_single_support_weight_map(
+                        weightnet_session, legacy_ref_chw,
+                        np.ascontiguousarray(
+                            np.transpose(supp_aligned, (2, 0, 1)), dtype=np.float32
+                        ),
+                        tile_size=tile_size, overlap=overlap,
+                        ghost_penalty=ghost_penalty,
+                        ghost_cutoff=ghost_cutoff,
+                        chroma_sensitivity=chroma_sensitivity,
+                        stop_event=stop_event,
+                    )
+                    weight_hwc = np.ascontiguousarray(
+                        np.transpose(weight_work, (1, 2, 0)), dtype=np.float32
+                    )
+                    with gpu_lock:
+                        weight_gpu = taichi_aot.upload(weight_hwc)
+                    if not put_until(weighted_queue, (index, flow_gpu, weight_gpu)):
+                        _release(flow_gpu)
+                        _release(weight_gpu)
+                        break
+                    flow_gpu = weight_gpu = None
+                finally:
+                    _release(weight_gpu)
+                    _release(flow_gpu)
+                    _release(onnx_aligned_gpu)
+        except Exception as exc:
+            fail(exc)
+        finally:
+            put_until(weighted_queue, sentinel)
+
+    preload_thread = threading.Thread(
+        target=preloader_worker, name="RAW_Preloader", daemon=True
+    )
+    align_thread = threading.Thread(target=alignment_worker, name="RAW_Alignment", daemon=True)
+    weight_thread = threading.Thread(target=weight_worker, name="RAW_WeightNet", daemon=True)
+    preload_thread.start()
+    align_thread.start()
+    weight_thread.start()
+    aligned_supports = 0
+    try:
+        total = max(1, raw_session.frame_count - 1)
+        while not stopped():
+            try:
+                packet = weighted_queue.get(timeout=0.05)
+            except queue.Empty:
+                if not align_thread.is_alive() and not weight_thread.is_alive():
+                    break
+                continue
+            if packet is sentinel:
+                break
+            index, flow_gpu, weight_gpu = packet
+            try:
+                source = raw_session.normalized(index)
+                with gpu_lock:
+                    _accumulate_weighted_cfa_flow_resident(
+                        source, reference, flow_gpu, weight_gpu,
+                        sums_gpu, weights_gpu,
+                    )
+                aligned_supports += 1
+                if progress_callback:
+                    progress_callback(
+                        5 + int(78 * index / total),
+                        f"Fusion RAW native {index}/{total}: pipeline in-flight=1...",
+                    )
+            finally:
+                _release(weight_gpu)
+                _release(flow_gpu)
+        align_thread.join(timeout=2.0)
+        weight_thread.join(timeout=2.0)
+        if failure:
+            raise failure[0]
+        with gpu_lock:
+            normalize_accumulator_cfa_taichi(sums_gpu, weights_gpu)
+            fused_cfa = np.ascontiguousarray(sums_gpu.to_numpy(), dtype=np.float32)
+    finally:
+        stop_requested.set()
+        preload_thread.join(timeout=2.0)
+        align_thread.join(timeout=2.0)
+        weight_thread.join(timeout=2.0)
+        _release(ref_gpu)
+        _release(sums_gpu)
+        _release(weights_gpu)
+
+    report = RawNativeAlignmentReport(
+        alignment_plan=str(alignment_plan), frames=raw_session.frame_count,
+        aligned_supports=aligned_supports, identity_supports=0,
+        block_size=None, block_count=aligned_supports * 4,
+    )
+    return create_raw_native_average_result(
+        fused_cfa, reference, raw_session.paths,
+        report=report, progress_callback=progress_callback,
+    )
+
+
 def _run_feature_aligned_average(
     session: RawNativeSession,
     *,
@@ -715,10 +1370,33 @@ class RawNativeResidentProcessor:
     def run(self, image_paths, session=None, **kwargs):
         weight_engine = str(kwargs.get("weight_engine", "")).casefold()
         alignment = str(kwargs.get("alignment_plan", "No Alignment")).casefold()
+        if weight_engine == "fusionet":
+            if session is None:
+                raise RawNativePipelineNotReadyError(
+                    "RAW Native FusionNet requires an initialized WeightNet ONNX session."
+                )
+            from .resident_alignment import resolve_fusionnet_alignment_plan
+
+            raw_session = RawNativeSession.load(image_paths)
+            result = _run_weightnet_cfa_fusion(
+                raw_session,
+                session,
+                alignment_plan=resolve_fusionnet_alignment_plan(alignment),
+                alignment_config=kwargs.get("alignment_config"),
+                work_scale=float(kwargs.get("work_scale", 0.50)),
+                tile_size=int(kwargs.get("tile_size", 256)),
+                overlap=float(kwargs.get("overlap", 0.30)),
+                ghost_penalty=float(kwargs.get("ghost_penalty", 1.0)),
+                ghost_cutoff=float(kwargs.get("ghost_cutoff", 0.05)),
+                chroma_sensitivity=float(kwargs.get("chroma_sensitivity", 1.0)),
+                block_size=kwargs.get("accumulation_block_size"),
+                stop_event=kwargs.get("stop_event"),
+                progress_callback=kwargs.get("progress_callback"),
+            )
+            return self._result_for_output(result), 1.0
         if weight_engine != "average":
             raise RawNativePipelineNotReadyError(
-                "RAW Native currently supports Average only. Neural and weighted "
-                "mergers remain RGB Linear until they have a CFA-aware fusion path."
+                "RAW Native supports Average and FusionNet CFA fusion only."
             )
         if alignment in self._NO_ALIGNMENT:
             from .Average import run_raw_native_average

@@ -7,7 +7,10 @@ output. This module selects a processor and preserves the historical imports.
 from __future__ import annotations
 
 from . import rgb_linear_resident as _rgb_linear
-from .raw_native_resident import RawNativePipelineNotReadyError, RawNativeResidentProcessor
+from .raw_native_resident import (
+    RawNativePipelineNotReadyError,
+    RawNativeResidentProcessor,
+)
 
 
 def normalize_processing_format(value) -> str:
@@ -44,11 +47,8 @@ def _is_supported_cfa_dng_request(image_paths, is_raw: bool, weight_engine) -> b
     RAW containers and all non-RAW images deliberately retain the established
     RGB Linear processor until they have the same contract.
     """
-    if (
-        not is_raw
-        or not image_paths
-        or str(weight_engine or "").strip().casefold() != "average"
-    ):
+    engine_name = str(weight_engine or "").strip().casefold()
+    if not is_raw or not image_paths or engine_name not in {"average", "fusionet"}:
         return False
     from pathlib import Path
 
@@ -60,10 +60,10 @@ def resolve_resident_processor(
 ):
     """Resolve a processor; no image pixels are decoded at this layer.
 
-    DNG Average bursts share the CFA-aware fusion path. ``processing_format``
-    selects only the final materialization: mosaiced DNG for RAW Native, or a
-    once-demosaiced linear TIFF for RGB Linear. Non-RAW images and RGB Linear
-    mergers without a CFA implementation retain their proven RGB route.
+    DNG Average and FusionNet bursts use the CFA-aware path.  FusionNet keeps
+    RGB only as a temporary alignment/WeightNet analysis proxy; its source
+    warp, weighted accumulation, and normalization stay in scalar CFA buffers
+    until final DNG/TIFF materialization.
     """
     if processing_format is None:
         processing_format = get_configured_processing_format()
@@ -86,7 +86,7 @@ def run_gpu_resident_pipeline(
     alignment_plan="optical_flow",
     alignment_config=None,
     spatial_config=None,
-    work_scale=0.50,
+    work_scale=0.60,
     tile_size=512,
     overlap=0.30,
     ghost_penalty=1.0,
@@ -94,7 +94,7 @@ def run_gpu_resident_pipeline(
     chroma_sensitivity=6.0,
     is_raw=False,
     storage_mode="direct",
-    accumulation_mode="auto",
+    accumulation_mode="full",
     alignment_only=False,
     batch_queue=3,
     auto_params=None,
@@ -110,6 +110,13 @@ def run_gpu_resident_pipeline(
         is_raw=is_raw,
         weight_engine=weight_engine,
     )
+    if str(weight_engine or "").strip().casefold() == "fusionet":
+        if isinstance(processor, RawNativeResidentProcessor):
+            print(
+                "[FusionNet] CFA resident workflow aktif: fusion dilakukan di backend Taichi."
+            )
+        else:
+            print("[FusionNet] Mode cepat aktif: resident RGB workflow digunakan.")
     return processor.run(
         image_paths,
         session,

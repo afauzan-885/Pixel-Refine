@@ -291,7 +291,7 @@ class MFDenoiserAlgorithm:
 
     @staticmethod
     def _configure_compute_runtime(ctx, frame_shape=None):
-        """Connect pipeline to the shared adaptive block/VRAM runtime."""
+        """Connect pipeline to the shared full-frame GPU-resident runtime."""
         try:
             from taichi_vision import taichi_aot
 
@@ -304,11 +304,12 @@ class MFDenoiserAlgorithm:
             ctx.compute_runtime = {
                 "available": True,
                 "backend": backend,
+                "mode": "full_frame",
                 "pressure": pressure,
                 "pipeline_limit_mb": pipeline_limit // (1024 * 1024),
             }
             print(
-                f"[MFDenoiser] Compute Backend: {backend.upper()} (VRAM Limit: {pipeline_limit // (1024 * 1024)}MB, Pressure: {pressure})"
+                f"[MFDenoiser] Compute Backend: {backend.upper()} (Full-Frame, VRAM Limit: {pipeline_limit // (1024 * 1024)}MB, Pressure: {pressure})"
             )
         except Exception as exc:
             ctx.compute_runtime = {"available": False, "reason": str(exc)}
@@ -360,7 +361,7 @@ class MFDenoiserAlgorithm:
         params = config.copy()
         params.update(
             {
-                "processing_mode": config.get("mfdenoiser_processing_mode", "auto"),
+                "processing_mode": config.get("mfdenoiser_processing_mode", "full"),
                 "tile_size": int(config.get("tile_based_tile_size", 256)),
                 "tile_overlap": float(config.get("tile_based_overlap_percent", 0.20)),
                 "alignment_plan": config.get(

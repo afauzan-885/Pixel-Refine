@@ -4449,9 +4449,15 @@ class AOTEngine:
             return consumer(entry)
 
     def _log_warning(self, message):
-        """Phase 4 D2 telemetry sink.  Default falls back to ``print`` so
-        warnings are visible without wiring a logger.
+        """Emit optional resident-budget diagnostics.
+
+        Buffer-pool pressure is expected during bounded in-flight pipelines:
+        the engine may temporarily retain retired buffers until the backend
+        reaches a safe point.  Keep normal application output quiet while
+        preserving the diagnostic through the existing verbose switch.
         """
+        if os.environ.get("PIXEL_REFINE_AOT_VERBOSE_LOGS", "0") != "1":
+            return
         try:
             print(f"[AOTEngine][warn] {message}")
         except Exception:  # noqa: BLE001

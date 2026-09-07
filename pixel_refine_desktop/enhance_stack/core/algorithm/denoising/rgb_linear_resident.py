@@ -1837,93 +1837,9 @@ def _resolve_resident_accumulation_plan(
     performance_block_size=None,
     performance_threshold_mp=None,
 ):
-    """Resolve block accumulation against engine policy and TCM capability."""
-    from taichi_vision.taichi_algorithm.aot_api import aot_graph_available
+    """Enforce full-frame accumulation across all backends."""
+    return {"enabled": False, "reason": "full-frame mode enforced"}
 
-    clean_mode = str(mode or "auto").strip().casefold().replace("-", "_")
-    if clean_mode in {"full", "full_frame", "off", "disabled", "none"}:
-        return {"enabled": False, "reason": "full-frame mode requested"}
-
-    block_config = engine.get_block_config()
-    memory = engine.get_memory_status(force=True)
-    configured_size = block_config.normalized_size()
-    if isinstance(configured_size, (tuple, list)):
-        configured_size = max(int(configured_size[0]), int(configured_size[1]))
-    recommended = int(memory.get("recommended_block_size", 0) or 0)
-    if performance_block_size is not None:
-        selected_size = performance_block_size
-    elif block_config.enabled:
-        selected_size = configured_size
-    elif clean_mode == "auto" and recommended:
-        selected_size = recommended
-    else:
-        selected_size = requested_tile_size or recommended or configured_size
-    tile_size = max(32, int(selected_size))
-
-    force_block = clean_mode in {"block", "tile", "tiled", "force"}
-    backend = str(getattr(engine, "arch", "")).strip().casefold()
-    # Current measured speed qualification is deliberately narrow.  Average
-    # removes an entire RGB weight accumulator, while weighted engines retain
-    # their scalar/vec3 sums and therefore do not yet offset region-dispatch
-    # overhead under healthy memory conditions.
-    performance_qualified = (
-        backend in {"cpu", "cuda"} and weight_engine == "average"
-    )
-    pixel_count = int(shape[0]) * int(shape[1])
-    if performance_threshold_mp is not None:
-        threshold_pixels = int(max(0.1, float(performance_threshold_mp)) * 1_000_000)
-    else:
-        threshold_pixels = int(
-            os.environ.get("PIXEL_REFINE_RESIDENT_BLOCK_PIXELS", "4000000")
-        )
-    large_frame = pixel_count >= threshold_pixels
-    memory_pressure = str(memory.get("pressure", "healthy")).lower()
-    automatic = bool(
-        force_block
-        or memory_pressure != "healthy"
-        or (performance_qualified and (block_config.enabled or large_frame))
-    )
-    if not automatic:
-        reason = (
-            f"block speed is not qualified on {backend or 'this backend'}"
-            if large_frame
-            else "frame is below the block threshold"
-        )
-        return {"enabled": False, "reason": reason}
-
-    if weight_engine == "average":
-        required = (
-            "accumulate_average_sum_region",
-            "remap_accumulate_average_sum_tile",
-            "normalize_accumulator_uniform_region",
-        )
-    elif weight_engine == "spatial_fusion":
-        required = (
-            "accumulate_spatial_merging_region",
-            "normalize_accumulator_scalar_region",
-        )
-    else:
-        required = (
-            "accumulate_spatial_merging_vec3_region",
-            "normalize_accumulator_vec3_region",
-        )
-    missing = tuple(
-        graph
-        for graph in required
-        if not aot_graph_available("spatial_fusion", graph)
-    )
-    if missing:
-        return {
-            "enabled": False,
-            "reason": "target TCM lacks block graph(s): " + ", ".join(missing),
-        }
-    return {
-        "enabled": True,
-        "tile_size": tile_size,
-        "required_graphs": required,
-        "memory_pressure": memory_pressure,
-        "performance_qualified": performance_qualified,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -2017,6 +1933,12 @@ def run_gpu_resident_pipeline(
     num_images = len(image_paths)
     if num_images < 2:
         raise ValueError(f"Need at least 2 images, got {num_images}")
+    if str(weight_engine or "").strip().casefold() == "fusionet":
+        from .resident_alignment import resolve_fusionnet_alignment_plan
+
+        # Direct resident callers receive the same small, explicit contract
+        # as the MFDenoiser/FusionNet adapter before any graph is allocated.
+        alignment_plan = resolve_fusionnet_alignment_plan(alignment_plan)
 
     # ------------------------------------------------------------------
     # PHASE 1: Load reference frame directly to GPU
@@ -2077,7 +1999,9 @@ def run_gpu_resident_pipeline(
     if analysis_required:
         analysis_params = analyze_auto_enhance_on_gpu(ref_gpu, mode="analysis")
         natural_params = (
-            analyze_auto_enhance_on_gpu(ref_gpu, mode="natural") if is_raw else None
+            analyze_auto_enhance_on_gpu(ref_gpu, mode="natural")
+            if weight_engine == "fusionet"
+            else (analyze_auto_enhance_on_gpu(ref_gpu, mode="natural") if is_raw else None)
         )
         if is_raw and natural_params is not None:
             pass
@@ -2100,6 +2024,25 @@ def run_gpu_resident_pipeline(
 
     work_h = max(32, int(target_h * capped_scale))
     work_w = max(32, int(target_w * capped_scale))
+
+    def _prepare_weightnet_natural_work_gpu(source_gpu):
+        """Build WeightNet's natural proxy without changing alignment input."""
+        natural_input_gpu = source_gpu
+        if tuple(int(value) for value in source_gpu.shape[:2]) != (work_h, work_w):
+            natural_input_gpu = taichi_aot.resize(
+                source_gpu,
+                (work_w, work_h),
+                interpolation=taichi_aot.INTER_AREA,
+                return_gpu=True,
+            )
+        if natural_params is not None:
+            natural_gpu = apply_auto_enhance_on_gpu(
+                natural_input_gpu, natural_params
+            )
+            if natural_input_gpu is not source_gpu and natural_gpu is not natural_input_gpu:
+                natural_input_gpu.destroy()
+            return natural_gpu
+        return natural_input_gpu
 
     def _prepare_work_analysis_gpu(linear_gpu):
         """Create only the work-resolution analysis buffer when needed."""
@@ -2339,6 +2282,11 @@ def run_gpu_resident_pipeline(
         else:
             ref_work_rgb_hwc_gpu = ref_analysis_gpu
 
+        if weight_engine == "fusionet":
+            natural_ref_gpu = _prepare_weightnet_natural_work_gpu(ref_gpu)
+            if natural_ref_gpu is not ref_work_rgb_hwc_gpu:
+                ref_work_rgb_hwc_gpu.destroy()
+            ref_work_rgb_hwc_gpu = natural_ref_gpu
         ref_work_rgb_np = np.transpose(
             ref_work_rgb_hwc_gpu.to_numpy(), (2, 0, 1)
         ).astype(
@@ -2730,10 +2678,23 @@ def run_gpu_resident_pipeline(
                             supp_aligned_analysis_work_gpu.destroy()
                         supp_work_item = None
                     else:
+                        # Alignment remains driven by the analysis proxy.
+                        # WeightNet receives a separate natural proxy derived
+                        # from the already aligned linear RGB frame.
+                        natural_support_gpu = _prepare_weightnet_natural_work_gpu(
+                            supp_aligned_linear_gpu
+                        )
                         supp_work_item = np.transpose(
-                            supp_aligned_analysis_work_gpu.to_numpy(), (2, 0, 1)
+                            natural_support_gpu.to_numpy(), (2, 0, 1)
                         ).astype(np.float32)
-                        supp_aligned_analysis_work_gpu.destroy()
+                        if natural_support_gpu is not supp_aligned_linear_gpu:
+                            natural_support_gpu.destroy()
+                        if (
+                            supp_aligned_analysis_work_gpu is not None
+                            and supp_aligned_analysis_work_gpu
+                            is not supp_aligned_linear_gpu
+                        ):
+                            supp_aligned_analysis_work_gpu.destroy()
                         engine.sync()
 
                     if alignment_only:

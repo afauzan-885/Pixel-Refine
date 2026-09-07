@@ -8,12 +8,12 @@ Matches SpatialFusion and FusioNet pipeline architecture:
 """
 
 from dataclasses import dataclass
-from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
 
 from ._common_helpers import active_backend, restore_output_dtype
+from .raw_metadata import extract_demosaic_parameters, extract_source_dng_metadata
 
 
 def _apply_baked_orientation(image: np.ndarray, orientation: int) -> np.ndarray:
@@ -61,92 +61,6 @@ def _baked_cfa_pattern(frame) -> tuple[int, int, int, int]:
         int(frame.cfa_pattern[frame.phase_index(*source_coordinate(row, column))])
         for row, column in ((0, 0), (0, 1), (1, 0), (1, 1))
     )
-
-
-_DNG_CAMERA_TAGS = {
-    50710: (1, 3),   # CFAPlaneColor
-    50711: (3, 1),   # CFALayout
-    50713: (3, 2),   # BlackLevelRepeatDim
-    50718: (5, 2),   # DefaultScale
-    50721: (10, 9), # ColorMatrix1
-    50722: (10, 9), # ColorMatrix2
-    50723: (10, 9), # CameraCalibration1
-    50724: (10, 9), # CameraCalibration2
-    50727: (5, 3),  # AnalogBalance
-    50728: (5, 3),  # AsShotNeutral
-    50729: (5, 2),  # AsShotWhiteXY
-    50730: (10, 1), # BaselineExposure
-    50731: (5, 1),  # BaselineNoise
-    50732: (5, 1),  # BaselineSharpness
-    50734: (5, 1),  # LinearResponseLimit
-    50778: (3, 1),  # CalibrationIlluminant1
-    50779: (3, 1),  # CalibrationIlluminant2
-}
-
-
-def _source_dng_camera_tags(frame, output_shape: tuple[int, int]):
-    """Keep the reference camera colour profile in a derived mosaiced DNG."""
-    source_tags = dict(getattr(frame, "metadata", {}).get("dng_tags", {}) or {})
-    entries = [
-        (tag, type_id, count, source_tags[tag])
-        for tag, (type_id, count) in _DNG_CAMERA_TAGS.items()
-        if tag in source_tags
-    ]
-    # The result is fully baked and may have width/height swapped.
-    height, width = map(int, output_shape)
-    entries.extend(
-        (
-            (50719, 4, 2, (0, 0)),       # DefaultCropOrigin
-            (50720, 4, 2, (width, height)),  # DefaultCropSize is X, Y
-            (50829, 4, 4, (0, 0, height, width)),
-        )
-    )
-    return entries
-
-
-def _ratio_pair(value) -> tuple[int, int]:
-    numerator = getattr(value, "num", None)
-    denominator = getattr(value, "den", None)
-    if numerator is not None and denominator is not None:
-        return int(numerator), max(1, int(denominator))
-    fraction = Fraction(float(value)).limit_denominator(1_000_000)
-    return int(fraction.numerator), int(fraction.denominator)
-
-
-def _source_capture_exif_tags(path: str):
-    """Read a compact, standard Exif capture record from the reference DNG."""
-    try:
-        import exifread
-
-        with Path(path).open("rb") as stream:
-            source = exifread.process_file(stream, details=False, strict=False)
-    except Exception:
-        return []
-
-    entries = []
-    rational_fields = {
-        "EXIF ExposureTime": 33434,
-        "EXIF FNumber": 33437,
-        "EXIF FocalLength": 37386,
-    }
-    for name, tag in rational_fields.items():
-        if value := source.get(name):
-            entries.append((tag, 5, 1, (_ratio_pair(value.values[0]),)))
-    short_fields = {
-        "EXIF ExposureProgram": 34850,
-        "EXIF ISOSpeedRatings": 34855,
-        "EXIF Flash": 37385,
-        "EXIF WhiteBalance": 41987,
-        "EXIF SceneCaptureType": 41990,
-    }
-    for name, tag in short_fields.items():
-        if value := source.get(name):
-            entries.append((tag, 3, 1, int(value.values[0])))
-    for name, tag in (("EXIF DateTimeOriginal", 36867), ("EXIF DateTimeDigitized", 36868)):
-        if value := source.get(name):
-            text = str(value.printable)
-            entries.append((tag, 2, len(text.encode("ascii", "ignore")) + 1, text))
-    return entries
 
 
 @dataclass(frozen=True)
@@ -202,23 +116,22 @@ class RawNativeAverageResult:
 
         frame = self.reference_frame
         mosaic, cfa_pattern = self.baked_oriented_mosaic()
-        source_tags = dict(getattr(frame, "metadata", {}).get("dng_tags", {}) or {})
+        source_path = frame.source_id or (self.source_paths[0] if self.source_paths else "")
         metadata = {
             # Pixels are already oriented, so the derived DNG is always
             # Orientation=1 by construction.  Its CFA tile must be transformed
             # with the same operation or a later demosaic would swap colours.
             "cfa_pattern": cfa_pattern,
+            "orientation": 1,
             "black_level": 0,
             "white_level": (1 << int(frame.bits_per_sample)) - 1,
-            "camera_model": str(source_tags.get(50708, "Pixel Refine RAW Native Average")),
             "rows_per_strip": min(256, int(frame.height)),
-            "dng_extra_tags": _source_dng_camera_tags(frame, mosaic.shape),
-            "exif_tags": _source_capture_exif_tags(frame.source_id),
         }
-        if 271 in source_tags:
-            metadata["make"] = str(source_tags[271])
-        if 272 in source_tags:
-            metadata["model"] = str(source_tags[272])
+        metadata.update(
+            extract_source_dng_metadata(
+                frame, mosaic.shape, source_path=source_path
+            )
+        )
         target = Path(path)
         save_dng_aot(
             mosaic,
@@ -245,6 +158,23 @@ class RawNativeAverageResult:
         # reference prevents the generic TIFF helper from rotating them again.
         if not save_image(encoded, str(path), reference_image_path=None):
             raise OSError(f"Failed to save RGB Linear TIFF: {path}")
+        # Copy the complete source metadata after writing.  The copy happens
+        # after pixels are already baked, so the metadata tool must normalize
+        # Orientation without triggering another pixel rotation.
+        source_path = self.reference_frame.source_id or (
+            self.source_paths[0] if self.source_paths else ""
+        )
+        if source_path:
+            try:
+                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+                    _copy_output_metadata,
+                )
+
+                _copy_output_metadata(source_path, str(path))
+            except Exception as exc:
+                # Metadata preservation is best-effort for installations that
+                # do not ship the optional metadata copier.
+                print(f"[Average] TIFF metadata preservation warning: {exc}")
         return str(path)
 
 
@@ -292,21 +222,32 @@ def create_raw_native_average_result(
     preview_mosaic, preview_cfa = result.baked_oriented_mosaic()
     if progress_callback:
         progress_callback(88, "Membuat pratinjau RGB dari RAW hasil fusion...")
+    try:
+        demosaic_params = extract_demosaic_parameters(
+            result.source_paths[0], cfa_pattern=preview_cfa
+        )
+    except Exception:
+        # Synthetic/headless callers may not have a readable source file.
+        # Real DNG outputs use the camera contract above; this fallback keeps
+        # the existing in-memory API usable without inventing metadata.
+        demosaic_params = {
+            "wb_r": 1.0,
+            "wb_g1": 1.0,
+            "wb_b": 1.0,
+            "wb_g2": 1.0,
+            "cmatrix": np.eye(3, dtype=np.float32),
+            "black_level": 0.0,
+            "white_level": float((1 << int(reference_frame.bits_per_sample)) - 1),
+            "c00": int(preview_cfa[0]),
+            "c01": int(preview_cfa[1]),
+            "c10": int(preview_cfa[2]),
+            "c11": int(preview_cfa[3]),
+        }
     linear_rgb = taichi_aot.demosaic(
         preview_mosaic.astype(np.float32, copy=False),
         method="hamilton",
         return_gpu=False,
-        wb_r=1.0,
-        wb_g1=1.0,
-        wb_b=1.0,
-        wb_g2=1.0,
-        cmatrix=np.eye(3, dtype=np.float32),
-        black_level=0.0,
-        white_level=float((1 << int(reference_frame.bits_per_sample)) - 1),
-        c00=int(preview_cfa[0]),
-        c01=int(preview_cfa[1]),
-        c10=int(preview_cfa[2]),
-        c11=int(preview_cfa[3]),
+        **demosaic_params,
     )
     # Natural AutoEnhance is display-only.  Do not feed this RGB result back
     # into the RAW Native accumulator or DNG writer: the persisted file must

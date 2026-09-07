@@ -92,6 +92,7 @@ class AOTOpticalFlowAligner:
         search_dist: int = 2,
         max_search_radius: int = 12,
     ):
+        from taichi_vision import taichi_aot
         from taichi_vision.taichi_aot import get_engine
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
             taichi_bridge,
@@ -170,6 +171,7 @@ class AOTOpticalFlowAligner:
         stop_event: Optional[threading.Event] = None,
         return_gpu: bool = False,
         stream_primary: bool = False,
+        keep_flow: bool = False,
     ):
         """Aligns a single support frame to the pre-loaded reference frame using pure GPU VRAM buffers.
         
@@ -290,6 +292,15 @@ class AOTOpticalFlowAligner:
                     return_gpu=return_gpu,
                 )
 
+            if keep_flow:
+                previous = getattr(self, "last_flow_gpu", None)
+                if previous is not None and hasattr(previous, "destroy"):
+                    previous.destroy()
+                self.last_flow_gpu = filtered_flow_gpu
+                if filtered_flow_gpu is smooth_flow_gpu:
+                    smooth_flow_gpu = None
+                filtered_flow_gpu = None
+
             if filtered_flow_gpu is not smooth_flow_gpu and hasattr(filtered_flow_gpu, "destroy"):
                 filtered_flow_gpu.destroy()
 
@@ -310,6 +321,14 @@ class AOTOpticalFlowAligner:
             return warped
         return np.ascontiguousarray(np.clip(warped, 0.0, 1.0), dtype=np.float32)
 
+    def take_last_flow(self):
+        """Transfer the exact filtered flow used by ``align_frame`` to a caller."""
+        flow = getattr(self, "last_flow_gpu", None)
+        self.last_flow_gpu = None
+        if flow is None:
+            raise RuntimeError("No retained compute_flow result is available.")
+        return flow
+
     def close(self):
         """Release all persistent reference and flow GPU buffers."""
         for buf in getattr(self, "ref_pyramid", []):
@@ -324,6 +343,7 @@ class AOTOpticalFlowAligner:
             getattr(self, "flow_l2", None),
             getattr(self, "comp_l1_warped", None),
             getattr(self, "comp_l0_warped", None),
+            getattr(self, "last_flow_gpu", None),
         ]:
             try:
                 if buf is not None and hasattr(buf, "destroy"):

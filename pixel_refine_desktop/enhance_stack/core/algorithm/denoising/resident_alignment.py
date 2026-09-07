@@ -13,6 +13,42 @@ from dataclasses import dataclass
 import numpy as np
 
 
+_FUSIONNET_ALIGNMENT_ALIASES = {
+    # ``optical flow`` is the resident spelling for the target-qualified
+    # compute_flow.tcm / align_end_to_end_3layer graph.
+    "block flow": "optical flow",
+    "compute flow": "optical flow",
+    "flownet": "optical flow",
+    "optical flow": "optical flow",
+    "dense optical flow": "optical flow",
+    # The resident block matcher owns its own native estimation/remap path.
+    "block matching": "block matching gpu",
+    "block matching gpu": "block matching gpu",
+    "blockmatching": "block matching gpu",
+    "block align": "block matching gpu",
+    "bm": "block matching gpu",
+}
+
+
+def resolve_fusionnet_alignment_plan(value: str) -> str:
+    """Return the only alignment plans with FusionNet's native contract.
+
+    WeightNet has a deliberate, small surface: either Block Flow through
+    ``compute_flow`` or the resident Block Matching implementation.  Keeping
+    this policy beside the common estimator contract prevents MFDenoiser,
+    FusionNet, and direct resident callers from drifting into different lists.
+    """
+    normalized = str(value or "").strip().casefold().replace("_", " ").replace("-", " ")
+    try:
+        return _FUSIONNET_ALIGNMENT_ALIASES[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            "FusionNet supports only Block Flow (compute_flow) or Block "
+            "Matching (block_matching); received "
+            f"{value!r}."
+        ) from exc
+
+
 @dataclass
 class ResidentAlignmentEstimate:
     """One support-to-reference transform derived from an RGB proxy.
@@ -54,4 +90,3 @@ class ResidentAlignmentEstimate:
             if callable(callback):
                 callback()
                 return
-

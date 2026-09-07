@@ -62,6 +62,21 @@ def _pack_value(value, type_id: int, count: int, endian: str) -> bytes:
         for numerator, denominator in values:
             flat.extend((int(numerator), int(denominator)))
         return struct.pack(_fmt(endian, f"{count * 2}i"), *flat)
+    if type_id == 6:
+        values = value if isinstance(value, (tuple, list)) else [value]
+        return struct.pack(_fmt(endian, f"{count}b"), *[int(x) for x in values])
+    if type_id == 8:
+        values = value if isinstance(value, (tuple, list)) else [value]
+        return struct.pack(_fmt(endian, f"{count}h"), *[int(x) for x in values])
+    if type_id == 9:
+        values = value if isinstance(value, (tuple, list)) else [value]
+        return struct.pack(_fmt(endian, f"{count}i"), *[int(x) for x in values])
+    if type_id == 11:
+        values = value if isinstance(value, (tuple, list)) else [value]
+        return struct.pack(_fmt(endian, f"{count}f"), *[float(x) for x in values])
+    if type_id == 12:
+        values = value if isinstance(value, (tuple, list)) else [value]
+        return struct.pack(_fmt(endian, f"{count}d"), *[float(x) for x in values])
     raise ValueError(f"unsupported TIFF field type: {type_id}")
 
 
@@ -115,7 +130,8 @@ def _metadata_ifd_entries(metadata: Mapping[str, Any], key: str) -> list[tuple[i
             raise ValueError(f"{key} entries must be (tag, type, count, value)")
         tag, type_id, count, value = item
         tag, type_id, count = int(tag), int(type_id), int(count)
-        if not 1 <= tag <= 0xFFFF or type_id not in _TYPE_SIZE or count < 1:
+        min_tag = 0 if key == "gps_tags" else 1
+        if not min_tag <= tag <= 0xFFFF or type_id not in _TYPE_SIZE or count < 1:
             raise ValueError(f"invalid {key} TIFF entry: {item!r}")
         if type_id in (5, 10) and count == 1 and isinstance(value, (tuple, list)) and len(value) == 2:
             # The native reader represents a single RATIONAL/SRATIONAL as one
@@ -1023,6 +1039,9 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
     metadata = dict(metadata or {})
     height, width = map(int, data.shape)
     bits = int(bits_per_sample or (8 if data.dtype == np.uint8 else 16))
+    orientation = int(metadata.get("orientation", 1))
+    if orientation not in range(1, 9):
+        raise ValueError("orientation must be a TIFF orientation value from 1 to 8")
     if not 1 <= bits <= 16:
         raise ValueError("bits_per_sample must be between 1 and 16")
     if compression == "lossless_jpeg" and not 8 <= bits <= 16:
@@ -1117,6 +1136,10 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
         (262, 3, 1, 32803),
         (266, 3, 1, 1),
         (273, 4, len(strips), tuple(0 for _ in strips)),
+        # Derived images are written with their orientation baked into the
+        # samples.  Emit the explicit identity tag so readers do not have to
+        # guess whether an absent tag means "already oriented".
+        (274, 3, 1, orientation),
         (277, 3, 1, 1),
         (278, 4, 1, rows_per_strip),
         (279, 4, len(strips), strip_counts),
@@ -1155,6 +1178,12 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
     if "xmp" in metadata:
         xmp = bytes(metadata["xmp"])
         entries.append((700, 7, len(xmp), xmp))
+    ifd0_entries = _metadata_ifd_entries(metadata, "ifd0_tags")
+    reserved_tags = {entry[0] for entry in entries}
+    collisions = reserved_tags.intersection(entry[0] for entry in ifd0_entries)
+    if collisions:
+        raise ValueError(f"ifd0_tags cannot replace native layout tags: {sorted(collisions)}")
+    entries.extend(ifd0_entries)
     extra_entries = _metadata_ifd_entries(metadata, "dng_extra_tags")
     reserved_tags = {entry[0] for entry in entries}
     collisions = reserved_tags.intersection(entry[0] for entry in extra_entries)
@@ -1162,8 +1191,11 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
         raise ValueError(f"dng_extra_tags cannot replace native layout tags: {sorted(collisions)}")
     entries.extend(extra_entries)
     exif_entries = _metadata_ifd_entries(metadata, "exif_tags")
+    gps_entries = _metadata_ifd_entries(metadata, "gps_tags")
     if exif_entries:
         entries.append((34665, 4, 1, 0))  # patched after its IFD is laid out
+    if gps_entries:
+        entries.append((34853, 4, 1, 0))  # patched after its IFD is laid out
     entries.sort(key=lambda item: item[0])
     ifd_offset = 8
     # Build the root IFD once with a placeholder Exif pointer.  The pointer is
@@ -1173,7 +1205,11 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
     if exif_offset & 1:
         exif_offset += 1
     exif_directory = _build_ifd(exif_entries, exif_offset, (), "II") if exif_entries else b""
-    strip_offset = exif_offset + len(exif_directory)
+    gps_offset = exif_offset + len(exif_directory)
+    if gps_offset & 1:
+        gps_offset += 1
+    gps_directory = _build_ifd(gps_entries, gps_offset, (), "II") if gps_entries else b""
+    strip_offset = gps_offset + len(gps_directory)
     if strip_offset & 1:
         strip_offset += 1
     strip_offsets = []
@@ -1186,12 +1222,20 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
             (tag, type_id, count, exif_offset if tag == 34665 else value)
             for tag, type_id, count, value in entries
         ]
+    if gps_entries:
+        entries = [
+            (tag, type_id, count, gps_offset if tag == 34853 else value)
+            for tag, type_id, count, value in entries
+        ]
     directory = _build_ifd(entries, ifd_offset, tuple(strip_offsets), "II")
     output = bytearray(b"II" + struct.pack("<H", 42) + struct.pack("<I", ifd_offset))
     output.extend(directory)
     while len(output) < exif_offset:
         output.append(0)
     output.extend(exif_directory)
+    while len(output) < gps_offset:
+        output.append(0)
+    output.extend(gps_directory)
     while len(output) < strip_offset:
         output.append(0)
     for strip in strips:
@@ -1238,6 +1282,9 @@ def encode_dng_bytes(
         raise ValueError("predictor must be none or horizontal")
 
     metadata = dict(metadata or {})
+    orientation = int(metadata.get("orientation", 1))
+    if orientation not in range(1, 9):
+        raise ValueError("orientation must be a TIFF orientation value from 1 to 8")
     row_size = (width * bits + 7) // 8
     packed = _byte_buffer(raw, "raw")
     if len(packed) != row_size * height:
@@ -1302,6 +1349,7 @@ def encode_dng_bytes(
         (50708, 2, camera_model_count, camera_model),
         (50714, 3, 1, black_level),
         (50717, 4, 1, white_level),
+        (274, 3, 1, orientation),
     ]
     if predictor == "horizontal":
         entries.append((317, 3, 1, 2))
@@ -1312,6 +1360,12 @@ def encode_dng_bytes(
     if "xmp" in metadata:
         xmp = _byte_buffer(metadata["xmp"], "xmp")
         entries.append((700, 7, len(xmp), xmp))
+    ifd0_entries = _metadata_ifd_entries(metadata, "ifd0_tags")
+    reserved_tags = {entry[0] for entry in entries}
+    collisions = reserved_tags.intersection(entry[0] for entry in ifd0_entries)
+    if collisions:
+        raise ValueError(f"ifd0_tags cannot replace native layout tags: {sorted(collisions)}")
+    entries.extend(ifd0_entries)
     entries.sort(key=lambda item: item[0])
 
     ifd_offset = 8
