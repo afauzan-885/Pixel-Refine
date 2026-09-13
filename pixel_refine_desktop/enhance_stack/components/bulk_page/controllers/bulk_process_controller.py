@@ -65,13 +65,11 @@ class MassAlgorithmEditDialog(ModalDialog):
         self.algorithms = {
             "alignment": [
                 language_config.UI_NO_CHANGE,
-                "ORB",
+                "OFB",
                 "AKAZE",
-                "Light Glue",
                 "Farneback",
                 "Lucas Kanade",
                 "Block Matching GPU",
-                "RAFT",
                 "No Alignment",
             ],
             "super_resolution": [language_config.UI_NO_CHANGE, "No Super Resolution"],

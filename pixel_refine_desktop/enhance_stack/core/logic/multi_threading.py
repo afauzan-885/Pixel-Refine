@@ -101,7 +101,13 @@ def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
             rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton")
         if rgb_f32 is not None:
             rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
-            return np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
+            u8_res = taichi_aot.cast(rgb_f32, np.uint8)
+            del rgb_f32
+            try:
+                taichi_aot.get_engine().buffer_pool.clear()
+            except Exception:
+                pass
+            return u8_res
         else:
             raise RuntimeError("Hamilton demosaic returned None")
     except Exception as e_ta:
@@ -139,7 +145,13 @@ def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
             rgb_f32 = taichi_aot.demosaic(image_path, method="bilinear", half_res=True)
         if rgb_f32 is not None:
             rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
-            return np.clip(rgb_f32 * 255.0, 0, 255).astype(np.uint8)
+            u8_res = taichi_aot.cast(rgb_f32, np.uint8)
+            del rgb_f32
+            try:
+                taichi_aot.get_engine().buffer_pool.clear()
+            except Exception:
+                pass
+            return u8_res
         else:
             raise RuntimeError("Hamilton demosaic half res returned None")
     except Exception as e_ta:
@@ -284,13 +296,21 @@ class ImageImportThreading(BaseMultiThreading):
     image_added_signal = Signal(int, str)
 
     def __init__(self, database_manager, image_paths, batch_size, delay_ms, batch_id=0):
-        self.batch_id = batch_id
+        # Resolve target batch ID: if batch_id <= 0 or not provided, get/create the default active batch
+        if not batch_id or batch_id <= 0:
+            if hasattr(database_manager, "get_or_create_default_batch_id"):
+                self.batch_id = database_manager.get_or_create_default_batch_id()
+            else:
+                self.batch_id = 1
+        else:
+            self.batch_id = batch_id
 
         def import_task(image_path):
-            database_manager.single_process_save_image_path(image_path)
+            database_manager.batch_process_save_image_path(self.batch_id, [image_path])
             self.image_added_signal.emit(self.batch_id, image_path)
 
         super().__init__(import_task, image_paths, batch_size, delay_ms)
+
 
 
 class BatchImageImportThreading(BaseMultiThreading):

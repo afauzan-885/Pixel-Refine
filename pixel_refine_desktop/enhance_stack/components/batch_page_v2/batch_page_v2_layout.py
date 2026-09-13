@@ -42,9 +42,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.fa
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
     running_light_glue,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
-    running_orb,
-)
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     save_special_jpg_and_png,
 )
@@ -488,8 +485,13 @@ class BatchPageV2Layout(QWidget):
                         f"[batch_page_v2_layout] Alignment '{alignment_choice}' "
                         f"will be executed inside denoising pipeline '{denoising_choice}'."
                     )
-            elif alignment_choice == "ORB":
-                running_orb(self, single_process=True)
+            elif alignment_choice == "OFB":
+                running_mf_denoiser(
+                    self,
+                    single_process=True,
+                    alignment_backend="OFB",
+                    merging_mode="none",
+                )
             elif alignment_choice in ("Farneback", "Farneback Optical Flow"):
                 running_farneback_flow(self, single_process=True)
             elif alignment_choice == "AKAZE":

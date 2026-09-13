@@ -114,8 +114,8 @@ def analyze_auto_enhance_params(
             gamma = 2.20
             shadow_lift = float(np.clip(p_black * 0.5, 0.0, 0.015))
 
-        # 2. Compute dynamic gain
-        gain = float(np.clip(target_key / max(log_avg, 1e-4), 1.0, 45.0))
+        # 2. Compute dynamic gain (capped at 6.0x)
+        gain = float(np.clip(target_key / max(log_avg, 1e-4), 1.0, 6.0))
 
         # 3. Filmic Extended White Level anchored to high percentiles (zero blown-out highlights)
         white_level = max(1.8, p_white * gain * 1.25)
@@ -273,8 +273,7 @@ def apply_auto_enhance_np(
     t_hl = np.clip((lum_final - 0.78) / 0.22, 0.0, 1.0)
     desat_smooth = 0.5 * (1.0 - np.cos(np.pi * t_hl)) * whiteness
     eff_sat = (
-        (1.0 + (saturation - 1.0) * (1.0 - desat_smooth))
-        * (1.0 - desat_smooth)
+        (1.0 + (saturation - 1.0) * (1.0 - desat_smooth)) * (1.0 - desat_smooth)
     )[:, :, np.newaxis]
 
     lum_3d = lum_final[:, :, np.newaxis]
@@ -364,7 +363,9 @@ if TAICHI_AVAILABLE:
             # Smooth raised-cosine (Hann) taper for peak highlights (> 0.78)
             t_hl = tm.clamp((lum_final - 0.78) / 0.22, 0.0, 1.0)
             desat_smooth = 0.5 * (1.0 - tm.cos(3.141592653589793 * t_hl)) * whiteness
-            eff_sat = (1.0 + (saturation - 1.0) * (1.0 - desat_smooth)) * (1.0 - desat_smooth)
+            eff_sat = (1.0 + (saturation - 1.0) * (1.0 - desat_smooth)) * (
+                1.0 - desat_smooth
+            )
 
             r_out = lum_final + (r_out - lum_final) * eff_sat
             g_out = lum_final + (g_out - lum_final) * eff_sat

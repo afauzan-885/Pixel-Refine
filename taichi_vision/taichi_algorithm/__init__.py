@@ -569,6 +569,7 @@ if AOT_MODE == "1":
         flow_init=None,
         buffer_provider="pool",
         return_gpu=False,
+        reference_pyramid=None,
     ):
         return _aot_farneback_flow(
             ref_gray,
@@ -582,6 +583,7 @@ if AOT_MODE == "1":
             flags=flags,
             flow_init=flow_init,
             return_gpu=return_gpu,
+            reference_pyramid=reference_pyramid,
         )
     zncc = _aot_zncc
 
@@ -1390,6 +1392,8 @@ def calcOpticalFlowFarneback(
     flags=0,
     preset="opencv",
     return_diagnostics=False,
+    reference_pyramid=None,
+    return_gpu=False,
 ):
     """OpenCV-style dense Farneback optical flow backed by taichi_aot."""
     from taichi_vision import taichi_aot
@@ -1407,6 +1411,8 @@ def calcOpticalFlowFarneback(
         poly_sigma=poly_sigma,
         flags=flags,
         flow_init=flow,
+        reference_pyramid=reference_pyramid,
+        return_gpu=return_gpu,
     )
 
 
@@ -1430,6 +1436,7 @@ def calcOpticalFlowPyrLK(
     max_flow_px=0.0,
     return_gpu=False,
     return_diagnostics=False,
+    reference_pyramid=None,
 ):
     """OpenCV-style Lucas-Kanade entrypoint with internal grid dense flow."""
     return aot_wrapper.calcOpticalFlowPyrLK(
@@ -1452,6 +1459,7 @@ def calcOpticalFlowPyrLK(
         max_flow_px=max_flow_px,
         return_gpu=return_gpu,
         return_diagnostics=return_diagnostics,
+        reference_pyramid=reference_pyramid,
     )
 
 

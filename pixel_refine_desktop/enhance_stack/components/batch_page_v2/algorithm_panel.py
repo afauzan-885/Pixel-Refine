@@ -278,11 +278,11 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self.processor_thread.finished_processing.connect(self._on_processing_finished)
         self.processor_thread.start()
 
-        # 3. Start timer for Cancel button (1s delay)
-        self._cancel_delay_timer.start(1000)
+        # 3. Enable Cancel button quickly (250ms delay for smooth UI feedback)
+        self._cancel_delay_timer.start(250)
 
     def _enable_cancel_button(self):
-        """Called 1s after Start to turn button into Cancel."""
+        """Called shortly after Start to turn button into Cancel."""
         if self._is_processing:
             self._update_all_buttons(
                 enabled=True,
@@ -365,6 +365,10 @@ class AlgorithmPanel(QWidget, SyncMixin):
             )
 
     def _on_processing_finished(self):
+        is_cancelled = False
+        if self.processor_thread and getattr(self.processor_thread, "is_cancelled", None):
+            is_cancelled = self.processor_thread.is_cancelled()
+
         self._is_processing = False
         self._cancel_delay_timer.stop()
 
@@ -372,20 +376,29 @@ class AlgorithmPanel(QWidget, SyncMixin):
 
         self.hide_progress()
         
-        # Hide loading toast and show process finished message
+        # Hide loading toast and show status toast
         if hasattr(self, "display_panel") and self.display_panel and hasattr(self.display_panel, "toast"):
             from resources.animations.toast.toast_manager import ToastPosition
             self.display_panel.toast.hide_category("process_loading")
-            self.display_panel.toast.show_message(
-                message="Proses selesai dengan sukses!",
-                duration=3000,
-                position=ToastPosition.BOTTOM_LEFT,
-                priority="NORMAL"
-            )
+            if is_cancelled:
+                self.display_panel.toast.show_message(
+                    message="Proses dihentikan. Hasil parsial berhasil disimpan & ditampilkan.",
+                    duration=3500,
+                    position=ToastPosition.BOTTOM_LEFT,
+                    priority="NORMAL",
+                )
+            else:
+                self.display_panel.toast.show_message(
+                    message="Proses selesai dengan sukses!",
+                    duration=3000,
+                    position=ToastPosition.BOTTOM_LEFT,
+                    priority="NORMAL",
+                )
 
         completion_data = {
             "batch_id": self.current_batch_id,
             "settings": self.get_settings(),
+            "is_cancelled": is_cancelled,
         }
         self.processing_completed.emit(completion_data)
 

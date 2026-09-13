@@ -46,6 +46,7 @@ from resources.GenericUILibrary import live_update
 
 
 @live_update
+@live_update("refresh_responsive_layout", on_resize=True)
 class RightPanel(QWidget, SyncMixin):
     """
     Batch List Panel for Enhance Stack.
@@ -129,10 +130,14 @@ class RightPanel(QWidget, SyncMixin):
 
         # Trigger immediate refresh for all bindings in this scope
         # (SyncMixin.on_store_changed(None, ...) handles this)
-        self.on_store_changed(None, self.get_data())
-        self._normalize_alignment_form_value()
+        self._is_syncing = True
+        try:
+            self.on_store_changed(None, self.get_data())
+            self._normalize_alignment_form_value()
+        finally:
+            self._is_syncing = False
 
-        # Emit signal for adaptive UI (AlgorithmPanel)
+        # Emit signal for adaptive UI (AlgorithmPanel) once cleanly
         self._on_settings_changed(save_to_store=False)
 
     def _normalize_alignment_form_value(self):
@@ -175,9 +180,9 @@ class RightPanel(QWidget, SyncMixin):
 
         # Create Splitter
         self.splitter = QSplitter(Qt.Orientation.Vertical)
-        self.splitter.setHandleWidth(10)  # Make handle visible/grabbable
+        self.splitter.setHandleWidth(2)  # Static separator line, manual resizing disabled
         self.splitter.setStyleSheet(
-            "QSplitter::handle { background-color: #e0e0e0; border-radius: 2px; }"
+            "QSplitter::handle { background-color: #e0e0e0; }"
         )
 
         # ==========================
@@ -318,6 +323,13 @@ class RightPanel(QWidget, SyncMixin):
         # Set Collapsible false to keep min sizes
         self.splitter.setCollapsible(0, False)
         self.splitter.setCollapsible(1, False)
+        self.splitter.setStretchFactor(0, 70)
+        self.splitter.setStretchFactor(1, 30)
+        # Disable manual splitter dragging between panels
+        handle = self.splitter.handle(1)
+        if handle:
+            handle.setEnabled(False)
+            handle.setCursor(Qt.CursorShape.ArrowCursor)
 
         # Re-balance splitter sizes whenever the list of batches changes
         # or the panel is resized. The algorithm cards (sr_card +
@@ -356,12 +368,19 @@ class RightPanel(QWidget, SyncMixin):
     def resizeEvent(self, event):
         """Handle resize to adjust splitter ratio based on screen state context."""
         super().resizeEvent(event)
-        # Re-balance so the algorithm cards stay pinned to the bottom
-        # of the right panel regardless of how much vertical room the
-        # list_group happens to need.
+        self.refresh_responsive_layout()
+
+    def refresh_responsive_layout(self):
+        """
+        Responsive layout refresher hooked via @live_update(..., on_resize=True).
+        Ensures right panel maintains fixed and clean layout between batch container
+        and algorithm panel across fullscreen and window resizing.
+        """
+        self._update_process_all_btn_scaling()
         self._balance_splitter_sizes()
 
-        # Dynamic scaling of process_all_btn height and font size
+    def _update_process_all_btn_scaling(self):
+        """Dynamic scaling of process_all_btn height and font size based on window width."""
         if hasattr(self, "process_all_btn") and self.process_all_btn:
             window_width = self.window().width() if self.window() else 1000
             f = max(0.0, min(1.0, (window_width - 1000) / 920.0))
@@ -373,46 +392,9 @@ class RightPanel(QWidget, SyncMixin):
             from resources.GenericUILibrary.theme import get_theme, create_button_style
             theme = get_theme()
             base_style = create_button_style("primary", theme)
-            self.process_all_btn.setStyleSheet(base_style + f" QPushButton {{ padding: 2px 4px; font-size: {font_size:.1f}pt; }}")
-
-        # If collapsed, force top widget to 100%
-        if self._is_collapsed:
-            # Clear any fixed height the splitter may have applied
-            # previously so the bottom can fully collapse.
-            try:
-                self.algo_container.setMinimumHeight(0)
-                self.algo_container.setMaximumHeight(0)
-            except Exception:
-                pass
-            self.splitter.setSizes([self.height(), 0])
-            return
-
-        # Lift the previous fixed height so the splitter can manage the
-        # bottom container freely. ``_balance_splitter_sizes`` will
-        # honour the algorithm card minimums via the splitter itself.
-        try:
-            self.algo_container.setMinimumHeight(0)
-            self.algo_container.setMaximumHeight(16777215)
-        except Exception:
-            pass
-
-        # Optimization for Large Displays (Maximised) — keep the
-        # 3:1 ratio behaviour that the previous implementation had.
-        current_height = self.height()
-        LARGE_MODE_THRESHOLD = 900
-
-        if current_height > LARGE_MODE_THRESHOLD:
-            # Calculate 3:1 ratio
-            top_h = int(current_height * 0.75)
-            bottom_h = current_height - top_h
-            self.splitter.setSizes([top_h, bottom_h])
-            return
-
-        # Default behaviour: pin the algorithm cards to the bottom and
-        # let the batch list take the rest. Without this, when the list
-        # is short the cards float just below it instead of being
-        # pushed down.
-        self._balance_splitter_sizes()
+            self.process_all_btn.setStyleSheet(
+                base_style + f" QPushButton {{ padding: 2px 4px; font-size: {font_size:.1f}pt; }}"
+            )
 
     def _update_cards_mutually_exclusive_state(self):
         """Enforce mutual exclusivity between Super Resolution and Denoising using the disable state."""
@@ -437,6 +419,7 @@ class RightPanel(QWidget, SyncMixin):
     def _on_settings_changed(self, save_to_store=True):
         """Emit current settings and optionally save to persistence."""
         self._update_cards_mutually_exclusive_state()
+        self._balance_splitter_sizes()
 
         settings = {
             config.KEY_ALIGNMENT: self.align_form.get_value() or "",
@@ -582,36 +565,34 @@ class RightPanel(QWidget, SyncMixin):
             # Emit signal clearing selection if needed (handled by list group clearing usually)
 
     def _calculate_algo_target_h(self):
-        """Calculate dynamic target height based on content but capped at 360px."""
-        # Force a layout update to get accurate sizeHint
-        # Use the stored layout reference directly
-        if self.scroll_content_layout:
-            self.scroll_content_layout.activate()
-        content_h = self.scroll_content.sizeHint().height()
+        """Calculate target height for algorithm panel based on content ratio."""
+        handle_w = (
+            max(0, self.splitter.handleWidth() or 0)
+            if hasattr(self, "splitter") and self.splitter
+            else 0
+        )
+        total_h = (
+            self.splitter.height()
+            if hasattr(self, "splitter") and self.splitter
+            else 650
+        )
+        available = max(0, total_h - handle_w)
 
-        # Add overhead for button and margins (approx 80px)
-        # Header (30) + Button (45) + Margins/Spacing (15)
-        total_h = content_h + 80
+        content_hint = (
+            self.scroll_content.sizeHint().height()
+            if hasattr(self, "scroll_content") and self.scroll_content
+            else 0
+        )
+        is_any_expanded = (
+            getattr(self.sr_card, "is_checked", False)
+            or getattr(self.denoise_card, "is_checked", False)
+        )
+        min_algo_h = max(215, content_hint + 5) if is_any_expanded else max(165, content_hint + 5)
 
-        # Clamp between 150 and 360
-        return max(150, min(total_h, 360))
+        return max(min_algo_h, int(available * 0.30))
 
     def _balance_splitter_sizes(self):
-        """Push the algorithm cards (Super Resolution + Denoising) as far
-        down as possible without ever clipping them.
-
-        Rules:
-        * ``algo_container`` (bottom) gets at least the combined
-          sizeHint of ``sr_card`` + ``denoise_card`` plus the scroll
-          area paddings.
-        * ``batch_container`` (top) gets whatever vertical space
-          remains in the splitter, but never less than the height
-          required for the action buttons row.
-        * When the list is short, the top container shrinks and the
-          bottom container expands to fill the gap, pushing the cards
-          down. When the list is long, the bottom container keeps its
-          minimum and the top container takes the rest.
-        """
+        """Establish proportional ratio layout between batch container and algorithm panel."""
         try:
             if not hasattr(self, "splitter") or self.splitter is None:
                 return
@@ -620,23 +601,54 @@ class RightPanel(QWidget, SyncMixin):
             ):
                 return
 
+            # Disable manual resizing between the two panels
+            try:
+                handle = self.splitter.handle(1)
+                if handle:
+                    handle.setEnabled(False)
+                    handle.setCursor(Qt.CursorShape.ArrowCursor)
+            except Exception:
+                pass
+
             total_h = self.splitter.height()
             if total_h <= 0:
                 return
 
-            # Minimum heights that must be preserved.
-            # Action buttons row in batch_container: ~32px (22 + spacing + margins).
-            min_top_h = 60
-            # Algorithm cards combined sizeHint + scroll area overhead.
-            min_bottom_h = 180  # sr_card ~80 + denoise_card ~80 + spacing/padding
+            # If collapsed, force top widget to 100% and bottom to 0
+            if getattr(self, "_is_collapsed", False):
+                try:
+                    self.algo_container.setMinimumHeight(0)
+                    self.algo_container.setMaximumHeight(0)
+                except Exception:
+                    pass
+                self.splitter.setSizes([total_h, 0])
+                return
 
-            # Allow a small fudge so QSplitter handle (10px) does not
-            # eat into either side.
-            handle = max(0, self.splitter.handleWidth() or 0)
-            available = max(0, total_h - handle)
+            handle_w = max(0, self.splitter.handleWidth() or 0)
+            available = max(0, total_h - handle_w)
 
-            top_h = max(min_top_h, available - min_bottom_h)
-            bottom_h = max(min_bottom_h, available - top_h)
+            # Maintain consistent ~70% : 30% percentage ratio between windowed and fullscreen
+            # with safe minimum height so cards are never clipped in windowed mode
+            content_hint = (
+                self.scroll_content.sizeHint().height()
+                if hasattr(self, "scroll_content") and self.scroll_content
+                else 0
+            )
+            is_any_expanded = (
+                getattr(self.sr_card, "is_checked", False)
+                or getattr(self.denoise_card, "is_checked", False)
+            )
+            min_algo_h = max(215, content_hint + 5) if is_any_expanded else max(165, content_hint + 5)
+
+            try:
+                self.algo_container.setMinimumHeight(min_algo_h)
+                self.algo_container.setMaximumHeight(16777215)
+            except Exception:
+                pass
+
+            bottom_h = max(min_algo_h, int(available * 0.30))
+            min_top_h = 80
+            top_h = max(min_top_h, available - bottom_h)
 
             self.splitter.setSizes([top_h, bottom_h])
         except Exception:
@@ -661,9 +673,9 @@ class RightPanel(QWidget, SyncMixin):
             self.process_all_btn.hide()
 
     def _on_selection_changed(self, selected_values):
-        """Buffer selection change to prevent UI lag during rapid clicking."""
+        """Immediately trigger selection change on next tick to eliminate UI lag."""
         self._pending_selection = selected_values
-        self._selection_timer.start(50)  # 50ms breathing room
+        self._selection_timer.start(0)  # Instantaneous next-tick dispatch
 
     def set_collapsed_state(self, collapsed):
         """Update internal collapsed state and animate height."""

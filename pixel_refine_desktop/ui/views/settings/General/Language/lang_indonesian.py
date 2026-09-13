@@ -40,21 +40,24 @@ EXIT_APPLICATION_MESSAGE = "Ingin keluar dari aplikasi?"
 EXIT_APPLICATION_YES = "Ya"
 EXIT_APPLICATION_NO = "Tidak"
 PROJECT_SAVE_CHANGES_TITLE = "Simpan Proyek"
-PROJECT_SAVE_CHANGES_MESSAGE = "Proyek ini memiliki perubahan yang belum disimpan. Simpan sebelum keluar?"
+PROJECT_SAVE_CHANGES_MESSAGE = (
+    "Proyek ini memiliki perubahan yang belum disimpan. Simpan sebelum keluar?"
+)
 PROJECT_SAVE_CHANGES_SAVE = "Simpan"
 PROJECT_SAVE_CHANGES_DISCARD = "Jangan Simpan"
 PROJECT_SAVE_CHANGES_CANCEL = "Batal"
 EXIT_APPLICATION_APPLY_BACKEND_TITLE = "Perubahan Backend"
-MSG_BACKEND_EXIT_REQUIRED = "Keluar dari aplikasi lalu jalankan kembali untuk menerapkan pilihan backend baru?"
-
+MSG_BACKEND_EXIT_REQUIRED = (
+    "Keluar dari aplikasi lalu jalankan kembali untuk menerapkan pilihan backend baru?"
+)
 
 
 # ==============================================================================
 # Sidebar UI
 # ==============================================================================
 
-SETTINGS_SIDEBAR_LABEL= "Pengaturan"
-PANORAMA_SIDEBAR_LABEL= "Panorama"
+SETTINGS_SIDEBAR_LABEL = "Pengaturan"
+PANORAMA_SIDEBAR_LABEL = "Panorama"
 
 
 # ==============================================================================
@@ -91,72 +94,91 @@ UI_LABEL_MOVING_FILES = "Memindahkan {} file ke folder '{}'. Harap tunggu..."
 PROCESSING_BATCH = "--- Memproses batch {}/{} (Telah di proses: {}) ---"
 NUMBER_OF_BATCHES_TO_BE_PROCESSED = "Jumlah batch yang akan diproses: {}"
 BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS = "batch_id harus ada untuk proses batch"
-SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED = "Melewati batch {} karena gambar tidak ada yang dimuat."
+SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED = (
+    "Melewati batch {} karena gambar tidak ada yang dimuat."
+)
 BATCH_LABEL_FORMAT = "Batch {}   -   ({} gambar)"
 BATCH_CANCELED_BY_USER = "Proses batch dibatalkan."
 BATCH_CANCELED_HEADER = "Batch Dibatalkan"
 BATCH_CANCELED_INFO = "Dibatalkan"
-BATCH_CANCELED_PROCESS = "Batalkan Proses" 
-BATCH_CANCELED_CONFIRMATION = "Apakah Anda yakin ingin membatalkan semua proses yang sedang berlangsung?"
+BATCH_CANCELED_PROCESS = "Batalkan Proses"
+BATCH_CANCELED_CONFIRMATION = (
+    "Apakah Anda yakin ingin membatalkan semua proses yang sedang berlangsung?"
+)
 BATCH_QUEUE = "Menunggu"
 BATCH_SUCCESS = "Proses batch selesai."
 BATCH_SUCCESS_HEADER = "Selesai"
 
 
-
 # --- Dialogue Title ---
 SELECT_OUTPUT_FOLDER_TITLE = "Pilih Folder Output untuk Simpan Batch"
 OUTPUT_FOLDER_SELECTION_CANCELLED = "Pemilihan folder dibatalkan. Proses dihentikan."
-ALGORITHM_SUCCESS_UPDATE = "Pengaturan algoritma berhasil diperbarui untuk batch {} hingga {}."
+ALGORITHM_SUCCESS_UPDATE = (
+    "Pengaturan algoritma berhasil diperbarui untuk batch {} hingga {}."
+)
 
 # --- General Error Messages & Dialogs ---
 BATCH_PROCESSING_ERROR_TITLE = "Kesalahan Proses Batch"
-BATCH_PROCESSING_ERROR_MESSAGE = "Gagal memproses Batch {} (ID: {}):\n{}" 
+BATCH_PROCESSING_ERROR_MESSAGE = "Gagal memproses Batch {} (ID: {}):\n{}"
 BATCH_SAVE_ERROR_TITLE = "Gagal Menyimpan"
-TARGET_FOLDER_NOT_ACCESSIBLE = "Folder tujuan tidak dapat diakses:\n{}" 
+TARGET_FOLDER_NOT_ACCESSIBLE = "Folder tujuan tidak dapat diakses:\n{}"
 MOVE_FILE_ERROR_TITLE = "Gagal Memindahkan File"
-COULD_NOT_SAVE_FILE_FOR_BATCH = "Gagal menyimpan file '{}' untuk batch:\n{}" 
+COULD_NOT_SAVE_FILE_FOR_BATCH = "Gagal menyimpan file '{}' untuk batch:\n{}"
 SOURCE_FILE_DOES_NOT_EXIST = "Gagal pindah: File sumber '{}' tidak ditemukan."
 TARGET_FOLDER_INVALID = "Gagal pindah: Folder tujuan '{}' tidak valid."
 BATCH_CONFIGURATION_INFO = "Batch belum dikonfigurasi"
 
 BATCH_PROCESSING_ERROR_REPORT_TITLE = "Laporan Kesalahan Pemrosesan Batch"
-BATCH_PROCESSING_ERROR_REPORT_INTRO = "Proses selesai dengan {num_failed} dari {num_total} batch gagal diproses. Detail:"
+BATCH_PROCESSING_ERROR_REPORT_INTRO = (
+    "Proses selesai dengan {num_failed} dari {num_total} batch gagal diproses. Detail:"
+)
 BATCH_PROCESSING_ERROR_REPORT_ITEM = "• Batch #{seq} (ID: {id})\n  Penyebab: {error}"
 
 # --- Log Message
-LOG_BATCH_PROCESSING_START = "Memulai pemrosesan untuk {} batch..." 
+LOG_BATCH_PROCESSING_START = "Memulai pemrosesan untuk {} batch..."
 LOG_PROCESSING_BATCH_DETAIL = "Memproses Batch ke-{} (ID: {}), urutan ({}/{})..."
-LOG_WARN_MULTIPLE_NEW_FILES = "Peringatan: Ada >1 file baru untuk Batch {}. Dipindahkan yang pertama: {}"
+LOG_WARN_MULTIPLE_NEW_FILES = (
+    "Peringatan: Ada >1 file baru untuk Batch {}. Dipindahkan yang pertama: {}"
+)
 LOG_BATCH_PROCESSED_NEW_OUTPUT = "Batch {} selesai, output baru: {}"
-LOG_BATCH_PROCESSED_NO_OUTPUT = "Batch {} selesai, tapi tidak ada file output baru di folder '{}'." 
-LOG_ERROR_PROCESSING_BATCH = "Error saat memproses Batch {}: {}" 
+LOG_BATCH_PROCESSED_NO_OUTPUT = (
+    "Batch {} selesai, tapi tidak ada file output baru di folder '{}'."
+)
+LOG_ERROR_PROCESSING_BATCH = "Error saat memproses Batch {}: {}"
 LOG_ALL_BATCH_ATTEMPTS_FINISHED = "Semua pemrosesan batch telah selesai."
 
 LOG_MOVE_SUCCESS = "Berhasil memindahkan '{}' ke '{}'."
-LOG_MOVE_FAILED = "Gagal memindahkan '{}' ke '{}': {}" 
-LOG_SOURCE_FILE_NOT_FOUND = "File sumber tidak ditemukan: {}" 
+LOG_MOVE_FAILED = "Gagal memindahkan '{}' ke '{}': {}"
+LOG_SOURCE_FILE_NOT_FOUND = "File sumber tidak ditemukan: {}"
 LOG_TARGET_FOLDER_NOT_FOUND = "Folder tujuan tidak valid: {}"
 
 
 # Toast message for process_all_batches
 UI_LABEL_BATCH_NO_PROCESS = "Tidak ada batch dipilih untuk diproses."
-UI_LABEL_BATCH_PROCESS_START = "Memulai proses untuk {} batch..." 
-UI_LABEL_BATCH_PROGRESS_DONE_SAVED = "Batch {} selesai & disimpan ({}/{})." 
+UI_LABEL_BATCH_PROCESS_START = "Memulai proses untuk {} batch..."
+UI_LABEL_BATCH_PROGRESS_DONE_SAVED = "Batch {} selesai & disimpan ({}/{})."
 UI_LABEL_BATCH_PROGRESS_SAVE_FAILED = "Batch {} selesai, gagal simpan ({}/{})."
-UI_LABEL_BATCH_PROGRESS_NO_OUTPUT = "Batch {} selesai, tanpa output ({}/{})." 
-UI_LABEL_BATCH_PROGRESS_ERROR = "Error Batch {} ({}/{})." 
+UI_LABEL_BATCH_PROGRESS_NO_OUTPUT = "Batch {} selesai, tanpa output ({}/{})."
+UI_LABEL_BATCH_PROGRESS_ERROR = "Error Batch {} ({}/{})."
 
 # Final Finished Toast Message
-UI_LABEL_BATCH_ALL_SUCCESS_SPECIFIC = "Semua {} batch berhasil diproses & disimpan ke {}." 
-UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC = "{} dari {} batch disimpan ke {}. Beberapa bermasalah."
-UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC = "Proses selesai. Tidak ada hasil batch yang disimpan ke {}."
+UI_LABEL_BATCH_ALL_SUCCESS_SPECIFIC = (
+    "Semua {} batch berhasil diproses & disimpan ke {}."
+)
+UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC = (
+    "{} dari {} batch disimpan ke {}. Beberapa bermasalah."
+)
+UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC = (
+    "Proses selesai. Tidak ada hasil batch yang disimpan ke {}."
+)
 UI_LABEL_BATCH_NONE_PROCESSED = "Tidak ada batch yang diproses."
 
 
-
 # Batch Deletion
-BATCH_DELETE_LABEL = "Konfirmasi Hapus Batch", "Apakah Anda yakin ingin menghapus batch {}?"
+BATCH_DELETE_LABEL = (
+    "Konfirmasi Hapus Batch",
+    "Apakah Anda yakin ingin menghapus batch {}?",
+)
 TITLE_BATCH_ALL_DELETE_BUTTON = "Hapus Semua Batch"
 CONFIRM_BATCH_ALL_DELETE_BUTTON = "Anda yakin ingin menghapus {} batch?"
 NO_DATA_BATCH_ALL_DELETE_BUTTON = "Tidak ada data batch yang tersimpan."
@@ -168,7 +190,9 @@ PARAMETER_BATCH_DENOISING = "Denoising"
 PARAMETER_BATCH_SUPER_RESOLUTION = "Super Resolusi"
 PARAMETER_BATCH_ALIGNMENT = "Selaraskan Gambar"
 PARAMETER_BATCH_ALIGNMENT_TO_FOLDER = "Simpan Hasil Penyelarasan ke dalam Folder"
-PARAMETER_BATCH_ALIGNMENT_TO_PROCESS = "Simpan Hasil Penyelarasan untuk proses Selanjutnya"
+PARAMETER_BATCH_ALIGNMENT_TO_PROCESS = (
+    "Simpan Hasil Penyelarasan untuk proses Selanjutnya"
+)
 
 # Batch Saving Feedback
 UI_FAILED_TO_SAVE_IMAGE_BATCH = "Gagal menyimpan gambar: {}"
@@ -178,30 +202,46 @@ UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH = "Folder sistem (database/stack) tid
 UI_NO_BATCH_PROCESS = "Tidak ada batch yang tersedia"
 
 # Batch Specific Errors/Warnings
-ERROR_WHILE_RETRIEVING_KEY_FROM_HD5F = "Terjadi kesalahan saat mngambil kunci {} dari HDF5: {}"
+ERROR_WHILE_RETRIEVING_KEY_FROM_HD5F = (
+    "Terjadi kesalahan saat mngambil kunci {} dari HDF5: {}"
+)
 
 
 # ==============================================================================
 # Image Handling (Import/Delete) UI & Messages
 # ==============================================================================
 # Import
-HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = "File Gambar (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
+HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = (
+    "File Gambar (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
+)
 PLACHOLDER_DRAG_AND_DROP_IMPORT_IMAGES = """Seret & lepas gambar ke sini<br>
 atau<br>
 Gunakan tombol 'Import Gambar'"""
 SUPPORTED_IMAGE_EXTENSION = "Format gambar yang didukung"
 HANDLE_IMPORT_BUTTON_IMAGE_PATH = "Pilih Gambar"
 HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE = "Gambar Duplikat"
-HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE = "{count} gambar sudah ada di database, akan dilewati."
+HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE = (
+    "{count} gambar sudah ada di database, akan dilewati."
+)
 HANDLE_IMPORT_BUTTON_IMAGE_SELECTED = "Format Terpilih"
-HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = "{count} gambar dengan format '{format}' akan diimpor."
-HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "Gagal", "Tidak ada gambar yang valid untuk diimpor." # Tuple for Title, Message
+HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = (
+    "{count} gambar dengan format '{format}' akan diimpor."
+)
+HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = (
+    "Gagal",
+    "Tidak ada gambar yang valid untuk diimpor.",
+)  # Tuple for Title, Message
 ON_IMPORT_COMPLETE_STATUS = "Impor selesai"
 ON_IMPORT_COMPLETE_MESSAGES = "{} gambar telah berhasil diimpor."
 
 # Delete
-HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "Gagal", "Tidak ada gambar yang dipilih." # Tuple for Title, Message
-HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "Apakah Anda yakin ingin menghapus {} gambar yang dipilih?"
+HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = (
+    "Gagal",
+    "Tidak ada gambar yang dipilih.",
+)  # Tuple for Title, Message
+HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = (
+    "Apakah Anda yakin ingin menghapus {} gambar yang dipilih?"
+)
 
 
 # ==============================================================================
@@ -250,7 +290,9 @@ CONSOL_LOG_RUNNING_ALGORITHM = "Proses {} dipilih, algoritma: {}"
 SAVE_TO_HDF5_ALIGNED_SAVING = "Menyimpan gambar yang telah diselaraskan"
 SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING = "Gambar ke-{index} telah disimpan."
 SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED = "Semua gambar berhasil disimpan."
-NO_HDF5_FILE_PROCESSING_FROM_PATH = "File HDF5 tidak ditemukan. Memproses dari path gambar..."
+NO_HDF5_FILE_PROCESSING_FROM_PATH = (
+    "File HDF5 tidak ditemukan. Memproses dari path gambar..."
+)
 
 # Image Processing Steps
 RUN_SAVING_REFERENCE_IMAGE = "Menyimpan gambar referensi."
@@ -263,8 +305,8 @@ RUN_SAVING_TRANSFORMATION = "[2/2] Simpan hasil {}/{}"
 
 
 # Motion Compensation / Alignment Steps
-PROGRESS_CALCULATE_AND_COMPENSATE_MOTION_PROCESS ="Menyelaraskan dan crop gambar {}/{}"
-PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION ="Menyimpan gambar {}/{}"
+PROGRESS_CALCULATE_AND_COMPENSATE_MOTION_PROCESS = "Menyelaraskan dan crop gambar {}/{}"
+PROGRESS_SAVING_CALCULATE_AND_COMPENSATE_MOTION = "Menyimpan gambar {}/{}"
 COMPENSATE_MOTION_STATUS = "Melakukan kompensasi gerakan pada gambar {image_id}..."
 COMPENSATE_MOTION_FINISHED = "Kompensasi gerakan selesai untuk gambar {image_id}."
 
@@ -296,7 +338,9 @@ FAILED_TO_CREATE_PROCESS_WINDOW = "Gagal membuat window proses: {}"
 # Image Loading / Preparation Errors
 LOAD_IMAGES_FROM_PATHS_LOAD_FAILED = "Gagal memuat gambar"
 RUN_IMAGE_NOT_FOUND = "Gambar tidak ditemukan di database."
-RUN_REFERENCE_IMAGE_NOT_FOUND = "Gambar referensi tidak dapat dimuat dari {image_paths[0]}."
+RUN_REFERENCE_IMAGE_NOT_FOUND = (
+    "Gambar referensi tidak dapat dimuat dari {image_paths[0]}."
+)
 RUN_IMAGE_PROCESSING_FAILED = "Gagal memuat gambar {i} dari {image_paths[i]}."
 FAILED_WHILE_PREPARING_IMAGE = "Gagal menyiapkan gambar: {}"
 FAILED_TO_PREPARE_REFERENCE_IMAGE = "Gagal menyiapkan gambar referensi: {}"
@@ -306,31 +350,39 @@ RUN_IMAGE_PROCESS_LOAD_FAILED = "Tidak ditemukan gambar di database."
 
 # File / System Errors
 ERROR_IN_READING_FILE_HDF5 = "Kesalahan membaca HDF5: {}"
-FAIL_LOAD_TRANSFORMATION_MATRIX_FILE = "File transformation matrix tidak ditemukan untuk gambar ke-{}"
+FAIL_LOAD_TRANSFORMATION_MATRIX_FILE = (
+    "File transformation matrix tidak ditemukan untuk gambar ke-{}"
+)
 LIBRARY_FILE_NOT_FOUND = "File library tidak ditemukan: {}"
 
 # Processing / Algorithm Errors
 ERROR_ACCUMULATE_IMAGE = "Accumulated image is None atau total weights tidak valid."
 RUN_STACK_PROCESSING_FAILED = "Gagal melakukan penumpukan gambar"
-FAIL_CALCULATE_GLOBAL_MOTION_PROCESS = "Kalkulasi gerakan tidak dapat dihitung untuk gambar ke-{}"
+FAIL_CALCULATE_GLOBAL_MOTION_PROCESS = (
+    "Kalkulasi gerakan tidak dapat dihitung untuk gambar ke-{}"
+)
 FAIL_COMPENSATE_MOTION_PROCESS = "Estimasi gagal pada gambar ke-{}"
 UNRECOGNIZED_TRANSFORMATION = "Jenis transformasi tidak dikenali."
-FAILED_TO_COMPUTE_TRANSFORMATION ="Transformasi tidak dapat dihitung."
+FAILED_TO_COMPUTE_TRANSFORMATION = "Transformasi tidak dapat dihitung."
 FAILED_TO_COMPUTE_CROP = "Gagal menghitung crop yang valid. Proses dibatalkan."
 FAIL_CROPPING_PROCESS = "Crop tidak valid. Overlap tidak cukup"
 ERROR_IN_FLOW_FIELD = "Kesalahan pada gambar {}: Input Field flow adalah none. Tidak dapat mengompensasi gerakan."
 ERROR_IN_BASE_IMAGE = "Kesalahan pada gambar {}: Input base_image adalah none. Tidak dapat mengompensasi gerakan."
 STACK_IMAGES_FAILED = "Tidak ada gambar untuk diproses."
-DATA_FAILED_COMPLETION_CREATED = "Data penyempurnaan gagal di generate. Tidak dapat melakukan penyempurnaan."
+DATA_FAILED_COMPLETION_CREATED = (
+    "Data penyempurnaan gagal di generate. Tidak dapat melakukan penyempurnaan."
+)
 FAILED_IMAGE_ENHANCEMENT = "Proses penyempurnaan gagal."
 ANALYSIS_FAILURE = "Analisis gagal: Tidak ada gambar yang diproses"
 ERROR_AT_END_OF_CONVERSION = "Kesalahan pada akhir konversi: {}"
-UNEXPECTED_NUMBER_OF_BUFFER_CHANNELS = "Kesalahan Internal: Jumlah channel buffer tak terduga."
+UNEXPECTED_NUMBER_OF_BUFFER_CHANNELS = (
+    "Kesalahan Internal: Jumlah channel buffer tak terduga."
+)
 UNABLE_TO_SAVE_WEIGHT_MAP = "Tidak dapat menyimpan Peta Bobot: {}"
 FAILED_TO_SAVE_WEIGHT_MAP_TO_PATH = "Gagal menyimpan peta bobot ke {}"
 NORMALIZATION_FAILED = "Normalisasi Gagal: {}"
 FATAL_ERROR_DURING_NORMALIZATION = "KESALAHAN FATAL Selama normalisasi: {}"
-FAILED_TO_ACCUMULATE_IMAGE= "Pada gambar {} gagal diakumulasi"
+FAILED_TO_ACCUMULATE_IMAGE = "Pada gambar {} gagal diakumulasi"
 COLOR_CHANNEL_DOES_NOT_MATCH = "Channel warna tidak cocok."
 IMAGE_CHANNEL_DOES_NOT_SUPPORT = "Channel warna yang tidak didukung: {}."
 DATA_TYPE_NOT_SUPPORTED = "Tipe data tidak didukung: {}."
@@ -338,14 +390,22 @@ IMAGE_BIT_REQUIRED = "Gambar harus berukuran 8 Bit atau 16 Bit."
 
 # Library / Dependency Errors
 FAILED_TO_CONFIGURE_LIBRARY = "Gagal memuat/mengkonfigurasi pustaka {}: {}"
-LIBRARY_FAILED_TO_LOAD_NORMALIZATION_FAILED = "Library C++ tidak dimuat. Normalisasi dilewati."
-LIBRARY_FAILED_TO_LOAD_ACCUMULATED_SKIPED = "Library C++ tidak dimuat. Akumulasi dilewati."
+LIBRARY_FAILED_TO_LOAD_NORMALIZATION_FAILED = (
+    "Library C++ tidak dimuat. Normalisasi dilewati."
+)
+LIBRARY_FAILED_TO_LOAD_ACCUMULATED_SKIPED = (
+    "Library C++ tidak dimuat. Akumulasi dilewati."
+)
 
 # GPU Errors
-GPU_ERROR_AND_FALLBACK_TO_CPU = "Kesalahan GPU yang tak terduga: {}. Proses menggunakan CPU."
+GPU_ERROR_AND_FALLBACK_TO_CPU = (
+    "Kesalahan GPU yang tak terduga: {}. Proses menggunakan CPU."
+)
 
 # Validation Errors
-IMAGE_DATA_MUST_BE_VALID = "Item pada daftar 'gambar' harus berupa data gambar yang valid (array NumPy)."
+IMAGE_DATA_MUST_BE_VALID = (
+    "Item pada daftar 'gambar' harus berupa data gambar yang valid (array NumPy)."
+)
 
 # ==============================================================================
 # Confirmation Dialogs / Warnings
@@ -492,7 +552,7 @@ NOISE_OFFSET_DESCRIPTION = """Ambang batas untuk mengabaikan noise gambar.
 
 # --- General Alignment Options (Edges, Crop, Saving) ---
 KEEP_EDGES_LABEL = """Pertahankan tepi"""
-IGNORE_EDGE_LABEL= """Abaikan Tepi"""
+IGNORE_EDGE_LABEL = """Abaikan Tepi"""
 KEEP_EDGES_DESCRIPTION = """Fitur Pertahankan Tepi memungkinkan algoritma menjaga tepi gambar
 tetap utuh selama proses penyelarasan."""
 
@@ -588,7 +648,7 @@ LANGUAGE_LABEL = "Bahasa"
 PROCESS_FORMAT_LABEL = "Format Proses"
 PROCESS_FORMAT_DESCRIPTION = "RGB Linear menggunakan pipeline RGB saat ini. RAW Native saat ini mendukung Average DNG tanpa alignment sebelum demosaic."
 LANGUAGE_TYPE = "Inggris", "Indonesia", "China Tradisional", "Melayu"
-GPU_ACCELERATION_LABEL = "Akselerasi GPU"
+GPU_ACCELERATION_LABEL = "Akselerasi Hardware"
 MULTI_CORE_CPU = "Akselerasi Multi-Core CPU"
 SETTINGS_SAVED = "Pengaturan berhasil disimpan."
 
@@ -630,7 +690,9 @@ LBL_BULK_MODE = "Mode Bulk"
 LBL_PARAMETER_ALIGNMENT = "Pengaturan Penyelarasan Gambar"
 LBL_ALIGNMENT_PLACEHOLDER = "Pengaturan penyelarasan gambar akan muncul di sini"
 LBL_PARAMETER_ALGORITHM = "Pengaturan Metode Proses"
-LBL_ALGORITHM_PLACEHOLDER = "Pengaturan detail akan muncul setelah Anda memilih metode proses di atas"
+LBL_ALGORITHM_PLACEHOLDER = (
+    "Pengaturan detail akan muncul setelah Anda memilih metode proses di atas"
+)
 BTN_START = "Mulai Proses"
 BTN_NEW_BATCH = "Buat Batch Baru"
 BTN_DELETE_BATCH = "Hapus Batch"
@@ -653,18 +715,24 @@ LBL_BATCH_NAME = "Nama Batch"
 BTN_CREATE = "Buat"
 MSG_CONFIRM_DELETE_BATCH_COUNT = "Apakah Anda yakin ingin menghapus {} batch?"
 MSG_NO_BATCHES_AVAILABLE = "Tidak ada daftar batch yang dapat diproses."
-MSG_RENAME_FAILED = "Gagal mengubah nama batch. Nama mungkin tidak valid atau sudah digunakan."
+MSG_RENAME_FAILED = (
+    "Gagal mengubah nama batch. Nama mungkin tidak valid atau sudah digunakan."
+)
 TIP_CPU_CORES = "Jumlah mesin pemroses (CPU) yang digunakan secara bersamaan. Pilihan 'Otomatis' adalah yang paling disarankan."
 LBL_SMART_NOISE_ALPHA = "Smart Noise Alpha (AI):"
 TIP_SMART_NOISE_ALPHA = "Mengatur seberapa toleran kecerdasan buatan (AI) terhadap bintik gangguan (noise).\nNilai rendah = Lebih peka gerakan (kurangi ghosting).\nNilai tinggi = Lebih bersih noise (risiko ghosting)."
 LBL_SMART_NOISE_AWARE = "Smart Noise Aware (AI):"
-TIP_SMART_NOISE_AWARE = "Aktifkan atau nonaktifkan analisis otomatis terhadap gangguan gambar oleh AI."
+TIP_SMART_NOISE_AWARE = (
+    "Aktifkan atau nonaktifkan analisis otomatis terhadap gangguan gambar oleh AI."
+)
 LBL_NOISE_CONTRIB = "Noise Contribution Strength (%):"
 TIP_NOISE_CONTRIB = "Mengatur kekuatan AI dalam menyaring bintik gangguan (0% = Tidak Aktif, 100% = Pembersihan Penuh)."
 LBL_LIGHT_GLUE_TITLE = "Pengaturan Metode LightGlue"
 LBL_SELECT_REFERENCE_IMAGE = "Pilih Gambar Referensi"
 LBL_DELETE_IMAGES = "Hapus Gambar"
-MSG_CONFIRM_DELETE_IMAGE = "Apakah Anda yakin ingin menghapus gambar yang dipilih dari batch ini?"
+MSG_CONFIRM_DELETE_IMAGE = (
+    "Apakah Anda yakin ingin menghapus gambar yang dipilih dari batch ini?"
+)
 TIP_RIGHT_CLICK_COPY = "Klik kanan untuk menyalin teks"
 MSG_UNSUPPORTED_FORMAT_IGNORED = "Format file tidak didukung atau ekstensi tidak valid."
 MSG_NO_VALID_IMAGES_GROUP = "Tidak ada gambar yang valid untuk diimpor."
@@ -681,8 +749,6 @@ MSG_NO_BATCH_SELECTED = "Tidak ada batch yang dipilih"
 LBL_BATCH_IMAGE_COUNT_FORMAT = "Batch {}   -   ({} gambar)"
 DESC_SUPER_RESOLUTION_CARD = "Tingkatkan detail dan perbesar resolusi gambar."
 DESC_DENOISING_CARD = "Kurangi noise gambar dan selaraskan lapisan piksel."
-
-
 
 
 # --- New UI & Bulk Core Keys ---
@@ -766,8 +832,10 @@ BTN_CANCEL = "Batal"
 SIMILARITY_V2_GROUP_TITLE = "Parameter Similarity V2"
 RESET_TO_DEFAULTS_BUTTON_TEXT = "Reset ke Default"
 HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED_TITLE = "Tidak Ada Gambar Valid"
-HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED_TEXT = "Tidak ada gambar valid yang dipilih untuk impor."
-DEVICE_ACCELERATION_LABEL = "Akselerasi GPU"
+HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED_TEXT = (
+    "Tidak ada gambar valid yang dipilih untuk impor."
+)
+DEVICE_ACCELERATION_LABEL = "Akselerasi Hardware"
 BTN_TEST_BACKEND_HARDWARE = "Uji Akselerasi Hardware"
 MSG_IMPORT_ERROR = "Kesalahan Impor"
 LBL_ANALYSIS_MODE = "Mode Analisis"
@@ -776,7 +844,9 @@ LBL_DEEP = "Mendalam"
 MSG_HARDWARE_TEST_DEPTH = "Pilih kedalaman pengujian akselerasi hardware:"
 MSG_HARDWARE_TEST_FAST = "Pemeriksaan kompatibilitas backend secara cepat."
 MSG_HARDWARE_TEST_DEEP = "Validasi menyeluruh per-backend."
-MSG_BACKEND_RESTART_REQUIRED = "Perlu memulai ulang aplikasi untuk menerapkan pilihan backend baru."
+MSG_BACKEND_RESTART_REQUIRED = (
+    "Perlu memulai ulang aplikasi untuk menerapkan pilihan backend baru."
+)
 BTN_YES = "Ya"
 BTN_NO = "Tidak"
 BTN_OK = "OK"
@@ -795,7 +865,9 @@ MSG_BACKEND_TEST_FINISHED = "Pengujian backend selesai."
 LBL_AUTO_FALLBACK = "Fallback Otomatis"
 LBL_AUTO_FALLBACK_TIP = "Jika diaktifkan, otomatis beralih melalui CUDA, Vulkan, OpenGL, lalu CPU bila backend yang dipilih tidak tersedia."
 AUTO_SHUTDOWN_LABEL = "Aktifkan Shutdown Otomatis"
-AUTO_SHUTDOWN_DESCRIPTION = "Tutup aplikasi setelah tidak ada aktivitas pengguna selama waktu yang ditentukan."
+AUTO_SHUTDOWN_DESCRIPTION = (
+    "Tutup aplikasi setelah tidak ada aktivitas pengguna selama waktu yang ditentukan."
+)
 AUTO_SHUTDOWN_TIMEOUT_LABEL = "Batas idle (menit)"
 
 # --- Startup Splash Status Messages ---
@@ -823,4 +895,42 @@ SPLASH_STATUS_ASSEMBLING_LAYOUT = "Menyusun tata letak aplikasi..."
 SPLASH_STATUS_FINISHING_SETUP = "Menyelesaikan persiapan awal..."
 SPLASH_STATUS_PREPARING_THEME = "Menyiapkan tema tampilan..."
 SPLASH_STATUS_FINALIZING = "Menyiapkan workspace..."
+
+# --- Tooltips & Settings UI Extensions ---
+LANGUAGE_DROPDOWN_TIP = "Pilih bahasa tampilan untuk antarmuka aplikasi."
+DEVICE_ACCELERATION_TIP = "Pilih perangkat akselerasi hardware yang digunakan untuk pemrosesan citra."
+ONNX_RUNTIME_TIP = (
+    "Pilih penyedia eksekusi untuk model inferensi AI (WeightNet / FusionNet).\n"
+    "Auto: menggunakan DirectML jika tersedia, beralih ke CPU bila tidak.\n"
+    "DirectML (GPU): memaksa akselerasi GPU melalui DirectML.\n"
+    "CPU: eksekusi hanya dengan CPU."
+)
+LBL_BACKEND_INFO_BTN_TIP = "Lihat hardware yang terdeteksi, status backend, dan estimasi performa."
+MSG_HARDWARE_TEST_DEEP_DISABLED = "Analisis mendalam dinonaktifkan sementara demi peningkatan stabilitas backend."
+
+LBL_BLOCK_PROCESSING = "Pemrosesan Blok"
+LBL_MEGAPIXEL_THRESHOLD = "Ambang Batas Megapixel"
+LBL_BLOCK_SIZE = "Ukuran Blok"
+LBL_ONNX_RUNTIME = "ONNX Runtime"
+
+# --- Hardware Statistics Modal Translations ---
+LBL_BACKEND_STATS_TITLE = "Statistik Backend Hardware"
+LBL_BACKEND_STATS_SUMMARY = (
+    "Terdeteksi: {detected} backend | Lulus: {passed}/{tested} diuji | Opsional dilewati: {skipped}\n"
+    "Benchmark GPU: 1024 x 1024 (1,049 MP) | 4x per algoritma (1 warm-up + 3 pengukuran) | Estimasi target: {target_label}"
+)
+LBL_BACKEND_HEADER = "Backend"
+LBL_HARDWARE_HEADER = "Hardware"
+LBL_STATUS_HEADER = "Status"
+LBL_GPU_BENCHMARK_HEADER = "GPU 1024²"
+LBL_ESTIMATE_HEADER = "Estimasi 24 MP"
+LBL_STATUS_SUPPORTED = "Didukung"
+LBL_STATUS_FAILED = "Gagal"
+LBL_STATUS_NOT_TESTED = "Belum diuji"
+LBL_STATUS_INVALID = "Tidak valid"
+LBL_BACKEND_STATS_NOTE = (
+    "Estimasi menggunakan pendekatan linear dari uji cepat resolusi kecil; "
+    "hasil aktual pada resolusi besar dapat berbeda karena bandwidth, cache, "
+    "tiling, dan penggunaan VRAM."
+)
 

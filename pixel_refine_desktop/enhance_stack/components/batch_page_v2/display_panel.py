@@ -32,32 +32,24 @@ from PySide6.QtCore import (
     Qt,
     QEvent,
     QPoint,
-    QSize,
     QThread,
-    QObject,
     QTimer,
-    QRect,
     QPropertyAnimation,
-    QEasingCurve,
 )
-from typing import Optional, TYPE_CHECKING, Any
-from PySide6.QtGui import QPixmap, QColor, QAction, QImage
+from typing import Any
+from PySide6.QtGui import QPixmap, QColor, QImage
 import os
 
 # Generic UI Library
 from resources.GenericUILibrary import (
-    ImageCard,
     Button,
     IconButton,
     Container,
     OverlayContainer,
     OverlayPosition,
-    ImageCompareItem,
 )
 from resources.GenericUILibrary.grids import GridContainer
-from resources.animations.slide import slide
 from resources.animations.animation_manager import (
-    SlideDirection,
     StackedWidgetAnimator,
 )
 from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
@@ -95,7 +87,9 @@ from pixel_refine_desktop.enhance_stack.core.logic.drag_drop_handler import (
 from pixel_refine_desktop.enhance_stack.core.logic.context_menu_handler import (
     ContextMenuHandler,
 )
-from pixel_refine_desktop.enhance_stack.core.logic.project_archive import recent_projects
+from pixel_refine_desktop.enhance_stack.core.logic.project_archive import (
+    recent_projects,
+)
 
 # Zoomable preview
 from pixel_refine_desktop.enhance_stack.core.logic.Zoomable_Handler import Zoomable
@@ -235,7 +229,7 @@ class BurstPreloadWorker(QThread):
 
     def _decode_frame(self, path: str):
         from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
-            load_raw_as_8bit_rgb_half_res,
+            load_raw_as_8bit_rgb,
         )
         from config import SUPPORTED_FORMATS
         from PIL import Image, ImageOps
@@ -250,7 +244,7 @@ class BurstPreloadWorker(QThread):
             img_array = None
 
             if ext in SUPPORTED_FORMATS.get("raw", []):
-                img_array = load_raw_as_8bit_rgb_half_res(path)
+                img_array = load_raw_as_8bit_rgb(path)
             elif ext in (
                 SUPPORTED_FORMATS.get("jpg", [])
                 + SUPPORTED_FORMATS.get("png", [])
@@ -260,21 +254,15 @@ class BurstPreloadWorker(QThread):
                     img = ImageOps.exif_transpose(img)
                     if img.mode != "RGB":
                         img = img.convert("RGB")
-                    img_array = np.ascontiguousarray(np.array(img)[::2, ::2])
+                    img_array = np.array(img)
 
             if img_array is not None and not self._is_aborted:
-                h, w = img_array.shape[:2]
-                # Cap to 1920x1080 if larger for rapid preview playback
-                if w > 1920 or h > 1080:
-                    scale = min(1920 / w, 1080 / h)
-                    new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
-                    pil_resized = Image.fromarray(img_array).resize(
-                        (new_w, new_h), Image.Resampling.BILINEAR
-                    )
-                    img_array = np.array(pil_resized)
-                    h, w = img_array.shape[:2]
+                if img_array.dtype != np.uint8:
+                    from taichi_vision import taichi_aot
+                    img_array = taichi_aot.cast(img_array, np.uint8)
 
                 img_array = np.ascontiguousarray(img_array)
+                h, w = img_array.shape[:2]
                 bytes_per_line = 3 * w
                 q_img = QImage(
                     img_array.data,
@@ -337,7 +325,7 @@ class BurstPreloadWorker(QThread):
             self.preload_finished.emit()
 
 
-@live_update
+@live_update("refresh_responsive_layout", on_resize=True)
 class DisplayPanel(QWidget):
     """
     Panel untuk menampilkan Grid images dan Preview.
@@ -374,9 +362,7 @@ class DisplayPanel(QWidget):
 
         self.controller = controller
         self.logic = DisplayLogic()
-        self.logic.thumbnail_policy.changed.connect(
-            self._on_thumbnail_policy_changed
-        )
+        self.logic.thumbnail_policy.changed.connect(self._on_thumbnail_policy_changed)
 
         # Managers
         self.selection_manager = SelectionManager(self)
@@ -409,7 +395,9 @@ class DisplayPanel(QWidget):
         self.current_results_map = {}
         self.zoom_states = {}
         # FIFO Playback Cache: stores up to 15 batches of burst frames in RAM
-        self._batch_playback_cache: "OrderedDict[str, dict[str, QPixmap]]" = OrderedDict()
+        self._batch_playback_cache: "OrderedDict[str, dict[str, QPixmap]]" = (
+            OrderedDict()
+        )
         self._batch_playback_cache_limit: int = 15
         self._preview_pixmap_item = None
         self._needs_playback_fit: bool = False
@@ -489,9 +477,7 @@ class DisplayPanel(QWidget):
         # 0. Sidebar Toggle Button (New)
         self.toggle_btn = Button("☰", object_name="SidebarToggleBtn")
         self.toggle_btn.setFixedWidth(40)
-        self.toggle_btn.setStyleSheet(
-            "QPushButton { font-size: 13pt; padding: 0; }"
-        )
+        self.toggle_btn.setStyleSheet("QPushButton { font-size: 13pt; padding: 0; }")
         self.toggle_btn.clicked.connect(self.toggle_sidebar)
         self.toggle_btn.installEventFilter(self)
         self.toggle_btn.setToolTip("")
@@ -1186,6 +1172,7 @@ class DisplayPanel(QWidget):
         # re-add them here.
         try:
             self.all_cards.clear()
+            self.grid_container.set_batch_update(True)
             for card in cached_cards:
                 if card is None:
                     continue
@@ -1346,6 +1333,7 @@ class DisplayPanel(QWidget):
         # See _trigger_preview_preload() for the on-demand loader.
 
         self.update_save_button_state()
+        QTimer.singleShot(0, self.refresh_responsive_layout)
 
     @Slot()
     def clear_display(self):
@@ -1446,6 +1434,38 @@ class DisplayPanel(QWidget):
     # =========================================================================
     # === 3. PRIVATE METHODS - GRID MANAGEMENT ===
     # =========================================================================
+
+    def refresh_responsive_layout(self):
+        """
+        Responsive layout refresher hooked via @live_update(..., on_resize=True).
+        Ensures GridContainer recalculates columns based on current viewport geometry
+        and cleanly re-arranges thumbnails across available width.
+        """
+        if not hasattr(self, "grid_container") or not self.grid_container:
+            return
+        if getattr(self.grid_container, "column_mode", None) != "responsive":
+            return
+        if getattr(self.grid_container, "_is_batch_updating", False):
+            return
+        if not getattr(self.grid_container, "_stored_widgets", None):
+            return
+
+        new_cols = self.grid_container._calculate_responsive_columns()
+        current_cols = getattr(self.grid_container, "columns", None)
+        layout_cols = (
+            self.grid_container.grid_layout.columnCount()
+            if hasattr(self.grid_container, "grid_layout")
+            else None
+        )
+        if new_cols != current_cols or (
+            layout_cols is not None
+            and layout_cols != new_cols
+            and self.grid_container.item_count > 0
+        ):
+            self.grid_container.columns = new_cols
+            self.grid_container._rebuild_grid()
+        if hasattr(self, "grid_manager"):
+            self.grid_manager._update_window()
 
     def _clear_grid(self):
         """Delegate to GridManager."""
@@ -1618,7 +1638,9 @@ class DisplayPanel(QWidget):
         self.import_manager.on_batch_import_finished(batch_id)
 
     @Slot(int, str)
-    def add_single_image_to_grid(self, batch_id, image_path=None, legacy_image_path=None):
+    def add_single_image_to_grid(
+        self, batch_id, image_path=None, legacy_image_path=None
+    ):
         """Delegate to ImportManager."""
         self.import_manager.add_single_image_to_grid(
             batch_id, image_path, legacy_image_path
@@ -1643,7 +1665,11 @@ class DisplayPanel(QWidget):
     def _enter_result_mode(self):
         """Masuk ke Result Mode: tampilkan tombol Save, sembunyikan tombol playback."""
         # Stop playback dulu kalau sedang berjalan
-        if hasattr(self, "playback_timer") and self.playback_timer and self.playback_timer.isActive():
+        if (
+            hasattr(self, "playback_timer")
+            and self.playback_timer
+            and self.playback_timer.isActive()
+        ):
             self.playback_timer.stop()
             self.is_playing = False
             if hasattr(self, "play_btn"):
@@ -1745,6 +1771,7 @@ class DisplayPanel(QWidget):
                 )
 
         self.display_stack.setCurrentIndex(0)
+        QTimer.singleShot(0, self.refresh_responsive_layout)
 
         # Update Header buttons
         self.back_btn.setVisible(False)
@@ -1997,7 +2024,10 @@ class DisplayPanel(QWidget):
 
         # If in preview mode and user has not zoomed in, keep image fitted to the new window size
         if hasattr(self, "display_stack") and self.display_stack.currentIndex() == 1:
-            if hasattr(self, "zoomable_preview") and getattr(self.zoomable_preview, "_zoom_level", 0) == 0:
+            if (
+                hasattr(self, "zoomable_preview")
+                and getattr(self.zoomable_preview, "_zoom_level", 0) == 0
+            ):
                 if hasattr(self, "preview_scene") and self.preview_scene.items():
                     self.zoomable_preview.fitInView(
                         self.preview_scene.itemsBoundingRect(),
@@ -2139,27 +2169,51 @@ class DisplayPanel(QWidget):
     @property
     def playback_cache(self) -> dict[str, QPixmap]:
         """Returns the frame cache for the currently active batch from the 15-batch FIFO RAM store."""
-        bid = str(self.current_batch_id) if self.current_batch_id is not None else "__transient__"
+        bid = (
+            str(self.current_batch_id)
+            if self.current_batch_id is not None
+            else "__transient__"
+        )
         if bid not in self._batch_playback_cache:
             while len(self._batch_playback_cache) >= self._batch_playback_cache_limit:
-                evicted_bid, evicted_dict = self._batch_playback_cache.popitem(last=False)
-                print(f"[PlaybackCache] FIFO evicted batch {evicted_bid} ({len(evicted_dict)} frames) from RAM")
+                evicted_bid, evicted_dict = self._batch_playback_cache.popitem(
+                    last=False
+                )
+                print(
+                    f"[PlaybackCache] FIFO evicted batch {evicted_bid} ({len(evicted_dict)} frames) from RAM"
+                )
             self._batch_playback_cache[bid] = {}
         return self._batch_playback_cache[bid]
 
     @playback_cache.setter
     def playback_cache(self, val: Any):
-        bid = str(self.current_batch_id) if self.current_batch_id is not None else "__transient__"
+        bid = (
+            str(self.current_batch_id)
+            if self.current_batch_id is not None
+            else "__transient__"
+        )
         if isinstance(val, dict):
             self._batch_playback_cache[bid] = val
 
     def _store_playback_frame(self, batch_id: str, path: str, pixmap: QPixmap):
         """Store a decoded frame into the FIFO 15-batch RAM cache."""
-        bid = str(batch_id) if batch_id else (str(self.current_batch_id) if self.current_batch_id is not None else "__transient__")
+        bid = (
+            str(batch_id)
+            if batch_id
+            else (
+                str(self.current_batch_id)
+                if self.current_batch_id is not None
+                else "__transient__"
+            )
+        )
         if bid not in self._batch_playback_cache:
             while len(self._batch_playback_cache) >= self._batch_playback_cache_limit:
-                evicted_bid, evicted_dict = self._batch_playback_cache.popitem(last=False)
-                print(f"[PlaybackCache] FIFO evicted batch {evicted_bid} ({len(evicted_dict)} frames) from RAM")
+                evicted_bid, evicted_dict = self._batch_playback_cache.popitem(
+                    last=False
+                )
+                print(
+                    f"[PlaybackCache] FIFO evicted batch {evicted_bid} ({len(evicted_dict)} frames) from RAM"
+                )
             self._batch_playback_cache[bid] = {}
         self._batch_playback_cache[bid][path] = pixmap
 
@@ -2266,7 +2320,9 @@ class DisplayPanel(QWidget):
                 and self.current_preview_path
                 and self.current_preview_path in self.playback_cache
             ):
-                self._update_preview_pixmap(self.playback_cache[self.current_preview_path])
+                self._update_preview_pixmap(
+                    self.playback_cache[self.current_preview_path]
+                )
 
             # Trigger burst preload to warm up remaining frames
             self._trigger_preview_preload(self.current_preview_path)
@@ -2349,9 +2405,11 @@ class DisplayPanel(QWidget):
         self._burst_preloader.frame_cached.connect(self._on_image_pre_cached)
         self._burst_preloader.preload_progress.connect(self._on_burst_preload_progress)
         self._burst_preloader.preload_finished.connect(
-            lambda: self.burst_loading_label.setVisible(False)
-            if hasattr(self, "burst_loading_label")
-            else None
+            lambda: (
+                self.burst_loading_label.setVisible(False)
+                if hasattr(self, "burst_loading_label")
+                else None
+            )
         )
         if hasattr(self, "burst_loading_label"):
             self.burst_loading_label.setText("Loading [0%]")
@@ -2444,9 +2502,9 @@ class DisplayPanel(QWidget):
 
             loader = ImageLoaderThread(
                 image_path,
-                max_width=1920,
-                max_height=1080,
-                half_res=True,
+                max_width=None,
+                max_height=None,
+                half_res=False,
                 parent=self,
             )
             loader.image_loaded.connect(_on_fast_loaded)
@@ -2494,7 +2552,8 @@ class DisplayPanel(QWidget):
             self.param_overlay.hide()
         self.set_start_button_mode(
             parameter_overlay_active
-            or super_resolution not in {
+            or super_resolution
+            not in {
                 "",
                 "None",
                 "No Super Resolution",

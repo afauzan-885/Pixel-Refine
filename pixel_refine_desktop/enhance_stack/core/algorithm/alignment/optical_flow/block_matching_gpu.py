@@ -12,9 +12,12 @@ DEFAULT_BLOCK_MATCHING_GPU_CONFIG = {
 
 BLOCK_MATCHING_GPU_PRESETS = {
     "fast": {
+        # Latency profile: half the grid density of balance and a 9px window.
+        # Keep the native pyramid path disabled here: on low-end CUDA devices
+        # its extra staging dominates the sparse-search savings.
         "grid_step": 48,
         "border_margin": 8,
-        "win_size": 13,
+        "win_size": 9,
         "max_level": 2,
         "iterations": 1,
         "epsilon": 0.02,
@@ -24,38 +27,46 @@ BLOCK_MATCHING_GPU_PRESETS = {
         "use_multi_core": False,
         "tile_overlap": 0.20,
         "max_flow_px": 48.0,
-        # CUDA/CPU may estimate the coarse field at half resolution and
-        # upsample it. This keeps the fast preset optical while avoiding a
-        # full multi-level dense search at the work-resolution grid.
-        "decoupled_scale": 2,
+        "decoupled_scale": 0,
+        "dense_mode": "blocky_clamped",
     },
     "balance": {
-        "grid_step": 32,
+        # Denser grid and smooth interpolation preserve detail; one adaptive
+        # residual pass keeps balance mode accuracy-oriented as requested.
+        "grid_step": 24,
         "border_margin": 8,
-        "win_size": 15,
-        "max_level": 2,
-        "iterations": 1,
+        "win_size": 17,
+        "max_level": 3,
+        "iterations": 2,
         "epsilon": 0.02,
         "motion_mode": "fast",
-        "adaptive": False,
+        "adaptive": True,
         "adaptive_threshold": 1,
         "use_multi_core": False,
         "tile_overlap": 0.20,
         "max_flow_px": 64.0,
+        "dense_mode": "smooth",
+        "decoupled_scale": 0,
+        "cache_reference_pyramid": True,
     },
     "high": {
+        # Accuracy profile: finest grid, extra pyramid level, smooth dense
+        # interpolation, and adaptive residual refinement.
         "grid_step": 16,
         "border_margin": 8,
         "win_size": 17,
         "max_level": 3,
-        "iterations": 1,
+        "iterations": 3,
         "epsilon": 0.02,
         "motion_mode": "fast",
-        "adaptive": False,
+        "adaptive": True,
         "adaptive_threshold": 1,
         "use_multi_core": False,
         "tile_overlap": 0.20,
         "max_flow_px": 96.0,
+        "dense_mode": "smooth",
+        "decoupled_scale": 0,
+        "cache_reference_pyramid": True,
     },
 }
 
@@ -94,21 +105,43 @@ class BlockMatchingGPU(LucasKanadeGPU):
     def _build_lk_params(self, config):
         """Build block-matching parameters, including optional decoupling."""
         params = super()._build_lk_params(config)
+        params["dense_mode"] = str(config.get("dense_mode", "blocky_clamped"))
+        params["adaptive"] = bool(config.get("adaptive", False))
+        params["adaptive_threshold"] = max(
+            1, int(config.get("adaptive_threshold", 1))
+        )
         params["decoupled_scale"] = max(
             0, int(config.get("decoupled_scale", 0) or 0)
         )
         return params
 
-    def align_frame(self, *args, **kwargs):
-        if len(args) >= 2:
-            reference, target = args[0], args[1]
-            rest = args[2:]
-        else:
-            reference = kwargs.get("reference")
-            target = kwargs.get("target")
-            rest = ()
-        if reference is None or target is None:
-            return super().align_frame(*args, **kwargs)
+    def align_frame(
+        self,
+        reference,
+        target,
+        config=None,
+        stop_requested=None,
+        tile_executor=None,
+        point_executor=None,
+        matching_reference=None,
+        matching_target=None,
+    ):
+        # Resolve the selected preset here as well as in load_config().  UI
+        # callers commonly pass only {"mode": "fast"}; forwarding that
+        # partial mapping used to silently fall back to base defaults.
+        cfg = self._resolve_mode_config(dict(config or self.load_config()))
+        cfg.setdefault("cache_reference_pyramid", True)
+        cfg.setdefault("retain_native_pool", True)
+        cfg.setdefault("conservative_vram", True)
+        cfg.setdefault("_reference_cache_key", id(reference))
+        try:
+            from taichi_vision import taichi_aot
+
+            pool = getattr(taichi_aot.engine, "buffer_pool", None)
+            if pool is not None and hasattr(pool, "set_budget"):
+                pool.set_budget(128 * 1024 * 1024)
+        except Exception:
+            pass
         try:
             from taichi_vision.taichi_aot import naturalTonemapping
             from config import CALCULATION_TONE_MAPPING_PARAMS
@@ -122,9 +155,16 @@ class BlockMatchingGPU(LucasKanadeGPU):
         except Exception as exc:
             print(f"[BlockMatchingGPU] Tone mapping unavailable, using original frames: {exc}")
             matching_reference, matching_target = reference, target
-        kwargs["matching_reference"] = matching_reference
-        kwargs["matching_target"] = matching_target
-        return super().align_frame(reference, target, *rest, **kwargs)
+        return super().align_frame(
+            reference,
+            target,
+            config=cfg,
+            stop_requested=stop_requested,
+            tile_executor=tile_executor,
+            point_executor=point_executor,
+            matching_reference=matching_reference,
+            matching_target=matching_target,
+        )
 
     @staticmethod
     def load_config(batch_id=None, config_filename=None):
@@ -154,7 +194,14 @@ class BlockMatchingGPU(LucasKanadeGPU):
                     visible_config.update(section)
             except Exception as exc:
                 print(f"[BlockMatchingGPU] Failed to load batch config: {exc}")
-        return BlockMatchingGPU._resolve_mode_config(visible_config)
+        resolved = BlockMatchingGPU._resolve_mode_config(visible_config)
+        # Keep the reference pyramid and released per-frame temporaries
+        # reusable.  The base GPU aligner used to clear the pool on every
+        # frame, which turned Block Matching into an allocation benchmark.
+        resolved.setdefault("cache_reference_pyramid", True)
+        resolved.setdefault("retain_native_pool", True)
+        resolved.setdefault("conservative_vram", True)
+        return resolved
 
     @staticmethod
     def _normalize_mode(mode):
@@ -169,6 +216,9 @@ class BlockMatchingGPU(LucasKanadeGPU):
     def _resolve_mode_config(config):
         mode = BlockMatchingGPU._normalize_mode(config.get("mode", "fast"))
         resolved = BLOCK_MATCHING_GPU_PRESETS[mode].copy()
+        for key, value in config.items():
+            if key != "mode":
+                resolved[key] = value
         resolved["mode"] = mode
         return resolved
 

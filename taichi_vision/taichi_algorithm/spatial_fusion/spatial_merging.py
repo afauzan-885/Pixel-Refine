@@ -287,19 +287,15 @@ def spatial_merging(
                         f"fusing frame {idx + 1}/{total}",
                     )
 
-            # Per-channel mean division with reference fallback.
-            weight_sum_3d = taichi_aot.upload(
-                np.ascontiguousarray(
-                    np.repeat(weight_sum_2d.to_numpy()[:, :, None], 3, axis=2),
-                    dtype=np.float32,
-                )
-            )
+            # The spatial path uses one luma weight per pixel.  Let the
+            # scalar-weight AOT graph divide all RGB channels directly;
+            # broadcasting through NumPy would create an unnecessary full
+            # frame readback and HWC3 upload.
             result_gpu = mean_division_vec3_weight_taichi(
                 sum_img=sum_img_gpu,
-                sum_weight=weight_sum_3d,
+                sum_weight=weight_sum_2d,
                 ref_img=ref_full_gpu,
             )
-            weight_sum_3d.destroy()
             weight_sum_2d.destroy()
 
             if progress:

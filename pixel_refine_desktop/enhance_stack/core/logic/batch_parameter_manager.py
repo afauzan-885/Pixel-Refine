@@ -20,6 +20,7 @@ def _normalize_alignment_name(name: str) -> str:
         "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
         "Block Matching GPU Optical Flow": "Block Matching GPU",
         "RAFT Optical Flow": "RAFT",
+        "ORB": "OFB",
     }
     return mapping.get(str(name or "").strip(), str(name or ""))
 
@@ -224,7 +225,7 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
     params_key_map = {
         "AKAZE": "akaze_params",
         "OFB": "ofb_params",
-        "ORB": "orb_params",
+        "ORB": "ofb_params",
         "Light Glue": "light_glue_params",
         "Farneback": "farneback_params",
         "Lucas Kanade": "lucas_kanade_params",

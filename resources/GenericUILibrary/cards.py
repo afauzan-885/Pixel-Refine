@@ -10,9 +10,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QFrame,
     QComboBox,
-    QCheckBox,
-    QPushButton,
-    QGridLayout,
     QSizePolicy,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
@@ -457,6 +454,7 @@ class FeatureCard(QFrame, RealtimeMixin):
         # Apply visual semi-transparency for disabled state
         if not enabled:
             from PySide6.QtWidgets import QGraphicsOpacityEffect
+
             effect = self.graphicsEffect()
             if not isinstance(effect, QGraphicsOpacityEffect):
                 effect = QGraphicsOpacityEffect(self)
@@ -470,6 +468,7 @@ class FeatureCard(QFrame, RealtimeMixin):
             super().resizeEvent(event)
         import config
         from resources.GenericUILibrary.theme import get_theme
+
         theme = get_theme()
 
         threshold = getattr(config, "FEATURE_CARD_COLLAPSE_THRESHOLD", 230)
@@ -496,32 +495,48 @@ class FeatureCard(QFrame, RealtimeMixin):
     def _emit_debounced_value(self):
         self.value_changed.emit(self.get_value())
 
-    def setChecked(self, checked):
+    def setChecked(self, checked, animate=True):
         if self.is_checked != checked:
             self.is_checked = checked
             self.switch_indicator.setChecked(checked)
 
-            # Smoothly animate options expansion using HeightAnimator
+            # Smoothly animate options expansion using HeightAnimator if animate=True
             if checked:
                 self.option_widget.show()
                 target_h = self.option_widget.sizeHint().height()
-                self.height_animator.animate_height(self.option_widget, target_h)
+                if animate:
+                    self.height_animator.animate_height(self.option_widget, target_h)
+                else:
+                    self.option_widget.setFixedHeight(target_h)
             else:
-                self.height_animator.animate_height(self.option_widget, 0)
+                if animate:
+                    self.height_animator.animate_height(self.option_widget, 0)
+                else:
+                    self.option_widget.setFixedHeight(0)
+                    self.option_widget.hide()
 
             self.update_styles()
-            self._debounce_timer.start()
+            if animate:
+                self._debounce_timer.start()
+            else:
+                self._emit_debounced_value()
 
             # Request parent right panel to recalculate layout height if bottom expansion active
             if "bottom" in self.adaptive_directions:
                 parent_panel = self.parentWidget()
                 while parent_panel:
-                    if hasattr(parent_panel, "algo_container") and hasattr(
-                        parent_panel, "_calculate_algo_target_h"
-                    ):
-                        parent_panel.algo_container.setFixedHeight(
-                            parent_panel._calculate_algo_target_h()
-                        )
+                    if hasattr(parent_panel, "algo_container"):
+                        if hasattr(parent_panel, "_balance_splitter_sizes"):
+                            if animate:
+                                QTimer.singleShot(
+                                    260, parent_panel._balance_splitter_sizes
+                                )
+                            else:
+                                parent_panel._balance_splitter_sizes()
+                        elif hasattr(parent_panel, "_calculate_algo_target_h"):
+                            parent_panel.algo_container.setFixedHeight(
+                                parent_panel._calculate_algo_target_h()
+                            )
                         break
                     parent_panel = parent_panel.parentWidget()
 
@@ -563,9 +578,9 @@ class FeatureCard(QFrame, RealtimeMixin):
     def set_value(self, val):
         self.blockSignals(True)
         if val == self.fallback_val or not val:
-            self.setChecked(False)
+            self.setChecked(False, animate=False)
         else:
-            self.setChecked(True)
+            self.setChecked(True, animate=False)
             idx = self.combo.findText(val)
             if idx >= 0:
                 self.combo.setCurrentIndex(idx)
@@ -573,6 +588,7 @@ class FeatureCard(QFrame, RealtimeMixin):
 
     def update_styles(self):
         from resources.GenericUILibrary.theme import get_theme
+
         theme = get_theme()
         if not self.isEnabled():
             self.setStyleSheet(
@@ -620,6 +636,7 @@ class FeatureCard(QFrame, RealtimeMixin):
         self.resizeEvent(None)
         if hasattr(self, "combo"):
             from resources.GenericUILibrary.theme import create_select_style
+
             self.combo.setStyleSheet(create_select_style())
 
     def to_qml(self, indent=0):

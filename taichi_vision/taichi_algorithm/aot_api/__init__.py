@@ -586,6 +586,7 @@ def load_tcm(name):
 
 def unload_all_modules():
     """Release all cached TCM modules. Call after heavy processing to free VRAM."""
+    clear_farneback_cache()
     _module_cache.clear()
     engine.modules.clear()
     engine.clear_pipelines()
@@ -3400,6 +3401,35 @@ def gaussian_blur(src, sigma=1.0, kernel_size=None, return_gpu=False, dst=None):
     return output
 
 
+def _resolve_pyramid_graph_module(graph_name):
+    """Resolve a pyramid graph from the OFB bundle when it is beneficial.
+
+    The OFB archive is shipped for every target, but the measured dispatch
+    policy is backend-specific: CUDA (NVIDIA) and Intel Vulkan use the bundle;
+    CPU and NVIDIA OpenGL stay on the canonical pyramid artifact because their
+    direct path is faster.  Older installations still use ``pyramid.tcm`` and
+    remain fully compatible.  Setting ``TAICHI_OFB_BUNDLE_PYRAMID=0`` remains
+    a diagnostic escape hatch for parity or driver investigations.
+    """
+    graph_name = str(graph_name)
+    requested = os.environ.get("TAICHI_OFB_BUNDLE_PYRAMID", "1") != "0"
+    backend = str(getattr(engine, "arch", "")).lower()
+    vendor = str(getattr(engine, "gpu_name", "")).lower()
+    use_bundle = (
+        backend == "cuda"
+        or (backend == "vulkan" and "intel" in vendor)
+    )
+    if requested and use_bundle:
+        try:
+            if aot_graph_available("ofb", graph_name):
+                return _mod("ofb"), "ofb"
+        except (FileNotFoundError, RuntimeError, OSError, ValueError):
+            # A stale or partially installed bundle must not make the
+            # established pyramid artifact unusable.
+            pass
+    return _mod("pyramid"), "pyramid"
+
+
 @_block_recovery("image_pyramid")
 def image_pyramid(src, levels=4, return_gpu=False):
     """AOT Implementation of Image Pyramid (Downsampling)"""
@@ -3430,6 +3460,7 @@ def image_pyramid(src, levels=4, return_gpu=False):
                     if current.ndim == 3
                     else "downsample_2x_offset_f32"
                 )
+                pyramid_module, _module_key = _resolve_pyramid_graph_module(graph)
                 source_crc = checksum(current)
                 cache_params = {"shape": output_shape, "graph": graph}
                 try:
@@ -3449,7 +3480,7 @@ def image_pyramid(src, levels=4, return_gpu=False):
                             continue
                         tile_buf = engine.allocate(tile_shape, dtype=np.float32)
                         try:
-                            _mod("pyramid").run(
+                            pyramid_module.run(
                                 graph,
                                 src=src_view,
                                 dst=tile_buf,
@@ -3478,6 +3509,7 @@ def image_pyramid(src, levels=4, return_gpu=False):
 
     curr_buf = src_buf
     graph = "downsample_2x_3ch_f32" if is_3d else "downsample_2x_f32"
+    pyramid_module, _module_key = _resolve_pyramid_graph_module(graph)
 
     for _ in range(levels):
         h, w = curr_buf.shape[0], curr_buf.shape[1]
@@ -3492,7 +3524,7 @@ def image_pyramid(src, levels=4, return_gpu=False):
             if is_3d and getattr(curr_buf, "is_vector", False)
             else curr_buf
         )
-        _mod("pyramid").run(graph, src=curr_view, dst=dst_buf)
+        pyramid_module.run(graph, src=curr_view, dst=dst_buf)
 
         if curr_buf is not src_buf:
             del curr_buf
@@ -3514,7 +3546,7 @@ def _median_filter_tile(tile):
         src_tile.destroy()
 
 
-def median_filter(src, return_gpu=False, **kwargs):
+def median_filter(src, return_gpu=False, dst=None, **kwargs):
     """AOT Median Filter 3x3."""
     # The deployed OpenGL artifact currently exposes a validated scalar graph;
     # RGB/flow remain on the reference path until the vector artifact is rebuilt.
@@ -3586,10 +3618,28 @@ def median_filter(src, return_gpu=False, **kwargs):
     is_3ch = len(src_buf.shape) == 3 and src_buf.shape[2] == 3
 
     # Use vector for flow, but scalar 3D for RGB to avoid field_dim warnings in Taichi AOT
-    src_v = src_buf.view_as_vector(True) if is_flow else src_buf.view_as_vector(False)
+    src_v = (
+        src_buf.view_as_vector(True, 2)
+        if is_flow
+        else src_buf.view_as_vector(False)
+    )
 
-    dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_flow)
-    dst_v = dst_buf.view_as_vector(True) if is_flow else dst_buf.view_as_vector(False)
+    if dst is not None:
+        if (
+            tuple(getattr(dst, "shape", ())) != tuple(src_buf.shape)
+            or np.dtype(getattr(dst, "dtype", None)) != np.dtype(src_buf.dtype)
+        ):
+            raise ValueError(
+                "median_filter destination must match source shape and dtype"
+            )
+        dst_buf = dst
+    else:
+        dst_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_flow)
+    dst_v = (
+        dst_buf.view_as_vector(True, 2)
+        if is_flow
+        else dst_buf.view_as_vector(False)
+    )
 
     if is_flow:
         graph = "median_flow_3x3_f32"
@@ -4806,24 +4856,6 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None):
     Eliminates need for map_x, map_y full-res buffers (~91.6 MB VRAM saved).
     """
     active_arch = str(getattr(engine, "arch", "")).lower()
-    # A common mixed API call uses a host image with a small GPU flow grid.
-    # Route it through the fused path as well; downloading the low-resolution
-    # flow grid avoids the broken legacy layout path while keeping full-
-    # resolution coordinate maps off-device.
-    if (
-        isinstance(src, np.ndarray)
-        and isinstance(flow, TaichiGPUBuffer)
-        and dst is None
-    ):
-        return remap_with_flow(
-            src,
-            np.ascontiguousarray(flow.to_numpy(), dtype=np.float32),
-            full_h,
-            full_w,
-            return_gpu=return_gpu,
-            dst=dst,
-        )
-
     if isinstance(src, np.ndarray) and isinstance(flow, np.ndarray) and dst is None:
         source = np.ascontiguousarray(src)
         flow_array = np.ascontiguousarray(flow, dtype=np.float32)
@@ -9387,6 +9419,922 @@ def generate_brief_pattern(num_pairs=256, patch_size=31, seed=42):
     return pattern
 
 
+def _feature_level_count(shape):
+    """Return the same adaptive pyramid count used by OFB/AKAZE."""
+    min_dim = min(int(shape[0]), int(shape[1]))
+    if min_dim < 240:
+        return 1
+    if min_dim < 512:
+        return 2
+    return 3
+
+
+def _nvidia_graphics_fused_allowed():
+    """Return whether fused feature graphs may run on the active device.
+
+    OpenGL/Vulkan graph fusion is enabled for NVIDIA only. Intel graphics
+    keep their established dispatch path unless an explicit opt-in is set;
+    this avoids changing driver-sensitive scheduling on the compatibility
+    backend while retaining the CUDA/NVIDIA optimization.
+    """
+    feature_arch = str(getattr(engine, "arch", "")).lower()
+    if feature_arch == "cuda":
+        return True
+    if feature_arch not in {"vulkan", "opengl"}:
+        return False
+    vendor = normalize_vendor(getattr(engine, "gpu_name", ""))
+    if vendor == "unknown":
+        try:
+            vendor = normalize_vendor(get_backend_config().vendor)
+        except Exception:
+            vendor = "unknown"
+    if vendor == "nvidia":
+        return True
+    return os.environ.get("TAICHI_FEATURE_FUSED_GRAPH_ALL", "0") == "1"
+
+
+def _akaze_fused_graph_allowed():
+    """Return whether AKAZE pair graphs are allowed on this backend.
+
+    The AKAZE pair graphs keep the same kernel order and buffer contracts as
+    the legacy path.  The measured production policy is deliberately narrow:
+    CUDA uses the bundled pair graphs, while CPU, OpenGL, and Vulkan use the
+    legacy dispatch path.  On the tested 12MP workload the Intel Vulkan pair
+    graphs were slower than the fallback, so Vulkan is fail-closed by default.
+    ``TAICHI_FEATURE_FUSED_GRAPH_ALL`` remains an explicit diagnostic override
+    for non-CPU graphics backends when comparing experimental graphs.
+    """
+    feature_arch = str(getattr(engine, "arch", "")).lower()
+    if feature_arch == "cuda":
+        return True
+    # Keep the measured fallback route for CPU, OpenGL, and Vulkan.  The
+    # explicit ALL switch is intentionally retained for diagnostics, but is
+    # never allowed to alter the CPU path.
+    if feature_arch == "cpu":
+        return False
+    return os.environ.get("TAICHI_FEATURE_FUSED_GRAPH_ALL", "0") == "1" and feature_arch not in {
+        "cpu",
+    }
+
+
+def _feature_telemetry_enabled(algorithm):
+    """Return whether optional feature-route diagnostics are enabled."""
+    return os.environ.get("TAICHI_FEATURE_TELEMETRY", "0") == "1" or (
+        str(algorithm).lower() == "akaze"
+        and os.environ.get("TAICHI_AKAZE_TELEMETRY", "0") == "1"
+    )
+
+
+def _feature_log(algorithm, message):
+    """Emit a concise opt-in feature log without affecting normal timing."""
+    if not _feature_telemetry_enabled(algorithm):
+        return
+    try:
+        print(f"[{str(algorithm).upper()}] {message}", flush=True)
+    except Exception:
+        pass
+
+
+def _release_feature_buffer(buffer):
+    if buffer is None:
+        return
+    try:
+        buffer.release()
+    except Exception:
+        try:
+            buffer.destroy()
+        except Exception:
+            pass
+
+
+# A-KAZE evolves a nonlinear scale-space between octaves.  We retain a compact
+# three-level window (previous/current/next) so extrema can be evaluated in
+# x, y, and scale without keeping a full scale-space resident in VRAM.
+_AKAZE_SUBLEVEL_SIGMA = 1.6
+
+
+def _akaze_fed_cycle(source, temp, conductivity, *, h, w, k_contrast, fed_taus):
+    """Evolve one FED cycle and return ``(result, reusable_temp)``.
+
+    Conductivity is computed from the prior evolution image as described by
+    the A-KAZE FED construction.  Buffer swapping keeps this GPU-only and
+    avoids allocating an image for each individual FED step.
+    """
+    _mod("akaze").run(
+        "compute_conductivity_map",
+        src=source,
+        conductivity=conductivity,
+        h=h,
+        w=w,
+        k=float(k_contrast),
+    )
+    current, dst = source, temp
+    for tau in fed_taus:
+        _mod("akaze").run(
+            "fed_diffusion_step",
+            src=current,
+            dst=dst,
+            conductivity=conductivity,
+            h=h,
+            w=w,
+            tau=tau,
+        )
+        current, dst = dst, current
+    return current, dst
+
+
+def _akaze_scale_triplet(
+    base,
+    mid,
+    next_level,
+    temp,
+    conductivity,
+    *,
+    h,
+    w,
+    k_contrast,
+    fed_taus,
+):
+    """Build previous/current/next nonlinear evolution images for one octave."""
+    copy_field(base, mid)
+    mid, temp = _akaze_fed_cycle(
+        mid,
+        temp,
+        conductivity,
+        h=h,
+        w=w,
+        k_contrast=k_contrast,
+        fed_taus=fed_taus,
+    )
+    copy_field(mid, next_level)
+    next_level, temp = _akaze_fed_cycle(
+        next_level,
+        temp,
+        conductivity,
+        h=h,
+        w=w,
+        k_contrast=k_contrast,
+        fed_taus=fed_taus,
+    )
+    return mid, next_level
+
+
+class FeatureReferenceCache:
+    """Resident reference features for burst alignment.
+
+    The public ``ofb``/``akaze`` functions remain stateless.  This internal
+    cache is used by the resident pipeline to build the reference pyramid,
+    keypoints, and descriptors once, then reuse them for every support frame.
+    Scratch buffers, counters, the BRIEF pattern, and the combined result
+    buffer remain allocated for the lifetime of the burst.
+    """
+
+    def __init__(self, algorithm, reference, **params):
+        self.algorithm = str(algorithm or "ofb").strip().lower()
+        if self.algorithm not in {"ofb", "akaze"}:
+            raise ValueError(f"Unsupported feature cache algorithm: {algorithm!r}")
+        self.engine = engine
+        self.params = dict(params)
+        self._closed = False
+        self._generation = getattr(engine, "_generation", 0)
+        self.pattern_gpu = engine.upload(
+            generate_brief_pattern(num_pairs=256, patch_size=31, seed=42)
+        )
+        self.zero_counter = engine.upload(np.zeros(1, dtype=np.int32))
+        self.levels = []
+        self._result_gpu = None
+        self._result_capacity = 0
+        self._target_gpu = None
+        self._target_owned = False
+        self.use_akaze_scale_space = False
+        try:
+            self._prepare(reference)
+        except Exception:
+            # Do not leave a partially prepared reference resident when a
+            # graph/shape mismatch aborts cache construction.
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise
+
+    def _assert_live(self):
+        if self._closed:
+            raise RuntimeError("FeatureReferenceCache is closed")
+        if getattr(self.engine, "_generation", 0) != self._generation:
+            raise RuntimeError("FeatureReferenceCache belongs to an old AOT runtime")
+
+    def _max_keypoints(self, level):
+        return max(100, int(self.params.get("max_keypoints", 1500)) // (2**level))
+
+    def _common_level_params(self, level):
+        return {
+            "grid_size": max(
+                8, int(self.params.get("grid_size", 32)) // (2**level)
+            ),
+            "margin": max(4, int(self.params.get("margin", 15)) // (2**level)),
+            "threshold": float(self.params.get("threshold", 0.015 if self.algorithm == "ofb" else 0.008))
+            * (0.8**level),
+            "max_kps": self._max_keypoints(level),
+        }
+
+    def _prepare(self, reference):
+        self._assert_live()
+        ref_gpu = reference if isinstance(reference, TaichiGPUBuffer) else upload(reference)
+        owns_ref = not isinstance(reference, TaichiGPUBuffer)
+        try:
+            h_orig, w_orig = ref_gpu.shape[:2]
+            self.shape = (int(h_orig), int(w_orig))
+            self.num_levels = _feature_level_count(ref_gpu.shape)
+            feature_arch = str(getattr(self.engine, "arch", "")).lower()
+            fused_opt_in = os.environ.get("TAICHI_FEATURE_FUSED_GRAPHS", "1") == "1"
+            fused_allowed = (
+                _akaze_fused_graph_allowed()
+                if self.algorithm == "akaze"
+                else _nvidia_graphics_fused_allowed()
+            )
+            self.use_akaze_scale_space = (
+                self.algorithm == "akaze"
+                and aot_graph_available("akaze", "compute_scale_normalized_hessian")
+                and aot_graph_available("akaze", "detect_scale_space_keypoints")
+            )
+            self.use_fused_detect = (
+                fused_opt_in
+                and fused_allowed
+                and not self.use_akaze_scale_space
+                and aot_graph_available(
+                    self.algorithm,
+                    "detect_and_describe",
+                )
+            )
+            _feature_log(
+                self.algorithm,
+                f"reference_route backend={feature_arch} "
+                f"device={getattr(self.engine, 'gpu_name', '') or 'unknown'} "
+                f"levels={self.num_levels} fused_detect={self.use_fused_detect} "
+                f"scale_space={self.use_akaze_scale_space}",
+            )
+            for level in range(self.num_levels):
+                level_started = time.perf_counter()
+                if level > 0:
+                    dh, dw = h_orig // (2**level), w_orig // (2**level)
+                    curr = resize(
+                        ref_gpu, (dw, dh), interpolation=INTER_AREA, return_gpu=True
+                    )
+                else:
+                    curr = ref_gpu
+                h_l, w_l = curr.shape[:2]
+                p = self._common_level_params(level)
+                kps = engine.allocate((p["max_kps"], 2), dtype=np.float32)
+                counter = engine.upload(np.zeros(1, dtype=np.int32))
+                desc_width = 8 if self.algorithm == "ofb" else 16
+                desc = engine.allocate(
+                    (p["max_kps"], desc_width), dtype=np.int32
+                )
+                score = engine.allocate((h_l, w_l), dtype=np.float32)
+                med = blur = None
+                temp = cond = None
+                scale_mid = scale_next = scale_temp = None
+                score_prev = score_next = None
+                try:
+                    if self.algorithm == "ofb":
+                        med = median_filter(curr, return_gpu=True)
+                        blur = gaussian_blur(curr, sigma=2.0, return_gpu=True)
+                        if self.use_fused_detect:
+                            _mod("ofb").run(
+                                "detect_and_describe",
+                                detect_src=med,
+                                descriptor_src=blur,
+                                score_map=score,
+                                keypoints=kps,
+                                counter=counter,
+                                pattern=self.pattern_gpu,
+                                desc=desc,
+                                h=h_l,
+                                w=w_l,
+                                grid_size=p["grid_size"],
+                                margin=p["margin"],
+                                threshold=p["threshold"],
+                            )
+                        else:
+                            _mod("ofb").run(
+                                "detect_keypoints",
+                                src=med,
+                                score_map=score,
+                                keypoints=kps,
+                                counter=counter,
+                                h=h_l,
+                                w=w_l,
+                                grid_size=p["grid_size"],
+                                margin=p["margin"],
+                                threshold=p["threshold"],
+                            )
+                            _mod("ofb").run(
+                                "compute_descriptors",
+                                src=blur,
+                                kps=kps,
+                                pattern=self.pattern_gpu,
+                                desc=desc,
+                                counter=counter,
+                                h=h_l,
+                                w=w_l,
+                            )
+                    elif self.use_akaze_scale_space:
+                        # Keep only prev/current/next nonlinear evolution
+                        # images.  This matches A-KAZE's scale-space extrema
+                        # criterion without retaining every sublevel.
+                        scale_mid = engine.allocate((h_l, w_l), dtype=np.float32)
+                        scale_next = engine.allocate((h_l, w_l), dtype=np.float32)
+                        scale_temp = engine.allocate((h_l, w_l), dtype=np.float32)
+                        cond = engine.allocate((h_l, w_l), dtype=np.float32)
+                        score_prev = engine.allocate((h_l, w_l), dtype=np.float32)
+                        score_next = engine.allocate((h_l, w_l), dtype=np.float32)
+                        mid, next_img = _akaze_scale_triplet(
+                            curr,
+                            scale_mid,
+                            scale_next,
+                            scale_temp,
+                            cond,
+                            h=h_l,
+                            w=w_l,
+                            k_contrast=float(self.params.get("k_contrast", 0.02)),
+                            fed_taus=get_fed_step_sizes(
+                                int(self.params.get("num_fed_steps", 8))
+                            ),
+                        )
+                        for image, hessian, sigma_norm in (
+                            (curr, score_prev, 1.0),
+                            (mid, score, _AKAZE_SUBLEVEL_SIGMA),
+                            (next_img, score_next, _AKAZE_SUBLEVEL_SIGMA * _AKAZE_SUBLEVEL_SIGMA),
+                        ):
+                            _mod("akaze").run(
+                                "compute_scale_normalized_hessian",
+                                src=image,
+                                hessian_map=hessian,
+                                h=h_l,
+                                w=w_l,
+                                sigma_norm=sigma_norm,
+                            )
+                        _mod("akaze").run(
+                            "detect_scale_space_keypoints",
+                            hessian_prev=score_prev,
+                            hessian_curr=score,
+                            hessian_next=score_next,
+                            keypoints=kps,
+                            counter=counter,
+                            h=h_l,
+                            w=w_l,
+                            grid_size=p["grid_size"],
+                            margin=p["margin"],
+                            threshold=p["threshold"],
+                        )
+                        min_scale_features = max(16, min(64, p["max_kps"] // 10))
+                        if int(counter.to_numpy()[0]) < min_scale_features:
+                            # Sparse/low-texture scenes may not contain a
+                            # strict 3-D extremum in this compact window.
+                            # Preserve nonlinear filtering and normalized
+                            # Hessian, then recover the established bounded
+                            # 2-D ANMS detector on the same GPU backend.
+                            copy_field(self.zero_counter, counter)
+                            _mod("akaze").run(
+                                "detect_keypoints",
+                                hessian_map=score,
+                                keypoints=kps,
+                                counter=counter,
+                                h=h_l,
+                                w=w_l,
+                                grid_size=p["grid_size"],
+                                threshold=p["threshold"],
+                            )
+                        _mod("akaze").run(
+                            "compute_descriptors",
+                            src=mid,
+                            kps=kps,
+                            pattern=self.pattern_gpu,
+                            desc=desc,
+                            counter=counter,
+                            h=h_l,
+                            w=w_l,
+                        )
+                    else:
+                        temp = engine.allocate((h_l, w_l), dtype=np.float32)
+                        cond = engine.allocate((h_l, w_l), dtype=np.float32)
+                        work = engine.allocate((h_l, w_l), dtype=np.float32)
+                        copy_field(curr, work)
+                        fed_taus = get_fed_step_sizes(
+                            int(self.params.get("num_fed_steps", 8))
+                        )
+                        _mod("akaze").run(
+                            "compute_conductivity_map",
+                            src=work,
+                            conductivity=cond,
+                            h=h_l,
+                            w=w_l,
+                            k=float(self.params.get("k_contrast", 0.02)),
+                        )
+                        for tau in fed_taus:
+                            _mod("akaze").run(
+                                "fed_diffusion_step",
+                                src=work,
+                                dst=temp,
+                                conductivity=cond,
+                                h=h_l,
+                                w=w_l,
+                                tau=tau,
+                            )
+                            work, temp = temp, work
+                        if self.use_fused_detect:
+                            _mod("akaze").run(
+                                "detect_and_describe",
+                                src=work,
+                                hessian_map=score,
+                                keypoints=kps,
+                                counter=counter,
+                                pattern=self.pattern_gpu,
+                                desc=desc,
+                                h=h_l,
+                                w=w_l,
+                                grid_size=p["grid_size"],
+                                threshold=p["threshold"],
+                            )
+                        else:
+                            _mod("akaze").run(
+                                "compute_hessian_determinant",
+                                src=work,
+                                hessian_map=score,
+                                h=h_l,
+                                w=w_l,
+                            )
+                            _mod("akaze").run(
+                                "detect_keypoints",
+                                hessian_map=score,
+                                keypoints=kps,
+                                counter=counter,
+                                h=h_l,
+                                w=w_l,
+                                grid_size=p["grid_size"],
+                                threshold=p["threshold"],
+                            )
+                            _mod("akaze").run(
+                                "compute_descriptors",
+                                src=work,
+                                kps=kps,
+                                pattern=self.pattern_gpu,
+                                desc=desc,
+                                counter=counter,
+                                h=h_l,
+                                w=w_l,
+                            )
+                        _release_feature_buffer(work)
+                    if _feature_telemetry_enabled(self.algorithm):
+                        # Graph submissions are asynchronous on graphics
+                        # backends.  Synchronize only in diagnostic mode so
+                        # the reported level time represents device work.
+                        self.engine.sync()
+                finally:
+                    _release_feature_buffer(score)
+                    _release_feature_buffer(med)
+                    _release_feature_buffer(blur)
+                    _release_feature_buffer(temp)
+                    _release_feature_buffer(cond)
+                    _release_feature_buffer(scale_mid)
+                    _release_feature_buffer(scale_next)
+                    _release_feature_buffer(scale_temp)
+                    _release_feature_buffer(score_prev)
+                    _release_feature_buffer(score_next)
+                    if level > 0:
+                        _release_feature_buffer(curr)
+                if _feature_telemetry_enabled(self.algorithm):
+                    status = self.engine.get_memory_status(force=True)
+                    _feature_log(
+                        self.algorithm,
+                        f"reference_level={level} shape={h_l}x{w_l} "
+                        f"elapsed_ms={(time.perf_counter() - level_started) * 1000.0:.2f} "
+                        f"live_mib={int(status.get('live_bytes', 0) or 0) / 1048576.0:.1f} "
+                        f"pool_mib={int(status.get('pooled_bytes', 0) or 0) / 1048576.0:.1f}",
+                    )
+                self.levels.append(
+                    {
+                        "shape": (int(h_l), int(w_l)),
+                        "max_kps": p["max_kps"],
+                        "kps": kps,
+                        "desc": desc,
+                        "counter": counter,
+                        "offset": sum(int(item["max_kps"]) for item in self.levels),
+                    }
+                )
+        finally:
+            if owns_ref:
+                _release_feature_buffer(ref_gpu)
+        self._result_capacity = sum(int(item["max_kps"]) for item in self.levels)
+        self._result_gpu = engine.allocate(
+            (self._result_capacity, 6), dtype=np.float32
+        )
+        self._allocate_support_scratch()
+
+    def _allocate_support_scratch(self):
+        for level in self.levels:
+            h_l, w_l = level["shape"]
+            max_kps = level["max_kps"]
+            scratch = {
+                "score": engine.allocate((h_l, w_l), dtype=np.float32),
+                "kps": engine.allocate((max_kps, 2), dtype=np.float32),
+                "counter": engine.upload(np.zeros(1, dtype=np.int32)),
+                "desc": engine.allocate(
+                    (max_kps, 8 if self.algorithm == "ofb" else 16), dtype=np.int32
+                ),
+                "matches": engine.allocate((max_kps, 2), dtype=np.int32),
+            }
+            if self.algorithm == "ofb":
+                scratch["median"] = engine.allocate((h_l, w_l), dtype=np.float32)
+                scratch["blur"] = engine.allocate((h_l, w_l), dtype=np.float32)
+            elif self.use_akaze_scale_space:
+                scratch["scale_mid"] = engine.allocate((h_l, w_l), dtype=np.float32)
+                scratch["scale_next"] = engine.allocate((h_l, w_l), dtype=np.float32)
+                scratch["scale_temp"] = engine.allocate((h_l, w_l), dtype=np.float32)
+                scratch["conductivity"] = engine.allocate((h_l, w_l), dtype=np.float32)
+                scratch["hessian_prev"] = engine.allocate((h_l, w_l), dtype=np.float32)
+                scratch["hessian_next"] = engine.allocate((h_l, w_l), dtype=np.float32)
+            else:
+                scratch["work_a"] = engine.allocate((h_l, w_l), dtype=np.float32)
+                scratch["work_b"] = engine.allocate((h_l, w_l), dtype=np.float32)
+                scratch["cond"] = engine.allocate((h_l, w_l), dtype=np.float32)
+            if level["shape"] != self.shape:
+                scratch["resized"] = engine.allocate(
+                    level["shape"], dtype=np.float32
+                )
+            level["scratch"] = scratch
+
+    def match(self, target):
+        self._assert_live()
+        target_gpu = target if isinstance(target, TaichiGPUBuffer) else upload(target)
+        owns_target = not isinstance(target, TaichiGPUBuffer)
+        try:
+            if tuple(target_gpu.shape[:2]) != tuple(self.shape):
+                raise ValueError(
+                    f"Feature cache shape mismatch: expected {self.shape}, "
+                    f"got {tuple(target_gpu.shape[:2])}"
+                )
+            feature_arch = str(getattr(self.engine, "arch", "")).lower()
+            fused_opt_in = os.environ.get("TAICHI_FEATURE_FUSED_GRAPHS", "1") == "1"
+            fused_allowed = (
+                _akaze_fused_graph_allowed()
+                if self.algorithm == "akaze"
+                else _nvidia_graphics_fused_allowed()
+            )
+            use_offset = (
+                fused_opt_in
+                and fused_allowed
+                and aot_graph_available(
+                    self.algorithm, "match_and_pack_offset"
+                )
+            )
+            _feature_log(
+                self.algorithm,
+                f"match_route backend={feature_arch} "
+                f"levels={len(self.levels)} fused_detect={self.use_fused_detect} "
+                f"offset_pack={use_offset}",
+            )
+            fed_taus = get_fed_step_sizes(
+                int(self.params.get("num_fed_steps", 8))
+            )
+            fallback_results = []
+            for level_index, level in enumerate(self.levels):
+                level_started = time.perf_counter()
+                h_l, w_l = level["shape"]
+                scratch = level["scratch"]
+                if level_index == 0:
+                    curr = target_gpu
+                    owns_curr = False
+                else:
+                    curr = resize(
+                        target_gpu,
+                        (w_l, h_l),
+                        interpolation=INTER_AREA,
+                        return_gpu=True,
+                        dst=scratch["resized"],
+                    )
+                    owns_curr = False
+                try:
+                    copy_field(self.zero_counter, scratch["counter"])
+                    if self.algorithm == "ofb":
+                        median_filter(
+                            curr, return_gpu=True, dst=scratch["median"]
+                        )
+                        gaussian_blur(
+                            curr,
+                            sigma=2.0,
+                            return_gpu=True,
+                            dst=scratch["blur"],
+                        )
+                        _mod("ofb").run(
+                            "detect_and_describe" if self.use_fused_detect else "detect_keypoints",
+                            **(
+                                {
+                                    "detect_src": scratch["median"],
+                                    "descriptor_src": scratch["blur"],
+                                    "score_map": scratch["score"],
+                                    "keypoints": scratch["kps"],
+                                    "counter": scratch["counter"],
+                                    "pattern": self.pattern_gpu,
+                                    "desc": scratch["desc"],
+                                    "h": h_l,
+                                    "w": w_l,
+                                    "grid_size": max(8, int(self.params.get("grid_size", 32)) // (2**level_index)),
+                                    "margin": max(4, int(self.params.get("margin", 15)) // (2**level_index)),
+                                    "threshold": float(self.params.get("threshold", 0.015)) * (0.8**level_index),
+                                }
+                                if self.use_fused_detect
+                                else {
+                                    "src": scratch["median"],
+                                    "score_map": scratch["score"],
+                                    "keypoints": scratch["kps"],
+                                    "counter": scratch["counter"],
+                                    "h": h_l,
+                                    "w": w_l,
+                                    "grid_size": max(8, int(self.params.get("grid_size", 32)) // (2**level_index)),
+                                    "margin": max(4, int(self.params.get("margin", 15)) // (2**level_index)),
+                                    "threshold": float(self.params.get("threshold", 0.015)) * (0.8**level_index),
+                                }
+                            ),
+                        )
+                        if not self.use_fused_detect:
+                            _mod("ofb").run(
+                                "compute_descriptors",
+                                src=scratch["blur"],
+                                kps=scratch["kps"],
+                                pattern=self.pattern_gpu,
+                                desc=scratch["desc"],
+                                counter=scratch["counter"],
+                                h=h_l,
+                                w=w_l,
+                            )
+                    elif self.use_akaze_scale_space:
+                        mid, next_img = _akaze_scale_triplet(
+                            curr,
+                            scratch["scale_mid"],
+                            scratch["scale_next"],
+                            scratch["scale_temp"],
+                            scratch["conductivity"],
+                            h=h_l,
+                            w=w_l,
+                            k_contrast=float(self.params.get("k_contrast", 0.02)),
+                            fed_taus=fed_taus,
+                        )
+                        for image, hessian, sigma_norm in (
+                            (curr, scratch["hessian_prev"], 1.0),
+                            (mid, scratch["score"], _AKAZE_SUBLEVEL_SIGMA),
+                            (next_img, scratch["hessian_next"], _AKAZE_SUBLEVEL_SIGMA * _AKAZE_SUBLEVEL_SIGMA),
+                        ):
+                            _mod("akaze").run(
+                                "compute_scale_normalized_hessian",
+                                src=image,
+                                hessian_map=hessian,
+                                h=h_l,
+                                w=w_l,
+                                sigma_norm=sigma_norm,
+                            )
+                        _mod("akaze").run(
+                            "detect_scale_space_keypoints",
+                            hessian_prev=scratch["hessian_prev"],
+                            hessian_curr=scratch["score"],
+                            hessian_next=scratch["hessian_next"],
+                            keypoints=scratch["kps"],
+                            counter=scratch["counter"],
+                            h=h_l,
+                            w=w_l,
+                            grid_size=max(8, int(self.params.get("grid_size", 32)) // (2**level_index)),
+                            margin=max(4, int(self.params.get("margin", 15)) // (2**level_index)),
+                            threshold=float(self.params.get("threshold", 0.008)) * (0.8**level_index),
+                        )
+                        min_scale_features = max(
+                            16, min(64, int(level["max_kps"]) // 10)
+                        )
+                        if int(scratch["counter"].to_numpy()[0]) < min_scale_features:
+                            copy_field(self.zero_counter, scratch["counter"])
+                            _mod("akaze").run(
+                                "detect_keypoints",
+                                hessian_map=scratch["score"],
+                                keypoints=scratch["kps"],
+                                counter=scratch["counter"],
+                                h=h_l,
+                                w=w_l,
+                                grid_size=max(8, int(self.params.get("grid_size", 32)) // (2**level_index)),
+                                threshold=float(self.params.get("threshold", 0.008)) * (0.8**level_index),
+                            )
+                        _mod("akaze").run(
+                            "compute_descriptors",
+                            src=mid,
+                            kps=scratch["kps"],
+                            pattern=self.pattern_gpu,
+                            desc=scratch["desc"],
+                            counter=scratch["counter"],
+                            h=h_l,
+                            w=w_l,
+                        )
+                    else:
+                        copy_field(curr, scratch["work_a"])
+                        work, temp = scratch["work_a"], scratch["work_b"]
+                        _mod("akaze").run(
+                            "compute_conductivity_map",
+                            src=work,
+                            conductivity=scratch["cond"],
+                            h=h_l,
+                            w=w_l,
+                            k=float(self.params.get("k_contrast", 0.02)),
+                        )
+                        for tau in fed_taus:
+                            _mod("akaze").run(
+                                "fed_diffusion_step",
+                                src=work,
+                                dst=temp,
+                                conductivity=scratch["cond"],
+                                h=h_l,
+                                w=w_l,
+                                tau=tau,
+                            )
+                            work, temp = temp, work
+                        if self.use_fused_detect:
+                            _mod("akaze").run(
+                                "detect_and_describe",
+                                src=work,
+                                hessian_map=scratch["score"],
+                                keypoints=scratch["kps"],
+                                counter=scratch["counter"],
+                                pattern=self.pattern_gpu,
+                                desc=scratch["desc"],
+                                h=h_l,
+                                w=w_l,
+                                grid_size=max(8, int(self.params.get("grid_size", 32)) // (2**level_index)),
+                                threshold=float(self.params.get("threshold", 0.008)) * (0.8**level_index),
+                            )
+                        else:
+                            _mod("akaze").run(
+                                "compute_hessian_determinant",
+                                src=work,
+                                hessian_map=scratch["score"],
+                                h=h_l,
+                                w=w_l,
+                            )
+                            _mod("akaze").run(
+                                "detect_keypoints",
+                                hessian_map=scratch["score"],
+                                keypoints=scratch["kps"],
+                                counter=scratch["counter"],
+                                h=h_l,
+                                w=w_l,
+                                grid_size=max(8, int(self.params.get("grid_size", 32)) // (2**level_index)),
+                                threshold=float(self.params.get("threshold", 0.008)) * (0.8**level_index),
+                            )
+                            _mod("akaze").run(
+                                "compute_descriptors",
+                                src=work,
+                                kps=scratch["kps"],
+                                pattern=self.pattern_gpu,
+                                desc=scratch["desc"],
+                                counter=scratch["counter"],
+                                h=h_l,
+                                w=w_l,
+                            )
+
+                    match_kwargs = {
+                        "desc1": level["desc"],
+                        "desc2": scratch["desc"],
+                        "matches": scratch["matches"],
+                        "counter1": level["counter"],
+                        "counter2": scratch["counter"],
+                        "ratio_threshold": float(self.params.get("ratio_threshold", 0.8)),
+                        "kps1": level["kps"],
+                        "kps2": scratch["kps"],
+                    }
+                    if use_offset:
+                        _mod(self.algorithm).run(
+                            "match_and_pack_offset",
+                            results=self._result_gpu,
+                            result_offset=int(level["offset"]),
+                            **match_kwargs,
+                        )
+                    else:
+                        local = engine.allocate((level["max_kps"], 6), dtype=np.float32)
+                        _mod(self.algorithm).run(
+                            "match_descriptors",
+                            desc1=level["desc"],
+                            desc2=scratch["desc"],
+                            matches=scratch["matches"],
+                            counter1=level["counter"],
+                            counter2=scratch["counter"],
+                            ratio_threshold=float(self.params.get("ratio_threshold", 0.8)),
+                        )
+                        _mod(self.algorithm).run(
+                            "pack_matches",
+                            kps1=level["kps"],
+                            kps2=scratch["kps"],
+                            matches=scratch["matches"],
+                            counter1=level["counter"],
+                            counter2=scratch["counter"],
+                            results=local,
+                        )
+                        fallback_results.append((level, local))
+                    if _feature_telemetry_enabled(self.algorithm):
+                        # A diagnostic sync makes this per-level timing
+                        # include native work rather than only enqueue time.
+                        self.engine.sync()
+                finally:
+                    if owns_curr:
+                        _release_feature_buffer(curr)
+                if _feature_telemetry_enabled(self.algorithm):
+                    status = self.engine.get_memory_status(force=True)
+                    _feature_log(
+                        self.algorithm,
+                        f"target_level={level_index} shape={h_l}x{w_l} "
+                        f"elapsed_ms={(time.perf_counter() - level_started) * 1000.0:.2f} "
+                        f"live_mib={int(status.get('live_bytes', 0) or 0) / 1048576.0:.1f} "
+                        f"pool_mib={int(status.get('pooled_bytes', 0) or 0) / 1048576.0:.1f}",
+                    )
+
+            if use_offset:
+                results_np = self._result_gpu.to_numpy()
+                return self._decode_results(results_np)
+            decoded = []
+            try:
+                for level, local in fallback_results:
+                    decoded.append((level, local.to_numpy()))
+            finally:
+                for _, local in fallback_results:
+                    _release_feature_buffer(local)
+            return self._decode_result_segments(decoded)
+        finally:
+            if owns_target:
+                _release_feature_buffer(target_gpu)
+
+    def _decode_results(self, results_np):
+        segments = [
+            (level, results_np[level["offset"] : level["offset"] + level["max_kps"]])
+            for level in self.levels
+        ]
+        return self._decode_result_segments(segments)
+
+    @staticmethod
+    def _decode_result_segments(segments):
+        kps1_list, kps2_list, scores = [], [], []
+        for level_index, (level, rows) in enumerate(segments):
+            valid = rows[:, 5] == 1.0
+            if not np.any(valid):
+                continue
+            factor = float(2**level_index)
+            for row in rows[valid]:
+                kps1_list.append([row[0] * factor, row[1] * factor])
+                kps2_list.append([row[2] * factor, row[3] * factor])
+                scores.append(row[4])
+        if not kps1_list:
+            return None, None, None
+        return (
+            np.asarray(kps1_list, dtype=np.float32),
+            np.asarray(kps2_list, dtype=np.float32),
+            np.asarray(scores, dtype=np.float32),
+        )
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        for level in self.levels:
+            for key in ("kps", "desc", "counter", "scratch"):
+                value = level.get(key)
+                if isinstance(value, dict):
+                    for item in value.values():
+                        _release_feature_buffer(item)
+                else:
+                    _release_feature_buffer(value)
+        self.levels.clear()
+        _release_feature_buffer(self._result_gpu)
+        _release_feature_buffer(self.pattern_gpu)
+        _release_feature_buffer(self.zero_counter)
+        self._result_gpu = None
+        self.pattern_gpu = None
+        self.zero_counter = None
+
+    def __del__(self):
+        # Cache instances are normally closed by the resident aligner.  Keep
+        # garbage-collection cleanup best-effort for cancelled pipelines,
+        # without raising during interpreter/runtime teardown.
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def create_feature_reference_cache(algorithm, reference, **params):
+    """Create an internal burst reference cache without changing public APIs."""
+    return FeatureReferenceCache(algorithm, reference, **params)
+
+
+def match_feature_reference(cache, target):
+    if not isinstance(cache, FeatureReferenceCache):
+        raise TypeError("cache must be a FeatureReferenceCache")
+    return cache.match(target)
+
+
 def ofb(
     src1,
     src2,
@@ -9433,6 +10381,27 @@ def ofb(
     kps1_list = []
     kps2_list = []
     desc1_list = []
+    # Keypoint extraction uses atomic compaction.  Fusing detection with the
+    # descriptor dispatch preserves the correspondence set but can change its
+    # row order, which in turn can perturb downstream seeded RANSAC.  Keep the
+    # graph additive for future deterministic compaction work, but do not
+    # select it on the exact-parity public path yet.
+    # Keypoint extraction uses atomic compaction.  Fusing detection with the
+    # descriptor dispatch preserves the correspondence set but can change its
+    # row order, which in turn can perturb downstream seeded RANSAC.  Keep the
+    # graph additive for future deterministic compaction work, but do not
+    # select it on the exact-parity public path yet.
+    use_fused_detect = False
+    feature_arch = str(getattr(engine, "arch", "")).lower()
+    fused_feature_opt_in = os.environ.get("TAICHI_FEATURE_FUSED_GRAPHS", "0") == "1"
+    # Compound match/pack is safe for graphics backends.  CUDA is included
+    # after the resident cache validation; CPU remains on the legacy path
+    # because its bridge launch cost is lower than the compound wrapper here.
+    use_fused_match = (
+        fused_feature_opt_in
+        and _nvidia_graphics_fused_allowed()
+        and aot_graph_available("ofb", "match_and_pack")
+    )
 
     for level in range(num_levels):
         if level > 0:
@@ -9474,81 +10443,91 @@ def ofb(
         counter1 = upload(np.zeros(1, dtype=np.int32))
         counter2 = upload(np.zeros(1, dtype=np.int32))
 
-        # Detect keypoints
-        _mod("ofb").run(
-            "detect_keypoints",
-            src=img1_med,
-            score_map=score_map1,
-            keypoints=kps1_gpu,
-            counter=counter1,
-            h=h_l,
-            w=w_l,
-            grid_size=grid_size_l,
-            margin=margin_l,
-            threshold=threshold_l,
-        )
-        _mod("ofb").run(
-            "detect_keypoints",
-            src=img2_med,
-            score_map=score_map2,
-            keypoints=kps2_gpu,
-            counter=counter2,
-            h=h_l,
-            w=w_l,
-            grid_size=grid_size_l,
-            margin=margin_l,
-            threshold=threshold_l,
-        )
-
         desc1_gpu = engine.allocate((max_kps_l, 8), dtype=np.int32)
         desc2_gpu = engine.allocate((max_kps_l, 8), dtype=np.int32)
         matches_gpu = engine.allocate((max_kps_l, 2), dtype=np.int32)
 
-        # Compute descriptors on GPU (fully async)
-        _mod("ofb").run(
-            "compute_descriptors",
-            src=img1_blur,
-            kps=kps1_gpu,
-            pattern=pattern_gpu,
-            desc=desc1_gpu,
-            counter=counter1,
-            h=h_l,
-            w=w_l,
-        )
-        _mod("ofb").run(
-            "compute_descriptors",
-            src=img2_blur,
-            kps=kps2_gpu,
-            pattern=pattern_gpu,
-            desc=desc2_gpu,
-            counter=counter2,
-            h=h_l,
-            w=w_l,
-        )
-
-        # Match descriptors on GPU (fully async)
-        _mod("ofb").run(
-            "match_descriptors",
-            desc1=desc1_gpu,
-            desc2=desc2_gpu,
-            matches=matches_gpu,
-            counter1=counter1,
-            counter2=counter2,
-            ratio_threshold=ratio_threshold,
-        )
+        if use_fused_detect:
+            for detect_src, descriptor_src, score_map, keypoints, counter, desc in (
+                (img1_med, img1_blur, score_map1, kps1_gpu, counter1, desc1_gpu),
+                (img2_med, img2_blur, score_map2, kps2_gpu, counter2, desc2_gpu),
+            ):
+                _mod("ofb").run(
+                    "detect_and_describe",
+                    detect_src=detect_src,
+                    descriptor_src=descriptor_src,
+                    score_map=score_map,
+                    keypoints=keypoints,
+                    counter=counter,
+                    pattern=pattern_gpu,
+                    desc=desc,
+                    h=h_l,
+                    w=w_l,
+                    grid_size=grid_size_l,
+                    margin=margin_l,
+                    threshold=threshold_l,
+                )
+        else:
+            for detect_src, descriptor_src, score_map, keypoints, counter, desc in (
+                (img1_med, img1_blur, score_map1, kps1_gpu, counter1, desc1_gpu),
+                (img2_med, img2_blur, score_map2, kps2_gpu, counter2, desc2_gpu),
+            ):
+                _mod("ofb").run(
+                    "detect_keypoints",
+                    src=detect_src,
+                    score_map=score_map,
+                    keypoints=keypoints,
+                    counter=counter,
+                    h=h_l,
+                    w=w_l,
+                    grid_size=grid_size_l,
+                    margin=margin_l,
+                    threshold=threshold_l,
+                )
+                _mod("ofb").run(
+                    "compute_descriptors",
+                    src=descriptor_src,
+                    kps=keypoints,
+                    pattern=pattern_gpu,
+                    desc=desc,
+                    counter=counter,
+                    h=h_l,
+                    w=w_l,
+                )
 
         results_gpu = engine.allocate((max_kps_l, 6), dtype=np.float32)
-
-        # Pack matches on GPU (fully async)
-        _mod("ofb").run(
-            "pack_matches",
-            kps1=kps1_gpu,
-            kps2=kps2_gpu,
-            matches=matches_gpu,
-            counter1=counter1,
-            counter2=counter2,
-            results=results_gpu,
-        )
+        if use_fused_match:
+            _mod("ofb").run(
+                "match_and_pack",
+                desc1=desc1_gpu,
+                desc2=desc2_gpu,
+                matches=matches_gpu,
+                counter1=counter1,
+                counter2=counter2,
+                ratio_threshold=ratio_threshold,
+                kps1=kps1_gpu,
+                kps2=kps2_gpu,
+                results=results_gpu,
+            )
+        else:
+            _mod("ofb").run(
+                "match_descriptors",
+                desc1=desc1_gpu,
+                desc2=desc2_gpu,
+                matches=matches_gpu,
+                counter1=counter1,
+                counter2=counter2,
+                ratio_threshold=ratio_threshold,
+            )
+            _mod("ofb").run(
+                "pack_matches",
+                kps1=kps1_gpu,
+                kps2=kps2_gpu,
+                matches=matches_gpu,
+                counter1=counter1,
+                counter2=counter2,
+                results=results_gpu,
+            )
 
         # Download results (causes exactly one sync step per level)
         results_np = results_gpu.to_numpy()
@@ -9649,11 +10628,40 @@ def akaze(
         pts2: Matched points from src2 (N, 2) in (x, y) coordinates.
         scores: Matching scores / Hamming distances (N,).
     """
-    img1_gpu = upload(src1) if not isinstance(src1, TaichiGPUBuffer) else src1
-    img2_gpu = upload(src2) if not isinstance(src2, TaichiGPUBuffer) else src2
+    owns_img1 = not isinstance(src1, TaichiGPUBuffer)
+    owns_img2 = not isinstance(src2, TaichiGPUBuffer)
+    img1_gpu = upload(src1) if owns_img1 else src1
+    img2_gpu = upload(src2) if owns_img2 else src2
 
     h_orig, w_orig = img1_gpu.shape[:2]
     min_dim = min(h_orig, w_orig)
+
+    # The stateless API uses the identical nonlinear scale-space route as
+    # the resident cache, then closes it before returning.  Its public return
+    # contract remains unchanged.
+    if (
+        aot_graph_available("akaze", "compute_scale_normalized_hessian")
+        and aot_graph_available("akaze", "detect_scale_space_keypoints")
+    ):
+        cache = FeatureReferenceCache(
+            "akaze",
+            img1_gpu,
+            ratio_threshold=float(ratio_threshold),
+            grid_size=int(grid_size),
+            threshold=float(threshold),
+            margin=int(margin),
+            max_keypoints=int(max_keypoints),
+            k_contrast=float(k_contrast),
+            num_fed_steps=int(num_fed_steps),
+        )
+        try:
+            return cache.match(img2_gpu)
+        finally:
+            cache.close()
+            if owns_img1:
+                _release_feature_buffer(img1_gpu)
+            if owns_img2:
+                _release_feature_buffer(img2_gpu)
 
     # Determine scale levels dynamically
     if min_dim < 240:
@@ -9671,6 +10679,32 @@ def akaze(
     desc1_list = []
 
     fed_taus = get_fed_step_sizes(num_fed_steps)
+    feature_arch = str(getattr(engine, "arch", "")).lower()
+    # Keep the stateless public API conservative: pair graphs are opt-in here
+    # while the resident reference cache uses them by default on the measured
+    # safe backends.  Setting TAICHI_FEATURE_FUSED_GRAPHS=1 enables the same
+    # backend policy for callers that explicitly request the fused path.
+    fused_feature_opt_in = os.environ.get("TAICHI_FEATURE_FUSED_GRAPHS", "0") == "1"
+    use_fused_akaze = fused_feature_opt_in and _akaze_fused_graph_allowed()
+    use_fused_conductivity = use_fused_akaze and aot_graph_available(
+        "akaze", "compute_conductivity_pair"
+    )
+    use_fused_fed = use_fused_akaze and aot_graph_available(
+        "akaze", "fed_diffusion_pair"
+    )
+    # See OFB above: atomic keypoint compaction is not row-order invariant.
+    # Exact public parity takes priority over one fewer launch here.
+    use_fused_detect = False
+    use_fused_match = use_fused_akaze and aot_graph_available(
+        "akaze", "match_and_pack"
+    )
+    _feature_log(
+        "akaze",
+        f"route backend={feature_arch} device={getattr(engine, 'gpu_name', '') or 'unknown'} "
+        f"levels={num_levels} fused={use_fused_akaze} "
+        f"conductivity_pair={use_fused_conductivity} "
+        f"fed_pair={use_fused_fed} match_pack={use_fused_match}",
+    )
 
     for level in range(num_levels):
         if level > 0:
@@ -9697,67 +10731,63 @@ def akaze(
         cond2 = engine.allocate((h_l, w_l), dtype=np.float32)
 
         # 1. Compute conductivity map at this scale level
-        _mod("akaze").run(
-            "compute_conductivity_map",
-            src=curr1,
-            conductivity=cond1,
-            h=h_l,
-            w=w_l,
-            k=float(k_contrast),
-        )
-        _mod("akaze").run(
-            "compute_conductivity_map",
-            src=curr2,
-            conductivity=cond2,
-            h=h_l,
-            w=w_l,
-            k=float(k_contrast),
-        )
+        if use_fused_conductivity:
+            _mod("akaze").run(
+                "compute_conductivity_pair",
+                src1=curr1,
+                src2=curr2,
+                conductivity1=cond1,
+                conductivity2=cond2,
+                h=h_l,
+                w=w_l,
+                k=float(k_contrast),
+            )
+        else:
+            for src, conductivity in ((curr1, cond1), (curr2, cond2)):
+                _mod("akaze").run(
+                    "compute_conductivity_map",
+                    src=src,
+                    conductivity=conductivity,
+                    h=h_l,
+                    w=w_l,
+                    k=float(k_contrast),
+                )
 
         # 2. Run FED explicit diffusion iterations on GPU
         for tau in fed_taus:
-            # Step on image 1
-            _mod("akaze").run(
-                "fed_diffusion_step",
-                src=curr1,
-                dst=temp1,
-                conductivity=cond1,
-                h=h_l,
-                w=w_l,
-                tau=tau,
-            )
-            curr1, temp1 = temp1, curr1  # zero-cost swap
-
-            # Step on image 2
-            _mod("akaze").run(
-                "fed_diffusion_step",
-                src=curr2,
-                dst=temp2,
-                conductivity=cond2,
-                h=h_l,
-                w=w_l,
-                tau=tau,
-            )
+            if use_fused_fed:
+                _mod("akaze").run(
+                    "fed_diffusion_pair",
+                    src1=curr1,
+                    src2=curr2,
+                    dst1=temp1,
+                    dst2=temp2,
+                    conductivity1=cond1,
+                    conductivity2=cond2,
+                    h=h_l,
+                    w=w_l,
+                    tau=tau,
+                )
+            else:
+                for src, dst, conductivity in (
+                    (curr1, temp1, cond1),
+                    (curr2, temp2, cond2),
+                ):
+                    _mod("akaze").run(
+                        "fed_diffusion_step",
+                        src=src,
+                        dst=dst,
+                        conductivity=conductivity,
+                        h=h_l,
+                        w=w_l,
+                        tau=tau,
+                    )
+            curr1, temp1 = temp1, curr1
             curr2, temp2 = temp2, curr2  # zero-cost swap
 
         # 3. Compute Hessian Determinant Map
         score_map1 = engine.allocate((h_l, w_l), dtype=np.float32)
         score_map2 = engine.allocate((h_l, w_l), dtype=np.float32)
-
-        _mod("akaze").run(
-            "compute_hessian_determinant",
-            src=curr1,
-            hessian_map=score_map1,
-            h=h_l,
-            w=w_l,
-        )
-        _mod("akaze").run(
-            "compute_hessian_determinant",
-            src=curr2,
-            hessian_map=score_map2,
-            h=h_l,
-            w=w_l,
-        )
 
         # Adaptive parameters for this scale level
         grid_size_l = max(8, grid_size // (2**level))
@@ -9772,77 +10802,95 @@ def akaze(
         counter1 = upload(np.zeros(1, dtype=np.int32))
         counter2 = upload(np.zeros(1, dtype=np.int32))
 
-        # Detect keypoints (ANMS)
-        _mod("akaze").run(
-            "detect_keypoints",
-            hessian_map=score_map1,
-            keypoints=kps1_gpu,
-            counter=counter1,
-            h=h_l,
-            w=w_l,
-            grid_size=grid_size_l,
-            threshold=threshold_l,
-        )
-        _mod("akaze").run(
-            "detect_keypoints",
-            hessian_map=score_map2,
-            keypoints=kps2_gpu,
-            counter=counter2,
-            h=h_l,
-            w=w_l,
-            grid_size=grid_size_l,
-            threshold=threshold_l,
-        )
-
         desc1_gpu = engine.allocate((max_kps_l, 16), dtype=np.int32)
         desc2_gpu = engine.allocate((max_kps_l, 16), dtype=np.int32)
         matches_gpu = engine.allocate((max_kps_l, 2), dtype=np.int32)
 
-        # Compute descriptors on GPU (fully async)
-        _mod("akaze").run(
-            "compute_descriptors",
-            src=curr1,
-            kps=kps1_gpu,
-            pattern=pattern_gpu,
-            desc=desc1_gpu,
-            counter=counter1,
-            h=h_l,
-            w=w_l,
-        )
-        _mod("akaze").run(
-            "compute_descriptors",
-            src=curr2,
-            kps=kps2_gpu,
-            pattern=pattern_gpu,
-            desc=desc2_gpu,
-            counter=counter2,
-            h=h_l,
-            w=w_l,
-        )
-
-        # Match descriptors on GPU (fully async)
-        _mod("akaze").run(
-            "match_descriptors",
-            desc1=desc1_gpu,
-            desc2=desc2_gpu,
-            matches=matches_gpu,
-            counter1=counter1,
-            counter2=counter2,
-            ratio_threshold=ratio_threshold,
-        )
+        if use_fused_detect:
+            _mod("akaze").run(
+                "detect_and_describe_pair",
+                src1=curr1,
+                src2=curr2,
+                hessian_map1=score_map1,
+                hessian_map2=score_map2,
+                keypoints1=kps1_gpu,
+                keypoints2=kps2_gpu,
+                counter1=counter1,
+                counter2=counter2,
+                pattern=pattern_gpu,
+                desc1=desc1_gpu,
+                desc2=desc2_gpu,
+                h=h_l,
+                w=w_l,
+                grid_size=grid_size_l,
+                threshold=threshold_l,
+            )
+        else:
+            for src, score_map, keypoints, counter, desc in (
+                (curr1, score_map1, kps1_gpu, counter1, desc1_gpu),
+                (curr2, score_map2, kps2_gpu, counter2, desc2_gpu),
+            ):
+                _mod("akaze").run(
+                    "compute_hessian_determinant",
+                    src=src,
+                    hessian_map=score_map,
+                    h=h_l,
+                    w=w_l,
+                )
+                _mod("akaze").run(
+                    "detect_keypoints",
+                    hessian_map=score_map,
+                    keypoints=keypoints,
+                    counter=counter,
+                    h=h_l,
+                    w=w_l,
+                    grid_size=grid_size_l,
+                    threshold=threshold_l,
+                )
+                _mod("akaze").run(
+                    "compute_descriptors",
+                    src=src,
+                    kps=keypoints,
+                    pattern=pattern_gpu,
+                    desc=desc,
+                    counter=counter,
+                    h=h_l,
+                    w=w_l,
+                )
 
         results_gpu = engine.allocate((max_kps_l, 6), dtype=np.float32)
-
-        # Pack matches on GPU (fully async)
-        _mod("akaze").run(
-            "pack_matches",
-            kps1=kps1_gpu,
-            kps2=kps2_gpu,
-            matches=matches_gpu,
-            counter1=counter1,
-            counter2=counter2,
-            results=results_gpu,
-        )
+        if use_fused_match:
+            _mod("akaze").run(
+                "match_and_pack",
+                desc1=desc1_gpu,
+                desc2=desc2_gpu,
+                matches=matches_gpu,
+                counter1=counter1,
+                counter2=counter2,
+                ratio_threshold=ratio_threshold,
+                kps1=kps1_gpu,
+                kps2=kps2_gpu,
+                results=results_gpu,
+            )
+        else:
+            _mod("akaze").run(
+                "match_descriptors",
+                desc1=desc1_gpu,
+                desc2=desc2_gpu,
+                matches=matches_gpu,
+                counter1=counter1,
+                counter2=counter2,
+                ratio_threshold=ratio_threshold,
+            )
+            _mod("akaze").run(
+                "pack_matches",
+                kps1=kps1_gpu,
+                kps2=kps2_gpu,
+                matches=matches_gpu,
+                counter1=counter1,
+                counter2=counter2,
+                results=results_gpu,
+            )
 
         # Download results (causes exactly one sync step per level)
         results_np = results_gpu.to_numpy()
@@ -11893,6 +12941,133 @@ def seamless_clone_aot(
 # ---------------------------------------------------------------------------
 
 
+def _farneback_level_count(shape, requested_levels, min_size=32):
+    """Return the number of usable 2x levels for a flow pyramid.
+
+    The native pyramid builder stops before either dimension drops below
+    ``min_size``.  Keeping the same rule here lets a caller-owned reference
+    pyramid be validated without allocating a temporary reference upload.
+    """
+    h, w = (int(shape[0]), int(shape[1]))
+    count = 1
+    for _ in range(max(0, int(requested_levels) - 1)):
+        h //= 2
+        w //= 2
+        if h < int(min_size) or w < int(min_size):
+            break
+        count += 1
+    return count
+
+
+def _validated_farneback_reference_pyramid(reference_pyramid, shape, requested_levels):
+    """Validate a resident reference pyramid against the native 2x contract."""
+    if reference_pyramid is None:
+        return None
+    try:
+        levels = list(reference_pyramid)
+    except (TypeError, ValueError):
+        return None
+    required = _farneback_level_count(shape, requested_levels)
+    if len(levels) < required:
+        return None
+    expected_h, expected_w = int(shape[0]), int(shape[1])
+    for level in levels[:required]:
+        level_shape = getattr(level, "shape", None)
+        if level_shape is None or len(level_shape) != 2:
+            return None
+        if tuple(int(value) for value in level_shape) != (expected_h, expected_w):
+            return None
+        if getattr(level, "handle", None) is None:
+            return None
+        if np.dtype(getattr(level, "dtype", np.float32)) != np.dtype(np.float32):
+            return None
+        expected_h //= 2
+        expected_w //= 2
+    return levels[:required]
+
+
+def _destroy_flow_buffer(buffer):
+    """Best-effort terminal cleanup for an owned AOT flow buffer."""
+    if buffer is None:
+        return
+    try:
+        buffer.destroy()
+    except Exception:
+        try:
+            buffer.release()
+        except Exception:
+            pass
+
+
+# Farneback's polynomial and smoothing coefficients depend only on the
+# algorithm configuration and the selected runtime.  Keep their GPU uploads
+# resident so consecutive frames in a burst do not allocate/upload the same
+# tiny buffers repeatedly.  The cache is deliberately bounded; these buffers
+# are small, and a backend/generation key prevents reuse across a re-created
+# Taichi runtime.
+_FARNEBACK_CONSTANT_CACHE = {}
+_FARNEBACK_CONSTANT_CACHE_LIMIT = 16
+
+
+def clear_farneback_cache():
+    """Release cached Farneback coefficient buffers and reset the cache."""
+    cached_items = tuple(_FARNEBACK_CONSTANT_CACHE.values())
+    _FARNEBACK_CONSTANT_CACHE.clear()
+    for bundle in cached_items:
+        for buffer in bundle.get("gpu", ()):
+            _destroy_flow_buffer(buffer)
+
+
+def _get_farneback_constant_bundle(poly_n, poly_sigma, win_size):
+    from taichi_vision.taichi_algorithm.optical_flow.farneback_flow import (
+        prepare_gaussian_constants,
+        compute_smoothing_weights,
+    )
+
+    key = (
+        str(getattr(engine, "arch", "")).lower(),
+        int(getattr(engine, "device_id", 0)),
+        int(getattr(engine, "_generation", 0)),
+        int(poly_n),
+        float(poly_sigma),
+        int(win_size),
+    )
+    cached = _FARNEBACK_CONSTANT_CACHE.get(key)
+    if cached is not None:
+        poly_gpu, smooth_gpu = cached["gpu"]
+        if getattr(poly_gpu, "handle", None) is not None and getattr(
+            smooth_gpu, "handle", None
+        ) is not None:
+            return cached
+
+    g_w, xg_w, xxg_w, ig11, ig03, ig33, ig55 = prepare_gaussian_constants(
+        poly_n, poly_sigma
+    )
+    smooth_w, smooth_radius = compute_smoothing_weights(win_size)
+    poly_gpu = InputArray(
+        np.ascontiguousarray(np.stack((g_w, xg_w, xxg_w), axis=1), dtype=np.float32)
+    )
+    smooth_gpu = InputArray(smooth_w[: smooth_radius + 1])
+    bundle = {
+        "gaussian": (g_w, xg_w, xxg_w, ig11, ig03, ig33, ig55),
+        "smooth": (smooth_w, smooth_radius),
+        "gpu": (poly_gpu, smooth_gpu),
+    }
+    _FARNEBACK_CONSTANT_CACHE[key] = bundle
+
+    # Prevent unbounded growth if a caller cycles through arbitrary presets.
+    while len(_FARNEBACK_CONSTANT_CACHE) > _FARNEBACK_CONSTANT_CACHE_LIMIT:
+        evicted_key, evicted = next(iter(_FARNEBACK_CONSTANT_CACHE.items()))
+        if evicted_key == key and len(_FARNEBACK_CONSTANT_CACHE) > 1:
+            evicted_key, evicted = next(
+                iter(list(_FARNEBACK_CONSTANT_CACHE.items())[1:])
+            )
+        _FARNEBACK_CONSTANT_CACHE.pop(evicted_key, None)
+        for buffer in evicted.get("gpu", ()):
+            _destroy_flow_buffer(buffer)
+    return bundle
+
+
 @_vulkan_host_accessible
 def farneback_flow(
     ref_gray,
@@ -11906,6 +13081,7 @@ def farneback_flow(
     flags=0,
     flow_init=None,
     return_gpu=False,
+    reference_pyramid=None,
 ):
     if str(getattr(engine, "arch", "")).lower() in ("opengl", "gles"):
         from taichi_vision.taichi_algorithm import aot_wrapper as _flow_wrapper
@@ -11914,19 +13090,52 @@ def farneback_flow(
     # Strategy A + C: Decoupling for High-Res (>= 8MP, e.g. 12MP) to prevent OOM
     h, w = ref_gray.shape[:2]
     if h * w >= 8_000_000 and flow_init is None and h >= 64 and w >= 64:
+        prev_dev = next_dev = None
+        ref_half = supp_half = flow_half = flow_full = None
+        prev_owned = next_owned = False
+        ref_half_owned = supp_half_owned = False
         try:
             from taichi_vision.taichi_algorithm.aot_wrapper import _get_module, _InputArray, _OutputArray
             pyramid_mod = _get_module("pyramid")
-            prev_dev = _InputArray(ref_gray if hasattr(ref_gray, "handle") else ref_gray.astype(np.float32))
-            next_dev = _InputArray(comp_gray if hasattr(comp_gray, "handle") else comp_gray.astype(np.float32))
             half_h, half_w = h // 2, w // 2
-            ref_half = _OutputArray((half_h, half_w), np.float32)
+            cached_ref = _validated_farneback_reference_pyramid(
+                reference_pyramid, (h, w), num_levels
+            )
+            cached_half = (
+                cached_ref[1:]
+                if cached_ref is not None and len(cached_ref) > 1
+                else None
+            )
+            if cached_half is not None:
+                # Reuse the caller-owned level-1 reference and avoid both a
+                # full-resolution upload and an extra downsample dispatch.
+                ref_half = cached_half[0]
+            else:
+                prev_dev = _InputArray(
+                    ref_gray
+                    if hasattr(ref_gray, "handle")
+                    else np.ascontiguousarray(ref_gray, dtype=np.float32)
+                )
+                prev_owned = not hasattr(ref_gray, "handle")
+                ref_half = _OutputArray((half_h, half_w), np.float32)
+                ref_half_owned = True
+                pyramid_mod.run("downsample_2x_f32", src=prev_dev, dst=ref_half)
+            next_dev = _InputArray(
+                comp_gray
+                if hasattr(comp_gray, "handle")
+                else np.ascontiguousarray(comp_gray, dtype=np.float32)
+            )
+            next_owned = not hasattr(comp_gray, "handle")
             supp_half = _OutputArray((half_h, half_w), np.float32)
-            pyramid_mod.run("downsample_2x_f32", src=prev_dev, dst=ref_half)
+            supp_half_owned = True
             pyramid_mod.run("downsample_2x_f32", src=next_dev, dst=supp_half)
             flow_half = farneback_flow(
-                ref_half.to_numpy(),
-                supp_half.to_numpy(),
+                # Keep the decoupled full-frame path resident.  The previous
+                # implementation read both half-resolution images back to
+                # NumPy and uploaded them again in the recursive call, which
+                # defeated the purpose of the high-resolution guard.
+                ref_half,
+                supp_half,
                 pyr_scale=pyr_scale,
                 num_levels=max(1, int(num_levels) - 1),
                 win_size=win_size,
@@ -11935,94 +13144,44 @@ def farneback_flow(
                 poly_sigma=poly_sigma,
                 flags=flags,
                 return_gpu=True,
+                reference_pyramid=cached_half,
             )
             flow_full = _OutputArray((h, w, 2), np.float32)
             pyramid_mod.run("upsample_flow_f32", src=flow_half, dst=flow_full, scale=2.0)
-            return flow_full if return_gpu else flow_full.to_numpy()
-        except Exception:
-            pass # fallback to tiled execution
-
-    if (
-        not return_gpu
-        and flow_init is None
-        and isinstance(ref_gray, np.ndarray)
-        and isinstance(comp_gray, np.ndarray)
-    ):
-        scale = max(1.0, 1.0 / max(float(pyr_scale), 1e-6))
-        local_radius = poly_n // 2 + win_size // 2 * max(1, int(num_iters)) + 4
-        halo = int(np.ceil(local_radius * scale ** max(0, int(num_levels) - 1)))
-        backend = str(getattr(engine, "arch", "")).lower()
-        if backend in {"vulkan", "cuda"}:
-            gpu_result = _run_blockwise_gpu(
-                "farneback_flow",
-                (np.ascontiguousarray(ref_gray), np.ascontiguousarray(comp_gray)),
-                (*ref_gray.shape[:2], 2),
-                np.float32,
-                lambda ref_tile, comp_tile: _farneback_flow_full(
-                    ref_tile,
-                    comp_tile,
-                    pyr_scale,
-                    num_levels,
-                    win_size,
-                    num_iters,
-                    poly_n,
-                    poly_sigma,
-                    flags,
-                    return_gpu=True,
-                ),
-                halo=halo,
-                params={
-                    "pyr_scale": float(pyr_scale),
-                    "levels": int(num_levels),
-                    "win_size": int(win_size),
-                    "iters": int(num_iters),
-                    "poly_n": int(poly_n),
-                    "poly_sigma": float(poly_sigma),
-                    "flags": int(flags),
-                    "gpu_tile": True,
-                },
-                validate_output=lambda output, _tiles: (
-                    output.ndim == 3
-                    and output.shape[2] == 2
-                    and np.isfinite(output).all()
-                ),
-                resident_multiplier=16,
-                batch_cap=2,
-            )
-            if gpu_result is not None:
-                return gpu_result
-        result = _run_blockwise(
-            "farneback_flow",
-            (np.ascontiguousarray(ref_gray), np.ascontiguousarray(comp_gray)),
-            (*ref_gray.shape[:2], 2),
-            np.float32,
-            lambda ref_tile, comp_tile: _farneback_flow_full(
-                ref_tile,
-                comp_tile,
-                pyr_scale,
-                num_levels,
-                win_size,
-                num_iters,
-                poly_n,
-                poly_sigma,
-                flags,
-            ),
-            halo=halo,
-            params={
-                "pyr_scale": float(pyr_scale),
-                "levels": int(num_levels),
-                "win_size": int(win_size),
-                "iters": int(num_iters),
-                "poly_n": int(poly_n),
-                "poly_sigma": float(poly_sigma),
-                "flags": int(flags),
-            },
-            validate_output=lambda output, _tiles: (
-                output.ndim == 3 and output.shape[2] == 2 and np.isfinite(output).all()
-            ),
-        )
-        if result is not None:
+            if return_gpu:
+                result = flow_full
+                flow_full = None
+                return result
+            result = flow_full.to_numpy()
             return result
+        except Exception:
+            # Recovery remains on the same backend and continues through the
+            # full-frame implementation below.  There is intentionally no
+            # blockwise fallback here: Farneback's pyramid and coarse-to-fine
+            # iterations are not tile-independent.
+            pass
+        finally:
+            # The decoupled path is a short-lived compatibility route.  Its
+            # half-resolution inputs and recursive flow result must not stay
+            # in the retired queue until the next allocation pressure event.
+            try:
+                engine.sync()
+            except Exception:
+                pass
+            for buffer in (flow_half, flow_full, supp_half):
+                _destroy_flow_buffer(buffer)
+            if ref_half_owned:
+                _destroy_flow_buffer(ref_half)
+            if prev_owned:
+                _destroy_flow_buffer(prev_dev)
+            if next_owned:
+                _destroy_flow_buffer(next_dev)
+
+    # Farneback is intentionally full-frame at this stage.  Its pyramid and
+    # iterative polynomial update have global dependencies, so the former
+    # blockwise path added upload/readback/stitching overhead and could change
+    # numerical results at tile boundaries.  Keep one backend-resident call
+    # until a separately validated partitioned implementation is available.
     result = _farneback_flow_full(
         ref_gray,
         comp_gray,
@@ -12035,6 +13194,7 @@ def farneback_flow(
         flags,
         flow_init,
         return_gpu,
+        reference_pyramid,
     )
     if return_gpu and str(getattr(engine, "arch", "")).lower() in ("opengl", "gles"):
         from taichi_vision.taichi_algorithm import aot_wrapper as _flow_wrapper
@@ -12043,115 +13203,33 @@ def farneback_flow(
     return result
 
 
-def _farneback_flow_full(
-    ref_gray,
-    comp_gray,
-    pyr_scale=0.5,
-    num_levels=3,
-    win_size=15,
-    num_iters=3,
-    poly_n=5,
-    poly_sigma=1.2,
-    flags=0,
-    flow_init=None,
-    return_gpu=False,
+def _run_farneback_level(
+    mod,
+    ref_lvl,
+    comp_lvl,
+    prev_flow,
+    num_iters,
+    poly_weights_gpu,
+    ig11,
+    ig03,
+    ig33,
+    ig55,
+    poly_radius,
+    smooth_gpu,
+    smooth_radius,
 ):
-    """
-    AOT Farneback Dense Optical Flow (OpenCV-compatible).
-
-    Computes a dense flow field from ref_gray to comp_gray.
-
-    Parameters
-    ----------
-    ref_gray  : ndarray (H, W) float32 – reference frame [0, 255].
-    comp_gray : ndarray (H, W) float32 – comparison frame [0, 255].
-    pyr_scale : float – pyramid scale factor (default 0.5).
-    num_levels: int   – number of pyramid levels (default 3).
-    win_size  : int   – smoothing window size (default 15).
-    num_iters : int   – iterations per pyramid level (default 3).
-    poly_n    : int   – polynomial expansion neighborhood (default 5).
-    poly_sigma: float – polynomial expansion sigma (default 1.2).
-    flags     : int   – reserved.
-    flow_init : ndarray (H,W,2) or TaichiGPUBuffer – optional initial flow.
-    return_gpu: bool  – if True, return TaichiGPUBuffer; else np.ndarray.
-
-    Returns
-    -------
-    flow : (H, W, 2) float32 – flow field where flow[:,:,0]=dx, flow[:,:,1]=dy.
-    """
-    from taichi_vision.taichi_algorithm.optical_flow.farneback_flow import (
-        prepare_gaussian_constants,
-        compute_smoothing_weights,
-    )
-
-    # Upload images
-    ref_buf = InputArray(ref_gray)
-    comp_buf = InputArray(comp_gray)
-    h_orig, w_orig = ref_buf.shape[:2]
-
-    # Build pyramids
-    downscale_factor = 1.0 / pyr_scale
-    if not np.isclose(downscale_factor, 2.0):
-        raise ValueError("AOT Farneback currently requires pyr_scale=0.5")
-
-    def _build_flow_pyramid(source):
-        pyramid = [source]
-        for _ in range(max(0, int(num_levels) - 1)):
-            h_prev, w_prev = pyramid[-1].shape[:2]
-            h_next, w_next = h_prev // 2, w_prev // 2
-            if h_next < 32 or w_next < 32:
-                break
-            level = engine.allocate((h_next, w_next), dtype=np.float32)
-            _mod("pyramid").run("downsample_2x_f32", src=pyramid[-1], dst=level)
-            pyramid.append(level)
-        return pyramid
-
-    ref_pyr = _build_flow_pyramid(ref_buf)
-    comp_pyr = _build_flow_pyramid(comp_buf)
-    actual_levels = len(ref_pyr)
-
-    # Pre-compute constants on CPU, upload to GPU
-    g_w, xg_w, xxg_w, ig11, ig03, ig33, ig55 = prepare_gaussian_constants(
-        poly_n, poly_sigma
-    )
-    smooth_w, smooth_radius = compute_smoothing_weights(win_size)
-    poly_radius = poly_n // 2
-
-    poly_weights_gpu = InputArray(
-        np.ascontiguousarray(np.stack((g_w, xg_w, xxg_w), axis=1), dtype=np.float32)
-    )
-    # The compiled graph ABI uses one ``poly_weights`` matrix on every
-    # backend (the three columns are g, x*g, and x*x*g).  Older host code
-    # passed separate g/xg/xxg buffers on CPU/OpenGL, which left the required
-    # poly_weights argument unset and caused ``Missing runtime value`` at
-    # graph initialization.  Keep one descriptor layout for CPU, CUDA,
-    # Vulkan, and OpenGL; it also reduces three uploads to one.
-    smooth_gpu = InputArray(smooth_w[: smooth_radius + 1])
-
-    mod = _mod("farneback_flow")
-    if mod is None:
-        raise RuntimeError("farneback_flow TCM not found in aot_tcm/")
-
-    # Coarse-to-fine
-    prev_flow = None
-    for lvl in range(actual_levels - 1, -1, -1):
-        ref_lvl = ref_pyr[lvl]
-        comp_lvl = comp_pyr[lvl]
-        hl, wl = ref_lvl.shape[0], ref_lvl.shape[1]
-
-        flow_buf = engine.allocate((hl, wl, 2), dtype=np.float32)
-
-        # Scratch buffers are also valid for the fused level graph because
-        # every graph dispatch in the sequence is ordered by the runtime.
-        vert_buf = engine.allocate((hl, wl, 3), dtype=np.float32)
-        R0 = engine.allocate((hl, wl, 5), dtype=np.float32)
-        R1 = engine.allocate((hl, wl, 5), dtype=np.float32)
-        M = engine.allocate((hl, wl, 5), dtype=np.float32)
-        M_smooth = engine.allocate((hl, wl, 5), dtype=np.float32)
-
-        # A/B qualification on the current desktop showed a small gain on
-        # CPU/CUDA but a regression on OpenGL/Vulkan, so graph fusion is
-        # selected per backend rather than applied unconditionally.
+    """Execute one coarse-to-fine level with exception-safe scratch cleanup."""
+    hl, wl = ref_lvl.shape[0], ref_lvl.shape[1]
+    flow_buf = engine.allocate((hl, wl, 2), dtype=np.float32)
+    vert_buf = engine.allocate((hl, wl, 3), dtype=np.float32)
+    R0 = engine.allocate((hl, wl, 5), dtype=np.float32)
+    R1 = engine.allocate((hl, wl, 5), dtype=np.float32)
+    M = engine.allocate((hl, wl, 5), dtype=np.float32)
+    M_smooth = engine.allocate((hl, wl, 5), dtype=np.float32)
+    try:
+        # The fused level graph is qualified for CPU/CUDA with the common
+        # three-iteration preset. Other backends use the identical ordered
+        # direct dispatch sequence.
         fused_level = int(num_iters) == 3 and str(
             getattr(engine, "arch", "")
         ).lower() in {"cpu", "cuda"}
@@ -12178,13 +13256,11 @@ def _farneback_flow_full(
             poly_radius=poly_radius,
             smooth_weights=smooth_gpu,
             smooth_radius=smooth_radius,
+            flow=flow_buf,
         )
-        if prev_flow is None:
-            fused_args["flow"] = flow_buf
-        else:
+        if prev_flow is not None:
             fused_args.update(
                 {
-                    "flow": flow_buf,
                     "flow_coarse": prev_flow,
                     "flow_fine": flow_buf,
                     "scale": float(ref_lvl.shape[0]) / float(prev_flow.shape[0]),
@@ -12197,8 +13273,6 @@ def _farneback_flow_full(
                 mod.run(fused_level_name, **fused_args)
                 fused_used = True
             except Exception as exc:
-                # Older artifacts remain usable through the exact direct
-                # sequence below; this is a same-backend recovery path.
                 print(
                     f"[AOT Farneback] {fused_level_name} unavailable; "
                     f"using direct dispatch: {exc}"
@@ -12226,20 +13300,9 @@ def _farneback_flow_full(
                 ig55=float(ig55),
                 poly_radius=poly_radius,
             )
-            mod.run(
-                "poly_expansion_f32",
-                src=ref_lvl,
-                poly=R0,
-                **poly_args,
-            )
-            mod.run(
-                "poly_expansion_f32",
-                src=comp_lvl,
-                poly=R1,
-                **poly_args,
-            )
+            mod.run("poly_expansion_f32", src=ref_lvl, poly=R0, **poly_args)
+            mod.run("poly_expansion_f32", src=comp_lvl, poly=R1, **poly_args)
 
-            # Choose batched multi-iteration graph for efficiency.
             iter_args = dict(
                 R0=R0,
                 R1=R1,
@@ -12251,55 +13314,165 @@ def _farneback_flow_full(
                 smooth_weights=smooth_gpu,
                 smooth_radius=smooth_radius,
             )
-            remaining = num_iters
+            remaining = int(num_iters)
             while remaining > 0:
                 if remaining >= 5:
-                    batch_key = "farneback_multi_5"
-                    batch_size = 5
+                    batch_key, batch_size = "farneback_multi_5", 5
                 elif remaining >= 3:
-                    batch_key = "farneback_multi_3"
-                    batch_size = 3
+                    batch_key, batch_size = "farneback_multi_3", 3
                 elif remaining >= 2:
-                    batch_key = "farneback_multi_2"
-                    batch_size = 2
+                    batch_key, batch_size = "farneback_multi_2", 2
                 else:
-                    batch_key = "farneback_iteration"
-                    batch_size = 1
+                    batch_key, batch_size = "farneback_iteration", 1
                 try:
                     mod.run(batch_key, **iter_args)
                 except Exception:
-                    # Fallback to single iteration if batch graph not found.
                     mod.run("farneback_iteration", **iter_args)
                 remaining -= batch_size
 
         if str(getattr(engine, "arch", "")).lower() in ("opengl", "gles"):
             engine.sync()
+        return flow_buf
+    except Exception:
+        try:
+            engine.sync()
+        except Exception:
+            pass
+        _destroy_flow_buffer(flow_buf)
+        raise
+    finally:
+        for buffer in (vert_buf, R0, R1, M, M_smooth):
+            _destroy_flow_buffer(buffer)
 
-        R0.destroy()
-        R1.destroy()
-        M.destroy()
-        M_smooth.destroy()
+
+def _farneback_flow_full(
+    ref_gray,
+    comp_gray,
+    pyr_scale=0.5,
+    num_levels=3,
+    win_size=15,
+    num_iters=3,
+    poly_n=5,
+    poly_sigma=1.2,
+    flags=0,
+    flow_init=None,
+    return_gpu=False,
+    reference_pyramid=None,
+):
+    """
+    AOT Farneback Dense Optical Flow (OpenCV-compatible).
+
+    Computes a dense flow field from ref_gray to comp_gray.
+
+    Parameters
+    ----------
+    ref_gray  : ndarray (H, W) float32 – reference frame [0, 255].
+    comp_gray : ndarray (H, W) float32 – comparison frame [0, 255].
+    pyr_scale : float – pyramid scale factor (default 0.5).
+    num_levels: int   – number of pyramid levels (default 3).
+    win_size  : int   – smoothing window size (default 15).
+    num_iters : int   – iterations per pyramid level (default 3).
+    poly_n    : int   – polynomial expansion neighborhood (default 5).
+    poly_sigma: float – polynomial expansion sigma (default 1.2).
+    flags     : int   – reserved.
+    flow_init : ndarray (H,W,2) or TaichiGPUBuffer – optional initial flow.
+    return_gpu: bool  – if True, return TaichiGPUBuffer; else np.ndarray.
+
+    Returns
+    -------
+    flow : (H, W, 2) float32 – flow field where flow[:,:,0]=dx, flow[:,:,1]=dy.
+    """
+    # A resident reference pyramid is caller-owned and may be reused across
+    # the whole burst.  When it is valid, avoid both the full-resolution
+    # reference upload and all reference downsample dispatches.
+    h_orig, w_orig = (int(ref_gray.shape[0]), int(ref_gray.shape[1]))
+    cached_ref_pyr = _validated_farneback_reference_pyramid(
+        reference_pyramid, (h_orig, w_orig), num_levels
+    )
+    ref_buf = cached_ref_pyr[0] if cached_ref_pyr is not None else InputArray(ref_gray)
+    comp_buf = InputArray(comp_gray)
+    ref_owned = cached_ref_pyr is None and not hasattr(ref_gray, "handle")
+    comp_owned = not hasattr(comp_gray, "handle")
+
+    # Build pyramids
+    downscale_factor = 1.0 / pyr_scale
+    if not np.isclose(downscale_factor, 2.0):
+        raise ValueError("AOT Farneback currently requires pyr_scale=0.5")
+
+    from taichi_vision.taichi_algorithm.pyramid.pyramid import build_image_pyramid_gpu
+
+    ref_pyr = cached_ref_pyr
+    if ref_pyr is None:
+        ref_pyr = build_image_pyramid_gpu(
+            ref_buf, n_levels=max(1, int(num_levels)), min_size=32
+        )
+    comp_pyr = build_image_pyramid_gpu(
+        comp_buf, n_levels=max(1, int(num_levels)), min_size=32
+    )
+    actual_levels = len(ref_pyr)
+
+    mod = _mod("farneback_flow")
+    if mod is None:
+        raise RuntimeError("farneback_flow TCM not found in aot_tcm/")
+
+    # Pre-compute constants once per configuration and retain their GPU
+    # descriptors across frames in the burst.
+    constants = _get_farneback_constant_bundle(poly_n, poly_sigma, win_size)
+    g_w, xg_w, xxg_w, ig11, ig03, ig33, ig55 = constants["gaussian"]
+    smooth_w, smooth_radius = constants["smooth"]
+    poly_weights_gpu, smooth_gpu = constants["gpu"]
+    poly_radius = poly_n // 2
+
+    # Coarse-to-fine
+    prev_flow = None
+    for lvl in range(actual_levels - 1, -1, -1):
+        ref_lvl = ref_pyr[lvl]
+        comp_lvl = comp_pyr[lvl]
+        flow_buf = _run_farneback_level(
+            mod,
+            ref_lvl,
+            comp_lvl,
+            prev_flow,
+            num_iters,
+            poly_weights_gpu,
+            ig11,
+            ig03,
+            ig33,
+            ig55,
+            poly_radius,
+            smooth_gpu,
+            smooth_radius,
+        )
 
         if prev_flow is not None and lvl < actual_levels - 1:
-            prev_flow.destroy()
+            _destroy_flow_buffer(prev_flow)
         prev_flow = flow_buf
 
     engine.sync()
     result = prev_flow
 
-    # Cleanup pyramid buffers (except level 0 which shares ref/comp_buf)
-    for lvl_buf in ref_pyr[1:]:
-        lvl_buf.destroy()
+    # Cleanup pyramid buffers (except a caller-owned reference pyramid).
+    if cached_ref_pyr is None:
+        for lvl_buf in ref_pyr[1:]:
+            _destroy_flow_buffer(lvl_buf)
     for lvl_buf in comp_pyr[1:]:
-        lvl_buf.destroy()
-    for buf in (poly_weights_gpu, smooth_gpu):
-        if buf is not None:
-            try:
-                buf.destroy()
-            except Exception:
-                pass
+        _destroy_flow_buffer(lvl_buf)
+    if return_gpu:
+        # The caller owns the final resident result.  Input and temporary
+        # buffers can be retired immediately after the synchronization above.
+        if ref_owned:
+            _destroy_flow_buffer(ref_buf)
+        if comp_owned:
+            _destroy_flow_buffer(comp_buf)
+        return result
 
-    return result if return_gpu else result.to_numpy()
+    result_np = result.to_numpy()
+    _destroy_flow_buffer(result)
+    if ref_owned:
+        _destroy_flow_buffer(ref_buf)
+    if comp_owned:
+        _destroy_flow_buffer(comp_buf)
+    return result_np
 
 
 # ===========================================================================

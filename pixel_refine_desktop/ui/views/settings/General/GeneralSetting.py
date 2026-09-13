@@ -1,7 +1,7 @@
 import os
 from contextlib import contextmanager
 
-from PySide6.QtWidgets import QWidget, QMessageBox, QComboBox, QVBoxLayout, QBoxLayout
+from PySide6.QtWidgets import QWidget, QComboBox, QBoxLayout
 from PySide6.QtCore import Qt, QObject, QThread, Signal
 
 from resources.GenericUILibrary import (
@@ -20,7 +20,6 @@ from .helpers import restart_application
 from taichi_vision.device_selection import (
     is_translation_device,
     make_device_selector,
-    resolve_device_selector,
     scan_cuda_device_records,
     scan_vulkan_device_records,
 )
@@ -473,9 +472,7 @@ class HardwareBackendTestWorker(QObject):
                     )
                     if renderer_match:
                         renderer = next(
-                            group.strip()
-                            for group in renderer_match.groups()
-                            if group
+                            group.strip() for group in renderer_match.groups() if group
                         )
                     else:
                         mismatch = re.search(
@@ -663,12 +660,18 @@ class GeneralSettingsPage(Container, SyncMixin):
         # Languages
         languages = ["English", "Indonesian", "China Traditional", "Melayu"]
         lang_label = getattr(language_config, "LANGUAGE_LABEL", "Language:")
+        lang_tip = getattr(
+            language_config,
+            "LANGUAGE_DROPDOWN_TIP",
+            "Select the display language for the application interface.",
+        )
 
         # Use FormGroup as requested
         self.language_group = FormGroup(label=lang_label, input_type="select")
 
         if isinstance(self.language_group.input, QComboBox):
             self.language_group.input.addItems(languages)
+            self.language_group.input.setToolTip(lang_tip)
 
         # We don't use auto_sync for language because we want to control the restart prompt
         self.language_group.bind_store(self.store, "language")
@@ -740,13 +743,9 @@ class GeneralSettingsPage(Container, SyncMixin):
             auto_sync=True,
         )
         self.auto_shutdown_minutes_group.input.setRange(1, 24 * 60)
-        self.auto_shutdown_minutes_group.bind_store(
-            self.store, "auto_shutdown_minutes"
-        )
+        self.auto_shutdown_minutes_group.bind_store(self.store, "auto_shutdown_minutes")
         form.add_row(self.auto_shutdown_minutes_group)
-        self._update_auto_shutdown_timeout_state(
-            self.auto_shutdown_cb.is_checked()
-        )
+        self._update_auto_shutdown_timeout_state(self.auto_shutdown_cb.is_checked())
 
         self.add_widget(form)
         self.add_stretch()
@@ -768,7 +767,8 @@ class GeneralSettingsPage(Container, SyncMixin):
 
     def retranslate_ui(self):
         """Dynamically update all UI labels when the language is changed."""
-        language_config.reload_language()
+        saved_lang = self.store.get("language") if hasattr(self, "store") else None
+        language_config.reload_language(saved_lang)
 
         # Try to update parent tab text
         parent_tab = self.parentWidget()
@@ -794,6 +794,13 @@ class GeneralSettingsPage(Container, SyncMixin):
         # Update labels and tooltips
         lang_label = getattr(language_config, "LANGUAGE_LABEL", "Language:")
         self.language_group.label.setText(lang_label)
+        self.language_group.input.setToolTip(
+            getattr(
+                language_config,
+                "LANGUAGE_DROPDOWN_TIP",
+                "Select the display language for the application interface.",
+            )
+        )
 
         self.processing_format_group.label.setText(
             getattr(language_config, "PROCESS_FORMAT_LABEL", "Process Format")
@@ -899,7 +906,8 @@ class GeneralSettingsPage(Container, SyncMixin):
 
             # Filter out translation adapters (Dozen/D3D12)
             native_vk = [
-                r for r in vk_records
+                r
+                for r in vk_records
                 if not r.get("translation") and not is_translation_device(r)
             ]
 
@@ -952,7 +960,8 @@ class GeneralSettingsPage(Container, SyncMixin):
                     if vendor == "nvidia" and cuda_records:
                         matching_cuda = next(
                             (
-                                c for c in cuda_records
+                                c
+                                for c in cuda_records
                                 if c.get("name", "").lower() in dev_name.lower()
                                 or dev_name.lower() in c.get("name", "").lower()
                             ),
@@ -1006,7 +1015,9 @@ class GeneralSettingsPage(Container, SyncMixin):
             self.store.set("device_backend_key", exact_text["key"])
             self.store.set("device_backend_arch", exact_text.get("backend", "cpu"))
             self.store.set("device_backend_id", exact_text.get("device_id", -1))
-            self.store.set("device_fallback_chain", exact_text.get("fallback_chain", ["cpu"]))
+            self.store.set(
+                "device_fallback_chain", exact_text.get("fallback_chain", ["cpu"])
+            )
             return
 
         # 2. Key match
@@ -1018,15 +1029,21 @@ class GeneralSettingsPage(Container, SyncMixin):
             self.store.set("device_backend", exact_key["text"])
             self.store.set("device_backend_arch", exact_key.get("backend", "cpu"))
             self.store.set("device_backend_id", exact_key.get("device_id", -1))
-            self.store.set("device_fallback_chain", exact_key.get("fallback_chain", ["cpu"]))
+            self.store.set(
+                "device_fallback_chain", exact_key.get("fallback_chain", ["cpu"])
+            )
             return
 
         # 3. Fuzzy migration from legacy strings (e.g. "Intel(R) UHD Graphics 620 — Vulkan")
         legacy = saved_text.lower()
         if "intel" in legacy or "uhd" in legacy or "iris" in legacy:
-            target_opt = next((opt for opt in options if opt.get("vendor") == "intel"), None)
+            target_opt = next(
+                (opt for opt in options if opt.get("vendor") == "intel"), None
+            )
         elif "nvidia" in legacy or "geforce" in legacy or "mx150" in legacy:
-            target_opt = next((opt for opt in options if opt.get("vendor") == "nvidia"), None)
+            target_opt = next(
+                (opt for opt in options if opt.get("vendor") == "nvidia"), None
+            )
         elif "cpu" in legacy:
             target_opt = options[0]
         else:
@@ -1039,7 +1056,9 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.store.set("device_backend_key", target_opt["key"])
         self.store.set("device_backend_arch", target_opt.get("backend", "cpu"))
         self.store.set("device_backend_id", target_opt.get("device_id", -1))
-        self.store.set("device_fallback_chain", target_opt.get("fallback_chain", ["cpu"]))
+        self.store.set(
+            "device_fallback_chain", target_opt.get("fallback_chain", ["cpu"])
+        )
         if "device_selector" in target_opt:
             self.store.set("device_selector", target_opt["device_selector"])
 
@@ -1055,7 +1074,11 @@ class GeneralSettingsPage(Container, SyncMixin):
         text = self.device_group.input.currentText()
         return {
             "text": text,
-            "backend": "cpu" if "cpu" in text.lower() else ("cuda" if "nvidia" in text.lower() else "vulkan"),
+            "backend": (
+                "cpu"
+                if "cpu" in text.lower()
+                else ("cuda" if "nvidia" in text.lower() else "vulkan")
+            ),
             "device_id": -1 if "cpu" in text.lower() else 0,
         }
 
@@ -1066,7 +1089,11 @@ class GeneralSettingsPage(Container, SyncMixin):
             return
 
         import os
-        from taichi_vision.backend_config import normalize_backend, BackendConfig, backend_env
+        from taichi_vision.backend_config import (
+            normalize_backend,
+            BackendConfig,
+            backend_env,
+        )
 
         backend = normalize_backend(option.get("backend", "cpu"), allow_auto=False)
         device_id = int(option.get("device_id", -1))
@@ -1124,7 +1151,9 @@ class GeneralSettingsPage(Container, SyncMixin):
         os.environ["AOT_ARCH"] = active_backend
         os.environ["AOT_DEVICE"] = str(active_device_id if active_device_id >= 0 else 0)
         os.environ["PIXEL_REFINE_AOT_AUTO_FALLBACK"] = "1" if auto_fallback else "0"
-        os.environ["PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK"] = "1" if auto_fallback else "0"
+        os.environ["PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK"] = (
+            "1" if auto_fallback else "0"
+        )
         if not auto_fallback:
             os.environ["AOT_STRICT_BACKEND"] = "1"
         else:
@@ -1148,8 +1177,11 @@ class GeneralSettingsPage(Container, SyncMixin):
         if vendor == "intel" or "opengl" in fallback_chain:
             try:
                 import glob
+
                 base_repo = r"C:\WINDOWS\system32\DriverStore\FileRepository"
-                for icd_cand in glob.glob(os.path.join(base_repo, "*iigd_dch*", "ig9icd64.dll")):
+                for icd_cand in glob.glob(
+                    os.path.join(base_repo, "*iigd_dch*", "ig9icd64.dll")
+                ):
                     if os.path.exists(icd_cand):
                         os.environ["PIXEL_REFINE_OPENGL_ICD_LIBRARY"] = icd_cand
                         break
@@ -1177,7 +1209,10 @@ class GeneralSettingsPage(Container, SyncMixin):
                 continue
             vendor = str(data.get("vendor", "")).lower()
             raw_name = str(data.get("raw_name", "") or data.get("text", ""))
-            fingerprint = str((data.get("device_selector") or {}).get("fingerprint") or data.get("key", ""))
+            fingerprint = str(
+                (data.get("device_selector") or {}).get("fingerprint")
+                or data.get("key", "")
+            )
             vk_id = data.get("vulkan_device_id", data.get("device_id", 0))
             cuda_id = data.get("cuda_device_id", 0)
 
@@ -1322,7 +1357,9 @@ class GeneralSettingsPage(Container, SyncMixin):
                 int(self.auto_shutdown_minutes_group.get_value()),
             )
 
-        if hasattr(self, "device_group") and isinstance(self.device_group.input, QComboBox):
+        if hasattr(self, "device_group") and isinstance(
+            self.device_group.input, QComboBox
+        ):
             self._apply_selected_backend_to_process()
 
         if hasattr(self.store, "save_to_file"):
@@ -1362,7 +1399,9 @@ class GeneralSettingsPage(Container, SyncMixin):
             dialog = modal_confirm(
                 language_config.MSG_BACKEND_EXIT_REQUIRED, self.window()
             )
-            dialog.title_text.setText(language_config.EXIT_APPLICATION_APPLY_BACKEND_TITLE)
+            dialog.title_text.setText(
+                language_config.EXIT_APPLICATION_APPLY_BACKEND_TITLE
+            )
             dialog.yes_button.setText(language_config.EXIT_APPLICATION_YES)
             dialog.no_button.setText(language_config.EXIT_APPLICATION_NO)
 
@@ -1469,7 +1508,10 @@ class GeneralSettingsPage(Container, SyncMixin):
         import sys
         import os
         from config import PYTHON_INTERPRETER
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", ".."))
+
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "..")
+        )
         llvm20_python = os.path.join(project_root, "venv", "Scripts", "python.exe")
         if os.path.isfile(llvm20_python):
             # Hardware probes must use the same LLVM20 interpreter as the
@@ -1479,7 +1521,9 @@ class GeneralSettingsPage(Container, SyncMixin):
         else:
             configured_python = os.path.abspath(str(PYTHON_INTERPRETER))
             python_bin = (
-                configured_python if os.path.exists(configured_python) else sys.executable
+                configured_python
+                if os.path.exists(configured_python)
+                else sys.executable
             )
         options = self._get_backend_test_options()
         if not options:
@@ -1501,7 +1545,11 @@ class GeneralSettingsPage(Container, SyncMixin):
         # (rather than hiding it) so users understand that it is intentional.
         chooser.no_button.setEnabled(False)
         chooser.no_button.setToolTip(
-            "Deep analysis is temporarily disabled while backend stability is being improved."
+            getattr(
+                language_config,
+                "MSG_HARDWARE_TEST_DEEP_DISABLED",
+                "Deep analysis is temporarily disabled while backend stability is being improved.",
+            )
         )
 
         chosen_mode = [None]

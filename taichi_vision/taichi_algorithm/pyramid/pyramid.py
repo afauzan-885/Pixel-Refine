@@ -201,8 +201,121 @@ def build_image_pyramid_gpu(
         buffer_provider: "pool" or "new".
     """
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_vision import taichi_aot
-        return taichi_aot.image_pyramid(image_gpu, levels=n_levels, return_gpu=True)
+        # ``taichi_aot.image_pyramid`` exposes the deepest level for its
+        # single-output API.  Optical-flow callers need every resident level,
+        # so dispatch the same native pyramid TCM graph while retaining L0,
+        # L1, ... as owned GPU buffers.
+        from taichi_vision.taichi_aot import get_engine
+        from taichi_vision.taichi_algorithm.aot_api import (
+            aot_graph_available,
+            _resolve_pyramid_graph_module,
+            _run_auto_graph_sequence,
+        )
+
+        engine = get_engine()
+        pyramid = [image_gpu]
+        is_3d = len(image_gpu.shape) == 3
+        graph = "downsample_2x_3ch_f32" if is_3d else "downsample_2x_f32"
+        pyramid_module, module_key = _resolve_pyramid_graph_module(graph)
+        vector_dim = int(image_gpu.shape[2]) if is_3d else 1
+        dispatches = []
+
+        for _ in range(max(0, int(n_levels) - 1)):
+            prev = pyramid[-1]
+            h_prev, w_prev = prev.shape[:2]
+            h_next, w_next = h_prev // 2, w_prev // 2
+            if h_next < min_size or w_next < min_size:
+                break
+
+            dst_shape = (
+                (h_next, w_next, vector_dim) if is_3d else (h_next, w_next)
+            )
+            dst = engine.allocate(
+                dst_shape,
+                dtype=prev.dtype,
+                is_vector=is_3d,
+                vector_dim=vector_dim,
+            )
+            prev_view = (
+                prev.view_as_vector(False)
+                if is_3d and getattr(prev, "is_vector", False)
+                else prev
+            )
+            dst_view = (
+                dst.view_as_vector(False)
+                if is_3d and getattr(dst, "is_vector", False)
+                else dst
+            )
+            dispatches.append((prev_view, dst_view))
+            pyramid.append(dst)
+
+        if dispatches:
+            # OFB contains fixed-length native chain graphs for the common
+            # 3- and 4-level pyramids.  Submit the whole chain directly when
+            # available; unlike the generic recorder this creates no
+            # per-call graph and preserves the exact dispatch ordering.
+            chain_graph = None
+            # CUDA benefits materially from a precompiled chain because the
+            # driver launch/recorder overhead is visible on small pyramid
+            # levels.  Vulkan/OpenGL/CPU measurements show that their direct
+            # dispatch path is already cheaper than a multi-argument chain,
+            # so keep those backends on the normal per-level submission.
+            use_chain = str(getattr(engine, "arch", "")).lower() == "cuda"
+            if use_chain and module_key == "ofb" and len(dispatches) in (2, 3):
+                suffix = "3ch_f32" if is_3d else "f32"
+                candidate = f"pyramid_chain_{len(dispatches)}_{suffix}"
+                if aot_graph_available("ofb", candidate):
+                    chain_graph = candidate
+
+            if chain_graph is not None:
+                chain_kwargs = {"src": dispatches[0][0]}
+                for level_index in range(1, len(dispatches)):
+                    intermediate = dispatches[level_index - 1][1]
+                    # The chain graph exposes separate producer/consumer
+                    # arguments for each intermediate to avoid compile-time
+                    # shape unification.  Both names intentionally bind to
+                    # the same resident buffer.
+                    chain_kwargs[f"level_{level_index}_out"] = intermediate
+                    chain_kwargs[f"level_{level_index}_in"] = intermediate
+                chain_kwargs["dst"] = dispatches[-1][1]
+                pyramid_module.run(chain_graph, **chain_kwargs)
+                return pyramid
+
+            def _dispatch_pyramid_levels():
+                for src_view, dst in dispatches:
+                    pyramid_module.run(graph, src=src_view, dst=dst)
+
+            if module_key == "ofb" and not use_chain:
+                for src_view, dst in dispatches:
+                    pyramid_module.run(graph, src=src_view, dst=dst)
+                return pyramid
+
+            # All graphs live in the same bundle when available.  The
+            # automatic recorder keeps the ordered sequence device-resident,
+            # reducing Python/bridge launches while retaining a direct
+            # same-backend fallback when the driver or memory governor rejects
+            # recording.  ``shape_policy=transform`` is required because each
+            # level intentionally changes dimensions.
+            _run_auto_graph_sequence(
+                (graph,) * len(dispatches),
+                tuple(int(value) for value in image_gpu.shape),
+                _dispatch_pyramid_levels,
+                operation="ofb_pyramid" if module_key == "ofb" else "image_pyramid",
+                source=f"{module_key}_pyramid_levels",
+                resident_multiplier=2,
+                reads=("pyramid_input",),
+                writes=("pyramid_levels",),
+                metadata={
+                    "sequence_kind": "deterministic_local_prefix",
+                    "hazard_policy": "ordered",
+                    "shape_policy": "transform",
+                    "allow_shape_change": True,
+                },
+                module_keys=(module_key,) * len(dispatches),
+                retain_buffers=tuple(pyramid),
+            )
+
+        return pyramid
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")

@@ -485,106 +485,54 @@ class DatabaseManager:
         except sqlite3.Error as e:
             print(f"Error getting images for batch ID {batch_id}: {e}")
             return []
-    # --- 4. Single Process Operations --- (Tidak ada perubahan di bagian ini)
+    def get_or_create_default_batch_id(self):
+        """
+        Ensures at least one batch exists in 'batch_process' and returns its ID.
+        If no batches exist, creates 'Batch 1'.
+        """
+        all_ids = self.get_all_batch_ids()
+        if all_ids:
+            return all_ids[0]
+        return self.create_new_batch("Batch 1")
+
+    # --- 4. Single Process Operations (Redirected to Batch Mode for 100% Batch Architecture) ---
 
     # --- 4.a Single Process Modification ---
     def single_process_save_image_path(self, image_path):
-        sql_check_link = "SELECT 1 FROM single_process_image WHERE image_id_single = ?"
-        sql_insert_link = "INSERT INTO single_process_image (image_id_single, is_reference) VALUES (?, ?)"
-        sql_count_single = "SELECT COUNT(*) FROM single_process_image"
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                try:
-                    image_id = self._get_or_create_image_id(cursor, image_path)
-                    if not image_id:
-                        raise Exception(
-                            f"Failed to get or create image ID for {image_path}"
-                        )
-                    cursor.execute(sql_check_link, (image_id,))
-                    if cursor.fetchone():
-                        conn.commit()
-                        return False
-                    cursor.execute(sql_count_single)
-                    count = cursor.fetchone()[0]
-                    is_first = count == 0
-                    reference_flag = 1 if is_first else 0
-                    cursor.execute(sql_insert_link, (image_id, reference_flag))
-                    conn.commit()
-                    return True
-                except sqlite3.IntegrityError:
-                    conn.rollback()
-                    return False
-                except Exception:
-                    conn.rollback()
-                    return False
-        except sqlite3.Error:
+        """
+        Redirected to batch_process_save_image_path using the default/active batch.
+        Guarantees all imported images land in batch_process_image.
+        """
+        batch_id = self.get_or_create_default_batch_id()
+        if not batch_id:
             return False
+        # Save to batch_process_image
+        added = self.batch_process_save_image_path(batch_id, [image_path])
+        return added > 0
 
     def single_process_delete_path_images(self, image_paths):
-        # Optimasi ringan: Bulk delete untuk single process juga
-        if not image_paths:
+        """
+        Redirected to batch delete using default/active batch.
+        """
+        batch_id = self.get_or_create_default_batch_id()
+        if not batch_id or not image_paths:
             return 0
-        placeholders = ",".join("?" * len(image_paths))
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                sql_get = f"SELECT spi.image_id_single, spi.is_reference FROM single_process_image spi JOIN images i ON spi.image_id_single = i.id WHERE i.path IN ({placeholders})"
-                cursor.execute(sql_get, image_paths)
-                rows = cursor.fetchall()
-                if not rows:
-                    return 0
-
-                ids = [r[0] for r in rows]
-                ref_del = any(r[1] == 1 for r in rows)
-
-                pl_del = ",".join("?" * len(ids))
-                cursor.execute(
-                    f"DELETE FROM single_process_image WHERE image_id_single IN ({pl_del})",
-                    ids,
-                )
-                cnt = cursor.rowcount
-
-                if ref_del:
-                    cursor.execute(
-                        "UPDATE single_process_image SET is_reference = 1 WHERE id = (SELECT id FROM single_process_image ORDER BY id LIMIT 1)"
-                    )
-
-                conn.commit()
-                return cnt
-        except sqlite3.Error:
-            return -1
+        return self.batch_process_delete_selected_images(batch_id, image_paths)
 
     # --- 4.b Single Process Retrieval ---
     def get_single_process_image_paths(self):
-        sql = """
-            SELECT i.path
-            FROM images i
-            JOIN single_process_image spi ON i.id = spi.image_id_single
-            ORDER BY spi.is_reference DESC, i.path ASC
         """
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(sql)
-                return [row[0] for row in cursor.fetchall()]
-        except sqlite3.Error as e:
-            print(f"Error retrieving single process image paths: {e}")
+        Redirected to return images of the default/active batch.
+        """
+        batch_id = self.get_or_create_default_batch_id()
+        if not batch_id:
             return []
+        return self.get_images_by_batch(batch_id)
 
     def get_single_process_reference_image(self):
-        sql = """
-            SELECT i.path
-            FROM images i
-            JOIN single_process_image spi ON i.id = spi.image_id_single
-            WHERE spi.is_reference = 1 LIMIT 1
         """
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(sql)
-                result = cursor.fetchone()
-                return result[0] if result else None
-        except sqlite3.Error as e:
-            print(f"Error retrieving single process reference image: {e}")
-            return None
+        Redirected to return the reference image of the default/active batch.
+        """
+        paths = self.get_single_process_image_paths()
+        return paths[0] if paths else None
+

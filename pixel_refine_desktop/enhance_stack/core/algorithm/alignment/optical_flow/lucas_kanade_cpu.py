@@ -1,6 +1,5 @@
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -17,39 +16,62 @@ DEFAULT_LUCAS_KANADE_CONFIG = {
 
 LUCAS_KANADE_CPU_PRESETS = {
     "fast": {
-        "grid_step": 24,
+        # Sparse sampling and one fewer pyramid level keep latency bounded.
+        "grid_step": 32,
         "border_margin": 8,
         "point_workers": 2,
-        "win_size": 15,
-        "max_level": 2,
-        "iterations": 12,
-        "epsilon": 0.02,
+        "win_size": 13,
+        "max_level": 1,
+        "iterations": 8,
+        "epsilon": 0.04,
+        "overlap": 0.15,
+        "dense_mode": "blocky_clamped",
+        "adaptive": False,
+        "adaptive_threshold": 1,
+        "max_flow_px": 32.0,
         "use_multi_core": True,
-        "tile_overlap": 0.20,
+        "tile_overlap": 0.15,
     },
-    "medium": {
-        "grid_step": 16,
+    "balance": {
+        # Production trade-off: denser samples and smooth interpolation.
+        "grid_step": 20,
         "border_margin": 8,
         "point_workers": 2,
         "win_size": 17,
         "max_level": 2,
-        "iterations": 18,
+        "iterations": 16,
         "epsilon": 0.015,
+        "overlap": 0.25,
+        "dense_mode": "smooth",
+        "adaptive": False,
+        "adaptive_threshold": 1,
+        "max_flow_px": 64.0,
         "use_multi_core": True,
         "tile_overlap": 0.20,
     },
     "high": {
+        # High is materially denser/more iterative and enables adaptive
+        # refinement for difficult low-texture and parallax regions.
         "grid_step": 12,
         "border_margin": 8,
-        "point_workers": 3,
-        "win_size": 21,
+        "point_workers": 4,
+        "win_size": 25,
         "max_level": 3,
-        "iterations": 24,
-        "epsilon": 0.01,
+        "iterations": 32,
+        "epsilon": 0.005,
+        "overlap": 0.35,
+        "dense_mode": "smooth",
+        "adaptive": True,
+        "adaptive_threshold": 1,
+        "max_flow_px": 128.0,
         "use_multi_core": True,
-        "tile_overlap": 0.25,
+        "tile_overlap": 0.30,
     },
 }
+
+# Historical configurations may still contain ``medium``; keep it as an
+# alias while exposing fast/balance/high as the canonical UI choices.
+LUCAS_KANADE_CPU_PRESETS["medium"] = LUCAS_KANADE_CPU_PRESETS["balance"]
 
 
 class LucasKanadeCPU:
@@ -60,8 +82,8 @@ class LucasKanadeCPU:
     @staticmethod
     def _normalize_mode(mode):
         value = str(mode or "fast").strip().lower()
-        if value in ("balanced", "balance", "normal"):
-            return "medium"
+        if value in ("balanced", "balance", "normal", "medium"):
+            return "balance"
         if value not in LUCAS_KANADE_CPU_PRESETS:
             return "fast"
         return value
@@ -113,6 +135,7 @@ class LucasKanadeCPU:
     def calculate_flow(self, reference_gray, target_gray, config, point_executor=None):
         """Run the full-frame Taichi AOT Lucas-Kanade implementation."""
         from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
+
         win_size = max(5, int(config.get("win_size", 17)))
         if win_size % 2 == 0:
             win_size += 1
@@ -121,9 +144,18 @@ class LucasKanadeCPU:
             np.ascontiguousarray(target_gray),
             winSize=(win_size, win_size),
             maxLevel=max(0, int(config.get("max_level", 2))),
+            criteria=(
+                3,
+                max(1, int(config.get("iterations", 8))),
+                float(config.get("epsilon", 0.03)),
+            ),
             grid_step=max(4, int(config.get("grid_step", 16))),
             border_margin=max(0, int(config.get("border_margin", 8))),
-            motion_mode=str(config.get("motion_mode", "fast")),
+            overlap=float(config.get("overlap", 0.35)),
+            adaptive=bool(config.get("adaptive", False)),
+            adaptive_threshold=max(1, int(config.get("adaptive_threshold", 1))),
+            motion_mode=str(config.get("motion_mode") or "fast"),
+            dense_mode=str(config.get("dense_mode") or "smooth"),
             max_flow_px=float(config.get("max_flow_px", 0.0)),
         )
         if isinstance(flow, tuple):
@@ -131,7 +163,9 @@ class LucasKanadeCPU:
         flow = np.asarray(flow, dtype=np.float32)
         expected = (*reference_gray.shape[:2], 2)
         if flow.shape != expected or not np.isfinite(flow).all():
-            raise RuntimeError(f"Taichi Lucas-Kanade returned invalid flow: {flow.shape}, expected {expected}")
+            raise RuntimeError(
+                f"Taichi Lucas-Kanade returned invalid flow: {flow.shape}, expected {expected}"
+            )
         return np.ascontiguousarray(flow)
 
     def _make_grid_points(self, width, height, config):
@@ -178,11 +212,14 @@ class LucasKanadeCPU:
 
         def box_blur(array):
             padded = np.pad(array, ((1, 1), (1, 1)), mode="edge")
-            return sum(
-                padded[dy : dy + array.shape[0], dx : dx + array.shape[1]]
-                for dy in range(3)
-                for dx in range(3)
-            ) / 9.0
+            return (
+                sum(
+                    padded[dy : dy + array.shape[0], dx : dx + array.shape[1]]
+                    for dy in range(3)
+                    for dx in range(3)
+                )
+                / 9.0
+            )
 
         for _ in range(64):
             missing = valid <= 0

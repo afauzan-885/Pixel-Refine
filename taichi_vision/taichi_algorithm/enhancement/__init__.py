@@ -10,8 +10,6 @@ from .auto_enhance import (
 )
 from .estimate_noise import (
     estimate_noise,
-    estimate_noise_gpu,
-    estimate_noise_numpy,
 )
 
 __all__ = [
@@ -20,6 +18,4 @@ __all__ = [
     "apply_auto_enhance_np",
     "DEFAULT_AUTO_ENHANCE_PARAMS",
     "estimate_noise",
-    "estimate_noise_gpu",
-    "estimate_noise_numpy",
 ]

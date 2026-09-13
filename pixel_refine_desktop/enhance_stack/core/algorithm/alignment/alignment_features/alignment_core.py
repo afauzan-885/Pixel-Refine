@@ -1096,18 +1096,52 @@ def perform_alignment_gpu(
                     (h_w // 4, w_w // 4, 2), dtype=np.float32, is_vector=False
                 )
 
-            def _refresh_frame_flow_buffers():
-                """Allocate flow storage for one frame only.
+            # Flow buffers are fully overwritten by every native alignment
+            # graph.  Reallocating them after each support frame used to make
+            # the retired queue grow steadily during a burst.  Reuse is the
+            # default; setting TAICHI_FLOW_REUSE_BUFFERS=0 restores the old
+            # defensive refresh for drivers with a stale-handle defect.
+            flow_buffer_reuse = os.environ.get(
+                "TAICHI_FLOW_REUSE_BUFFERS", "1"
+            ).strip().lower() not in {"0", "false", "off", "no"}
 
-                The automatic smoothing/remap pipeline may retire a flow
-                wrapper after its native graph sequence completes. Reusing
-                the same wrapper for the next support frame then presents a
-                stale handle to ``align_end_to_end_3layer``. Keep the CUDA
-                runtime shared, but give every frame a fresh flow wrapper.
+            def _flow_buffer_usable(buffer, shape):
+                return bool(
+                    buffer is not None
+                    and getattr(buffer, "handle", None) is not None
+                    and getattr(buffer, "is_owner", False)
+                    and tuple(getattr(buffer, "shape", ())) == tuple(shape)
+                    and getattr(buffer, "engine_generation", getattr(engine, "_generation", 0))
+                    == getattr(engine, "_generation", 0)
+                )
+
+            def _refresh_frame_flow_buffers():
+                """Reuse flow storage, reallocating only after invalidation.
+
+                All callers fence the previous graph before entering the next
+                frame.  Therefore a live, same-generation buffer is safe to
+                overwrite and does not need to pass through the retired queue.
                 """
 
                 nonlocal flow_l0, flow_l1, flow_l2
                 nonlocal flow_temp_l0, flow_temp_l1, flow_temp_l2
+                if flow_buffer_reuse:
+                    flow_shapes = (
+                        ((h_w, w_w, 2), flow_l0),
+                        ((h_w // 2, w_w // 2, 2), flow_l1),
+                        ((h_w // 4, w_w // 4, 2), flow_l2),
+                    )
+                    if all(_flow_buffer_usable(buf, shape) for shape, buf in flow_shapes):
+                        if flow_backend != "horn_schunck" or all(
+                            _flow_buffer_usable(buf, shape)
+                            for shape, buf in (
+                                ((h_w, w_w, 2), flow_temp_l0),
+                                ((h_w // 2, w_w // 2, 2), flow_temp_l1),
+                                ((h_w // 4, w_w // 4, 2), flow_temp_l2),
+                            )
+                        ):
+                            return
+
                 for buffer in (
                     flow_l0,
                     flow_l1,
@@ -1266,9 +1300,8 @@ def perform_alignment_gpu(
                     if stop_requested and stop_requested():
                         break
 
-                    # Refresh after every completed frame. The first set was
-                    # allocated above; subsequent frames must not reuse a
-                    # wrapper that a previous smoothing/remap graph retired.
+                    # Refresh only if a previous graph invalidated a flow
+                    # handle.  Normal frames reuse the fixed allocations.
                     if i > 1:
                         _refresh_frame_flow_buffers()
 
@@ -2073,7 +2106,11 @@ def perform_image_alignment(
         try:
             # Menggunakan referensi grayscale yang sudah dipreprocess
             # Tetapi Farneback butuh uint8 0-255 biasanya lebih robust
-            ref_gray_8u = np.clip(ref_preprocessed_cpp * 255.0, 0, 255).astype(np.uint8)
+            ref_gray_8u = (
+                ta_aot.cast(ref_preprocessed_cpp, np.uint8)
+                if ta_aot is not None
+                else np.clip(ref_preprocessed_cpp * 255.0, 0, 255).astype(np.uint8)
+            )
 
             def process_single_alignment_farneback(
                 i,
@@ -2099,8 +2136,10 @@ def perform_image_alignment(
                     # [MODIFIED] Menggunakan preprocess_in_python (CPU)
                     current_preproc, _ = preprocess_in_python(current_img_float)
 
-                current_gray_8u = np.clip(current_preproc * 255.0, 0, 255).astype(
-                    np.uint8
+                current_gray_8u = (
+                    ta_aot.cast(current_preproc, np.uint8)
+                    if ta_aot is not None
+                    else np.clip(current_preproc * 255.0, 0, 255).astype(np.uint8)
                 )
 
                 # Ensure same size (just in case)

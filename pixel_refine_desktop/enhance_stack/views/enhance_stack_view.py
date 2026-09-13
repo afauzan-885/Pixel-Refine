@@ -268,7 +268,10 @@ class EnhanceStackView(WorkspaceView):
             # Selection restoration can normalize persisted settings; capture
             # the clean baseline only after that synchronization is complete.
             self._project_baseline_token = session_state_token(self.db_path)
+            from resources.GenericUILibrary import trigger_live_update
+            QTimer.singleShot(0, trigger_live_update)
             self._show_project_loaded_modal(result)
+            QTimer.singleShot(0, trigger_live_update)
         except Exception as exc:
             QMessageBox.critical(self, "Project Error", str(exc))
             return False

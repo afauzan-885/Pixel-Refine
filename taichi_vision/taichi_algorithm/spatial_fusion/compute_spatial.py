@@ -997,6 +997,31 @@ def mean_division_vec3_weight_kernel(
 
 
 @ti.kernel
+def mean_division_vec3_scalar_weight_kernel(
+    sum_img: ti.types.ndarray(),
+    sum_weight: ti.types.ndarray(),
+    ref_img: ti.types.ndarray(),
+    dst: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+):
+    """Normalize RGB sums using one scalar weight per pixel.
+
+    SpatialFusion produces a luma-only 2D weight map.  Keeping that map
+    scalar avoids the historical device->host->device broadcast to HWC3;
+    the arithmetic is identical because the same denominator is used for
+    every channel.
+    """
+    for i, j in ti.ndrange(h, w):
+        w_sum = sum_weight[i, j]
+        for c in ti.static(range(3)):
+            if w_sum > 1e-8:
+                dst[i, j, c] = sum_img[i, j, c] / w_sum
+            else:
+                dst[i, j, c] = ref_img[i, j, c]
+
+
+@ti.kernel
 def normalize_accumulator_scalar_region_kernel(
     sum_img: ti.types.ndarray(),
     sum_weight: ti.types.ndarray(),
@@ -1618,6 +1643,23 @@ def _compile_graphs(module):
     )
     module.add_graph("mean_division_vec3_weight", g_md_v3.compile())
 
+    sym_sum_weight_md_scalar = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "sum_weight", dtype=ti.f32, ndim=2
+    )
+    g_md_scalar = ti.graph.GraphBuilder()
+    g_md_scalar.dispatch(
+        mean_division_vec3_scalar_weight_kernel,
+        sym_sum_img_md,
+        sym_sum_weight_md_scalar,
+        sym_ref_img_md,
+        sym_dst_md,
+        sym_h_md,
+        sym_w_md,
+    )
+    module.add_graph(
+        "mean_division_vec3_scalar_weight", g_md_scalar.compile()
+    )
+
     # In-place block normalization.  The resident pipeline seeds every lane
     # with reference weight 1, so no separate full-resolution reference/output
     # buffer is required during this terminal pass.
@@ -2216,7 +2258,8 @@ def generate_spatial_weights_taichi(
             estimate_noise,
         )
 
-        noise_sigma = float(estimate_noise(reference_image))
+        noise_score, _ = estimate_noise(reference_image)
+        noise_sigma = float(noise_score)
     else:
         noise_sigma = float(np.clip(noise_sigma, 1e-5, 0.99999))
 
@@ -3434,9 +3477,15 @@ def mean_division_vec3_weight_taichi(
 
     h, w = sum_img.shape[0], sum_img.shape[1]
 
-    if not _tcm_graph_available(tcm_path, "mean_division_vec3_weight"):
+    scalar_weight = len(sum_weight.shape) == 2
+    graph_name = (
+        "mean_division_vec3_scalar_weight"
+        if scalar_weight
+        else "mean_division_vec3_weight"
+    )
+    if not _tcm_graph_available(tcm_path, graph_name):
         raise RuntimeError(
-            "mean_division_vec3_weight requested but the resolved spatial "
+            f"{graph_name} requested but the resolved spatial "
             f"TCM lacks the graph: {tcm_path}. Recompile the spatial TCM for "
             "the active backend (compile_spatial_fusion_tcm)."
         )
@@ -3458,12 +3507,12 @@ def mean_division_vec3_weight_taichi(
         return buf
 
     sum_img_v = _scalar_3d(sum_img)
-    sum_weight_v = _scalar_3d(sum_weight)
+    sum_weight_v = sum_weight if scalar_weight else _scalar_3d(sum_weight)
     ref_img_v = _scalar_3d(ref_img)
     dst_v = _scalar_3d(dst)
 
     mod.run(
-        "mean_division_vec3_weight",
+        graph_name,
         sum_img=sum_img_v,
         sum_weight=sum_weight_v,
         ref_img=ref_img_v,

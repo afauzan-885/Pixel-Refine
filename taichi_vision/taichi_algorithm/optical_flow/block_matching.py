@@ -128,6 +128,79 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
                 sad += ti.abs(diff)
         return sad
 
+    @ti.func
+    def _bm_patch_sad_static(
+        prev: ti.types.ndarray(),
+        next: ti.types.ndarray(),
+        cy: ti.i32,
+        cx: ti.i32,
+        shift_y: ti.i32,
+        shift_x: ti.i32,
+        h: ti.i32,
+        w: ti.i32,
+        win_radius: ti.template(),
+    ) -> ti.f32:
+        """Exact SAD path with a compile-time patch radius.
+
+        The public API still permits arbitrary window sizes through
+        :func:`_bm_patch_sad`.  The shipped BM presets only use radii 6, 7,
+        and 8, however.  Making those loop bounds static lets CUDA unroll the
+        sparse patch without changing samples, traversal order, or rounding.
+        """
+        sad = 0.0
+        half_r = ti.static(win_radius // 2)
+        for oy_i in ti.static(range(-half_r, half_r + 1)):
+            oy = oy_i * 2
+            yy_i = cy + oy
+            for ox_i in ti.static(range(-half_r, half_r + 1)):
+                ox = ox_i * 2
+                xx_i = cx + ox
+                diff = (
+                    _bm_read_i32(next, yy_i + shift_y, xx_i + shift_x, h, w)
+                    - _bm_read_i32(prev, yy_i, xx_i, h, w)
+                )
+                sad += ti.abs(diff)
+        return sad
+
+    @ti.func
+    def _bm_patch_sad_5point_static(
+        prev: ti.types.ndarray(),
+        next: ti.types.ndarray(),
+        cy: ti.i32,
+        cx: ti.i32,
+        fy: ti.i32,
+        fx: ti.i32,
+        h: ti.i32,
+        w: ti.i32,
+        win_radius: ti.template(),
+    ) -> ti.types.vector(5, ti.f32):
+        """Static-radius equivalent of the five-point parabolic stencil."""
+        sad_vec = ti.Vector([0.0, 0.0, 0.0, 0.0, 0.0])
+        half_r = ti.static(win_radius // 2)
+        for oy_i in ti.static(range(-half_r, half_r + 1)):
+            oy = oy_i * 2
+            yy_i = cy + oy
+            for ox_i in ti.static(range(-half_r, half_r + 1)):
+                ox = ox_i * 2
+                xx_i = cx + ox
+                p_val = _bm_read_i32(prev, yy_i, xx_i, h, w)
+                sad_vec[0] += ti.abs(
+                    _bm_read_i32(next, yy_i + fy, xx_i + fx, h, w) - p_val
+                )
+                sad_vec[1] += ti.abs(
+                    _bm_read_i32(next, yy_i + fy, xx_i + fx - 1, h, w) - p_val
+                )
+                sad_vec[2] += ti.abs(
+                    _bm_read_i32(next, yy_i + fy, xx_i + fx + 1, h, w) - p_val
+                )
+                sad_vec[3] += ti.abs(
+                    _bm_read_i32(next, yy_i + fy - 1, xx_i + fx, h, w) - p_val
+                )
+                sad_vec[4] += ti.abs(
+                    _bm_read_i32(next, yy_i + fy + 1, xx_i + fx, h, w) - p_val
+                )
+        return sad_vec
+
     @ti.kernel
     def _bm_grid_track_kernel(
         prev: ti.types.ndarray(),
@@ -273,6 +346,184 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
                 grid_meta[gy, gx, 1] = 1.0
                 grid_meta[gy, gx, 2] = cls
                 grid_meta[gy, gx, 3] = motion2
+
+    @ti.func
+    def _bm_grid_track_static_impl(
+        prev: ti.types.ndarray(),
+        next: ti.types.ndarray(),
+        prev_grid_flow: ti.types.ndarray(),
+        grid_flow: ti.types.ndarray(),
+        grid_meta: ti.types.ndarray(),
+        grid_step: ti.i32,
+        border_margin: ti.i32,
+        has_prev_flow: ti.i32,
+        epsilon: ti.f32,
+        win_radius: ti.template(),
+    ):
+        """Preset-specialized track kernel, numerically identical to BM.
+
+        Keep this implementation deliberately parallel to
+        ``_bm_grid_track_kernel``.  Only the two patch helpers and the
+        compile-time radius differ, so a preset path cannot silently alter
+        feature selection or sub-pixel fitting.
+        """
+        h = prev.shape[0]
+        w = prev.shape[1]
+        grid_h = grid_flow.shape[0]
+        grid_w = grid_flow.shape[1]
+        pts_side = ti.static(win_radius + 1)
+        inv_patch_area = 1.0 / ti.cast(pts_side * pts_side, ti.f32)
+        tau_low = 0.020
+        tau_high = 0.080
+
+        for gy, gx in ti.ndrange(grid_h, grid_w):
+            px = ti.cast(border_margin + gx * grid_step, ti.f32)
+            py = ti.cast(border_margin + gy * grid_step, ti.f32)
+            grid_flow[gy, gx, 0] = 0.0
+            grid_flow[gy, gx, 1] = 0.0
+            grid_flow[gy, gx, 2] = 0.0
+            grid_meta[gy, gx, 0] = 0.0
+            grid_meta[gy, gx, 1] = 0.0
+            grid_meta[gy, gx, 2] = 2.0
+            grid_meta[gy, gx, 3] = 0.0
+
+            if px < ti.cast(w - border_margin, ti.f32) and py < ti.cast(h - border_margin, ti.f32):
+                center_y = border_margin + gy * grid_step
+                center_x = border_margin + gx * grid_step
+                init_dx = 0
+                init_dy = 0
+                if has_prev_flow == 1:
+                    cgx = _bm_clamp(gx >> 1, 0, prev_grid_flow.shape[1] - 1)
+                    cgy = _bm_clamp(gy >> 1, 0, prev_grid_flow.shape[0] - 1)
+                    init_dx = ti.cast(ti.round(prev_grid_flow[cgy, cgx, 0] * 2.0), ti.i32)
+                    init_dy = ti.cast(ti.round(prev_grid_flow[cgy, cgx, 1] * 2.0), ti.i32)
+
+                best_cy = init_dy
+                best_cx = init_dx
+                baseline_sad = _bm_patch_sad_static(
+                    prev, next, center_y, center_x, init_dy, init_dx, h, w, win_radius
+                )
+                initial_norm_sad = baseline_sad * inv_patch_area
+                best_sad = baseline_sad
+
+                if has_prev_flow == 1 and initial_norm_sad <= tau_low:
+                    best_cy = init_dy
+                    best_cx = init_dx
+                elif has_prev_flow == 1 and initial_norm_sad <= tau_high:
+                    for foy_s, fox_s in ti.static(((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1))):
+                        soy = init_dy + foy_s
+                        sox = init_dx + fox_s
+                        sad = _bm_patch_sad_static(
+                            prev, next, center_y, center_x, soy, sox, h, w, win_radius
+                        )
+                        if sad < best_sad:
+                            best_sad = sad
+                            best_cy = soy
+                            best_cx = sox
+                else:
+                    for coy_s, cox_s in ti.static(((-2, 0), (2, 0), (0, -2), (0, 2))):
+                        soy = init_dy + coy_s
+                        sox = init_dx + cox_s
+                        sad = _bm_patch_sad_static(
+                            prev, next, center_y, center_x, soy, sox, h, w, win_radius
+                        )
+                        if sad < best_sad:
+                            best_sad = sad
+                            best_cy = soy
+                            best_cx = sox
+
+                    best_fy_tmp = best_cy
+                    best_fx_tmp = best_cx
+                    for foy_s, fox_s in ti.static(((-1, 0), (1, 0), (0, -1), (0, 1))):
+                        soy = best_cy + foy_s
+                        sox = best_cx + fox_s
+                        sad = _bm_patch_sad_static(
+                            prev, next, center_y, center_x, soy, sox, h, w, win_radius
+                        )
+                        if sad < best_sad:
+                            best_sad = sad
+                            best_fy_tmp = soy
+                            best_fx_tmp = sox
+                    best_cy = best_fy_tmp
+                    best_cx = best_fx_tmp
+
+                stencil = _bm_patch_sad_5point_static(
+                    prev, next, center_y, center_x, best_cy, best_cx, h, w, win_radius
+                )
+                sad_center = stencil[0]
+                sad_left = stencil[1]
+                sad_right = stencil[2]
+                sad_up = stencil[3]
+                sad_down = stencil[4]
+                dx_offset = 0.0
+                denom_x = sad_right - 2.0 * sad_center + sad_left
+                if ti.abs(denom_x) > 1e-4:
+                    dx_offset = -0.5 * (sad_right - sad_left) / denom_x
+                    dx_offset = ti.max(-0.5, ti.min(0.5, dx_offset))
+                dy_offset = 0.0
+                denom_y = sad_down - 2.0 * sad_center + sad_up
+                if ti.abs(denom_y) > 1e-4:
+                    dy_offset = -0.5 * (sad_down - sad_up) / denom_y
+                    dy_offset = ti.max(-0.5, ti.min(0.5, dy_offset))
+
+                dx = ti.cast(best_cx, ti.f32) + dx_offset
+                dy = ti.cast(best_cy, ti.f32) + dy_offset
+                max_flow = ti.cast(grid_step * 2 + win_radius * 2, ti.f32)
+                dx = ti.max(-max_flow, ti.min(max_flow, dx))
+                dy = ti.max(-max_flow, ti.min(max_flow, dy))
+                residual = sad_center * inv_patch_area
+                grid_flow[gy, gx, 0] = dx
+                grid_flow[gy, gx, 1] = dy
+                grid_flow[gy, gx, 2] = 1.0
+
+                motion2 = dx * dx + dy * dy
+                med_thr = ti.cast(grid_step * grid_step, ti.f32) * 0.04
+                high_thr = ti.cast(grid_step * grid_step, ti.f32) * 0.20
+                cls = 0.0
+                if motion2 > med_thr or residual > 0.05:
+                    cls = 1.0
+                if motion2 > high_thr or residual > 0.12:
+                    cls = 2.0
+                grid_meta[gy, gx, 0] = residual
+                grid_meta[gy, gx, 1] = 1.0
+                grid_meta[gy, gx, 2] = cls
+                grid_meta[gy, gx, 3] = motion2
+
+    @ti.kernel
+    def _bm_grid_track_kernel_r6(
+        prev: ti.types.ndarray(), next: ti.types.ndarray(),
+        prev_grid_flow: ti.types.ndarray(), grid_flow: ti.types.ndarray(),
+        grid_meta: ti.types.ndarray(), grid_step: ti.i32,
+        border_margin: ti.i32, has_prev_flow: ti.i32, epsilon: ti.f32,
+    ):
+        _bm_grid_track_static_impl(
+            prev, next, prev_grid_flow, grid_flow, grid_meta, grid_step,
+            border_margin, has_prev_flow, epsilon, 6,
+        )
+
+    @ti.kernel
+    def _bm_grid_track_kernel_r7(
+        prev: ti.types.ndarray(), next: ti.types.ndarray(),
+        prev_grid_flow: ti.types.ndarray(), grid_flow: ti.types.ndarray(),
+        grid_meta: ti.types.ndarray(), grid_step: ti.i32,
+        border_margin: ti.i32, has_prev_flow: ti.i32, epsilon: ti.f32,
+    ):
+        _bm_grid_track_static_impl(
+            prev, next, prev_grid_flow, grid_flow, grid_meta, grid_step,
+            border_margin, has_prev_flow, epsilon, 7,
+        )
+
+    @ti.kernel
+    def _bm_grid_track_kernel_r8(
+        prev: ti.types.ndarray(), next: ti.types.ndarray(),
+        prev_grid_flow: ti.types.ndarray(), grid_flow: ti.types.ndarray(),
+        grid_meta: ti.types.ndarray(), grid_step: ti.i32,
+        border_margin: ti.i32, has_prev_flow: ti.i32, epsilon: ti.f32,
+    ):
+        _bm_grid_track_static_impl(
+            prev, next, prev_grid_flow, grid_flow, grid_meta, grid_step,
+            border_margin, has_prev_flow, epsilon, 8,
+        )
 
     @ti.kernel
     def _bm_adaptive_refine_kernel(

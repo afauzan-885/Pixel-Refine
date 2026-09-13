@@ -561,7 +561,7 @@ LANGUAGE_LABEL = "Bahasa"
 PROCESS_FORMAT_LABEL = "Format Proses"
 PROCESS_FORMAT_DESCRIPTION = "RGB Linear menggunakan pipeline RGB semasa. RAW Native kini menyokong Purata DNG tanpa penjajaran sebelum demosaik."
 LANGUAGE_TYPE = "Inggeris", "Indonesia", "Cina Tradisional", "Melayu"
-GPU_ACCELERATION_LABEL = "Pecutan GPU"
+GPU_ACCELERATION_LABEL = "Pecutan Perkakasan"
 MULTI_CORE_CPU = "Pecutan Multi-Teras CPU"
 SETTINGS_SAVED = "Tetapan berjaya disimpan."
 
@@ -739,7 +739,7 @@ SIMILARITY_V2_GROUP_TITLE = "Parameter Similarity V2"
 RESET_TO_DEFAULTS_BUTTON_TEXT = "Reset ke Default"
 HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED_TITLE = "Tiada Imej Sah"
 HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED_TEXT = "Tiada imej sah dipilih untuk import."
-DEVICE_ACCELERATION_LABEL = "Pecutan GPU"
+DEVICE_ACCELERATION_LABEL = "Pecutan Perkakasan"
 BTN_TEST_BACKEND_HARDWARE = "Uji Pecutan Perkakasan"
 MSG_IMPORT_ERROR = "Ralat Import"
 LBL_ANALYSIS_MODE = "Mod Analisis"
@@ -795,3 +795,42 @@ SPLASH_STATUS_ASSEMBLING_LAYOUT = "Menyusun susun atur aplikasi..."
 SPLASH_STATUS_FINISHING_SETUP = "Menyelesaikan persediaan awal..."
 SPLASH_STATUS_PREPARING_THEME = "Menyediakan tema paparan..."
 SPLASH_STATUS_FINALIZING = "Menyediakan ruang kerja..."
+
+# --- Tooltips & Settings UI Extensions ---
+LANGUAGE_DROPDOWN_TIP = "Pilih bahasa paparan untuk antara muka aplikasi."
+DEVICE_ACCELERATION_TIP = "Pilih peranti pecutan perkakasan yang digunakan untuk pemprosesan imej."
+ONNX_RUNTIME_TIP = (
+    "Pilih penyedia pelaksanaan untuk model inferens AI (WeightNet / FusionNet).\n"
+    "Auto: menggunakan DirectML jika tersedia, beralih ke CPU jika tiada.\n"
+    "DirectML (GPU): memaksa pecutan GPU melalui DirectML.\n"
+    "CPU: pelaksanaan CPU sahaja."
+)
+LBL_BACKEND_INFO_BTN_TIP = "Lihat perkakasan yang dikesan, status backend, dan anggaran prestasi."
+MSG_HARDWARE_TEST_DEEP_DISABLED = "Analisis mendalam dilumpuhkan buat sementara waktu sementara kestabilan backend dipertingkatkan."
+
+LBL_BLOCK_PROCESSING = "Pemprosesan Blok"
+LBL_MEGAPIXEL_THRESHOLD = "Ambang Megapiksel"
+LBL_BLOCK_SIZE = "Saiz Blok"
+LBL_ONNX_RUNTIME = "ONNX Runtime"
+
+# --- Hardware Statistics Modal Translations ---
+LBL_BACKEND_STATS_TITLE = "Statistik Backend Perkakasan"
+LBL_BACKEND_STATS_SUMMARY = (
+    "Dikesan: {detected} backend | Lulus: {passed}/{tested} diuji | Pilihan dilangkau: {skipped}\n"
+    "Tanda Aras GPU: 1024 x 1024 (1.049 MP) | 4x setiap algoritma (1 pemanasan + 3 larian) | Anggaran sasaran: {target_label}"
+)
+LBL_BACKEND_HEADER = "Backend"
+LBL_HARDWARE_HEADER = "Perkakasan"
+LBL_STATUS_HEADER = "Status"
+LBL_GPU_BENCHMARK_HEADER = "GPU 1024²"
+LBL_ESTIMATE_HEADER = "Anggaran 24 MP"
+LBL_STATUS_SUPPORTED = "Disokong"
+LBL_STATUS_FAILED = "Gagal"
+LBL_STATUS_NOT_TESTED = "Belum diuji"
+LBL_STATUS_INVALID = "Tidak sah"
+LBL_BACKEND_STATS_NOTE = (
+    "Anggaran menggunakan unjuran linear daripada ujian pantas resolusi kecil; "
+    "hasil sebenar pada resolusi besar mungkin berbeza disebabkan oleh lebar jalur memori, cache, "
+    "penjubinan, dan overhed VRAM."
+)
+

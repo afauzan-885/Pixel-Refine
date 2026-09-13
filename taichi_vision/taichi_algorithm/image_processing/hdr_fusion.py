@@ -267,7 +267,8 @@ def _estimate_noise_sigma(gray_np):
             estimate_noise,
         )
 
-        return float(np.clip(estimate_noise(gray_np), 1e-5, 0.99999))
+        score, _ = estimate_noise(gray_np)
+        return float(np.clip(score, 1e-5, 0.99999))
     except Exception:
         pass
 

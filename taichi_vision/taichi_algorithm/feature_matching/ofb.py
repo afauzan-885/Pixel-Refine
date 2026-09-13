@@ -86,6 +86,7 @@ def compute_score_map(
     margin: int
 ):
     """Pass 1: Membangun peta skor FAST dinamis dengan margin sensor."""
+    ti.loop_config(block_dim=256)
     for y, x in ti.ndrange(h, w):
         if y >= margin and y < h - margin and x >= margin and x < w - margin:
             score_map[y, x] = compute_dynamic_fast_score(src, y, x)
@@ -104,7 +105,8 @@ def extract_grid_keypoints(
     """Pass 2: Adaptive Non-Maximal Suppression (ANMS) Berbasis Grid dengan filter threshold dan sub-pixel refinement."""
     grid_h = h // grid_size
     grid_w = w // grid_size
-    
+
+    ti.loop_config(block_dim=128)
     for gy, gx in ti.ndrange(grid_h, grid_w):
         best_score = 0.0
         best_x = -1
@@ -192,6 +194,7 @@ def _compute_descriptors_kernel(
 ):
     """Mengekstrak deskriptor Oriented BRIEF 256-bit di GPU secara penuh."""
     num_kps = counter[0]
+    ti.loop_config(block_dim=64)
     for i in range(kps.shape[0]):
         if i < num_kps:
             cy = int(kps[i, 0])
@@ -247,6 +250,7 @@ def _hamming_matcher_kernel(
     """Pencocokan Hamming Matcher dengan Lowe's Ratio Test di GPU secara penuh."""
     num_kps1 = counter1[0]
     num_kps2 = counter2[0]
+    ti.loop_config(block_dim=64)
     for i in range(desc1.shape[0]):
         if i < num_kps1:
             best_j = -1
@@ -287,6 +291,7 @@ def pack_matches_kernel(
     """Mengemas keypoint koordinat x, y dan kecocokan ke satu buffer hasil float32 di GPU."""
     num_kps1 = counter1[0]
     num_kps2 = counter2[0]
+    ti.loop_config(block_dim=256)
     for i in range(kps1.shape[0]):
         if i < num_kps1:
             idx2 = matches[i, 0]
@@ -302,6 +307,43 @@ def pack_matches_kernel(
                 results[i, 5] = 0.0
         else:
             results[i, 5] = 0.0
+
+
+@ti.kernel
+def pack_matches_offset_kernel(
+    kps1: ti.types.ndarray(ti.f32, ndim=2),
+    kps2: ti.types.ndarray(ti.f32, ndim=2),
+    matches: ti.types.ndarray(ti.i32, ndim=2),
+    counter1: ti.types.ndarray(ti.i32, ndim=1),
+    counter2: ti.types.ndarray(ti.i32, ndim=1),
+    results: ti.types.ndarray(ti.f32, ndim=2),
+    result_offset: ti.i32,
+):
+    """Pack matches into a shared multi-level result buffer.
+
+    ``result_offset`` keeps the graph shape dynamic while allowing the
+    caller to perform one host readback after all pyramid levels finish.
+    The arithmetic and row ordering are identical to ``pack_matches_kernel``.
+    """
+    num_kps1 = counter1[0]
+    num_kps2 = counter2[0]
+    ti.loop_config(block_dim=256)
+    for i in range(kps1.shape[0]):
+        out_i = result_offset + i
+        if i < num_kps1:
+            idx2 = matches[i, 0]
+            dist = matches[i, 1]
+            if idx2 >= 0 and idx2 < num_kps2:
+                results[out_i, 0] = kps1[i, 1]
+                results[out_i, 1] = kps1[i, 0]
+                results[out_i, 2] = kps2[idx2, 1]
+                results[out_i, 3] = kps2[idx2, 0]
+                results[out_i, 4] = ti.cast(dist, ti.f32)
+                results[out_i, 5] = 1.0
+            else:
+                results[out_i, 5] = 0.0
+        else:
+            results[out_i, 5] = 0.0
 
 # --- Python Wrappers ---
 try:

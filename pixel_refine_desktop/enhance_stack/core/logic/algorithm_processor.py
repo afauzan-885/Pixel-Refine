@@ -13,9 +13,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.fa
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.AKAZE import (
     running_akaze,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
-    running_orb,
-)
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
     running_light_glue,
 )
@@ -49,7 +46,7 @@ class AlgorithmProcessorThread(QThread):
     error_occurred = Signal(str)  # error message
     cancel_requested = Signal()  # Signal emitted when cancellation is requested
 
-    def __init__(self, batch_id, settings, parent=None, single_process=True):
+    def __init__(self, batch_id, settings, parent=None, single_process=None):
         """
         Initialize the algorithm processor thread.
 
@@ -57,14 +54,14 @@ class AlgorithmProcessorThread(QThread):
             batch_id: ID of the batch to process
             settings: Dict with algorithm selections (alignment, super_resolution, denoising)
             parent: Parent QObject (usually the layout or panel)
-            single_process: If True, run in single process mode (default).
-                           Set to False for batch processing with batch_id.
+            single_process: If True, run in single process mode.
+                           If False or if batch_id is given, run in batch processing mode.
         """
         super().__init__(parent)
-        self.batch_id = batch_id
+        self.batch_id = batch_id if (batch_id is not None and batch_id > 0) else 1
         self.settings = settings
         self.parent_panel = parent
-        self.single_process = single_process
+        self.single_process = False
         self._is_running = True
         self._is_cancelled = False
 
@@ -73,13 +70,82 @@ class AlgorithmProcessorThread(QThread):
         self._is_running = False
         self._is_cancelled = True
         self.cancel_requested.emit()
+        try:
+            from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_manager import (
+                BackendWorkerManager,
+            )
+            BackendWorkerManager.instance().stop_current_task()
+        except Exception:
+            pass
 
     def is_cancelled(self) -> bool:
         """Check if cancellation was requested."""
         return self._is_cancelled
 
     def run(self):
-        """Execute the selected algorithms."""
+        """Execute the selected algorithms via isolated backend worker."""
+        import os
+
+        if os.environ.get("PIXEL_REFINE_DISABLE_WORKER") == "1":
+            return self._run_in_process()
+
+        try:
+            def progress_callback(percent, raw_msg=""):
+                if self._is_running:
+                    self.progress_update.emit(int(percent), str(raw_msg))
+
+            controller = getattr(self.parent_panel, "controller", None)
+            db_path = getattr(controller, "db_path", None)
+            if not db_path:
+                db_path = os.environ.get("PIXEL_REFINE_SESSION_DB")
+
+            from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_manager import (
+                BackendWorkerManager,
+            )
+
+            if self._is_cancelled or not self._is_running:
+                print("[AlgorithmProcessorThread] Task was cancelled before worker startup.")
+                return
+
+            worker_mgr = BackendWorkerManager.instance()
+            if not worker_mgr.ensure_worker_ready():
+                self.error_occurred.emit("Backend worker failed to start.")
+                return
+
+            if self._is_cancelled or not self._is_running:
+                print("[AlgorithmProcessorThread] Task was cancelled while preparing worker.")
+                return
+
+            task_payload = {
+                "batch_id": self.batch_id,
+                "single_process": self.single_process,
+                "db_path": db_path,
+                "settings": self.settings,
+            }
+
+            result = worker_mgr.dispatch_task(
+                task_payload,
+                progress_cb=progress_callback,
+                stop_requested_cb=lambda: self._is_cancelled,
+            )
+
+            if not result.get("success", False):
+                if result.get("type") == "cancelled" or self._is_cancelled:
+                    print(f"[AlgorithmProcessorThread] Task was cancelled by user.")
+                else:
+                    err = result.get("error", "Unknown error during processing.")
+                    print(f"[AlgorithmProcessorThread] Worker error: {err}")
+                    self.error_occurred.emit(str(err))
+
+        except Exception as e:
+            error_msg = f"Critical error in algorithm processing: {e}"
+            print(f"[ERROR] {error_msg}")
+            self.error_occurred.emit(error_msg)
+        finally:
+            self.finished_processing.emit()
+
+    def _run_in_process(self):
+        """Fallback in-process algorithm execution."""
         try:
             # Progress callback to emit signal with dual UI & Console messaging:
             def progress_callback(percent, message="", *args, **kwargs):
@@ -190,12 +256,14 @@ class AlgorithmProcessorThread(QThread):
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
                     ),
-                    "ORB": lambda: running_orb(
+                    "OFB": lambda: running_mf_denoiser(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
+                        alignment_backend="OFB",
+                        merging_mode="none",
                     ),
                     "Light Glue": lambda: running_light_glue(
                         self.parent_panel,

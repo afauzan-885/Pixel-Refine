@@ -24,9 +24,12 @@ class FarnebackFlowCPU:
     PRESETS = {
         "fast": {
             "pyr_scale": 0.5,
-            "levels": 2,
-            "winsize": 13,
-            "iterations": 2,
+            # One pyramid level/iteration keeps the latency floor low.  A
+            # small window is intentional: this preset targets responsive
+            # preview alignment and accepts reduced large-motion robustness.
+            "levels": 1,
+            "winsize": 9,
+            "iterations": 1,
             "poly_n": 5,
             "poly_sigma": 1.1,
         },
@@ -41,12 +44,79 @@ class FarnebackFlowCPU:
         "high": {
             "pyr_scale": 0.5,
             "levels": 5,
-            "winsize": 21,
-            "iterations": 5,
+            # Extra refinement and a wider support window make this the
+            # accuracy-first profile.  It deliberately spends more latency
+            # on difficult motion, parallax, and low-texture regions.
+            "winsize": 25,
+            "iterations": 7,
             "poly_n": 7,
             "poly_sigma": 1.5,
         },
     }
+
+    def __init__(self):
+        # The reference is invariant across a burst.  Keep its native pyramid
+        # resident and replace it only when the reference identity/configuration
+        # changes.  This cache is optional and does not alter the public flow
+        # result or its dtype.
+        self._reference_cache = None
+
+    def _release_reference_cache(self):
+        cached = self._reference_cache
+        self._reference_cache = None
+        if not cached:
+            return
+        try:
+            from taichi_vision.taichi_aot import get_engine
+
+            get_engine().sync()
+        except Exception:
+            pass
+        for buffer in cached.get("pyramid", ()):
+            try:
+                buffer.destroy()
+            except Exception:
+                try:
+                    buffer.release()
+                except Exception:
+                    pass
+
+    def close(self):
+        """Release the optional resident reference pyramid."""
+        self._release_reference_cache()
+
+    def __del__(self):
+        try:
+            self._release_reference_cache()
+        except Exception:
+            pass
+
+    def _get_reference_pyramid(self, ref_gray, reference_token, levels):
+        try:
+            from taichi_vision import taichi_algorithm
+
+            build_pyramid = getattr(taichi_algorithm, "build_image_pyramid_gpu", None)
+            if build_pyramid is None:
+                return None
+            key = (reference_token, tuple(ref_gray.shape), int(levels))
+            cached = self._reference_cache
+            if cached is not None and cached.get("key") == key:
+                pyramid = cached.get("pyramid") or ()
+                if pyramid and all(getattr(buf, "handle", None) is not None for buf in pyramid):
+                    return pyramid
+
+            self._release_reference_cache()
+            pyramid = build_pyramid(
+                np.ascontiguousarray(ref_gray, dtype=np.float32), levels=int(levels)
+            )
+            if not pyramid or not all(hasattr(buf, "handle") for buf in pyramid):
+                return None
+            self._reference_cache = {"key": key, "pyramid": tuple(pyramid)}
+            return self._reference_cache["pyramid"]
+        except Exception:
+            # The normal full-frame call remains the same-backend recovery
+            # path when an optional resident cache cannot be prepared.
+            return None
 
     @classmethod
     def load_config(cls, batch_id=None, config_filename=None):
@@ -99,7 +169,14 @@ class FarnebackFlowCPU:
             return (gray >> 8).astype(np.float32)
         return (np.clip(gray, 0.0, 1.0) * 255.0).astype(np.float32)
 
-    def calculate_flow(self, reference_gray, target_gray, config=None):
+    def calculate_flow(
+        self,
+        reference_gray,
+        target_gray,
+        config=None,
+        reference_pyramid=None,
+        return_gpu=False,
+    ):
         """Run Taichi Vision Farneback optical flow."""
         config = config or self.load_config()
         mode = str(config.get("mode", "fast")).strip().lower()
@@ -121,7 +198,11 @@ class FarnebackFlowCPU:
             poly_n=int(preset["poly_n"]),
             poly_sigma=float(preset["poly_sigma"]),
             flags=0,
+            reference_pyramid=reference_pyramid,
+            return_gpu=bool(return_gpu),
         )
+        if return_gpu:
+            return flow
         if isinstance(flow, tuple):
             flow = flow[0]
         flow = np.asarray(flow, dtype=np.float32)
@@ -146,20 +227,41 @@ class FarnebackFlowCPU:
         tgt_gray = self._to_flow_gray(target)
         tgt_warp = target if target_for_warping is None else target_for_warping
 
-        flow = self.calculate_flow(ref_gray, tgt_gray, config)
+        mode = str(config.get("mode", "fast")).strip().lower()
+        preset = self.PRESETS.get(mode, self.PRESETS["fast"])
+        reference_pyramid = self._get_reference_pyramid(
+            ref_gray,
+            id(reference),
+            int(preset["levels"]),
+        )
+        flow_gpu = self.calculate_flow(
+            ref_gray,
+            tgt_gray,
+            config,
+            reference_pyramid=reference_pyramid,
+            return_gpu=True,
+        )
 
         from taichi_vision import taichi_aot
-        return taichi_aot.remap_with_flow(
-            np.ascontiguousarray(tgt_warp),
-            flow,
-            int(reference.shape[0]),
-            int(reference.shape[1]),
-            return_gpu=False,
-        )
+        try:
+            return taichi_aot.remap_with_flow(
+                np.ascontiguousarray(tgt_warp),
+                flow_gpu,
+                int(reference.shape[0]),
+                int(reference.shape[1]),
+                return_gpu=False,
+            )
+        finally:
+            try:
+                flow_gpu.destroy()
+            except Exception:
+                try:
+                    flow_gpu.release()
+                except Exception:
+                    pass
 
 
 def running_farneback_flow(*args, **kwargs):
     raise RuntimeError(
         "Farneback is now orchestrated by MFDenoiser. Use MFDenoiser with alignment='Farneback' instead."
     )
-

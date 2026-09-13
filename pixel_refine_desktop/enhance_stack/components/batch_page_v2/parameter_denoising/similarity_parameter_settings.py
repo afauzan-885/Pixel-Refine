@@ -35,6 +35,80 @@ SIMILARITY_DEFAULTS = {
 }
 
 
+# Runtime names used by the SpatialFusion/ Taichi path.  The UI writes the
+# ``similarity_spatial_*`` names, while older batch snapshots and experiments
+# used shorter names.  Keep the public UI schema unchanged, but normalize all
+# accepted spellings at the boundary so a batch cannot silently run with the
+# kernel defaults.
+_SPATIAL_PARAM_ALIASES = {
+    "similarity_spatial_tile_size": (
+        "similarity_spatial_tile_size",
+        "spatial_tile_size",
+        "tile_size",
+    ),
+    "similarity_spatial_motion_sensitivity": (
+        "similarity_spatial_motion_sensitivity",
+        "motion_sensitivity",
+        "motion_sensivity",  # legacy typo used by an early UI prototype
+    ),
+    "similarity_spatial_noise_mad_offset_factor": (
+        "similarity_spatial_noise_mad_offset_factor",
+        "noise_offset_factor",
+        "noise_mad_offset_factor",
+        "noise_offset",
+    ),
+    "similarity_spatial_overlap_percent": (
+        "similarity_spatial_overlap_percent",
+        "spatial_overlap_percent",
+        "overlap_percent",
+        "overlap",
+    ),
+}
+
+
+def normalize_similarity_spatial_config(config):
+    """Return a flattened Similarity/SpatialFusion config.
+
+    Batch state may contain either ``similarity_params`` (current name) or a
+    legacy ``similarity_fusion_params``/``spatial_params`` object.  In
+    addition, experiments historically used unprefixed motion/noise keys.
+    Flattening once here makes the values consumed by SpatialFusion and the
+    Taichi graph deterministic without changing any public function signature.
+    """
+    normalized = dict(config or {})
+    nested_names = (
+        "spatial_params",
+        "similarity_spatial_params",
+        "similarity_fusion_params",
+        "similarity_params",
+    )
+    # Later nested entries are the most specific override (useful when a
+    # snapshot contains both a generic spatial_params and a fusion-specific
+    # object).  Ignore malformed entries instead of failing the pipeline.
+    nested_values = {}
+    for name in nested_names:
+        nested = normalized.get(name)
+        if isinstance(nested, dict):
+            nested_values.update(nested)
+    normalized.update(nested_values)
+
+    for canonical, aliases in _SPATIAL_PARAM_ALIASES.items():
+        # A nested batch value is more specific than a flattened global
+        # default, including when the nested object uses a legacy alias.
+        for alias in aliases:
+            value = nested_values.get(alias)
+            if value is not None:
+                normalized[canonical] = value
+                break
+        else:
+            for alias in aliases:
+                value = normalized.get(alias)
+                if value is not None:
+                    normalized[canonical] = value
+                    break
+    return normalized
+
+
 PARAMETER_SCHEMA = [
     {
         "key": "similarity_spatial_tile_size",
@@ -160,16 +234,12 @@ def load_similarity_config():
                     final_config["use_multi_core"] = loaded_similarity_section[
                         "use_multi_core"
                     ]
-                if "spatial_params" in loaded_similarity_section and isinstance(
-                    loaded_similarity_section["spatial_params"], dict
-                ):
-                    for key, value in SIMILARITY_DEFAULTS.items():
-                        final_config[key] = loaded_similarity_section[
-                            "spatial_params"
-                        ].get(key, value)
-                else:
-                    for key, value in SIMILARITY_DEFAULTS.items():
-                        final_config[key] = loaded_similarity_section.get(key, value)
+                spatial_values = loaded_similarity_section.get("spatial_params")
+                if not isinstance(spatial_values, dict):
+                    spatial_values = loaded_similarity_section
+                spatial_values = normalize_similarity_spatial_config(spatial_values)
+                for key, value in SIMILARITY_DEFAULTS.items():
+                    final_config[key] = spatial_values.get(key, value)
                 return final_config
     except (IOError, json.JSONDecodeError) as e:
         print(f"Error loading Similarity config: {e}. Using defaults.")

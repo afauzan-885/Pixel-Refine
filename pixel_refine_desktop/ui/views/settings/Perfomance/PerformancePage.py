@@ -80,12 +80,18 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         device_label = getattr(
             language_config,
             "DEVICE_ACCELERATION_LABEL",
-            "GPU Acceleration",
+            "Hardware Acceleration",
+        )
+        device_tip = getattr(
+            language_config,
+            "DEVICE_ACCELERATION_TIP",
+            "Select the hardware acceleration device used for image processing.",
         )
         self.device_group = FormGroup(
             label=device_label, input_type="select", auto_sync=False
         )
         if isinstance(self.device_group.input, QComboBox):
+            self.device_group.input.setToolTip(device_tip)
             for option in hardware_backends:
                 self.device_group.input.addItem(option["text"], option)
             self.device_group.input.currentTextChanged.connect(
@@ -109,6 +115,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         left_form.add_row(self.test_btn)
         left_form.form_layout.setAlignment(self.test_btn, Qt.AlignmentFlag.AlignCenter)
         self._update_test_button_width()
+        self.test_btn.setVisible(False)
 
         auto_fb_label = getattr(language_config, "LBL_AUTO_FALLBACK", "Auto Fallback")
         auto_fb_tip = getattr(
@@ -148,24 +155,28 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             self._on_block_processing_changed
         )
         self.store.changed.connect(self._on_performance_store_changed)
-        right_form.add_row(self.compute_block_mode_group)
-        right_form.add_row(self.compute_block_threshold_group)
+        # Block Processing and Block Size UI are removed from view per user request
+        self.compute_block_mode_group.setVisible(False)
+        self.compute_block_threshold_group.setVisible(False)
 
         self.compute_block_size_group = FormGroup(
             label="Block Size", input_type="select", auto_sync=True
         )
         self.compute_block_size_group.input.addItems(["512", "768", "1024", "2048"])
         self.compute_block_size_group.bind_store(self.store, "compute_block_size")
-        right_form.add_row(self.compute_block_size_group)
+        self.compute_block_size_group.setVisible(False)
 
+        onnx_label = getattr(language_config, "LBL_ONNX_RUNTIME", "ONNX Runtime")
         self.onnx_runtime_group = FormGroup(
-            label="ONNX Runtime", input_type="select", auto_sync=False
+            label=onnx_label, input_type="select", auto_sync=False
         )
-        onnx_tip = (
-            "Select the execution provider for AI inference models (WeightNet FusionNet).\n"
+        onnx_tip = getattr(
+            language_config,
+            "ONNX_RUNTIME_TIP",
+            "Select the execution provider for AI inference models (WeightNet / FusionNet).\n"
             "Auto: uses DirectML when available, falls back to CPU.\n"
             "DirectML (GPU): forces GPU acceleration via DirectML.\n"
-            "CPU: forces CPU-only execution."
+            "CPU: forces CPU-only execution.",
         )
         self.onnx_runtime_group.input.setToolTip(onnx_tip)
         self._setup_onnx_runtime_options()
@@ -221,7 +232,11 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.backend_info_btn.setFixedSize(18, 18)
         self.backend_info_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.backend_info_btn.setToolTip(
-            "Lihat hardware yang terdeteksi, status backend, dan estimasi performa."
+            getattr(
+                language_config,
+                "LBL_BACKEND_INFO_BTN_TIP",
+                "View detected hardware, backend status, and performance estimates.",
+            )
         )
         self.backend_info_btn.setStyleSheet(
             """
@@ -275,16 +290,22 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             for result in test_results.values()
             if isinstance(result, dict)
         )
-        summary = QLabel(
-            f"Terdeteksi: {len(options)} backend · Lulus: {supported}/{tested} diuji\n"
-            f"Benchmark kecil: 256 x 256 (0,066 MP) · Estimasi target: {target_label}"
+        summary_template = getattr(
+            language_config,
+            "LBL_BACKEND_STATS_SUMMARY",
+            "Detected: {detected} backends | Passed: {passed}/{tested} tested | Optional skipped: {skipped}\n"
+            "GPU Benchmark: 1024 x 1024 (1.049 MP) | 4x per algorithm (1 warm-up + 3 runs) | Target estimate: {target_label}",
         )
+        summary = QLabel()
         summary.setWordWrap(True)
         summary.setText(
-            f"Terdeteksi: {len(options)} backend | Lulus: {supported}/{tested} diuji"
-            f" | Opsional dilewati: {skipped}\n"
-            f"Benchmark GPU: 1024 x 1024 (1,049 MP) | 4x per algoritma "
-            f"(1 warm-up + 3 pengukuran) | Estimasi target: {target_label}"
+            summary_template.format(
+                detected=len(options),
+                passed=supported,
+                tested=tested,
+                skipped=skipped,
+                target_label=target_label,
+            )
         )
         summary.setStyleSheet("color: #475569; font-size: 11px; padding: 2px 0 4px 0;")
         body_layout.addWidget(summary)
@@ -312,7 +333,13 @@ class PerformanceSettingsPage(GeneralSettingsPage):
 
         table = QTableWidget(len(grouped_options), 5)
         table.setHorizontalHeaderLabels(
-            ["Backend", "Hardware", "Status", "GPU 1024²", "Estimasi 24 MP"]
+            [
+                getattr(language_config, "LBL_BACKEND_HEADER", "Backend"),
+                getattr(language_config, "LBL_HARDWARE_HEADER", "Hardware"),
+                getattr(language_config, "LBL_STATUS_HEADER", "Status"),
+                getattr(language_config, "LBL_GPU_BENCHMARK_HEADER", "GPU 1024²"),
+                getattr(language_config, "LBL_ESTIMATE_HEADER", "Estimate 24 MP"),
+            ]
         )
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -371,9 +398,9 @@ class PerformanceSettingsPage(GeneralSettingsPage):
                 result = {"status": result}
             status = str(result.get("status", "not_tested"))
             status_text = {
-                "support": "Didukung",
-                "disable": "Gagal",
-                "not_tested": "Belum diuji",
+                "support": getattr(language_config, "LBL_STATUS_SUPPORTED", "Supported"),
+                "disable": getattr(language_config, "LBL_STATUS_FAILED", "Failed"),
+                "not_tested": getattr(language_config, "LBL_STATUS_NOT_TESTED", "Not tested"),
             }.get(status, status)
             benchmark_ms = result.get("benchmark_elapsed_ms")
             benchmark_width = int(result.get("benchmark_width", 1024) or 1024)
@@ -393,10 +420,10 @@ class PerformanceSettingsPage(GeneralSettingsPage):
                         f"~{1000.0 / max(projected_ms, 1.0):.2f} FPS"
                     )
                 except (TypeError, ValueError):
-                    small_text = "Tidak valid"
+                    small_text = getattr(language_config, "LBL_STATUS_INVALID", "Invalid")
                     large_text = "-"
             else:
-                small_text = "Belum diuji"
+                small_text = getattr(language_config, "LBL_STATUS_NOT_TESTED", "Not tested")
                 large_text = "-"
 
             values = (
@@ -435,19 +462,31 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         )
         body_layout.addWidget(table, 1)
         note = QLabel(
-            "Estimasi menggunakan pendekatan linear dari uji cepat resolusi kecil; "
-            "hasil aktual pada resolusi besar dapat berbeda karena bandwidth, cache, "
-            "tiling, dan penggunaan VRAM."
+            getattr(
+                language_config,
+                "LBL_BACKEND_STATS_NOTE",
+                "Estimates use a linear projection from small-resolution quick tests; "
+                "actual results on large resolutions may vary due to memory bandwidth, "
+                "cache, tiling, and VRAM overhead.",
+            )
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #64748B; font-size: 10px;")
         body_layout.addWidget(note)
 
         dialog = Modal(
-            title="Hardware Backend Statistics", size="medium", parent=self.window()
+            title=getattr(
+                language_config,
+                "LBL_BACKEND_STATS_TITLE",
+                "Hardware Backend Statistics",
+            ),
+            size="medium",
+            parent=self.window(),
         )
         dialog.set_body(body)
-        dialog.add_footer_button("Tutup", variant="secondary")
+        dialog.add_footer_button(
+            getattr(language_config, "BTN_CLOSE", "Close"), variant="secondary"
+        )
         dialog.fit_to_content(max_width=660, max_height=700)
         dialog.exec()
 
@@ -495,6 +534,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         from pixel_refine_desktop.enhance_stack.core.algorithm.onnx_utils import (
             get_selected_gpu_vendor,
         )
+
         return get_selected_gpu_vendor(self.store)
 
     def _get_onnx_auto_label(self, vendor=None) -> str:
@@ -503,6 +543,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
                 scan_directml_adapters,
                 resolve_onnx_runtime_and_providers,
             )
+
             target_vendor = (
                 str(vendor).lower()
                 if vendor
@@ -516,7 +557,11 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             matching_adapter = next(
                 (a for a in dml_adapters if a.get("vendor") == target_vendor), None
             )
-            if matching_adapter is None and target_vendor not in ("intel", "cpu") and dml_adapters:
+            if (
+                matching_adapter is None
+                and target_vendor not in ("intel", "cpu")
+                and dml_adapters
+            ):
                 matching_adapter = next(
                     (a for a in dml_adapters if a.get("vendor") in ("nvidia", "amd")),
                     dml_adapters[0],
@@ -525,8 +570,14 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             if matching_adapter is not None and matching_adapter.get("name"):
                 return f"Auto (GPU: {matching_adapter['name']})"
 
-            runtime, providers = resolve_onnx_runtime_and_providers("auto", store=self.store)
-            if runtime == "cpu" or not providers or providers[0] == "CPUExecutionProvider":
+            runtime, providers = resolve_onnx_runtime_and_providers(
+                "auto", store=self.store
+            )
+            if (
+                runtime == "cpu"
+                or not providers
+                or providers[0] == "CPUExecutionProvider"
+            ):
                 return "Auto (CPU)"
             return "Auto (GPU)"
         except Exception:
@@ -594,13 +645,9 @@ class PerformanceSettingsPage(GeneralSettingsPage):
 
     def _update_block_processing_controls(self):
         """Apply the mode-dependent visibility/enabled contract."""
-        mode = self._block_mode_value()
-        is_disabled = mode == "full"
-        is_automatic = mode == "auto"
-
-        self.compute_block_threshold_group.setVisible(not is_disabled)
-        self.compute_block_threshold_group.input.setEnabled(is_automatic)
-        self.compute_block_size_group.input.setEnabled(not is_disabled)
+        self.compute_block_threshold_group.setVisible(False)
+        self.compute_block_mode_group.setVisible(False)
+        self.compute_block_size_group.setVisible(False)
 
     def _compact_performance_inputs(self):
         """Keep settings editors compact while allowing long options to fit."""
@@ -662,6 +709,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.test_btn._full_text = full_text
 
         from PySide6.QtGui import QFontMetrics
+
         metrics = QFontMetrics(self.test_btn.font())
         # Stylesheet padding: 6px 14px; border: 1px -> 14*2 + 2 = 30px margin
         horizontal_padding = 30
@@ -673,12 +721,16 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             device_input = getattr(getattr(self, "device_group", None), "input", None)
             if device_input is not None and device_input.width() > 50:
                 max_available = device_input.width()
-            elif hasattr(self, "performance_left") and self.performance_left.width() > 50:
+            elif (
+                hasattr(self, "performance_left") and self.performance_left.width() > 50
+            ):
                 max_available = max(100, self.performance_left.width() - 24)
             else:
                 max_available = compact_width
 
-        target_width = min(content_width, max_available) if max_available > 0 else content_width
+        target_width = (
+            min(content_width, max_available) if max_available > 0 else content_width
+        )
         target_width = max(40, target_width)
 
         self.test_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -754,7 +806,8 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             self.device_group.input.setCurrentIndex(index)
 
     def retranslate_ui(self):
-        language_config.reload_language()
+        saved_lang = self.store.get("language") if hasattr(self, "store") else None
+        language_config.reload_language(saved_lang)
         parent_tab = self.parentWidget()
         if parent_tab and hasattr(parent_tab, "parentWidget"):
             from PySide6.QtWidgets import QTabWidget
@@ -770,16 +823,53 @@ class PerformanceSettingsPage(GeneralSettingsPage):
                         ),
                     )
         self.device_group.label.setText(
-            getattr(language_config, "DEVICE_ACCELERATION_LABEL", "GPU Acceleration")
+            getattr(
+                language_config,
+                "DEVICE_ACCELERATION_LABEL",
+                "Hardware Acceleration",
+            )
         )
+        self.device_group.input.setToolTip(
+            getattr(
+                language_config,
+                "DEVICE_ACCELERATION_TIP",
+                "Select the hardware acceleration device used for image processing.",
+            )
+        )
+        if hasattr(self, "backend_info_btn") and self.backend_info_btn:
+            self.backend_info_btn.setToolTip(
+                getattr(
+                    language_config,
+                    "LBL_BACKEND_INFO_BTN_TIP",
+                    "View detected hardware, backend status, and performance estimates.",
+                )
+            )
         if hasattr(self, "compute_block_mode_group"):
-            self.compute_block_mode_group.label.setText("Block Processing")
+            self.compute_block_mode_group.label.setText(
+                getattr(language_config, "LBL_BLOCK_PROCESSING", "Block Processing")
+            )
         if hasattr(self, "compute_block_threshold_group"):
-            self.compute_block_threshold_group.label.setText("Megapixel Threshold")
+            self.compute_block_threshold_group.label.setText(
+                getattr(language_config, "LBL_MEGAPIXEL_THRESHOLD", "Megapixel Threshold")
+            )
         if hasattr(self, "compute_block_size_group"):
-            self.compute_block_size_group.label.setText("Block Size")
+            self.compute_block_size_group.label.setText(
+                getattr(language_config, "LBL_BLOCK_SIZE", "Block Size")
+            )
         if hasattr(self, "onnx_runtime_group"):
-            self.onnx_runtime_group.label.setText("ONNX Runtime")
+            self.onnx_runtime_group.label.setText(
+                getattr(language_config, "LBL_ONNX_RUNTIME", "ONNX Runtime")
+            )
+            self.onnx_runtime_group.input.setToolTip(
+                getattr(
+                    language_config,
+                    "ONNX_RUNTIME_TIP",
+                    "Select the execution provider for AI inference models (WeightNet / FusionNet).\n"
+                    "Auto: uses DirectML when available, falls back to CPU.\n"
+                    "DirectML (GPU): forces GPU acceleration via DirectML.\n"
+                    "CPU: forces CPU-only execution.",
+                )
+            )
         self.auto_fallback_cb.checkbox.setText(
             getattr(language_config, "LBL_AUTO_FALLBACK", "Auto Fallback")
         )
@@ -787,6 +877,10 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             getattr(language_config, "LBL_AUTO_FALLBACK_TIP", "")
         )
         self.test_btn.setText(language_config.BTN_TEST_BACKEND_HARDWARE)
+        self.test_btn.setVisible(False)
+        self.compute_block_mode_group.setVisible(False)
+        self.compute_block_threshold_group.setVisible(False)
+        self.compute_block_size_group.setVisible(False)
         self.apply_btn.setText(
             getattr(language_config, "APPLY_PARAMETER_BUTTON_TEXT", "Apply Settings")
         )
@@ -798,9 +892,14 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         """Update button styles, checkbox styles, and form elements dynamically on theme change."""
         super().update_theme()
         from resources.GenericUILibrary.theme import get_theme, create_checkbox_style
+
         theme = get_theme()
-        if hasattr(self, "auto_fallback_cb") and hasattr(self.auto_fallback_cb, "checkbox"):
-            self.auto_fallback_cb.checkbox.setStyleSheet(create_checkbox_style(theme=theme))
+        if hasattr(self, "auto_fallback_cb") and hasattr(
+            self.auto_fallback_cb, "checkbox"
+        ):
+            self.auto_fallback_cb.checkbox.setStyleSheet(
+                create_checkbox_style(theme=theme)
+            )
         if hasattr(self, "test_btn") and self.test_btn:
             self.test_btn.setStyleSheet(
                 f"QPushButton {{"
@@ -832,6 +931,34 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         if hasattr(self.store, "save_to_file"):
             self.store.save_to_file()
 
+        # Seamless real-time backend switch in isolated worker (0% VRAM residue, no restart needed)
+        try:
+            from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_manager import (
+                BackendWorkerManager,
+            )
+
+            backend_config = {
+                "arch": self.store.get(
+                    "device_backend_arch", os.environ.get("AOT_ARCH", "cpu")
+                ),
+                "device_id": self.store.get(
+                    "device_backend_id", os.environ.get("AOT_DEVICE", "0")
+                ),
+                "vendor": self.store.get(
+                    "device_vendor", os.environ.get("TARGET_VENDOR", "")
+                ),
+                "backend_text": selected_backend_text,
+                "auto_fallback": bool(self.store.get("auto_fallback", True)),
+                "onnx_runtime": self.store.get("onnx_runtime", "auto"),
+            }
+            BackendWorkerManager.instance().switch_backend(
+                backend_config, force_restart=backend_changed
+            )
+        except Exception as exc:
+            print(
+                f"[PerformanceSettingsPage] Realtime worker backend switch error: {exc}"
+            )
+
         from resources.GenericUILibrary import Toast, trigger_live_update
 
         trigger_live_update()
@@ -841,18 +968,6 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             variant="success",
             parent=self.window(),
         ).show_toast(duration=3000)
-
-        if backend_changed:
-            dialog = modal_confirm(
-                language_config.MSG_BACKEND_EXIT_REQUIRED, self.window()
-            )
-            dialog.title_text.setText(
-                language_config.EXIT_APPLICATION_APPLY_BACKEND_TITLE
-            )
-            dialog.yes_button.setText(language_config.EXIT_APPLICATION_YES)
-            dialog.no_button.setText(language_config.EXIT_APPLICATION_NO)
-            if dialog.exec() == dialog.DialogCode.Accepted:
-                restart_application()
 
 
 def performance_page():

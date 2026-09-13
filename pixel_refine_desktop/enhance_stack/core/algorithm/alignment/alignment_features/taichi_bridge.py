@@ -194,16 +194,14 @@ def _natural_tonemap_analysis_gpu(image, *, input_dtype=None):
 
 
 def prepare_pyramid_aot(image_gpu, num_layers=3):
-    """Creates a multi-layer pyramid (L0, L1, ...). L0=full res, L1=1/2, L2=1/4, etc."""
-    layers = [image_gpu]
-    for i in range(1, num_layers):
-        prev = layers[-1]
-        h_prev, w_prev = prev.shape[:2]
-        next_layer = taichi_aot.resize(
-            prev, (w_prev // 2, h_prev // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True
-        )
-        layers.append(next_layer)
-    return tuple(layers)
+    """Build a resident L0/L1/... pyramid with Taichi Vision's native TCM graph."""
+    from taichi_vision.taichi_algorithm.pyramid.pyramid import (
+        build_image_pyramid_gpu,
+    )
+
+    # ``compute_flow`` requires its 8-pixel L2 when L0 is the minimum
+    # 32-pixel work image, so do not apply the general-purpose 16-pixel stop.
+    return tuple(build_image_pyramid_gpu(image_gpu, n_levels=num_layers, min_size=1))
 
 
 def prepare_reference_for_alignment(
@@ -441,7 +439,7 @@ def prepare_reference_aot(
         estimate_noise,
     )
 
-    ref_noise_sigma = estimate_noise(final_res_gray)
+    ref_noise_sigma, _ = estimate_noise(final_res_gray)
 
     return final_res_gray, ref_noise_sigma
 

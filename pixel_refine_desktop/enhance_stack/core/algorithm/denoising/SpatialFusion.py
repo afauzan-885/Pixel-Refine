@@ -8,9 +8,17 @@ selection into the CPU or GPU execution lane of ``SpatialFusionProcessor``.
 import os
 from contextlib import contextmanager
 
+# (h5py removed)
 import numpy as np
 
 from ._common_helpers import active_backend, restore_output_dtype
+
+
+def _sorted_image_keys(h5f):
+    return sorted(
+        (key for key in h5f.keys() if key.startswith("image_")),
+        key=lambda item: int(item.split("_", 1)[1]),
+    )
 
 
 @contextmanager
@@ -41,7 +49,11 @@ class SpatialFusionDenoisingAlgorithm:
         return load_similarity_config()
 
     def _resolve_config(self, ctx):
-        config = self.load_config()
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
+            normalize_similarity_spatial_config,
+        )
+
+        config = normalize_similarity_spatial_config(self.load_config())
         if hasattr(ctx, "params") and isinstance(ctx.params, dict):
             for k in (
                 "similarity_spatial_tile_size",
@@ -58,10 +70,21 @@ class SpatialFusionDenoisingAlgorithm:
             ):
                 if k in ctx.params and ctx.params[k] is not None:
                     config[k] = ctx.params[k]
-            batch_params = ctx.params.get("similarity_params")
-            if isinstance(batch_params, dict):
-                config.update(batch_params)
-        return config
+            # ``ctx.params`` normally already contains flattened values from
+            # MFDenoiser, but preserve all supported nested batch spellings.
+            for key in (
+                "spatial_params",
+                "similarity_spatial_params",
+                "similarity_fusion_params",
+                "similarity_params",
+            ):
+                nested = ctx.params.get(key)
+                if isinstance(nested, dict):
+                    config.update(nested)
+            for k, v in ctx.params.items():
+                if k not in config and v is not None:
+                    config[k] = v
+        return normalize_similarity_spatial_config(config)
 
     @staticmethod
     def _load_inputs(ctx, frames):
@@ -121,6 +144,20 @@ class SpatialFusionDenoisingAlgorithm:
                     config.get("similarity_chroma_sensitivity", 6.0),
                 )
             )
+            noise_sigma_cfg = config.get("noise_sigma")
+            noise_sigma_label = (
+                "auto"
+                if noise_sigma_cfg in (None, 0, 0.0)
+                else f"{float(noise_sigma_cfg):.5f}"
+            )
+
+            print(
+                f"[SpatialFusion] Effective spatial params: "
+                f"tile={tile_size} overlap={overlap:.3f} "
+                f"motion_sensitivity={float(config.get('similarity_spatial_motion_sensitivity', 150.0)):.3f} "
+                f"noise_offset_factor={float(config.get('similarity_spatial_noise_mad_offset_factor', 0.15)):.3f} "
+                f"noise_sigma={noise_sigma_label}"
+            )
 
             result_fp32, _ = run_resident_pipeline(
                 image_paths,
@@ -137,9 +174,6 @@ class SpatialFusionDenoisingAlgorithm:
                 chroma_sensitivity=chroma_sensitivity,
                 is_raw=is_raw,
                 storage_mode=storage_mode,
-                accumulation_mode=getattr(ctx, "params", {}).get(
-                    "processing_mode", "auto"
-                ),
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=getattr(ctx, "update_progress", None),
@@ -150,6 +184,9 @@ class SpatialFusionDenoisingAlgorithm:
 
             ref_dtype = getattr(ctx, "ref_dtype", np.uint16 if is_raw else np.uint8)
             result = restore_output_dtype(result_fp32, ref_dtype)
+            del result_fp32
+            import gc
+            gc.collect()
             print(
                 f"[SpatialFusion] finished backend={backend} "
                 f"result shape={result.shape} dtype={result.dtype}"

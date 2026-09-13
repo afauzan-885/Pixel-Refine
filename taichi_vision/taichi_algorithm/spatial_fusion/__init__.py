@@ -34,6 +34,7 @@ from .compute_spatial import (
     equalize_brightness_kernel,
     generate_spatial_weights_taichi,
     mean_division_vec3_weight_taichi,
+    mean_division_vec3_scalar_weight_kernel,
     postprocess_spatial_weight_taichi,
     phase1_coarse_analysis_kernel,
     phase2_fine_analysis_kernel,
@@ -69,6 +70,7 @@ __all__ = [
     "remap_accumulate_cfa_weighted_taichi",
     "remap_accumulate_tile_taichi",
     "mean_division_vec3_weight_taichi",
+    "mean_division_vec3_scalar_weight_kernel",
     "postprocess_spatial_weight_taichi",
     "compile_spatial_tcm",
     # thresholds

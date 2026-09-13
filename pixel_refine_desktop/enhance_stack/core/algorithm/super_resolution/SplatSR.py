@@ -1642,35 +1642,18 @@ def main(
         output_folder_stack = "database/stack"
         os.makedirs(output_folder_stack, exist_ok=True)
 
-        image_paths = []
-        if single_process:
-            hdf5_path = os.path.join(align_dir, "aligned_images.h5")
+        target_batch_id = batch_id if batch_id is not None else 1
+        hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{target_batch_id}.h5")
+        image_paths = image_processor.get_all_image_paths_for_batch_process(target_batch_id)
+        if not image_paths and single_process:
             image_paths = get_all_image_paths_for_single_process(db_path)
-            ref_name = (
-                os.path.splitext(os.path.basename(image_paths[0]))[0]
-                if image_paths
-                else "single_process"
-            )
-            # SplattingSR owns alignment internally.  Never consume an
-            # externally aligned HDF5 product here; doing so would align the
-            # burst before the internal Lucas-Kanade stage.
-            data_source = image_paths
-        else:
-            if batch_id is None:
-                raise ValueError("Batch ID must be provided for batch processing.")
-            hdf5_path = os.path.join(align_dir, f"aligned_image_batch_{batch_id}.h5")
-            image_paths = image_processor.get_all_image_paths_for_batch_process(
-                batch_id
-            )
-            ref_name = (
-                os.path.splitext(os.path.basename(image_paths[0]))[0]
-                if image_paths
-                else f"batch_{batch_id}"
-            )
-            # Keep the raw/session image order and let the internal
-            # Lucas-Kanade stage estimates motion.  The SpatialFusion
-            # HDF5 alignment cache is deliberately not an input to SplatSR.
-            data_source = image_paths
+
+        ref_name = (
+            os.path.splitext(os.path.basename(image_paths[0]))[0]
+            if image_paths
+            else f"batch_{target_batch_id}"
+        )
+        data_source = image_paths
 
         cleanup_old_hdf5_files(hdf5_path)
 
@@ -1770,9 +1753,11 @@ def running_splatting_sr(
     batch_id=None,
     progress_callback=None,
     stop_callback=None,
+    db_path=None,
 ):
-    controller = getattr(parent, "controller", None)
-    db_path = getattr(controller, "db_path", None)
+    if not db_path:
+        controller = getattr(parent, "controller", None)
+        db_path = getattr(controller, "db_path", None)
     db_path = db_path or os.environ.get("PIXEL_REFINE_SESSION_DB")
     if not db_path:
         raise RuntimeError(
@@ -1780,12 +1765,12 @@ def running_splatting_sr(
             "Set PIXEL_REFINE_SESSION_DB or pass db_path explicitly."
         )
 
-    if batch_id is not None and progress_callback is not None:
+    if progress_callback is not None:
         main(
             db_path=db_path,
             update_progress=progress_callback,
             stop_requested=stop_callback,
-            single_process=False,
+            single_process=False if batch_id is not None else bool(single_process),
             batch_id=batch_id,
         )
         return

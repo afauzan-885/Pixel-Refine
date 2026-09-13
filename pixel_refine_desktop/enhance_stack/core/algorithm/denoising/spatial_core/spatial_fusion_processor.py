@@ -145,9 +145,14 @@ class SpatialFusionProcessor:
         data_source = kwargs.get("data_source", images)
         image_paths = kwargs.get("image_paths", None)
 
-        if isinstance(data_source, (list, tuple)):
+        if isinstance(data_source, str) and data_source.endswith(".h5"):
+            # (h5py removed)
+
+            with h5py.File(data_source, "r") as f:
+                num_images = sum(1 for k in f.keys() if k.startswith("image_"))
+        elif isinstance(data_source, list):
             num_images = len(data_source)
-        elif images is not None and isinstance(images, (list, tuple)):
+        elif images is not None and isinstance(images, list):
             num_images = len(images)
             data_source = None
         else:
@@ -237,18 +242,29 @@ class SpatialFusionProcessor:
 
                     # Load batch
                     chunk_images = []
-                    source = (
-                        images
-                        if images is not None and isinstance(images, (list, tuple))
-                        else data_source
-                    )
-                    if isinstance(source, (list, tuple)):
-                        chunk_images = source[start_idx:end_idx]
+                    if (
+                        data_source is not None
+                        and isinstance(data_source, str)
+                        and data_source.endswith(".h5")
+                    ):
+                        # (h5py removed)
+
+                        with h5py.File(data_source, "r") as h5f:
+                            for idx in range(start_idx, end_idx):
+                                chunk_images.append(h5f[f"image_{idx}"][:])
                     else:
-                        print(
-                            f"[SpatialFusion] Cannot load images from source: {type(source)}"
+                        source = (
+                            images
+                            if images is not None and isinstance(images, list)
+                            else data_source
                         )
-                        break
+                        if isinstance(source, list):
+                            chunk_images = source[start_idx:end_idx]
+                        else:
+                            print(
+                                f"[SpatialFusion] Cannot load images from source: {type(source)}"
+                            )
+                            break
 
                     for chunk_i, img_orig in enumerate(chunk_images):
                         i = start_idx + chunk_i

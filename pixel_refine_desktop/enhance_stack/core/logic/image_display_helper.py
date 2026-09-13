@@ -202,6 +202,11 @@ class ImageLoaderThread(QThread):
                         img = img.convert("RGB")
                     elif img.mode == "L":
                         img = img.convert("RGB")
+                    
+                    # Pre-downsample in PIL C-space if exceeds requested bounds
+                    if self.max_width and self.max_height and (img.width > self.max_width or img.height > self.max_height):
+                        img.thumbnail((self.max_width, self.max_height), Image.Resampling.BILINEAR)
+
                     # Convert PIL image to numpy array (RGB)
                     image_array = np.array(img)
                     
@@ -229,6 +234,10 @@ class ImageLoaderThread(QThread):
         try:
             if image_array is None or image_array.size == 0:
                 return None
+
+            if image_array.dtype != np.uint8:
+                from taichi_vision import taichi_aot
+                image_array = taichi_aot.cast(image_array, np.uint8)
 
             image_array = np.ascontiguousarray(image_array)
             height, width = image_array.shape[:2]
@@ -334,9 +343,9 @@ def setup_zoomable_preview(
     def on_error(error_msg):
         print(f"Error loading image: {error_msg}")
 
-    # Start loading thread with optimized bounds for half_res burst previews
-    max_w = 1920 if half_res else 4000
-    max_h = 1080 if half_res else 4000
+    # Start loading thread at 100% full native resolution (no downscaling)
+    max_w = None
+    max_h = None
 
     loader = ImageLoaderThread(
         image_path,
@@ -344,7 +353,7 @@ def setup_zoomable_preview(
         max_height=max_h,
         is_reference=is_reference,
         batch_id=batch_id,
-        half_res=half_res,
+        half_res=False,
     )
     loader.image_loaded.connect(on_image_loaded)
     loader.error_occurred.connect(on_error)
@@ -379,11 +388,11 @@ def display_image_in_zoomable(
 
 
 def load_and_display_image(
-    image_path, max_width=2000, max_height=2000, is_reference=False, batch_id=None
+    image_path, max_width=None, max_height=None, is_reference=False, batch_id=None
 ):
     """
     Load dan return QPixmap dari image path.
-    Helper untuk synchronous image loading.
+    Helper untuk synchronous image loading (Full native resolution by default).
     Support caching untuk reference image.
 
     Args:
@@ -430,10 +439,16 @@ def load_and_display_image(
                 img = ImageOps.exif_transpose(img)
                 if img.mode in ("RGBA", "LA", "P"):
                     img = img.convert("RGB")
+                elif img.mode == "L":
+                    img = img.convert("RGB")
+                if max_width and max_height and (img.width > max_width or img.height > max_height):
+                    img.thumbnail((max_width, max_height), Image.Resampling.BILINEAR)
                 image_array = np.array(img)
 
         elif ext in SUPPORTED_FORMATS.get("raw", []):
-            from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import load_raw_as_8bit_rgb
+            from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
+                load_raw_as_8bit_rgb,
+            )
             image_array = load_raw_as_8bit_rgb(image_path)
 
         else:
@@ -443,14 +458,37 @@ def load_and_display_image(
         if image_array is None:
             return None
 
-        image_array = np.ascontiguousarray(image_array)
+        # Ensure image_array is strictly 8-bit uint8 RGB for QImage Format_RGB888
+        if image_array.dtype != np.uint8:
+            from taichi_vision import taichi_aot
+            image_array = taichi_aot.cast(image_array, np.uint8)
+
+        if image_array.ndim == 2:
+            image_array = np.repeat(image_array[:, :, None], 3, axis=2)
+        elif image_array.ndim == 3 and image_array.shape[2] == 4:
+            image_array = image_array[:, :, :3]
+
+        # Pre-downsample only if display bounds are explicitly specified
+        orig_h, orig_w = image_array.shape[:2]
+        if max_width and max_height and (orig_w > max_width or orig_h > max_height):
+            scale = min(max_width / orig_w, max_height / orig_h)
+            new_w = max(1, int(round(orig_w * scale)))
+            new_h = max(1, int(round(orig_h * scale)))
+            pil_tmp = Image.fromarray(image_array)
+            del image_array
+            resized_pil = pil_tmp.resize((new_w, new_h), Image.Resampling.BILINEAR)
+            del pil_tmp
+            image_array = np.ascontiguousarray(np.array(resized_pil), dtype=np.uint8)
+            del resized_pil
+        else:
+            image_array = np.ascontiguousarray(image_array, dtype=np.uint8)
 
         # --- OPTIMIZATION: Save to Cache if it's a reference ---
         if is_reference:
             print(f"[ComparisonCache] Saving to cache (Batch {batch_id}): {image_path}")
             ComparisonCache.instance().save_to_cache(batch_id, image_path, image_array)
 
-        # Convert to QPixmap
+        # Convert to QPixmap directly at target resolution
         height, width = image_array.shape[:2]
         bytes_per_line = 3 * width
         q_image = QImage(
@@ -459,11 +497,10 @@ def load_and_display_image(
 
         pixmap = QPixmap.fromImage(q_image)
 
-        # Resize jika perlu
-        if width > max_width or height > max_height:
-            pixmap = pixmap.scaledToWidth(
-                max_width, Qt.TransformationMode.SmoothTransformation
-            )
+        del image_array
+        del q_image
+        import gc
+        gc.collect()
 
         return pixmap
 

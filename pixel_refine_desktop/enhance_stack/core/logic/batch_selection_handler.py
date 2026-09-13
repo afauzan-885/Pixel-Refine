@@ -40,28 +40,32 @@ class BatchSelectionHandler(QObject):
         # Case 2: One item selected
         elif len(selected_values) == 1:
             self._splitter_timer.stop()  # Cancel any pending collapse
+            was_collapsed = getattr(self.right_panel, "_is_collapsed", True)
             self.right_panel.set_collapsed_state(False)
-
-            target_h = self.right_panel._calculate_algo_target_h()
-            self.right_panel.height_animator.animate_height(
-                self.right_panel.algo_container, target_h
-            )
-            self.right_panel.splitter.setStretchFactor(0, 1)
-            self.right_panel.splitter.setStretchFactor(1, 1)
 
             batch_id = int(selected_values[0])
             self.right_panel.current_batch_id = batch_id
 
+            # Emit signal immediately to load batch content without latency
+            self.right_panel.batch_selected.emit(batch_id)
+
             # Load settings from JSON/Store for this batch
             self.right_panel._load_batch_settings(batch_id)
+
+            if was_collapsed:
+                target_h = self.right_panel._calculate_algo_target_h()
+                self.right_panel.height_animator.animate_height(
+                    self.right_panel.algo_container, target_h
+                )
+                self.right_panel.splitter.setStretchFactor(0, 70)
+                self.right_panel.splitter.setStretchFactor(1, 30)
+            else:
+                self.right_panel._balance_splitter_sizes()
 
             # Update Header Title
             selected_labels = self.right_panel.list_group.get_selected_labels()
             batch_name = selected_labels[0] if selected_labels else ""
             display_panel.set_header_title(f"Batch: {batch_name}")
-
-            # Emit signal
-            self.right_panel.batch_selected.emit(batch_id)
 
         # Case 3: No items selected
         else:

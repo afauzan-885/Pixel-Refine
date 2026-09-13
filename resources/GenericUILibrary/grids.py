@@ -90,6 +90,16 @@ class GridContainer(QScrollArea, RealtimeMixin):
 
     def add_item(self, widget):
         """Add item to grid based on wrap mode and column mode"""
+        # Store in _items_map if ID is resolvable
+        item_id = (
+            widget.property("card_id")
+            or getattr(widget, "card_id", None)
+            or getattr(widget, "_card_id", None)
+            or getattr(widget, "item_id", None)
+        )
+        if item_id is not None:
+            self._items_map[str(item_id)] = widget
+
         # Store widget for responsive mode
         if self.column_mode == "responsive":
             self._stored_widgets.append(widget)
@@ -112,23 +122,34 @@ class GridContainer(QScrollArea, RealtimeMixin):
         Calculate number of columns based on available width and item size.
         """
         viewport = self.viewport()
-        if not viewport:
-            return self.columns
+        viewport_w = viewport.width() if viewport else 0
 
-        available_width = viewport.width()
+        frame_w = self.frameWidth() * 2 if hasattr(self, "frameWidth") else 0
+        sb_w = (
+            self.verticalScrollBar().width()
+            if hasattr(self, "verticalScrollBar") and self.verticalScrollBar().isVisible()
+            else 0
+        )
+        self_inner_w = max(0, self.width() - frame_w - sb_w)
 
-        # Debounce/Init handling
+        # Use the larger of viewport width and inner width if viewport geometry is stale
+        available_width = max(viewport_w, self_inner_w)
+
+        # Debounce/Init handling: if width is still too small, traverse parent chain
         if available_width <= 100:
-            parent_scroll = self.parentWidget()
-            if isinstance(parent_scroll, QWidget) and parent_scroll.width() > 100:
-                available_width = parent_scroll.width()
+            p = self.parentWidget()
+            while p is not None:
+                if isinstance(p, QWidget) and p.width() > 100:
+                    available_width = max(0, p.width() - frame_w - sb_w)
+                    break
+                p = p.parentWidget()
             else:
                 available_width = 800
 
         # Ambil margin dari layout secara dinamis
         m = self.grid_layout.contentsMargins()
         padding = m.left() + m.right()
-        usable_width = available_width - padding
+        usable_width = max(0, available_width - padding)
 
         spacing = self.spacing or 0
         item_width_with_spacing = self.item_width + spacing
@@ -155,6 +176,10 @@ class GridContainer(QScrollArea, RealtimeMixin):
         """Safe removal of tracking widget."""
         if widget in self._stored_widgets:
             self._stored_widgets.remove(widget)
+        for k, v in list(self._items_map.items()):
+            if v == widget:
+                self._items_map.pop(k, None)
+                break
         try:
             self.grid_layout.removeWidget(widget)
         except (RuntimeError, AttributeError):
@@ -198,23 +223,34 @@ class GridContainer(QScrollArea, RealtimeMixin):
     def sync_items(self, new_data_list):
         """
         Smart-update grid items based on ID.
-        new_data_list: list of dicts with 'id' key.
+        Supports list of dicts or model objects with 'id' / '.id'.
         """
-        new_ids = [str(item.get("id")) for item in new_data_list if "id" in item]
+        def _get_val(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        new_ids = [
+            str(_get_val(item, "id"))
+            for item in new_data_list
+            if _get_val(item, "id") is not None
+        ]
 
         # 1. Remove items no longer in list
         ids_to_remove = set(self._items_map.keys()) - set(new_ids)
         for item_id in ids_to_remove:
-            widget = self._items_map.pop(item_id)
-            if widget in self._stored_widgets:
-                self._stored_widgets.remove(widget)
-            self.grid_layout.removeWidget(widget)
-            widget.deleteLater()
+            widget = self._items_map.pop(item_id, None)
+            if widget:
+                if widget in self._stored_widgets:
+                    self._stored_widgets.remove(widget)
+                try:
+                    self.grid_layout.removeWidget(widget)
+                    widget.deleteLater()
+                except (RuntimeError, AttributeError):
+                    pass
 
         # 2. Add or Reorder
-        # Since QGridLayout is row/col based, it's easier to just re-layout everything
-        # if the order or set of items changed, but we keep the widget instances.
-
+        # Re-layout everything to guarantee row/col ordering, preserving alive widget instances.
         old_item_count = self.item_count
         self.item_count = 0
 
@@ -222,8 +258,11 @@ class GridContainer(QScrollArea, RealtimeMixin):
         ordered_widgets = []
 
         for item_data in new_data_list:
-            item_id = str(item_data.get("id"))
-            label = item_data.get("label", item_data.get("name", ""))
+            raw_id = _get_val(item_data, "id")
+            if raw_id is None:
+                continue
+            item_id = str(raw_id)
+            label = _get_val(item_data, "label", _get_val(item_data, "name", ""))
 
             if item_id in self._items_map:
                 widget = self._items_map[item_id]
@@ -241,28 +280,23 @@ class GridContainer(QScrollArea, RealtimeMixin):
 
                 self._items_map[item_id] = widget
 
-            ordered_widgets.append(widget)
+            if widget is not None:
+                ordered_widgets.append(widget)
 
-        # Clear layout (remove but don't delete)
+        # Clear layout (remove from grid without deleting the widgets)
         while self.grid_layout.count():
             self.grid_layout.takeAt(0)
 
         # Reset stored widgets for responsive mode if needed
         if self.column_mode == "responsive":
             self._stored_widgets = ordered_widgets.copy()
-            self.columns = self._calculate_responsive_columns()
+            self.columns = max(1, self._calculate_responsive_columns())
+        else:
+            self.columns = max(1, self.columns)
 
-        # Re-add in order
+        # Re-add in order using robust layout addition
         for widget in ordered_widgets:
-            if self.wrap_mode == "vertical":
-                row = self.item_count // self.columns
-                col = self.item_count % self.columns
-            else:
-                col = self.item_count // self.columns
-                row = self.item_count % self.columns
-
-            self.grid_layout.addWidget(widget, row, col)
-            self.item_count += 1
+            self._add_to_layout_grid(widget)
 
     def get_item_count(self):
         """Get number of items"""
@@ -362,6 +396,18 @@ class GridContainer(QScrollArea, RealtimeMixin):
 
                 if not self._resize_timer.isActive():
                     self._resize_timer.start()
+
+    def refresh_responsive_layout(self):
+        """Forces an immediate responsive layout calculation and rebuild if needed."""
+        if (
+            self.column_mode == "responsive"
+            and self._stored_widgets
+            and not self._is_batch_updating
+        ):
+            new_columns = self._calculate_responsive_columns()
+            if new_columns != self.columns or self.grid_layout.columnCount() != new_columns:
+                self.columns = new_columns
+                self._rebuild_grid()
 
     def to_qml(self, indent=0):
         tab = "    " * indent
@@ -470,18 +516,23 @@ class GridItem(QWidget):
         super().paintEvent(event)
 
         if self._is_selected:
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter = QPainter()
+            if not painter.begin(self):
+                return
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-            # Blue highlight border
-            border_pen = QPen(QColor(0, 120, 215))
-            border_pen.setWidth(3)
+                # Blue highlight border
+                border_pen = QPen(QColor(0, 120, 215))
+                border_pen.setWidth(3)
 
-            painter.setPen(border_pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(border_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
 
-            rect = self.rect().adjusted(2, 2, -2, -2)
-            painter.drawRoundedRect(rect, 4, 4)
+                rect = self.rect().adjusted(2, 2, -2, -2)
+                painter.drawRoundedRect(rect, 4, 4)
+            finally:
+                painter.end()
 
     def mousePressEvent(self, event: QMouseEvent):
         """Handle click"""

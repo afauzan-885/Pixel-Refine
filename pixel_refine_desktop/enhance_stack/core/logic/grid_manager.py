@@ -158,6 +158,14 @@ class GridManager:
         if len(self._populate_queue) % 3 == 0:
             self._update_window()
 
+        if not self._populate_queue:
+            if self._populate_timer and self._populate_timer.isActive():
+                self._populate_timer.stop()
+            self.panel.grid_container.set_batch_update(False)
+            self._update_window()
+            if self._real_paths_for_sync:
+                self.staged_load_timer.start()
+
     # =========================================================================
     # === WINDOWED LAZY LOADING ===
     # =========================================================================

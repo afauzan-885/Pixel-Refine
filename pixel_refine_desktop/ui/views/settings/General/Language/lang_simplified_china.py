@@ -562,7 +562,7 @@ LANGUAGE_LABEL = "语言"
 PROCESS_FORMAT_LABEL = "处理格式"
 PROCESS_FORMAT_DESCRIPTION = "RGB Linear 使用当前 RGB 流程。RAW Native 目前支持去马赛克前、无对齐的 DNG 平均融合。"
 LANGUAGE_TYPE = "英语", "印尼语", "繁體中文", "马来语"
-GPU_ACCELERATION_LABEL = "GPU 加速"
+GPU_ACCELERATION_LABEL = "硬件加速"
 MULTI_CORE_CPU = "多核 CPU 加速"
 SETTINGS_SAVED = "设置已成功保存。"
 
@@ -740,7 +740,7 @@ SIMILARITY_V2_GROUP_TITLE = "Similarity V2 参数"
 RESET_TO_DEFAULTS_BUTTON_TEXT = "重置为默认值"
 HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED_TITLE = "无有效图像"
 HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED_TEXT = "未选择可导入的有效图像。"
-DEVICE_ACCELERATION_LABEL = "GPU 加速"
+DEVICE_ACCELERATION_LABEL = "硬件加速"
 BTN_TEST_BACKEND_HARDWARE = "测试硬件加速"
 MSG_IMPORT_ERROR = "导入错误"
 LBL_ANALYSIS_MODE = "分析模式"
@@ -796,3 +796,40 @@ SPLASH_STATUS_ASSEMBLING_LAYOUT = "正在构建应用程序布局..."
 SPLASH_STATUS_FINISHING_SETUP = "正在完成初始化准备..."
 SPLASH_STATUS_PREPARING_THEME = "正在准备界面主题..."
 SPLASH_STATUS_FINALIZING = "正在准备工作空间..."
+
+# --- Tooltips & Settings UI Extensions ---
+LANGUAGE_DROPDOWN_TIP = "选择应用程序界面的显示语言。"
+DEVICE_ACCELERATION_TIP = "选择用于图像处理的硬件加速设备。"
+ONNX_RUNTIME_TIP = (
+    "选择 AI 推理模型 (WeightNet / FusionNet) 的执行提供程序。\n"
+    "自动 (Auto): 可用时使用 DirectML，否则降级到 CPU。\n"
+    "DirectML (GPU): 通过 DirectML 强制 GPU 加速。\n"
+    "CPU: 仅使用 CPU 执行。"
+)
+LBL_BACKEND_INFO_BTN_TIP = "查看检测到的硬件、后端状态以及性能预估。"
+MSG_HARDWARE_TEST_DEEP_DISABLED = "深度分析已暂时禁用，以改进后端稳定性。"
+
+LBL_BLOCK_PROCESSING = "分块处理"
+LBL_MEGAPIXEL_THRESHOLD = "百万像素阈值"
+LBL_BLOCK_SIZE = "分块大小"
+LBL_ONNX_RUNTIME = "ONNX 运行时"
+
+# --- Hardware Statistics Modal Translations ---
+LBL_BACKEND_STATS_TITLE = "硬件后端统计信息"
+LBL_BACKEND_STATS_SUMMARY = (
+    "检测到: {detected} 个后端 | 通过: {passed}/{tested} 已测试 | 跳过可选: {skipped}\n"
+    "GPU 基准测试: 1024 x 1024 (1.049 MP) | 每个算法 4 次 (1 次预热 + 3 次测试) | 目标预估: {target_label}"
+)
+LBL_BACKEND_HEADER = "后端"
+LBL_HARDWARE_HEADER = "硬件"
+LBL_STATUS_HEADER = "状态"
+LBL_GPU_BENCHMARK_HEADER = "GPU 1024²"
+LBL_ESTIMATE_HEADER = "预估 24 MP"
+LBL_STATUS_SUPPORTED = "支持"
+LBL_STATUS_FAILED = "失败"
+LBL_STATUS_NOT_TESTED = "未测试"
+LBL_STATUS_INVALID = "无效"
+LBL_BACKEND_STATS_NOTE = (
+    "预估值基于小分辨率快速测试的线性外推；由于内存带宽、缓存、分块和 VRAM 开销，大分辨率的实际结果可能会有所不同。"
+)
+

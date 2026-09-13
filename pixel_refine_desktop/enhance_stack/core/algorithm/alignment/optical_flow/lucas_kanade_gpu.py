@@ -23,26 +23,32 @@ DEFAULT_LUCAS_KANADE_GPU_CONFIG = {
 
 LUCAS_KANADE_GPU_PRESETS = {
     "fast": {
-        "grid_step": 48,
+        # Lowest dispatch/iteration count for preview and interactive use.
+        "grid_step": 64,
         "border_margin": 8,
         "win_size": 13,
-        "max_level": 2,
-        "iterations": 8,
-        "epsilon": 0.03,
+        "max_level": 1,
+        "iterations": 6,
+        "epsilon": 0.05,
+        "overlap": 0.15,
+        "dense_mode": "blocky_clamped",
         "motion_mode": "fast",
         "adaptive": False,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_overlap": 0.20,
+        "tile_overlap": 0.15,
         "max_flow_px": 48.0,
     },
-    "medium": {
+    "balance": {
+        # Recommended default: smooth densification without adaptive reruns.
         "grid_step": 32,
         "border_margin": 8,
-        "win_size": 15,
+        "win_size": 17,
         "max_level": 2,
-        "iterations": 8,
-        "epsilon": 0.02,
+        "iterations": 16,
+        "epsilon": 0.015,
+        "overlap": 0.25,
+        "dense_mode": "smooth",
         "motion_mode": "fast",
         "adaptive": False,
         "adaptive_threshold": 1,
@@ -51,20 +57,28 @@ LUCAS_KANADE_GPU_PRESETS = {
         "max_flow_px": 64.0,
     },
     "high": {
-        "grid_step": 32,
+        # High deliberately increases samples, window, pyramid depth and
+        # solver iterations, then adds adaptive refinement/auto rerun.
+        "grid_step": 16,
         "border_margin": 8,
-        "win_size": 15,
-        "max_level": 2,
-        "iterations": 8,
-        "epsilon": 0.02,
+        "win_size": 25,
+        "max_level": 3,
+        "iterations": 32,
+        "epsilon": 0.005,
+        "overlap": 0.35,
+        "dense_mode": "smooth",
         "motion_mode": "auto",
-        "adaptive": False,
+        "adaptive": True,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_overlap": 0.20,
+        "tile_overlap": 0.30,
         "max_flow_px": 96.0,
     },
 }
+
+# ``medium`` remains accepted as a compatibility alias, but balance is the
+# canonical label exposed by the settings panel.
+LUCAS_KANADE_GPU_PRESETS["medium"] = LUCAS_KANADE_GPU_PRESETS["balance"]
 
 
 def _allocate_float_buffer_like(taichi_aot, image, host_accessible=False):
@@ -144,43 +158,63 @@ class LucasKanadeGPU(LucasKanadeCPU):
         except Exception:
             pass
 
-    def _cleanup_tile_buffers(self):
-        if self._tile_buffers:
-            for idx, bufs in self._tile_buffers.items():
-                for name, buf in bufs.items():
-                    if buf is not None and hasattr(buf, "release"):
-                        try:
-                            buf.release()
-                        except Exception:
-                            pass
-                    elif buf is not None and hasattr(buf, "destroy"):
-                        try:
-                            buf.destroy()
-                        except Exception:
-                            pass
-            self._tile_buffers = None
-        self._current_ref_id = None
+    def _cleanup_tile_buffers(self, *, keep_reference=False):
+        if not self._tile_buffers:
+            return
+        remaining = {}
+        for idx, bufs in tuple(self._tile_buffers.items()):
+            retained = {}
+            for name, buf in bufs.items():
+                if keep_reference and name in ("ref_gray_gpu", "reference_pyramid"):
+                    retained[name] = buf
+                    continue
+                self._release_tile_value(buf)
+            if retained:
+                remaining[idx] = retained
+        self._tile_buffers = remaining or None
+        if self._tile_buffers is None:
+            self._current_ref_id = None
 
-    def _cleanup_tile_buffer(self, tile_idx):
+    @classmethod
+    def _release_tile_value(cls, value):
+        """Release a tile buffer or a resident pyramid owned by that tile."""
+        if value is None:
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                cls._release_tile_value(item)
+            return
+        release = getattr(value, "release", None)
+        destroy = getattr(value, "destroy", None)
+        if callable(release):
+            try:
+                release()
+                return
+            except Exception:
+                pass
+        if callable(destroy):
+            try:
+                destroy()
+            except Exception:
+                pass
+
+    def _cleanup_tile_buffer(self, tile_idx, *, keep_reference=False):
         if not self._tile_buffers:
             return
         bufs = self._tile_buffers.pop(tile_idx, None)
         if not bufs:
             return
-        for buf in bufs.values():
-            if buf is not None and hasattr(buf, "release"):
-                try:
-                    buf.release()
-                except Exception:
-                    pass
-            elif buf is not None and hasattr(buf, "destroy"):
-                try:
-                    buf.destroy()
-                except Exception:
-                    pass
+        retained = {}
+        for name, buf in bufs.items():
+            if keep_reference and name in ("ref_gray_gpu", "reference_pyramid"):
+                retained[name] = buf
+                continue
+            self._release_tile_value(buf)
+        if retained:
+            self._tile_buffers[tile_idx] = retained
 
     @staticmethod
-    def _vram_cleanup(reason=""):
+    def _vram_cleanup(reason="", *, clear_pool=True):
         try:
             from taichi_vision import taichi_aot
 
@@ -188,7 +222,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
             if engine is not None:
                 if hasattr(engine, "sync"):
                     engine.sync()
-                if hasattr(engine, "buffer_pool") and engine.buffer_pool:
+                if clear_pool and hasattr(engine, "buffer_pool") and engine.buffer_pool:
                     engine.buffer_pool.clear()
         except Exception as exc:
             print(f"[LucasKanadeGPU] VRAM cleanup skipped ({reason}): {exc}")
@@ -196,11 +230,11 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
     def _init_tile_buffers(self, reference, tiles, config):
         return {
-            idx: self._init_tile_buffer(reference, tile)
+            idx: self._init_tile_buffer(reference, tile, config)
             for idx, tile in enumerate(tiles)
         }
 
-    def _init_tile_buffer(self, reference, tile):
+    def _init_tile_buffer(self, reference, tile, config=None, reuse_reference=None):
         from taichi_vision import taichi_aot
         from taichi_vision.taichi_aot import get_engine
 
@@ -208,8 +242,11 @@ class LucasKanadeGPU(LucasKanadeCPU):
         rx0, ry0, rx1, ry1 = tile["roi"]
         roi_h, roi_w = ry1 - ry0, rx1 - rx0
         ref_roi = reference[ry0:ry1, rx0:rx1]
-        ref_gray_cpu = to_flow_gray_u8(ref_roi).astype(np.float32, copy=False)
-        ref_gray_gpu = taichi_aot.upload(ref_gray_cpu, is_vector=False)
+        if reuse_reference and reuse_reference.get("ref_gray_gpu") is not None:
+            ref_gray_gpu = reuse_reference["ref_gray_gpu"]
+        else:
+            ref_gray_cpu = to_flow_gray_u8(ref_roi).astype(np.float32, copy=False)
+            ref_gray_gpu = taichi_aot.upload(ref_gray_cpu, is_vector=False)
         is_color = reference.ndim == 3
         shape = (roi_h, roi_w, 3) if is_color else (roi_h, roi_w)
         target_gpu = engine.allocate(
@@ -231,8 +268,55 @@ class LucasKanadeGPU(LucasKanadeCPU):
         oy1, ox1 = vy1 - ry0, vx1 - rx0
         mask_cpu = np.zeros((roi_h, roi_w), dtype=np.float32)
         mask_cpu[oy0:oy1, ox0:ox1] = 1.0
+        # A full-frame tile can keep the invariant reference pyramid resident
+        # across support frames.  On conservative/low-VRAM mode this remains
+        # disabled by default; callers may opt in explicitly with
+        # ``cache_reference_pyramid=True``.
+        cache_reference_pyramid = bool(
+            (config or {}).get(
+                "cache_reference_pyramid",
+                not bool((config or {}).get("conservative_vram", True)),
+            )
+        )
+        reference_pyramid = (
+            reuse_reference.get("reference_pyramid")
+            if reuse_reference
+            else None
+        )
+        if (
+            reference_pyramid is None
+            and cache_reference_pyramid
+            and (rx0, ry0, rx1, ry1) == (
+            0,
+            0,
+            int(reference.shape[1]),
+            int(reference.shape[0]),
+            )
+        ):
+            candidate_pyramid = None
+            try:
+                from taichi_vision.taichi_algorithm.pyramid.pyramid import (
+                    build_image_pyramid_gpu,
+                )
+
+                candidate_pyramid = build_image_pyramid_gpu(
+                    ref_gray_gpu,
+                    n_levels=max(1, int((config or {}).get("max_level", 2)) + 1),
+                    min_size=32,
+                )
+                reference_pyramid = candidate_pyramid
+            except Exception:
+                # Pyramid caching is an optimization only.  The established
+                # per-call construction remains the same-backend recovery.
+                try:
+                    for level in candidate_pyramid[1:]:
+                        self._release_tile_value(level)
+                except Exception:
+                    pass
+                reference_pyramid = None
         buffers = {
             "ref_gray_gpu": ref_gray_gpu,
+            "reference_pyramid": reference_pyramid,
             "target_gpu": target_gpu,
             "target_gray_gpu": target_gray_gpu,
             "target_host": np.empty(shape, dtype=np.float32),
@@ -279,8 +363,8 @@ class LucasKanadeGPU(LucasKanadeCPU):
     @staticmethod
     def _normalize_mode(mode):
         value = str(mode or "fast").strip().lower()
-        if value in ("balanced", "balance mode", "balance", "normal"):
-            return "medium"
+        if value in ("balanced", "balance mode", "balance", "normal", "medium"):
+            return "balance"
         if value == "auto":
             return "high"
         if value not in LUCAS_KANADE_GPU_PRESETS:
@@ -320,8 +404,13 @@ class LucasKanadeGPU(LucasKanadeCPU):
             ),
             "grid_step": max(4, int(config.get("grid_step", 48))),
             "border_margin": max(0, int(config.get("border_margin", 8))),
+            "overlap": float(config.get("overlap", 0.35)),
+            "adaptive": bool(config.get("adaptive", False)),
+            "adaptive_threshold": max(
+                1, int(config.get("adaptive_threshold", 1))
+            ),
             "motion_mode": str(config.get("motion_mode", "fast")),
-            "dense_mode": "blocky_clamped",
+            "dense_mode": str(config.get("dense_mode", "smooth")),
             "max_flow_px": float(config.get("max_flow_px", 64.0)),
         }
 
@@ -352,15 +441,19 @@ class LucasKanadeGPU(LucasKanadeCPU):
             lk_params,
         )
 
-    def _calculate_flow_gpu_buffer(self, reference_gray, target_gray, config):
+    def _calculate_flow_gpu_buffer(
+        self, reference_gray, target_gray, config, reference_pyramid=None
+    ):
         from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
 
-        flow = calcOpticalFlowPyrLK(
-            reference_gray,
-            target_gray,
-            **self._build_lk_params(config),
-            return_gpu=True,
-        )
+        # Forward the optional resident reference pyramid.  The public LK
+        # wrapper validates its shape/layout and reuses the caller-owned
+        # levels, avoiding a full pyramid rebuild for every support frame.
+        flow_kwargs = self._build_lk_params(config)
+        flow_kwargs["return_gpu"] = True
+        if reference_pyramid is not None:
+            flow_kwargs["reference_pyramid"] = reference_pyramid
+        flow = calcOpticalFlowPyrLK(reference_gray, target_gray, **flow_kwargs)
         if isinstance(flow, tuple):
             flow = flow[0]
         if flow is None or not hasattr(flow, "shape"):
@@ -422,7 +515,11 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 for module_name in self.GPU_MODULES:
                     taichi_aot._mod(module_name)
                 taichi_aot.engine.sync()
-                taichi_aot.engine.buffer_pool.clear()
+                # Block Matching can opt into allocator reuse.  The old
+                # unconditional clear forced every pyramid/grid temporary to
+                # be freshly allocated for the next support frame.
+                if not bool(config.get("retain_native_pool", False)):
+                    taichi_aot.engine.buffer_pool.clear()
                 res = self._align_frame_gpu_flow_remap(
                     reference,
                     target,
@@ -432,12 +529,17 @@ class LucasKanadeGPU(LucasKanadeCPU):
                     matching_target=matching_target,
                 )
             if bool(config.get("conservative_vram", True)):
-                self._cleanup_tile_buffers()
-            self._vram_cleanup("frame-complete")
+                self._cleanup_tile_buffers(
+                    keep_reference=bool(config.get("cache_reference_pyramid", False))
+                )
+            self._vram_cleanup(
+                "frame-complete",
+                clear_pool=not bool(config.get("retain_native_pool", False)),
+            )
             return res
         except Exception as exc:
             self._cleanup_tile_buffers()
-            self._vram_cleanup("frame-error")
+            self._vram_cleanup("frame-error", clear_pool=True)
 
             LucasKanadeGPU._gpu_remap_disabled = True
             print(
@@ -552,7 +654,10 @@ class LucasKanadeGPU(LucasKanadeCPU):
         conservative_vram = bool(config.get("conservative_vram", True))
 
         # Initialize/re-initialize tile buffers once per batch/reference change
-        ref_id = id(matching_reference)
+        # A caller may regenerate an analysis/tone-mapped NumPy view for each
+        # frame while the actual reference image remains unchanged.  Let the
+        # specialized aligner provide a stable cache key in that case.
+        ref_id = config.get("_reference_cache_key", id(matching_reference))
         if self._tile_buffers is None or self._current_ref_id != ref_id:
             self._cleanup_tile_buffers()
             # Keep only the active tile resident on low-VRAM devices.
@@ -585,7 +690,10 @@ class LucasKanadeGPU(LucasKanadeCPU):
             taichi_aot.engine.sync()
             profile["stitch"] += time.perf_counter() - fence_start
             for pending_idx in pending_stitch:
-                self._cleanup_tile_buffer(pending_idx)
+                self._cleanup_tile_buffer(
+                    pending_idx,
+                    keep_reference=bool(config.get("cache_reference_pyramid", False)),
+                )
             pending_stitch.clear()
             pending_stitch_bytes = 0
 
@@ -594,8 +702,22 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 if stop_requested and stop_requested():
                     return None
 
-                if idx not in self._tile_buffers:
-                    self._tile_buffers[idx] = self._init_tile_buffer(matching_reference, tile)
+                tile_buffers = self._tile_buffers.get(idx)
+                if tile_buffers is None or "target_gpu" not in tile_buffers:
+                    retained_reference = (
+                        tile_buffers
+                        if tile_buffers is not None
+                        and tile_buffers.get("ref_gray_gpu") is not None
+                        else None
+                    )
+                    if tile_buffers is not None:
+                        self._cleanup_tile_buffer(idx, keep_reference=True)
+                    self._tile_buffers[idx] = self._init_tile_buffer(
+                        matching_reference,
+                        tile,
+                        config,
+                        reuse_reference=retained_reference,
+                    )
 
 
                 warped_gpu = self._warp_tile_gpu(
@@ -679,7 +801,10 @@ class LucasKanadeGPU(LucasKanadeCPU):
         finally:
             taichi_aot.engine.sync()
             for pending_idx in list(pending_stitch):
-                self._cleanup_tile_buffer(pending_idx)
+                self._cleanup_tile_buffer(
+                    pending_idx,
+                    keep_reference=bool(config.get("cache_reference_pyramid", False)),
+                )
             for buffer in buffers:
                 if buffer is not None and hasattr(buffer, "release"):
                     buffer.release()
@@ -831,6 +956,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 ref_gray_gpu,
                 target_gray_gpu,
                 config,
+                reference_pyramid=bufs.get("reference_pyramid"),
             )
             taichi_aot.engine.sync()
             if bool(config.get("conservative_vram", True)):

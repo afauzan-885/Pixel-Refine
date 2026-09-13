@@ -6,9 +6,8 @@ sensitivity.  This module provides self-contained estimation so the public
 ``spatial_merging`` API can auto-tune these thresholds from the reference
 frame without forcing the caller to compute them manually.
 
-- noise_sigma:           Laplacian MAD (median absolute deviation) estimator,
-                         matching the application's historical
-                         ``estimate_noise_in_python`` convention.
+- noise_sigma:           Canonical normalized noise score in [0, 1], matching
+                         the public Taichi CPU/GPU estimator contract.
 - motion_sensitivity:    Higher = more aggressive ghost rejection.  When
                          None, defaults to the established 150.0 value.
 - noise_offset_factor:   Fraction of noise_sigma subtracted before the
@@ -32,7 +31,7 @@ def estimate_noise_sigma(
         fallback:  Value returned when the image is empty or degenerate.
 
     Returns:
-        Estimated sigma in [1e-5, 0.99999].
+        Estimated normalized noise score in [1e-5, 0.99999].
     """
     if ref_image is None or (isinstance(ref_image, np.ndarray) and ref_image.size == 0):
         return float(fallback)
@@ -42,7 +41,8 @@ def estimate_noise_sigma(
             estimate_noise,
         )
 
-        return float(np.clip(estimate_noise(ref_image), 1e-5, 0.99999))
+        score, _ = estimate_noise(ref_image)
+        return float(np.clip(score, 1e-5, 0.99999))
     except Exception:
         pass
 
@@ -76,7 +76,9 @@ def estimate_noise_sigma(
     mad_value = float(np.median(np.abs(lap - median_val)))
     estimated_sigma = mad_value * 1.4826
 
-    return float(np.clip(estimated_sigma, 1e-5, 0.99999))
+    # Keep the fallback in the same normalized score domain as the Taichi
+    # estimator instead of returning an unscaled raw sigma.
+    return float(np.clip(estimated_sigma / 0.032, 1e-5, 0.99999))
 
 
 def auto_motion_sensitivity(
@@ -117,7 +119,8 @@ def resolve_spatial_thresholds(
             estimate_noise,
         )
 
-        noise_sigma = float(estimate_noise(reference_work_gray))
+        noise_score, _ = estimate_noise(reference_work_gray)
+        noise_sigma = float(noise_score)
     else:
         noise_sigma = float(np.clip(noise_sigma, 1e-5, 0.99999))
 

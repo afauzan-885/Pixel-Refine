@@ -95,6 +95,62 @@ def compile_compute_flow_tcm(
             downscale,
         )
         module.add_graph("align_end_to_end_3layer", builder.compile())
+
+        # V2 keeps every coarse-to-fine source immutable while the next
+        # level is being produced.  The original graph bound ``flow_l1`` and
+        # ``flow_l0`` as both input and output of a tile-parallel kernel;
+        # neighbouring tiles could then observe a partially written flow.
+        # Extra arguments are internal to the resident aligner, so the
+        # historical graph and public API remain available as a fallback.
+        flow_l1_seed = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "flow_l1_seed", dtype=ti.f32, ndim=3
+        )
+        flow_l0_seed = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "flow_l0_seed", dtype=ti.f32, ndim=3
+        )
+        flow_l0_raw = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "flow_l0_raw", dtype=ti.f32, ndim=3
+        )
+        builder_v2 = ti.graph.GraphBuilder()
+        builder_v2.dispatch(
+            block_search_kernel,
+            ref_l2,
+            comp_l2,
+            flow_l2,
+            tile_h,
+            tile_w,
+            max_search_radius,
+        )
+        builder_v2.dispatch(
+            upsample_flow_bicubic_kernel, flow_l2, flow_l1_seed, scale
+        )
+        builder_v2.dispatch(
+            search_coarse_level_kernel,
+            ref_l1,
+            comp_l1,
+            flow_l1_seed,
+            flow_l2,
+            flow_l1,
+            tile_h,
+            tile_w,
+            search_dist,
+            downscale,
+        )
+        builder_v2.dispatch(
+            upsample_flow_bicubic_kernel, flow_l1, flow_l0_seed, scale
+        )
+        builder_v2.dispatch(
+            search_fine_level_kernel,
+            ref_l0,
+            comp_l0,
+            flow_l0_seed,
+            flow_l1,
+            flow_l0_raw,
+            tile_h,
+            tile_w,
+            downscale,
+        )
+        module.add_graph("align_end_to_end_3layer_v2", builder_v2.compile())
         archive_module(module, save_path)
         return str(save_path)
     finally:

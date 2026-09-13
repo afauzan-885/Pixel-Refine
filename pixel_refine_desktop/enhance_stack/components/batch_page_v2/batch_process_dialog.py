@@ -54,13 +54,11 @@ class MassAlgorithmEditDialog(QDialog):
         from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import get_backend_arch
         _alignment_choices = [
             language_config.UI_NO_CHANGE,
-            "ORB",
+            "OFB",
             "AKAZE",
-            "Light Glue",
             "Farneback",
             "Lucas Kanade",
             "Block Matching GPU",
-            "RAFT",
             "No Alignment",
         ]
         backend_arch = get_backend_arch()

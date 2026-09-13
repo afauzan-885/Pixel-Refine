@@ -34,7 +34,9 @@ COMMAND_APPLICATION_DESCRIPTION = "Reloading Application..."
 TRY_RESTART_APPLICATION = "Attempting to reload the application"
 COMMAND_FAILED_IN_RESTART_APPLICATION = "System failed to restart."
 RESTART_FAILED = "Restart Failed"
-COMMAND_TO_RESTART_MANUALLY = "Could not restart the application automatically. Please restart it manually."
+COMMAND_TO_RESTART_MANUALLY = (
+    "Could not restart the application automatically. Please restart it manually."
+)
 EXIT_APPLICATION_TITLE = "Exit Application"
 EXIT_APPLICATION_MESSAGE = "Do you want to exit the application?"
 EXIT_APPLICATION_YES = "Yes"
@@ -45,7 +47,9 @@ PROJECT_SAVE_CHANGES_SAVE = "Save"
 PROJECT_SAVE_CHANGES_DISCARD = "Don't Save"
 PROJECT_SAVE_CHANGES_CANCEL = "Cancel"
 EXIT_APPLICATION_APPLY_BACKEND_TITLE = "Backend Change"
-MSG_BACKEND_EXIT_REQUIRED = "Exit the application, then open it again to apply the new backend selection?"
+MSG_BACKEND_EXIT_REQUIRED = (
+    "Exit the application, then open it again to apply the new backend selection?"
+)
 
 # ==============================================================================
 # Sidebar UI
@@ -86,7 +90,9 @@ UI_LABEL_BATCH_PROGRESS = "{}/{} batches processed..."
 UI_LABEL_MOVING_FILES = "Moving {} files to folder '{}'. Please wait..."
 PROCESSING_BATCH = "--- Processing batch {}/{} (Completed: {}) ---"
 NUMBER_OF_BATCHES_TO_BE_PROCESSED = "Number of batches to be processed: {}"
-BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS = "batch_id must be present for batch processing"
+BATCH_ID_MUST_BE_PRESENT_DURING_BATCH_PROCESS = (
+    "batch_id must be present for batch processing"
+)
 SKIP_BATCH_BECAUSE_IMAGE_NOT_LOADED = "Skipping batch {} because no images were loaded."
 BATCH_LABEL_FORMAT = "Batch {}   -   ({} images)"
 BATCH_CANCELED_BY_USER = "Batch processing was canceled by the user."
@@ -101,7 +107,9 @@ BATCH_SUCCESS_HEADER = "Finished"
 # --- Dialogue Title ---
 SELECT_OUTPUT_FOLDER_TITLE = "Select Output Folder to Save Batch"
 OUTPUT_FOLDER_SELECTION_CANCELLED = "Folder selection canceled. Process stopped."
-ALGORITHM_SUCCESS_UPDATE = "Algorithm settings successfully updated for batches {} through {}."
+ALGORITHM_SUCCESS_UPDATE = (
+    "Algorithm settings successfully updated for batches {} through {}."
+)
 
 # --- General Error Messages & Dialogs ---
 BATCH_PROCESSING_ERROR_TITLE = "Batch Processing Error"
@@ -121,9 +129,13 @@ BATCH_PROCESSING_ERROR_REPORT_ITEM = "• Batch #{seq} (ID: {id})\n  Reason: {er
 # --- Log Message
 LOG_BATCH_PROCESSING_START = "Starting processing for {} batches..."
 LOG_PROCESSING_BATCH_DETAIL = "Processing Batch #{}, ID: {}, sequence ({}/{})..."
-LOG_WARN_MULTIPLE_NEW_FILES = "Warning: More than 1 new file found for Batch {}. Moving the first one: {}"
+LOG_WARN_MULTIPLE_NEW_FILES = (
+    "Warning: More than 1 new file found for Batch {}. Moving the first one: {}"
+)
 LOG_BATCH_PROCESSED_NEW_OUTPUT = "Batch {} processed, new output: {}"
-LOG_BATCH_PROCESSED_NO_OUTPUT = "Batch {} processed, but no new output file found in folder '{}'."
+LOG_BATCH_PROCESSED_NO_OUTPUT = (
+    "Batch {} processed, but no new output file found in folder '{}'."
+)
 LOG_ERROR_PROCESSING_BATCH = "Error processing Batch {}: {}"
 LOG_ALL_BATCH_ATTEMPTS_FINISHED = "All batch processing attempts have finished."
 
@@ -141,13 +153,22 @@ UI_LABEL_BATCH_PROGRESS_NO_OUTPUT = "Batch {} finished, no output ({}/{})."
 UI_LABEL_BATCH_PROGRESS_ERROR = "Error in Batch {} ({}/{})."
 
 # Final Finished Toast Message
-UI_LABEL_BATCH_ALL_SUCCESS_SPECIFIC = "All {} batches successfully processed & saved to {}."
-UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC = "{} of {} batches saved to {}. Some had issues."
-UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC = "Process finished. No batch results were saved to {}."
+UI_LABEL_BATCH_ALL_SUCCESS_SPECIFIC = (
+    "All {} batches successfully processed & saved to {}."
+)
+UI_LABEL_BATCH_PARTIAL_SUCCESS_SPECIFIC = (
+    "{} of {} batches saved to {}. Some had issues."
+)
+UI_LABEL_BATCH_NO_SUCCESS_SPECIFIC = (
+    "Process finished. No batch results were saved to {}."
+)
 UI_LABEL_BATCH_NONE_PROCESSED = "No batches were processed."
 
 # Batch Deletion
-BATCH_DELETE_LABEL = "Confirm Batch Deletion", "Are you sure you want to delete batch {}?"
+BATCH_DELETE_LABEL = (
+    "Confirm Batch Deletion",
+    "Are you sure you want to delete batch {}?",
+)
 TITLE_BATCH_ALL_DELETE_BUTTON = "Delete All Batches"
 CONFIRM_BATCH_ALL_DELETE_BUTTON = "Are you sure you want to delete {} batches?"
 NO_DATA_BATCH_ALL_DELETE_BUTTON = "No saved batch data."
@@ -165,33 +186,51 @@ PARAMETER_BATCH_ALIGNMENT_TO_PROCESS = "Use Alignment Result for Next Process"
 UI_FAILED_TO_SAVE_IMAGE_BATCH = "Failed to save image: {}"
 UI_SUCCES_TO_SAVE_IMAGE_BATCH = "Image saved successfully: {}"
 UI_NO_IMAGE_TO_SAVE_IMAGE_BATCH = "No image to save"
-UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH = "System folder (database/stack) does not exist"
+UI_SYSTEM_FOLDER_WRONG_TO_SAVE_IMAGE_BATCH = (
+    "System folder (database/stack) does not exist"
+)
 UI_NO_BATCH_PROCESS = "No batches available for processing"
 
 # Batch Specific Errors/Warnings
-ERROR_WHILE_RETRIEVING_KEY_FROM_HD5F = "An error occurred while retrieving key {} from HDF5: {}"
+ERROR_WHILE_RETRIEVING_KEY_FROM_HD5F = (
+    "An error occurred while retrieving key {} from HDF5: {}"
+)
 
 # ==============================================================================
 # Image Handling (Import/Delete) UI & Messages
 # ==============================================================================
 # Import
-HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = "Image Files (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
+HANDLE_IMPORT_BUTTON_IMAGE_EXTENSION = (
+    "Image Files (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
+)
 PLACHOLDER_DRAG_AND_DROP_IMPORT_IMAGES = """Drag & drop images here<br>
 or<br>
 Use the 'Import Images' button"""
 SUPPORTED_IMAGE_EXTENSION = "Supported image formats"
 HANDLE_IMPORT_BUTTON_IMAGE_PATH = "Select Images"
 HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE = "Duplicate Images"
-HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE = "{count} images already exist in the database and will be skipped."
+HANDLE_IMPORT_BUTTON_IMAGE_DUPLICATE_MESSAGE = (
+    "{count} images already exist in the database and will be skipped."
+)
 HANDLE_IMPORT_BUTTON_IMAGE_SELECTED = "Format Selected"
-HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = "{count} images with '{format}' format will be imported."
-HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = "Failed", "No valid images to import." # Tuple for Title, Message
+HANDLE_IMPORT_BUTTON_IMAGE_DOMINANT = (
+    "{count} images with '{format}' format will be imported."
+)
+HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED = (
+    "Failed",
+    "No valid images to import.",
+)  # Tuple for Title, Message
 ON_IMPORT_COMPLETE_STATUS = "Import complete"
 ON_IMPORT_COMPLETE_MESSAGES = "{} images have been successfully imported."
 
 # Delete
-HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = "Failed", "No images selected." # Tuple for Title, Message
-HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = "Are you sure you want to delete the {} selected images?"
+HANDLE_DELETE_BUTTON_IMAGE_NO_VALID_SELECTED = (
+    "Failed",
+    "No images selected.",
+)  # Tuple for Title, Message
+HANDLE_DELETE_BUTTON_IMAGE_CONFIRM_DELETE = (
+    "Are you sure you want to delete the {} selected images?"
+)
 
 # ==============================================================================
 # Preview Panel UI & Messages
@@ -237,7 +276,9 @@ CONSOL_LOG_RUNNING_ALGORITHM = "Process {} selected, algorithm: {}"
 SAVE_TO_HDF5_ALIGNED_SAVING = "Saving aligned images"
 SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING = "Image {index} has been saved."
 SAVE_TO_HDF5_IMAGE_ALIGNED_SAVING_FINISHED = "All images saved successfully."
-NO_HDF5_FILE_PROCESSING_FROM_PATH = "HDF5 file not found. Processing from image paths..."
+NO_HDF5_FILE_PROCESSING_FROM_PATH = (
+    "HDF5 file not found. Processing from image paths..."
+)
 
 # Image Processing Steps
 RUN_SAVING_REFERENCE_IMAGE = "Saving reference image."
@@ -281,7 +322,9 @@ FAILED_TO_CREATE_PROCESS_WINDOW = "Failed to create process window: {}"
 # Image Loading / Preparation Errors
 LOAD_IMAGES_FROM_PATHS_LOAD_FAILED = "Failed to load image"
 RUN_IMAGE_NOT_FOUND = "Image not found in the database."
-RUN_REFERENCE_IMAGE_NOT_FOUND = "Reference image could not be loaded from {image_paths[0]}."
+RUN_REFERENCE_IMAGE_NOT_FOUND = (
+    "Reference image could not be loaded from {image_paths[0]}."
+)
 RUN_IMAGE_PROCESSING_FAILED = "Failed to load image {i} from {image_paths[i]}."
 FAILED_WHILE_PREPARING_IMAGE = "Failed to prepare image: {}"
 FAILED_TO_PREPARE_REFERENCE_IMAGE = "Failed to prepare reference image: {}"
@@ -291,26 +334,38 @@ RUN_IMAGE_PROCESS_LOAD_FAILED = "No images found in the database."
 
 # File / System Errors
 ERROR_IN_READING_FILE_HDF5 = "Error reading HDF5: {}"
-FAIL_LOAD_TRANSFORMATION_MATRIX_FILE = "Transformation matrix file not found for image #{}"
+FAIL_LOAD_TRANSFORMATION_MATRIX_FILE = (
+    "Transformation matrix file not found for image #{}"
+)
 LIBRARY_FILE_NOT_FOUND = "Library file not found: {}"
 
 # Processing / Algorithm Errors
 ERROR_ACCUMULATE_IMAGE = "Accumulated image is None or total weights are invalid."
 RUN_STACK_PROCESSING_FAILED = "Failed to perform image stacking"
-FAIL_CALCULATE_GLOBAL_MOTION_PROCESS = "Motion calculation could not be computed for image #{}"
+FAIL_CALCULATE_GLOBAL_MOTION_PROCESS = (
+    "Motion calculation could not be computed for image #{}"
+)
 FAIL_COMPENSATE_MOTION_PROCESS = "Estimation failed on image #{}"
 UNRECOGNIZED_TRANSFORMATION = "Unrecognized transformation type."
 FAILED_TO_COMPUTE_TRANSFORMATION = "Transformation could not be computed."
 FAILED_TO_COMPUTE_CROP = "Failed to compute a valid crop. Process canceled."
 FAIL_CROPPING_PROCESS = "Invalid crop. Insufficient overlap."
-ERROR_IN_FLOW_FIELD = "Error in image {}: Input flow field is None. Cannot compensate motion."
-ERROR_IN_BASE_IMAGE = "Error in image {}: Input base_image is None. Cannot compensate motion."
+ERROR_IN_FLOW_FIELD = (
+    "Error in image {}: Input flow field is None. Cannot compensate motion."
+)
+ERROR_IN_BASE_IMAGE = (
+    "Error in image {}: Input base_image is None. Cannot compensate motion."
+)
 STACK_IMAGES_FAILED = "No images to process."
-DATA_FAILED_COMPLETION_CREATED = "Enhancement data failed to generate. Cannot perform enhancement."
+DATA_FAILED_COMPLETION_CREATED = (
+    "Enhancement data failed to generate. Cannot perform enhancement."
+)
 FAILED_IMAGE_ENHANCEMENT = "Enhancement process failed."
 ANALYSIS_FAILURE = "Analysis failed: No images were processed"
 ERROR_AT_END_OF_CONVERSION = "Error at the end of conversion: {}"
-UNEXPECTED_NUMBER_OF_BUFFER_CHANNELS = "Internal Error: Unexpected number of buffer channels."
+UNEXPECTED_NUMBER_OF_BUFFER_CHANNELS = (
+    "Internal Error: Unexpected number of buffer channels."
+)
 UNABLE_TO_SAVE_WEIGHT_MAP = "Unable to save Weight Map: {}"
 FAILED_TO_SAVE_WEIGHT_MAP_TO_PATH = "Failed to save weight map to {}"
 NORMALIZATION_FAILED = "Normalization Failed: {}"
@@ -323,14 +378,20 @@ IMAGE_BIT_REQUIRED = "Image must be 8-bit or 16-bit."
 
 # Library / Dependency Errors
 FAILED_TO_CONFIGURE_LIBRARY = "Failed to load/configure library {}: {}"
-LIBRARY_FAILED_TO_LOAD_NORMALIZATION_FAILED = "C++ library not loaded. Normalization skipped."
-LIBRARY_FAILED_TO_LOAD_ACCUMULATED_SKIPED = "C++ library not loaded. Accumulation skipped."
+LIBRARY_FAILED_TO_LOAD_NORMALIZATION_FAILED = (
+    "C++ library not loaded. Normalization skipped."
+)
+LIBRARY_FAILED_TO_LOAD_ACCUMULATED_SKIPED = (
+    "C++ library not loaded. Accumulation skipped."
+)
 
 # GPU Errors
 GPU_ERROR_AND_FALLBACK_TO_CPU = "Unexpected GPU error: {}. Falling back to CPU."
 
 # Validation Errors
-IMAGE_DATA_MUST_BE_VALID = "Items in the 'images' list must be valid image data (NumPy array)."
+IMAGE_DATA_MUST_BE_VALID = (
+    "Items in the 'images' list must be valid image data (NumPy array)."
+)
 
 # ==============================================================================
 # Confirmation Dialogs / Warnings
@@ -561,7 +622,7 @@ LANGUAGE_LABEL = "Language"
 PROCESS_FORMAT_LABEL = "Process Format"
 PROCESS_FORMAT_DESCRIPTION = "RGB Linear uses the current processed-RGB pipeline. RAW Native currently supports DNG Average with No Alignment before demosaicing."
 LANGUAGE_TYPE = "English", "Indonesian", "Traditional Chinese", "Malay"
-GPU_ACCELERATION_LABEL = "GPU Acceleration"
+GPU_ACCELERATION_LABEL = "Hardware Acceleration"
 MULTI_CORE_CPU = "Multi-Core CPU Acceleration"
 SETTINGS_SAVED = "Settings saved successfully."
 
@@ -625,20 +686,30 @@ LBL_BATCH_NAME = "Batch Name"
 BTN_CREATE = "Create"
 MSG_CONFIRM_DELETE_BATCH_COUNT = "Are you sure you want to delete {} batches?"
 MSG_NO_BATCHES_AVAILABLE = "There are no batches available to process."
-MSG_RENAME_FAILED = "Could not rename the batch. The name may be invalid or already in use."
+MSG_RENAME_FAILED = (
+    "Could not rename the batch. The name may be invalid or already in use."
+)
 TIP_CPU_CORES = "Number of CPU cores used for parallel processing."
 LBL_SMART_NOISE_ALPHA = "Smart Noise Alpha (AI):"
 TIP_SMART_NOISE_ALPHA = "Controls AI tolerance to noise.\nLow value = Sensitive to motion (less ghosting).\nHigh value = More noise cleanup (risk of ghosting)."
 LBL_SMART_NOISE_AWARE = "Smart Noise Aware (AI):"
-TIP_SMART_NOISE_AWARE = "Enable or disable noise estimation contribution to the AI model."
+TIP_SMART_NOISE_AWARE = (
+    "Enable or disable noise estimation contribution to the AI model."
+)
 LBL_NOISE_CONTRIB = "Noise Contribution Strength (%):"
-TIP_NOISE_CONTRIB = "Adjust how strongly noise estimation is applied (0% = Disabled, 100% = Full)."
+TIP_NOISE_CONTRIB = (
+    "Adjust how strongly noise estimation is applied (0% = Disabled, 100% = Full)."
+)
 LBL_LIGHT_GLUE_TITLE = "Light Glue Parameter Setting"
 LBL_SELECT_REFERENCE_IMAGE = "Select Reference Image"
 LBL_DELETE_IMAGES = "Delete Images"
-MSG_CONFIRM_DELETE_IMAGE = "Are you sure you want to delete the selected images from this batch?"
+MSG_CONFIRM_DELETE_IMAGE = (
+    "Are you sure you want to delete the selected images from this batch?"
+)
 TIP_RIGHT_CLICK_COPY = "Right-click to copy text"
-MSG_UNSUPPORTED_FORMAT_IGNORED = "Unsupported file format or no valid extension provided."
+MSG_UNSUPPORTED_FORMAT_IGNORED = (
+    "Unsupported file format or no valid extension provided."
+)
 MSG_NO_VALID_IMAGES_GROUP = "No valid images to import."
 LBL_LOGGING_LEVEL = "Logging Level:"
 BTN_RESET_TO_DEFAULT = "Reset to Default"
@@ -646,15 +717,15 @@ BTN_CLEAR_CACHE = "Clear Cache"
 LBL_STATUS_READY = "Ready"
 LBL_ITEMS_REMAINING = "items remaining"
 LBL_SPLASH_LOADING = "L O A D I N G . . ."
-MSG_EXIFTOOL_NOT_FOUND = "Exiftool not found. Please ensure it is installed and in your system's PATH."
+MSG_EXIFTOOL_NOT_FOUND = (
+    "Exiftool not found. Please ensure it is installed and in your system's PATH."
+)
 MSG_NO_BATCHES_YET = "No batches yet"
 MSG_NO_BATCHES_YET_DESC = "Create a new batch or import images to get started."
 MSG_NO_BATCH_SELECTED = "No batch selected"
 LBL_BATCH_IMAGE_COUNT_FORMAT = "Batch {}   -   ({} images)"
 DESC_SUPER_RESOLUTION_CARD = "Enhance details and scale image resolution."
 DESC_DENOISING_CARD = "Reduce image noise and align pixel layers."
-
-
 
 
 # --- New UI & Bulk Core Keys ---
@@ -669,7 +740,9 @@ CORE_MSG_CONFIRM_DELETE = "Delete selected images?"
 CORE_TOOLTIP_COPY = "Right-click to copy"
 
 # Alignment parameter tooltips
-PARAMETER_DIRECT_EDIT_TOOLTIP = "You can type a value directly, then press Enter or move focus away to apply it."
+PARAMETER_DIRECT_EDIT_TOOLTIP = (
+    "You can type a value directly, then press Enter or move focus away to apply it."
+)
 AKAZE_THRESHOLD_TOOLTIP = "AKAZE feature sensitivity. Lower values detect more keypoints, useful for dark or low-texture images, but may add noisy matches. Higher values are stricter and faster."
 AKAZE_OCTAVES_TOOLTIP = "Number of scale levels analyzed by AKAZE. More octaves help with larger scale changes between frames, but increase processing time."
 AKAZE_OCTAVE_LAYERS_TOOLTIP = "Sub-levels inside each octave. Higher values refine scale detection, but can make feature extraction slower."
@@ -738,8 +811,10 @@ BTN_CANCEL = "Cancel"
 SIMILARITY_V2_GROUP_TITLE = "Similarity V2 Parameters"
 RESET_TO_DEFAULTS_BUTTON_TEXT = "Reset to Defaults"
 HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED_TITLE = "No Valid Images"
-HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED_TEXT = "No valid images were selected for import."
-DEVICE_ACCELERATION_LABEL = "GPU Acceleration"
+HANDLE_IMPORT_BUTTON_IMAGE_NO_VALID_SELECTED_TEXT = (
+    "No valid images were selected for import."
+)
+DEVICE_ACCELERATION_LABEL = "Hardware Acceleration"
 BTN_TEST_BACKEND_HARDWARE = "Test Hardware Acceleration"
 MSG_IMPORT_ERROR = "Import Error"
 LBL_ANALYSIS_MODE = "Analysis Mode"
@@ -748,7 +823,9 @@ LBL_DEEP = "Deep"
 MSG_HARDWARE_TEST_DEPTH = "Choose the hardware acceleration test depth:"
 MSG_HARDWARE_TEST_FAST = "Quick backend compatibility check."
 MSG_HARDWARE_TEST_DEEP = "Thorough per-backend validation."
-MSG_BACKEND_RESTART_REQUIRED = "A restart is required to apply the new backend selection."
+MSG_BACKEND_RESTART_REQUIRED = (
+    "A restart is required to apply the new backend selection."
+)
 BTN_YES = "Yes"
 BTN_NO = "No"
 BTN_OK = "OK"
@@ -767,7 +844,9 @@ MSG_BACKEND_TEST_FINISHED = "Backend test finished."
 LBL_AUTO_FALLBACK = "Auto Fallback"
 LBL_AUTO_FALLBACK_TIP = "When enabled, automatically fall back through CUDA, Vulkan, OpenGL, then CPU if the selected backend is unavailable."
 AUTO_SHUTDOWN_LABEL = "Enable Auto Shutdown"
-AUTO_SHUTDOWN_DESCRIPTION = "Close the application after the configured period without user activity."
+AUTO_SHUTDOWN_DESCRIPTION = (
+    "Close the application after the configured period without user activity."
+)
 AUTO_SHUTDOWN_TIMEOUT_LABEL = "Idle timeout (minutes)"
 
 # --- Startup Splash Status Messages ---
@@ -795,3 +874,41 @@ SPLASH_STATUS_ASSEMBLING_LAYOUT = "Assembling application layout..."
 SPLASH_STATUS_FINISHING_SETUP = "Completing startup preparation..."
 SPLASH_STATUS_PREPARING_THEME = "Preparing visual theme..."
 SPLASH_STATUS_FINALIZING = "Finishing workspace setup..."
+
+# --- Tooltips & Settings UI Extensions ---
+LANGUAGE_DROPDOWN_TIP = "Select the display language for the application interface."
+DEVICE_ACCELERATION_TIP = "Select the hardware acceleration device used for image processing."
+ONNX_RUNTIME_TIP = (
+    "Select the execution provider for AI inference models (WeightNet / FusionNet).\n"
+    "Auto: uses DirectML when available, falls back to CPU.\n"
+    "DirectML (GPU): forces GPU acceleration via DirectML.\n"
+    "CPU: forces CPU-only execution."
+)
+LBL_BACKEND_INFO_BTN_TIP = "View detected hardware, backend status, and performance estimates."
+MSG_HARDWARE_TEST_DEEP_DISABLED = "Deep analysis is temporarily disabled while backend stability is being improved."
+
+LBL_BLOCK_PROCESSING = "Block Processing"
+LBL_MEGAPIXEL_THRESHOLD = "Megapixel Threshold"
+LBL_BLOCK_SIZE = "Block Size"
+LBL_ONNX_RUNTIME = "ONNX Runtime"
+
+# --- Hardware Statistics Modal Translations ---
+LBL_BACKEND_STATS_TITLE = "Hardware Backend Statistics"
+LBL_BACKEND_STATS_SUMMARY = (
+    "Detected: {detected} backends | Passed: {passed}/{tested} tested | Optional skipped: {skipped}\n"
+    "GPU Benchmark: 1024 x 1024 (1.049 MP) | 4x per algorithm (1 warm-up + 3 runs) | Target estimate: {target_label}"
+)
+LBL_BACKEND_HEADER = "Backend"
+LBL_HARDWARE_HEADER = "Hardware"
+LBL_STATUS_HEADER = "Status"
+LBL_GPU_BENCHMARK_HEADER = "GPU 1024²"
+LBL_ESTIMATE_HEADER = "Estimate 24 MP"
+LBL_STATUS_SUPPORTED = "Supported"
+LBL_STATUS_FAILED = "Failed"
+LBL_STATUS_NOT_TESTED = "Not tested"
+LBL_STATUS_INVALID = "Invalid"
+LBL_BACKEND_STATS_NOTE = (
+    "Estimates use a linear projection from small-resolution quick tests; actual results "
+    "on large resolutions may vary due to memory bandwidth, cache, tiling, and VRAM overhead."
+)
+

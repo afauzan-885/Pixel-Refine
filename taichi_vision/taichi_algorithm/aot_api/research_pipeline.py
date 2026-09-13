@@ -134,7 +134,8 @@ def _estimate_noise_sigma(gray):
             estimate_noise,
         )
 
-        return max(float(estimate_noise(gray)), 1e-3)
+        score, _ = estimate_noise(gray)
+        return max(float(score), 1e-3)
     except Exception:
         highpass = _laplacian_abs(gray)
         sigma = float(np.std(highpass))

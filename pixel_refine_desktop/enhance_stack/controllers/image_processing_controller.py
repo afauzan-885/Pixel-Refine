@@ -11,9 +11,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matchin
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
     running_light_glue,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
-    running_orb,
-)
 from pixel_refine_desktop.enhance_stack.models.algorithm_config_model import (
     AlgorithmConfig,
     AlgorithmType,
@@ -263,7 +260,6 @@ class ImageProcessingController(QObject):
 
         # Map algorithm names to functions
         algorithm_map = {
-            "ORB": running_orb,
             "AKAZE": running_akaze,
             # "Farneback Optical Flow": running_farneback_flow,
             "Light Glue": running_light_glue,

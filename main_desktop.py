@@ -1040,6 +1040,21 @@ def main():
     except Exception as exc:
         print(f"[AOT Warmup] Launch skipped: {exc}", flush=True)
 
+    # Silent background warmup for isolated backend worker process
+    try:
+        from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_manager import (
+            BackendWorkerManager,
+        )
+
+        threading.Thread(
+            target=BackendWorkerManager.instance().ensure_worker_ready,
+            daemon=True,
+            name="WarmupBackendWorker",
+        ).start()
+    except Exception as exc:
+        print(f"[BackendWorker] Warmup skipped: {exc}", flush=True)
+
+
     # A .prf opened from Explorer is passed as a command-line argument.
     if project_argument and window.enhance_stack_view:
         QTimer.singleShot(

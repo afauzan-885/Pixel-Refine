@@ -189,6 +189,10 @@ class ImportManager(QObject):
         if batch_id in self.active_import_batches:
             self.active_import_batches.remove(batch_id)
 
+        # Invalidate controller batch cache so subsequent get_batch reads fresh DB rows
+        if hasattr(self.panel, "controller") and self.panel.controller:
+            self.panel.controller.invalidate_batch_cache(batch_id)
+
         # Jika tidak ada lagi import yang berjalan di batch manapun
         if not self.active_import_batches:
             # MODIFIKASI: Tampilkan pesan "Selesai" dengan durasi 3 detik
@@ -213,9 +217,13 @@ class ImportManager(QObject):
             return
 
         try:
+            # Drop any stale cached batch model in controller before import starts
+            if controller:
+                controller.invalidate_batch_cache(batch_id)
+
             # Get batch name for info
             batch_name = "batch"
-            batch = controller.get_batch(batch_id)
+            batch = controller.get_batch(batch_id) if controller else None
             if batch:
                 batch_name = batch.name
 
@@ -236,6 +244,8 @@ class ImportManager(QObject):
             # Actually page_layout had some progress bar logic for the algorithm panel
 
             def local_on_finished(total):
+                if controller:
+                    controller.invalidate_batch_cache(batch_id)
                 self.on_batch_import_finished(batch_id)
 
             def local_on_progress(progress_percent, items_left):

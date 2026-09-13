@@ -178,8 +178,10 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
     display_panel.current_preview_path = image_path
     print(f"[DisplayManager] Showing processed result (Compare Mode): {image_path}")
 
-    # 1. Clear Preview Scene
+    # 1. Clear Preview Scene and release memory before loading new pixmaps
     display_panel.preview_scene.clear()
+    import gc
+    gc.collect()
 
     # 2. Determine Original Image - Use helper that supports RAW files
     original_pixmap = None
@@ -188,11 +190,11 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
         original_path = display_panel.logic.current_images[0].path
         print(f"[DisplayManager] Original image path: {original_path}")
         if os.path.exists(original_path):
-            # Use load_and_display_image with caching enabled for reference
+            # Use load_and_display_image at full native resolution (no downscaling)
             original_pixmap = load_and_display_image(
                 original_path,
-                max_width=4000,  # Reasonable size for comparison
-                max_height=4000,
+                max_width=None,
+                max_height=None,
                 is_reference=True,
                 batch_id=display_panel.current_batch_id,
             )
@@ -210,9 +212,9 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
                 f"[DisplayManager] WARNING: Original image file not found: {original_path}"
             )
 
-    # Load processed image - Use helper for consistency
+    # Load processed image at full native resolution (no downscaling)
     processed_pixmap = load_and_display_image(
-        image_path, max_width=4000, max_height=4000
+        image_path, max_width=None, max_height=None
     )
     if processed_pixmap is None or processed_pixmap.isNull():
         print(
@@ -228,7 +230,9 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
 
     use_compare = True
 
-    if original_pixmap and processed_pixmap and use_compare:
+    is_comparison = bool(original_pixmap and processed_pixmap and use_compare)
+
+    if is_comparison:
         # --- FIX: Scale Original to Match Processed (1:1 Comparison) ---
         # Checks if dimensions differ (e.g. upscaling)
         if (
@@ -239,11 +243,12 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
                 f"[DisplayManager] Scaling original ({original_pixmap.width()}x{original_pixmap.height()}) "
                 f"to match processed ({processed_pixmap.width()}x{processed_pixmap.height()})"
             )
-            original_pixmap = original_pixmap.scaled(
+            scaled_orig = original_pixmap.scaled(
                 processed_pixmap.size(),
                 Qt.AspectRatioMode.IgnoreAspectRatio,  # Match exact size
                 Qt.TransformationMode.SmoothTransformation,
             )
+            original_pixmap = scaled_orig
 
         # 3. Create Comparison Item (Reusable from GenericUILibrary)
         print(f"[DisplayManager] Creating ImageCompareItem for comparison mode")
@@ -268,9 +273,7 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
     # RESTORE State or Fit to View
     # For comparison mode, always fit to view on first display (ignore saved state)
     # This ensures the full comparison is visible when first shown
-    if image_path in display_panel.zoom_states and not (
-        original_pixmap and processed_pixmap
-    ):
+    if image_path in display_panel.zoom_states and not is_comparison:
         # Only restore zoom state for single image view, not comparison mode
         print(
             f"[DisplayManager] Restoring zoom state for {os.path.basename(image_path)}"
@@ -280,7 +283,7 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
         )
     else:
         # Always fit to view for comparison mode or first view
-        if original_pixmap and processed_pixmap:
+        if is_comparison:
             print(
                 f"[DisplayManager] Comparison mode: fitting to view (ignoring saved zoom state)"
             )
@@ -317,3 +320,10 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
         display_panel.result_selector.blockSignals(block)
 
     display_panel.show_preview(show_dropdown=True)
+
+    try:
+        del original_pixmap, processed_pixmap
+    except Exception:
+        pass
+    import gc
+    gc.collect()

@@ -41,9 +41,9 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
     load_akaze_config,
     save_akaze_config_for_active_batch,
 )
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.orb_parameter_settings import (
-    load_orb_config,
-    save_orb_config_for_active_batch,
+from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.ofb_parameter_settings import (
+    load_ofb_config,
+    save_ofb_config_for_active_batch,
 )
 from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.MFDenoiser_parameter_settings import (
@@ -105,6 +105,7 @@ class SwitchableParameterPanel(QWidget):
     # Matching, and Farneback use the validated native AOT paths on OpenGL.
     _VULKAN_ONLY_ALIGNMENT = {"RAFT"}
     _CPU_HIDDEN_ALIGNMENT = {"RAFT"}
+    _HIDDEN_ALIGNMENT = {"RAFT", "Light Glue", "LightGlue"}
 
     def _repopulate_alignment_combo(self):
         """Rebuild the alignment combo items based on current backend arch & denoising algorithm.
@@ -139,6 +140,8 @@ class SwitchableParameterPanel(QWidget):
             fallback_default = "Block Flow"
         else:
             for name in self.alignment_algorithm_names:
+                if name in self._HIDDEN_ALIGNMENT:
+                    continue
                 if backend_arch == "opengl" and name in self._VULKAN_ONLY_ALIGNMENT:
                     continue
                 if backend_arch == "cpu" and name in self._CPU_HIDDEN_ALIGNMENT:
@@ -175,8 +178,8 @@ class SwitchableParameterPanel(QWidget):
 
         if selected_text == "Farneback":
             save_farneback_config_for_active_batch(load_farneback_config())
-        elif selected_text in ("OFB", "ORB"):
-            save_orb_config_for_active_batch(load_orb_config())
+        elif selected_text == "OFB":
+            save_ofb_config_for_active_batch(load_ofb_config())
         elif selected_text == "AKAZE":
             save_akaze_config_for_active_batch(load_akaze_config())
         elif selected_text == "Light Glue":
@@ -354,21 +357,59 @@ class SwitchableParameterPanel(QWidget):
             preferred_width = max(260 + 58, int(available_w * 0.24))
             width = max(290, min(520, preferred_width, width_cap))
 
-        # Tinggi maksimal ditambah 30%: dari 0.52 menjadi 0.67 area layar
-        height = max(240, min(562, int(available_h * 0.67), height_cap))
+        # Ukuran terpanjang adalah ukuran saat ini (max height cap)
+        max_height = max(240, min(562, int(available_h * 0.67), height_cap))
+
+        if self.active_tab == "alignment":
+            # Ukuran menyusut menyesuaikan konten alignment secara fit tanpa terpotong
+            header_h = 0
+            if hasattr(self, "align_dropdown_label") and hasattr(self, "align_dropdown"):
+                header_h = (
+                    self.align_dropdown_label.sizeHint().height()
+                    + self.align_dropdown.sizeHint().height()
+                )
+            align_spacing = 10 * 2
+
+            selected = self.align_dropdown.currentText() if hasattr(self, "align_dropdown") else ""
+            current_page = getattr(self, "alignment_pages", {}).get(selected)
+            if current_page:
+                inner_widget = current_page.widget() if hasattr(current_page, "widget") else current_page
+                if inner_widget and inner_widget.layout():
+                    inner_widget.ensurePolished()
+                    page_h = inner_widget.layout().sizeHint().height()
+                elif inner_widget:
+                    inner_widget.ensurePolished()
+                    page_h = inner_widget.sizeHint().height()
+                else:
+                    page_h = current_page.sizeHint().height()
+            else:
+                page_h = 100
+
+            margins = self.content_layout.contentsMargins() if hasattr(self, "content_layout") else None
+            margin_y = (margins.top() + margins.bottom()) if margins else 28
+            border_cushion = 14
+
+            content_needed_h = header_h + align_spacing + page_h + margin_y + border_cushion
+            min_sidebar_h = self._collapsed_height()
+            content_needed_h = max(content_needed_h, min_sidebar_h)
+
+            height = min(content_needed_h, max_height)
+        else:
+            height = max_height
+
         return width, height
 
     def _sync_overlay_geometry(self):
         overlay = self.get_overlay_container()
+        if self.content_wrapper.isVisible():
+            width, height = self._expanded_size()
+            self.setMinimumSize(width, height)
+            self.setMaximumSize(width, height)
+        else:
+            self.setMinimumSize(50, self._collapsed_height())
+            self.setMaximumSize(50, self._collapsed_height())
+        self.adjustSize()
         if overlay:
-            if self.content_wrapper.isVisible():
-                width, height = self._expanded_size()
-                self.setMinimumSize(width, height)
-                self.setMaximumSize(width, height)
-            else:
-                self.setMinimumSize(50, self._collapsed_height())
-                self.setMaximumSize(50, self._collapsed_height())
-            self.adjustSize()
             overlay.content_wrapper.adjustSize()
             overlay.adjustSize()
             overlay._update_position()
@@ -521,6 +562,7 @@ class SwitchableParameterPanel(QWidget):
             border_color = COLOR_DENOISING_GREEN
 
         self._update_styles(border_color)
+        self._sync_overlay_geometry()
 
     def _update_styles(self, active_color):
         is_expanded = self.content_wrapper.isVisible()
@@ -693,6 +735,7 @@ class SwitchableParameterPanel(QWidget):
 
         # Save choice to settings / store
         self._persist_alignment_selection()
+        self._sync_overlay_geometry()
 
     def get_overlay_container(self):
         p = self.parent()
@@ -718,7 +761,8 @@ class SwitchableParameterPanel(QWidget):
         if idx >= 0:
             self.align_dropdown.blockSignals(True)
             self.align_dropdown.setCurrentIndex(idx)
-            self.align_param_stack.setCurrentIndex(idx)
+            if alignment_algo in self.alignment_pages:
+                self.align_param_stack.setCurrentWidget(self.alignment_pages[alignment_algo])
             self.align_dropdown.blockSignals(False)
 
         # 2. Handle visibility logic for denoising

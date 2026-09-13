@@ -39,7 +39,9 @@ class GridItemWidget(QWidget):
         """Menggambar border biru saat dipilih."""
         super().paintEvent(event)
         if self._is_selected:
-            painter = QPainter(self)
+            painter = QPainter()
+            if not painter.begin(self):
+                return
             try:
                 painter.setRenderHint(QPainter.Antialiasing)
                 

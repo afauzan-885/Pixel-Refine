@@ -133,7 +133,7 @@ def sync_algorithm_settings(gpu_setting, multicore_setting):
                 all_specific_params = json.load(f)
 
         needs_writing = False
-        algo_keys_cpu = ["Farneback", "ORB", "AKAZE"]
+        algo_keys_cpu = ["Farneback", "AKAZE"]
         algo_keys_gpu = ["Farneback"]
 
         for key in algo_keys_cpu:

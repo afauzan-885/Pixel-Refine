@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt, Signal, QSize, QPoint, Property, QRect
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QMouseEvent, QPen, QBrush
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QSizePolicy
+from typing import Union
 
 from .theme import get_theme
 
@@ -22,7 +23,9 @@ class ImageCard(QWidget):
 
     def __init__(self, card_id: str, size: int = 110, parent=None):
         super().__init__(parent)
-        self.card_id = card_id
+        self.card_id = str(card_id)
+        self._card_id = str(card_id)
+        self.setProperty("card_id", str(card_id))
         self._image_path = None
         self._image = None
         self._is_selected = False
@@ -40,16 +43,30 @@ class ImageCard(QWidget):
 
         # No internal components/layouts to avoid layout-engine overhead during scroll
 
-    def set_image(self, q_image: QImage, scale_to_fit: bool = True):
+    def set_image(self, q_image: Union[QImage, QPixmap], scale_to_fit: bool = True):
         """Display an image on the card (Pixel-Perfect Image Drawing)."""
         self._is_loading = False
         self._is_fetching = False
         self._placeholder_text = ""
+        if isinstance(q_image, QPixmap):
+            q_image = q_image.toImage()
         if q_image and not q_image.isNull():
             self._image = q_image
         else:
             self._image = None
         self.update()
+
+    def set_thumbnail(self, pixmap_or_image: Union[QImage, QPixmap]):
+        """Compatibility alias for set_image."""
+        self.set_image(pixmap_or_image)
+
+    def has_image(self) -> bool:
+        """Check if card currently holds image data."""
+        return self._image is not None
+
+    def has_thumbnail(self) -> bool:
+        """Compatibility alias for has_image."""
+        return self.has_image()
 
     def set_loading(self, loading: bool = True):
         """Show or hide the loading state."""
@@ -76,12 +93,6 @@ class ImageCard(QWidget):
             self._image = None
             self._placeholder_text = ""
             self.update()
-
-    def has_image(self) -> bool:
-        """Check if card currently holds image data."""
-        return self._image is not None
-
-    # --- Animation Properties ---
 
     def get_opacity(self):
         return self._opacity
@@ -127,70 +138,76 @@ class ImageCard(QWidget):
 
     def paintEvent(self, event):
         """Render the card and its content manually for ultimate stability."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter = QPainter()
+        if not painter.begin(self):
+            return
 
-        # Apply internal opacity for reinforced fade-in
-        painter.setOpacity(self._opacity)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        theme = get_theme()
-        rect = self.rect()
+            # Apply internal opacity for reinforced fade-in
+            painter.setOpacity(self._opacity)
 
-        # 1. Background (Transparent - No brush/pen applied to fill)
-        # Background is inherited or empty as per user request.
+            theme = get_theme()
+            rect = self.rect()
 
-        # 2. Content (Image / Loading / Placeholder)
-        content_rect = rect.adjusted(5, 5, -5, -5)  # Internal padding
+            # 1. Background (Transparent - No brush/pen applied to fill)
+            # Background is inherited or empty as per user request.
 
-        if self._image:
-            # Gunakan drawImage langsung dengan SmoothTransformation
-            # Ini mengatasi bug gambar terpotong saat lazy loading/scroll
-            img_size = self._image.size()
-            img_size.scale(content_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
+            # 2. Content (Image / Loading / Placeholder)
+            content_rect = rect.adjusted(5, 5, -5, -5)  # Internal padding
 
-            # Center it
-            x = content_rect.left() + (content_rect.width() - img_size.width()) // 2
-            y = content_rect.top() + (content_rect.height() - img_size.height()) // 2
+            if self._image:
+                # Gunakan drawImage langsung dengan SmoothTransformation
+                # Ini mengatasi bug gambar terpotong saat lazy loading/scroll
+                img_size = self._image.size()
+                img_size.scale(content_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
 
-            target_rect = QRect(x, y, img_size.width(), img_size.height())
+                # Center it
+                x = content_rect.left() + (content_rect.width() - img_size.width()) // 2
+                y = content_rect.top() + (content_rect.height() - img_size.height()) // 2
 
-            # Pixel-to-pixel drawing: Render image directly into target rect
-            painter.drawImage(target_rect, self._image)
-        elif self._placeholder_text:
-            placeholder_rect = rect.adjusted(1, 1, -1, -1)
-            painter.setPen(QColor("gray"))
-            painter.setBrush(QColor("lightgray"))
-            painter.drawRect(placeholder_rect)
+                target_rect = QRect(x, y, img_size.width(), img_size.height())
 
-            painter.setPen(QColor(theme.text_secondary))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawText(
-                content_rect,
-                Qt.AlignmentFlag.AlignCenter,
-                self._placeholder_text,
-            )
-        elif self._is_loading:
-            painter.setPen(QColor(theme.text_secondary))
-            painter.drawText(content_rect, Qt.AlignmentFlag.AlignCenter, "Loading..")
-        else:
-            painter.setPen(QColor(theme.text_secondary))
-            painter.drawText(content_rect, Qt.AlignmentFlag.AlignCenter, "!")
+                # Pixel-to-pixel drawing: Render image directly into target rect
+                painter.drawImage(target_rect, self._image)
+            elif self._placeholder_text:
+                placeholder_rect = rect.adjusted(1, 1, -1, -1)
+                painter.setPen(QColor("gray"))
+                painter.setBrush(QColor("lightgray"))
+                painter.drawRect(placeholder_rect)
 
-        # 3. Selection Overlay
-        if self._is_selected:
-            overlay_color = QColor(theme.primary)
-            overlay_color.setAlpha(40)
+                painter.setPen(QColor(theme.text_secondary))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawText(
+                    content_rect,
+                    Qt.AlignmentFlag.AlignCenter,
+                    self._placeholder_text,
+                )
+            elif self._is_loading:
+                painter.setPen(QColor(theme.text_secondary))
+                painter.drawText(content_rect, Qt.AlignmentFlag.AlignCenter, "Loading..")
+            else:
+                painter.setPen(QColor(theme.text_secondary))
+                painter.drawText(content_rect, Qt.AlignmentFlag.AlignCenter, "!")
 
-            border_pen = QPen(QColor(theme.primary))
-            border_pen.setWidth(2)
+            # 3. Selection Overlay
+            if self._is_selected:
+                overlay_color = QColor(theme.primary)
+                overlay_color.setAlpha(40)
 
-            painter.setPen(border_pen)
-            painter.setBrush(overlay_color)
+                border_pen = QPen(QColor(theme.primary))
+                border_pen.setWidth(2)
 
-            # Adjusted rect for border alignment
-            selection_rect = rect.adjusted(1, 1, -1, -1)
-            painter.drawRoundedRect(selection_rect, 4, 4)
+                painter.setPen(border_pen)
+                painter.setBrush(overlay_color)
+
+                # Adjusted rect for border alignment
+                selection_rect = rect.adjusted(1, 1, -1, -1)
+                painter.drawRoundedRect(selection_rect, 4, 4)
+        finally:
+            painter.end()
 
     def mousePressEvent(self, event: QMouseEvent):
         self.clicked.emit(self.card_id, event)

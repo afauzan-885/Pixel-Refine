@@ -2289,6 +2289,18 @@ class TaichiGPUBuffer:
                     neginf=-32768.0,
                 )
                 converted = np.clip(source, -32768.0, 32767.0).astype(np.int16)
+            elif cast_pair == (0, 2):
+                converted = np.clip(
+                    np.nan_to_num(source) * 255.0 + 0.5, 0.0, 255.0
+                ).astype(np.uint8)
+            elif cast_pair == (2, 0):
+                converted = source.astype(np.float32) / 255.0
+            elif cast_pair == (0, 3):
+                converted = np.clip(
+                    np.nan_to_num(source) * 65535.0 + 0.5, 0.0, 65535.0
+                ).astype(np.uint16)
+            elif cast_pair == (3, 0):
+                converted = source.astype(np.float32) / 65535.0
             else:
                 converted = source.astype(target_dtype)
             return self.engine.upload(converted)
@@ -6440,13 +6452,6 @@ for _sig in crash_signals:
     except (OSError, ValueError):
         pass  # Cannot set handlers on non-main threads; skip gracefully
 
-# SIGBREAK is Windows-specific (Ctrl+Break / console close)
-if hasattr(signal, "SIGBREAK"):
-    try:
-        signal.signal(signal.SIGBREAK, _signal_cleanup_handler)
-    except (OSError, ValueError):
-        pass
-
 
 # --- Watchdog is started EARLY (before DLL/GPU init) — see top of file ---
 
@@ -6489,3 +6494,125 @@ def OutputArray(
         vector_dim=vector_dim,
         host_accessible=host_accessible,
     )
+
+
+def cast(src, target_dtype=np.uint8, out=None, host_accessible=True):
+    """
+    High-performance native type conversion with mathematical normalization.
+    Maps [0.0, 1.0] <-> [0, 255] for uint8, and [0.0, 1.0] <-> [0, 65535] for uint16.
+    Uses C++ SIMD bridge (_LIB.ti_cast_buffer) or zero-overhead integer bitshifts without float64 promotions.
+
+    Args:
+        src: TaichiGPUBuffer or numpy.ndarray
+        target_dtype: Target numpy dtype (default: np.uint8)
+        out: Optional pre-allocated destination array (numpy.ndarray)
+        host_accessible: If src is TaichiGPUBuffer, whether destination buffer should be host accessible.
+
+    Returns:
+        Converted TaichiGPUBuffer or numpy.ndarray.
+    """
+    if src is None:
+        return None
+
+    if isinstance(src, TaichiGPUBuffer):
+        return src.cast(target_dtype, host_accessible=host_accessible)
+
+    if not isinstance(src, np.ndarray):
+        src = np.asarray(src)
+
+    src_dtype = np.dtype(src.dtype).type
+    tgt_dtype = np.dtype(target_dtype).type
+
+    if src_dtype == tgt_dtype:
+        if out is None:
+            return src
+        np.copyto(out, src)
+        return out
+
+    # Fast Integer Path: uint16 -> uint8 (Bitshift >> 8, 0 float promotions, 0 memory spikes)
+    if src_dtype == np.uint16 and tgt_dtype == np.uint8:
+        if out is None:
+            return np.ascontiguousarray(src >> 8, dtype=np.uint8)
+        else:
+            np.right_shift(src, 8, out=out)
+            return out
+
+    num_elements = int(src.size)
+
+    # Native C++ SIMD Path: float32 -> uint8 (AVX2/SSE2: [0.0, 1.0] -> [0, 255])
+    if src_dtype == np.float32 and tgt_dtype == np.uint8:
+        if out is None:
+            out = np.empty(src.shape, dtype=np.uint8)
+        if _LIB is not None and hasattr(_LIB, "ti_cast_buffer"):
+            src_c = np.ascontiguousarray(src, dtype=np.float32)
+            out_c = np.ascontiguousarray(out, dtype=np.uint8)
+            success = _LIB.ti_cast_buffer(
+                ctypes.c_void_p(src_c.ctypes.data),
+                ctypes.c_void_p(out_c.ctypes.data),
+                num_elements,
+                0,  # f32
+                2,  # u8
+            )
+            if success:
+                return out_c
+        return np.clip(np.nan_to_num(src) * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+
+    # Native C++ SIMD Path: uint8 -> float32 (AVX2/SSE2: [0, 255] -> [0.0, 1.0])
+    if src_dtype == np.uint8 and tgt_dtype == np.float32:
+        if out is None:
+            out = np.empty(src.shape, dtype=np.float32)
+        if _LIB is not None and hasattr(_LIB, "ti_cast_buffer"):
+            src_c = np.ascontiguousarray(src, dtype=np.uint8)
+            out_c = np.ascontiguousarray(out, dtype=np.float32)
+            success = _LIB.ti_cast_buffer(
+                ctypes.c_void_p(src_c.ctypes.data),
+                ctypes.c_void_p(out_c.ctypes.data),
+                num_elements,
+                2,  # u8
+                0,  # f32
+            )
+            if success:
+                return out_c
+        return src.astype(np.float32) / 255.0
+
+    # Native C++ SIMD Path: float32 -> uint16 (AVX2/SSE2: [0.0, 1.0] -> [0, 65535])
+    if src_dtype == np.float32 and tgt_dtype == np.uint16:
+        if out is None:
+            out = np.empty(src.shape, dtype=np.uint16)
+        if _LIB is not None and hasattr(_LIB, "ti_cast_buffer"):
+            src_c = np.ascontiguousarray(src, dtype=np.float32)
+            out_c = np.ascontiguousarray(out, dtype=np.uint16)
+            success = _LIB.ti_cast_buffer(
+                ctypes.c_void_p(src_c.ctypes.data),
+                ctypes.c_void_p(out_c.ctypes.data),
+                num_elements,
+                0,  # f32
+                3,  # u16
+            )
+            if success:
+                return out_c
+        return np.clip(np.nan_to_num(src) * 65535.0 + 0.5, 0.0, 65535.0).astype(np.uint16)
+
+    # Native C++ SIMD Path: uint16 -> float32 (AVX2/SSE2: [0, 65535] -> [0.0, 1.0])
+    if src_dtype == np.uint16 and tgt_dtype == np.float32:
+        if out is None:
+            out = np.empty(src.shape, dtype=np.float32)
+        if _LIB is not None and hasattr(_LIB, "ti_cast_buffer"):
+            src_c = np.ascontiguousarray(src, dtype=np.uint16)
+            out_c = np.ascontiguousarray(out, dtype=np.float32)
+            success = _LIB.ti_cast_buffer(
+                ctypes.c_void_p(src_c.ctypes.data),
+                ctypes.c_void_p(out_c.ctypes.data),
+                num_elements,
+                3,  # u16
+                0,  # f32
+            )
+            if success:
+                return out_c
+        return src.astype(np.float32) / 65535.0
+
+    # Fallback path for any other datatypes
+    if out is None:
+        return src.astype(target_dtype)
+    np.copyto(out, src.astype(target_dtype))
+    return out

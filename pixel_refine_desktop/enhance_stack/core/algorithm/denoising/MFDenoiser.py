@@ -5,16 +5,24 @@ Delegates multi-frame processing (preloading, alignment, weighting, and accumula
 to the high-performance GPU-resident pipeline (resident_pipeline.py).
 """
 
+import gc
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Optional
+
 import numpy as np
+
+from ._common_helpers import frame_info as _frame_info
 
 from config import GENERAL_SETTINGS_FILE
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
+    extract_exif,
     get_all_image_paths_for_single_process,
+    load_images_from_paths,
+    resize_all_with_padding,
     save_image,
     save_linear_dng,
     setup_balanced_batching,
@@ -111,9 +119,6 @@ def get_alignment_registry():
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.OFB import (
         OFBAlgorithm,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
-        ORBAlgorithm,
-    )
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
         FarnebackFlowCPU,
     )
@@ -133,7 +138,6 @@ def get_alignment_registry():
     algorithms = [
         NoAlignmentAlgorithm(),
         OFBAlgorithm(),
-        ORBAlgorithm(),
         AKAZEAlgorithm(),
         LightGlueAlgorithm(),
         FarnebackFlowCPU(),
@@ -155,16 +159,12 @@ def get_denoising_registry():
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
         FusionNetDenoisingAlgorithm,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
-        MedianDenoisingAlgorithm,
-    )
 
     algorithms = [
         NoDenoisingAlgorithm(),
         AverageDenoisingAlgorithm(),
         SpatialFusionDenoisingAlgorithm(),
         FusionNetDenoisingAlgorithm(),
-        MedianDenoisingAlgorithm(),
     ]
     return {algo.NAME: algo for algo in algorithms}
 
@@ -186,7 +186,6 @@ def get_algorithm_options(category):
         ordered_names = [
             "No Alignment",
             "OFB",
-            "ORB",
             "AKAZE",
             "Light Glue",
             "Farneback",
@@ -228,16 +227,8 @@ def _resolve_algorithm(registry, requested_name, fallback_name):
         "light glue": "Light Glue",
         "lightglue": "Light Glue",
         "farneback": "Farneback Optical Flow",
-        "farneback optical flow": "Farneback Optical Flow",
         "lucas kanade": "Lucas Kanade Optical Flow",
-        "lucas kanade optical flow": "Lucas Kanade Optical Flow",
-        "lucas kanade gpu": "Lucas Kanade GPU Optical Flow",
-        "lucas kanade gpu optical flow": "Lucas Kanade GPU Optical Flow",
-        "block matching gpu": "Block Matching GPU",
-        "block_matching_gpu": "Block Matching GPU",
-        "raft": "RAFT Optical Flow",
         "average": "Average",
-        "median": "Median",
         "similarity": "Similarity",
         "spatial fusion": "Similarity",
         "fusionnet": "FusionNet",
@@ -291,7 +282,7 @@ class MFDenoiserAlgorithm:
 
     @staticmethod
     def _configure_compute_runtime(ctx, frame_shape=None):
-        """Connect pipeline to the shared full-frame GPU-resident runtime."""
+        """Connect pipeline to the shared adaptive block/VRAM runtime."""
         try:
             from taichi_vision import taichi_aot
 
@@ -304,12 +295,12 @@ class MFDenoiserAlgorithm:
             ctx.compute_runtime = {
                 "available": True,
                 "backend": backend,
-                "mode": "full_frame",
                 "pressure": pressure,
                 "pipeline_limit_mb": pipeline_limit // (1024 * 1024),
             }
             print(
-                f"[MFDenoiser] Compute Backend: {backend.upper()} (Full-Frame, VRAM Limit: {pipeline_limit // (1024 * 1024)}MB, Pressure: {pressure})"
+                f"[MFDenoiser][Compute] mode=full_frame backend={backend} "
+                f"pressure={pressure} pipeline_limit={pipeline_limit // (1024 * 1024)}MB"
             )
         except Exception as exc:
             ctx.compute_runtime = {"available": False, "reason": str(exc)}
@@ -324,7 +315,13 @@ class MFDenoiserAlgorithm:
 
             stats = taichi_aot.get_block_cache_stats()
             device = stats.get("device", {})
-            pass
+            print(
+                "[MFDenoiser][Compute] cache "
+                f"ram_hits={stats.get('hits', 0)} "
+                f"vram_hits={device.get('hits', 0)} "
+                f"vram_entries={device.get('entries', 0)} "
+                f"vram_bytes={device.get('size_bytes', 0)}"
+            )
         except Exception:
             pass
 
@@ -352,6 +349,7 @@ class MFDenoiserAlgorithm:
         try:
             from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.similarity_parameter_settings import (
                 load_similarity_config,
+                normalize_similarity_spatial_config,
             )
 
             config = load_similarity_config()
@@ -361,7 +359,7 @@ class MFDenoiserAlgorithm:
         params = config.copy()
         params.update(
             {
-                "processing_mode": config.get("mfdenoiser_processing_mode", "full"),
+                "processing_mode": config.get("mfdenoiser_processing_mode", "auto"),
                 "tile_size": int(config.get("tile_based_tile_size", 256)),
                 "tile_overlap": float(config.get("tile_based_overlap_percent", 0.20)),
                 "alignment_plan": config.get(
@@ -389,21 +387,24 @@ class MFDenoiserAlgorithm:
                 b_str = str(batch_id)
                 if b_str in batch_data and isinstance(batch_data[b_str], dict):
                     b_cfg = batch_data[b_str]
-                    if "similarity_params" in b_cfg and isinstance(
-                        b_cfg["similarity_params"], dict
+                    # Accept the current batch key and legacy/experimental
+                    # names so SpatialFusion receives the same values that
+                    # the Similarity parameter panel saved.
+                    for key in (
+                        "spatial_params",
+                        "similarity_spatial_params",
+                        "similarity_fusion_params",
+                        "similarity_params",
                     ):
-                        params.update(b_cfg["similarity_params"])
-                    alignment_params = b_cfg.get("alignment_params")
-                    if isinstance(alignment_params, dict):
-                        params["alignment_params"] = alignment_params.copy()
-                    else:
-                        block_matching_params = b_cfg.get("block_matching_gpu_params")
-                        if isinstance(block_matching_params, dict):
-                            params["alignment_params"] = block_matching_params.copy()
+                        nested = b_cfg.get(key)
+                        if isinstance(nested, dict):
+                            params.update(nested)
             except Exception:
                 pass
 
-        pass
+        params = normalize_similarity_spatial_config(params)
+
+        print(f"[MFDenoiser][Config] params={params}")
 
         try:
             if os.path.exists(GENERAL_SETTINGS_FILE):
@@ -422,9 +423,11 @@ class MFDenoiserAlgorithm:
         )
         ctx.total_images = len(ctx.image_paths)
         print(
-            f"[MFDenoiser] Loaded {ctx.total_images} frames ({'Single' if ctx.single_process else 'Batch ' + str(ctx.batch_id)})"
+            f"[MFDenoiser][Load] mode={'single' if ctx.single_process else 'batch'} "
+            f"batch_id={ctx.batch_id} paths={ctx.total_images}"
         )
-        # Individual image paths suppressed for clean console output
+        for idx, path in enumerate(ctx.image_paths):
+            print(f"[MFDenoiser][Load] path_{idx}: {path}")
         if not ctx.image_paths:
             return ctx
 
@@ -448,7 +451,7 @@ class MFDenoiserAlgorithm:
             max_batch_size=batch_size,
         )
         ctx.batch_plan = [(start + 1, end + 1) for start, end in comparison_plan]
-        pass
+        print(f"[MFDenoiser][Batch] batch_size={batch_size} plan={ctx.batch_plan}")
         return ctx.batch_plan
 
     def align_process(self, ctx, batch_plan=None):
@@ -467,7 +470,15 @@ class MFDenoiserAlgorithm:
         ctx.alignment_selection_name = alignment_name
         ctx.alignment_effective_name = algorithm.NAME
 
-        pass
+        print(
+            f"[MFDenoiser][Align] selected={alignment_name} "
+            f"effective={algorithm.NAME} resolved={algorithm.NAME} "
+            f"input_frames={len(ctx.frames)} batch_plan={batch_plan}"
+        )
+        print(
+            f"[MFDenoiser][Align] Streaming GPU-Resident pipeline active (alignment={algorithm.NAME}); "
+            "bypassing legacy HDF5 alignment cache."
+        )
         return ctx
 
     def merge_process(self, ctx, batch_plan=None):
@@ -479,7 +490,10 @@ class MFDenoiserAlgorithm:
         denoising_name = ctx.params.get("merge_plan", "No Denoising")
         registry = get_denoising_registry()
         algorithm = _resolve_algorithm(registry, denoising_name, "No Denoising")
-        pass
+        print(
+            f"[MFDenoiser][Merge] selected={denoising_name} resolved={algorithm.NAME} "
+            f"input_frames={len(ctx.aligned_frames or ctx.frames)} batch_plan={batch_plan}"
+        )
 
         if algorithm.NAME == "No Denoising":
             if ctx.image_paths:
@@ -487,9 +501,7 @@ class MFDenoiserAlgorithm:
                     load_frame_to_gpu,
                 )
 
-                ref_gpu = load_frame_to_gpu(
-                    ctx.image_paths[0], is_raw=ctx.is_linear_mode
-                )
+                ref_gpu = load_frame_to_gpu(ctx.image_paths[0], is_raw=ctx.is_linear_mode)
                 ref_np = ref_gpu.to_numpy()
                 ref_gpu.destroy()
                 scale = 65535.0 if ctx.is_linear_mode else 255.0
@@ -500,7 +512,7 @@ class MFDenoiserAlgorithm:
 
         frames = ctx.aligned_frames or ctx.frames
         ctx.result_image = algorithm.run(ctx, frames, batch_plan=batch_plan)
-        pass
+        print(f"[MFDenoiser][Merge] result={_frame_info(ctx.result_image)}")
         return ctx
 
     def save_process(self, ctx):
@@ -519,18 +531,9 @@ class MFDenoiserAlgorithm:
         )
         output_suffix = ctx.params.get("output_suffix", "mf_denoiser")
         output_path = os.path.join(output_folder, f"{safe_name}_{output_suffix}.tif")
-        raw_native_result = getattr(ctx, "raw_native_result", None)
-        if raw_native_result is not None:
-            if getattr(raw_native_result, "output_format", "RAW Native") == "RGB Linear":
-                raw_native_result.save_linear_tiff(output_path)
-                print(f"[MFDenoiser] Saved RGB Linear TIFF to: {output_path}")
-                return output_path
-            raw_output_path = os.path.splitext(output_path)[0] + ".dng"
-            raw_native_result.save_dng(raw_output_path)
-            print(f"[MFDenoiser] Saved RAW Native DNG to: {raw_output_path}")
-            return raw_output_path
-
-        print(f"[MFDenoiser] Saved output to: {output_path}")
+        print(
+            f"[MFDenoiser][Save] output_path={output_path} result={_frame_info(ctx.result_image)}"
+        )
 
         if ctx.is_linear_mode:
             return save_linear_dng(
@@ -546,15 +549,7 @@ class MFDenoiserAlgorithm:
         if ctx.image_paths:
             _, ext = os.path.splitext(ctx.image_paths[0])
             is_raw_input = ext.lower() in (
-                ".dng",
-                ".cr2",
-                ".cr3",
-                ".nef",
-                ".arw",
-                ".orf",
-                ".rw2",
-                ".pef",
-                ".raf",
+                ".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2", ".pef", ".raf"
             )
 
         save_image(
@@ -590,19 +585,6 @@ class MFDenoiserAlgorithm:
             stop_requested=stop_requested,
         )
         ctx.params = self._load_params(batch_id=batch_id)
-        # General Settings owns the default processing domain. A batch-level
-        # value remains authoritative so saved jobs can opt in explicitly.
-        if "processing_format" not in ctx.params:
-            try:
-                from pixel_refine_desktop.ui.views.settings.General.general_store import (
-                    get_general_store,
-                )
-
-                ctx.params["processing_format"] = get_general_store().get(
-                    "processing_format", "RGB Linear"
-                )
-            except Exception:
-                ctx.params["processing_format"] = "RGB Linear"
         if merging_mode is not None:
             ctx.params["merge_plan"] = merging_mode
         if output_suffix is not None:
@@ -623,7 +605,10 @@ class MFDenoiserAlgorithm:
 
         self._configure_compute_runtime(ctx)
         print(
-            f"[MFDenoiser] Pipeline Start: Alignment='{ctx.params.get('alignment_plan')}' | Merge='{ctx.params.get('merge_plan')}'"
+            f"[MFDenoiser][Pipeline] start single_process={single_process} batch_id={batch_id} "
+            f"alignment={ctx.params.get('alignment_plan')} denoising={ctx.params.get('merge_plan')} "
+            f"batch_size={ctx.params.get('batch_size')} "
+            f"output_suffix={ctx.params.get('output_suffix')}"
         )
 
         # Stage 0: pipeline start
@@ -640,9 +625,7 @@ class MFDenoiserAlgorithm:
                 update_progress,
                 PROGRESS_DONE,
                 ui="Tidak ada gambar.",
-                console=getattr(
-                    _lang(), "NO_IMAGE_PATH_PROCESSED_IMAGE", "No image to process."
-                ),
+                console=getattr(_lang(), "NO_IMAGE_PATH_PROCESSED_IMAGE", "No image to process."),
             )
             return None
         if stop_requested and stop_requested():
@@ -679,7 +662,7 @@ class MFDenoiserAlgorithm:
         )
         output_path = self.save_process(ctx)
         self._report_compute_runtime(ctx)
-        pass
+        print(f"[MFDenoiser][Pipeline] finished output_path={output_path}")
         _progress(
             update_progress,
             PROGRESS_DONE,
@@ -824,6 +807,7 @@ def running_similarity(
     batch_size=None,
     alignment_backend=None,
     clear_raw=None,
+    db_path=None,
 ):
     return running_mf_denoiser(
         parent=parent,
@@ -836,6 +820,7 @@ def running_similarity(
         batch_size=batch_size,
         alignment_backend=alignment_backend,
         clear_raw=clear_raw,
+        db_path=db_path,
     )
 
 
@@ -850,6 +835,7 @@ def running_fusionnet(
     batch_size=None,
     alignment_backend=None,
     clear_raw=None,
+    db_path=None,
 ):
     return running_mf_denoiser(
         parent=parent,
@@ -862,6 +848,7 @@ def running_fusionnet(
         batch_size=batch_size,
         alignment_backend=alignment_backend,
         clear_raw=clear_raw,
+        db_path=db_path,
     )
 
 
@@ -872,3 +859,4 @@ if __name__ == "__main__":
             "Set PIXEL_REFINE_SESSION_DB before running MFDenoiser directly."
         )
     _run_pipeline_entry(session_db)
+

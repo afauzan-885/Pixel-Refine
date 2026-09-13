@@ -58,12 +58,6 @@ from ..parameter_alignment.ofb_parameter_settings import (
     save_ofb_config,
     save_ofb_config_for_active_batch,
 )
-from ..parameter_alignment.orb_parameter_settings import (
-    PARAMETER_SCHEMA as ORB_PARAMETER_SCHEMA,
-    load_orb_config,
-    save_orb_config,
-    save_orb_config_for_active_batch,
-)
 from ..parameter_alignment.light_glue_parameter_settings import (
     PARAMETER_SCHEMA as LIGHT_GLUE_PARAMETER_SCHEMA,
     load_light_glue_config,
@@ -386,12 +380,6 @@ ALIGNMENT_PARAMETER_PROVIDERS = {
         "save": save_ofb_config,
         "save_batch": save_ofb_config_for_active_batch,
     },
-    "ORB": {
-        "schema": ORB_PARAMETER_SCHEMA,
-        "load": load_orb_config,
-        "save": save_orb_config,
-        "save_batch": save_orb_config_for_active_batch,
-    },
     "Light Glue": {
         "schema": LIGHT_GLUE_PARAMETER_SCHEMA,
         "load": load_light_glue_config,
@@ -696,9 +684,14 @@ class AlignmentParameterPage(QWidget):
             reset_btn.setStyleSheet(APPLY_BUTTON)
             reset_btn.setMinimumHeight(28)
             reset_btn.clicked.connect(self._reset_to_defaults)
-            reset_layout = QHBoxLayout()
+            reset_btn.hide()
+            self.reset_btn = reset_btn
+            self.reset_container = QWidget()
+            reset_layout = QHBoxLayout(self.reset_container)
+            reset_layout.setContentsMargins(0, 0, 0, 0)
             reset_layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignRight)
-            layout.addLayout(reset_layout)
+            self.reset_container.hide()
+            layout.addWidget(self.reset_container)
         layout.addStretch()
 
     def _create_field(self, field, value):
@@ -938,7 +931,6 @@ class MFDenoiserParameterPage(QWidget):
         # Widget maps for each backend
         self.similarity_widgets = {}
         self.akaze_widgets = {}
-        self.orb_widgets = {}
         self.tile_based_widgets = {}
         self._responsive_slider_rows = []
         self._tab_pages = []
@@ -965,7 +957,6 @@ class MFDenoiserParameterPage(QWidget):
             self.similarity_widgets,
             self.tile_based_widgets,
             self.akaze_widgets,
-            self.orb_widgets,
         ):
             for widget in form_map.values():
                 if isinstance(widget, FormGroup):
@@ -994,7 +985,6 @@ class MFDenoiserParameterPage(QWidget):
         # Create tabs
         self._create_similarity_tab()
         self._create_akaze_tab()
-        self._create_orb_tab()
         self._create_tile_based_tab()
 
     def _create_similarity_tab(self):
@@ -1137,62 +1127,6 @@ class MFDenoiserParameterPage(QWidget):
         layout.addStretch()
         self.tab_widget.addTab(page, "AKAZE")
 
-    def _create_orb_tab(self):
-        """Create ORB settings tab."""
-        page = QWidget()
-        self._tab_pages.append(page)
-        layout = QVBoxLayout(page)
-        layout.setSpacing(15)
-        layout.setContentsMargins(10, 10, 10, 10)
-
-        self.orb_widgets["nfeatures"] = text(
-            "Max Features:",
-            default=1500,
-            tooltip="Jumlah maksimum keypoint yang dideteksi",
-        )
-        layout.addWidget(self.orb_widgets["nfeatures"])
-
-        self.orb_widgets["scaleFactor"] = text(
-            "Scale Factor:", default=1.1, tooltip="Faktor skala untuk image pyramid"
-        )
-        layout.addWidget(self.orb_widgets["scaleFactor"])
-
-        self.orb_widgets["nlevels"] = dropdown(
-            "Levels:",
-            [1, 2, 3, 4, 5, 6, 7, 8],
-            default=5,
-            tooltip="Jumlah level untuk image pyramid",
-        )
-        layout.addWidget(self.orb_widgets["nlevels"])
-
-        self.orb_widgets["ransacThreshold"] = text(
-            "RANSAC Threshold:",
-            default=5.0,
-            tooltip="Threshold untuk RANSAC inlier detection",
-        )
-        layout.addWidget(self.orb_widgets["ransacThreshold"])
-
-        self.orb_widgets["transformation"] = dropdown(
-            "Transformation:",
-            ["homography", "affine"],
-            default="homography",
-            tooltip="Tipe transformasi geometris",
-        )
-        layout.addWidget(self.orb_widgets["transformation"])
-
-        # Reset Button
-        reset_btn = QPushButton("Reset to Defaults")
-        reset_btn.setStyleSheet(APPLY_BUTTON)
-        reset_btn.setMinimumHeight(28)
-        reset_btn.clicked.connect(self._reset_orb)
-
-        reset_layout = QHBoxLayout()
-        reset_layout.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignRight)
-        layout.addLayout(reset_layout)
-
-        layout.addStretch()
-        self.tab_widget.addTab(page, "ORB")
-
     def _create_tile_based_tab(self):
         """Create Tile-Based Spatial Fusion settings tab."""
         page = QWidget()
@@ -1278,7 +1212,6 @@ class MFDenoiserParameterPage(QWidget):
         """Load all configs from backends."""
         self._load_similarity()
         self._load_akaze()
-        self._load_orb()
         self._load_tile_based()
 
     def _load_similarity(self):
@@ -1304,11 +1237,6 @@ class MFDenoiserParameterPage(QWidget):
         """Load AKAZE config from backend."""
         config = load_akaze_config()
         bind(config, self.akaze_widgets)
-
-    def _load_orb(self):
-        """Load ORB config from backend."""
-        config = load_orb_config()
-        bind(config, self.orb_widgets)
 
     def _load_tile_based(self):
         """Load Tile-Based config from backend."""
@@ -1367,17 +1295,6 @@ class MFDenoiserParameterPage(QWidget):
             self._save_akaze
         )
 
-        # ORB
-        self.orb_widgets["nfeatures"].input.editingFinished.connect(self._save_orb)
-        self.orb_widgets["scaleFactor"].input.editingFinished.connect(self._save_orb)
-        self.orb_widgets["nlevels"].input.currentIndexChanged.connect(self._save_orb)
-        self.orb_widgets["ransacThreshold"].input.editingFinished.connect(
-            self._save_orb
-        )
-        self.orb_widgets["transformation"].input.currentIndexChanged.connect(
-            self._save_orb
-        )
-
         # Tile-Based
         self.tile_based_widgets[
             "tile_based_tile_size"
@@ -1430,23 +1347,6 @@ class MFDenoiserParameterPage(QWidget):
         }
         save_akaze_config(config)
 
-    def _save_orb(self):
-        """Save ORB config to backend (realtime)."""
-        values = collect(self.orb_widgets)
-        config = {
-            "nfeatures": int(values.get("nfeatures", 1500)),
-            "scaleFactor": float(values.get("scaleFactor", 1.1)),
-            "nlevels": int(values.get("nlevels", 5)),
-            "ransacThreshold": float(values.get("ransacThreshold", 5.0)),
-            "transformation": values.get("transformation", "homography"),
-            "keep_edges": False,
-            "enable_cropping": False,
-            "save_align": False,
-            "command_save_to_hd5f": True,
-            "align_folder": "",
-        }
-        save_orb_config(config)
-
     def _save_tile_based(self):
         """Save Tile-Based config to backend (realtime)."""
         values = collect(self.tile_based_widgets)
@@ -1476,11 +1376,6 @@ class MFDenoiserParameterPage(QWidget):
         """Reset AKAZE to backend defaults."""
         self._load_akaze()
         self._save_akaze()
-
-    def _reset_orb(self):
-        """Reset ORB to backend defaults."""
-        self._load_orb()
-        self._save_orb()
 
     def _reset_tile_based(self):
         """Reset Tile-Based to backend defaults."""

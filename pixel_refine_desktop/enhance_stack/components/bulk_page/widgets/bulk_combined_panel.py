@@ -37,9 +37,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matchin
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
     running_light_glue,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.ORB import (
-    running_orb,
-)
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
@@ -1254,12 +1251,14 @@ class CombinedPanel(QWidget):
                     progress_callback=progress_callback,
                     stop_callback=stop_callback,
                 ),
-                "ORB": lambda: running_orb(
+                "OFB": lambda: running_mf_denoiser(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
                     stop_callback=stop_callback,
+                    alignment_backend="OFB",
+                    merging_mode="none",
                 ),
                 "Light Glue": lambda: running_light_glue(
                     self,

@@ -38,6 +38,7 @@ from taichi_vision.config import AOT_MODE
 _modules = {}
 _OPENGL_FLOW_FAMILY = None
 _OPENGL_FLOW_GPU_OUTPUTS = []
+_BLOCK_MATCHING_SPECIALIZED_GRAPHS = {}
 
 
 def _register_opengl_flow_output(buffer):
@@ -246,6 +247,70 @@ def _run_fused_flow_level(
     mod.run("flow_lk_grid_track", **track_args)
     mod.run(dense_name, **dense_args)
     return False
+
+
+def _run_fused_block_matching_level(
+    mod,
+    track_args,
+    dense_mode,
+    dense_args,
+    *,
+    win_radius,
+):
+    """Use a static-radius BM graph for supported presets when present.
+
+    The generic fused graph remains the public compatibility contract.  This
+    branch only selects a target-qualified graph whose arithmetic is the same
+    but whose SAD patch loops are compile-time constants (radii 6/7/8 for
+    the 13/15/17px shipped windows).
+    """
+    try:
+        radius = int(win_radius)
+    except (TypeError, ValueError):
+        radius = 0
+    if radius in (6, 7, 8):
+        suffix, _dense_name, _ = _dense_flow_spec(
+            dense_mode,
+            grid_flow=dense_args["grid_flow"],
+            flow_out=dense_args["flow_out"],
+            grid_step=dense_args["grid_step"],
+            border_margin=dense_args["border_margin"],
+            overlap=dense_args.get("overlap", 0.0),
+            max_flow_px=dense_args.get("max_flow_px", 0.0),
+        )
+        graph_name = f"flow_bm_r{radius}_track_dense{suffix}"
+        engine = _get_engine()
+        cache_key = (
+            str(getattr(engine, "arch", "")).lower(),
+            int(getattr(engine, "_generation", 0)),
+            graph_name,
+        )
+        available = _BLOCK_MATCHING_SPECIALIZED_GRAPHS.get(cache_key)
+        if available is None:
+            try:
+                from taichi_vision.taichi_algorithm.aot_api import (
+                    aot_graph_available,
+                )
+
+                available = bool(aot_graph_available("block_matching", graph_name))
+            except Exception:
+                available = False
+            _BLOCK_MATCHING_SPECIALIZED_GRAPHS[cache_key] = available
+        if available:
+            specialized_args = dict(track_args)
+            # Static graph encodes this scalar in its kernel and therefore
+            # intentionally does not expose ``win_radius`` in the native ABI.
+            specialized_args.pop("win_radius", None)
+            specialized_args.update(dense_args)
+            try:
+                mod.run(graph_name, **specialized_args)
+                return True
+            except Exception:
+                # Cache the failed availability result so a bad/stale target
+                # archive does not add an exception path to every frame.
+                _BLOCK_MATCHING_SPECIALIZED_GRAPHS[cache_key] = False
+
+    return _run_fused_flow_level(mod, track_args, dense_mode, dense_args)
 
 
 def _validated_flow_reference_pyramid(reference_pyramid, shape, required_levels):
@@ -1602,6 +1667,7 @@ def calcOpticalFlowPyrLK(
     decoupled_scale=0,
     return_gpu=False,
     return_diagnostics=False,
+    reference_pyramid=None,
 ):
     """Dense grid Lucas-Kanade optical flow with cv2-style function name.
 
@@ -1649,14 +1715,36 @@ def calcOpticalFlowPyrLK(
     backend_name = str(getattr(_get_engine(), 'arch', '')).lower()
     auto_decouple = (backend_name in {'cuda', 'cpu'}) and (decoupled_scale == 2 or (decoupled_scale == 0 and (h * w >= 8_000_000)))
     if auto_decouple and h >= 64 and w >= 64:
+        prev_dev = None
+        next_dev = None
+        ref_half = None
+        supp_half = None
+        flow_half = None
+        flow_full = None
+        flow_keep = None
+        ref_half_owned = False
+        prev_dev_owned = False
+        next_dev_owned = False
         try:
             pyramid_mod = _get_module("pyramid")
             prev_dev = prev_f if is_prev_gpu else _InputArray(prev_f)
             next_dev = next_f if is_next_gpu else _InputArray(next_f)
+            prev_dev_owned = not is_prev_gpu
+            next_dev_owned = not is_next_gpu
             half_h, half_w = h // 2, w // 2
-            ref_half = _OutputArray((half_h, half_w), np.float32)
+            cached_levels = _validated_flow_reference_pyramid(
+                reference_pyramid, (h, w), 2
+            )
+            if cached_levels is not None:
+                # Level 1 of the resident reference pyramid is already the
+                # exact half-resolution input required by the decoupled path.
+                ref_half = cached_levels[1]
+            else:
+                ref_half = _OutputArray((half_h, half_w), np.float32)
+                ref_half_owned = True
             supp_half = _OutputArray((half_h, half_w), np.float32)
-            pyramid_mod.run("downsample_2x_f32", src=prev_dev, dst=ref_half)
+            if ref_half_owned:
+                pyramid_mod.run("downsample_2x_f32", src=prev_dev, dst=ref_half)
             pyramid_mod.run("downsample_2x_f32", src=next_dev, dst=supp_half)
 
             # Coarse-Motion Early-Exit on Half-Res
@@ -1682,11 +1770,16 @@ def calcOpticalFlowPyrLK(
                 decoupled_scale=1,
                 return_gpu=True,
                 return_diagnostics=False,
+                reference_pyramid=(cached_levels[1:] if cached_levels is not None else None),
             )
             flow_full = _OutputArray((h, w, 2), np.float32)
             pyramid_mod.run("upsample_flow_f32", src=flow_half, dst=flow_full, scale=2.0)
 
             if return_gpu:
+                # The caller owns the returned output buffer.  Keep it out of
+                # the temporary-buffer cleanup below; destroying it here
+                # would make a successful GPU return point at freed storage.
+                flow_keep = flow_full
                 if return_diagnostics:
                     diagnostics = {"motion_mode": motion_mode, "selected_max_level": half_max_level, "decoupled": True}
                     return flow_full, diagnostics
@@ -1698,6 +1791,31 @@ def calcOpticalFlowPyrLK(
             return res_np
         except Exception:
             pass # fallback to native execution
+        finally:
+            for buffer in (flow_half, flow_full, supp_half):
+                try:
+                    if buffer is not None and buffer is not flow_keep:
+                        buffer.destroy()
+                except Exception:
+                    pass
+            if ref_half_owned:
+                try:
+                    if ref_half is not None:
+                        ref_half.destroy()
+                except Exception:
+                    pass
+            if prev_dev_owned:
+                try:
+                    if prev_dev is not None:
+                        prev_dev.destroy()
+                except Exception:
+                    pass
+            if next_dev_owned:
+                try:
+                    if next_dev is not None:
+                        next_dev.destroy()
+                except Exception:
+                    pass
 
     win = winSize[0] if isinstance(winSize, tuple) else int(winSize)
     win_radius = max(2, int(win) // 2)
@@ -1724,39 +1842,97 @@ def calcOpticalFlowPyrLK(
 
         engine = _get_engine()
         with engine._lock:
-            prev_levels = [_InputArray(prev_f)]
-            next_levels = [_InputArray(next_f)]
-            level_shapes = [(h, w)]
+            owned_buffers = []
 
-            for _level in range(1, levels_i):
-                src_h, src_w = level_shapes[-1]
+            def _own(buffer):
+                if buffer is not None and buffer not in owned_buffers:
+                    owned_buffers.append(buffer)
+                return buffer
+
+            def _cleanup_owned(keep=None):
+                for buffer in tuple(owned_buffers):
+                    if buffer is keep:
+                        continue
+                    try:
+                        buffer.destroy()
+                    except Exception:
+                        try:
+                            buffer.release()
+                        except Exception:
+                            pass
+                owned_buffers[:] = [keep] if keep is not None else []
+
+            def _release_owned(buffer):
+                """Retire one temporary as soon as its last graph use ends."""
+                if buffer is None:
+                    return
+                try:
+                    owned_buffers.remove(buffer)
+                except ValueError:
+                    return
+                try:
+                    buffer.destroy()
+                except Exception:
+                    try:
+                        buffer.release()
+                    except Exception:
+                        pass
+
+            cached_levels = _validated_flow_reference_pyramid(
+                reference_pyramid, (h, w), levels_i
+            )
+            if cached_levels is not None:
+                # Cached levels are caller-owned; wrappers are non-owning
+                # views and must never be destroyed by this call.
+                prev_levels = [_InputArray(level) for level in cached_levels]
+                level_shapes = [
+                    (int(level.shape[0]), int(level.shape[1]))
+                    for level in cached_levels
+                ]
+            else:
+                prev_base = _own(_InputArray(prev_f)) if not is_prev_gpu else _InputArray(prev_f)
+                prev_levels = [prev_base]
+                level_shapes = [(h, w)]
+            next_levels = [_InputArray(next_f)]
+            if not is_next_gpu:
+                next_levels[0] = _own(next_levels[0])
+
+            # Build only the support pyramid.  When a resident reference
+            # pyramid was supplied, its levels are already complete and must
+            # not be appended again (doing so desynchronizes prev/next level
+            # counts and used to trigger an IndexError on the first tracked
+            # frame).
+            target_levels = len(prev_levels) if cached_levels is not None else levels_i
+            for _level in range(1, target_levels):
+                src_h, src_w = level_shapes[len(next_levels) - 1]
                 dst_h = src_h // 2
                 dst_w = src_w // 2
                 if dst_h < 32 or dst_w < 32:
                     break
-                prev_dst = _OutputArray((dst_h, dst_w), np.float32)
-                next_dst = _OutputArray((dst_h, dst_w), np.float32)
-                pyramid_mod.run(
-                    "downsample_2x_f32",
-                    src=prev_levels[-1],
-                    dst=prev_dst,
-                )
+                next_dst = _own(_OutputArray((dst_h, dst_w), np.float32))
                 pyramid_mod.run(
                     "downsample_2x_f32",
                     src=next_levels[-1],
                     dst=next_dst,
                 )
-                prev_levels.append(prev_dst)
                 next_levels.append(next_dst)
-                level_shapes.append((dst_h, dst_w))
+                if cached_levels is None:
+                    prev_dst = _own(_OutputArray((dst_h, dst_w), np.float32))
+                    pyramid_mod.run(
+                        "downsample_2x_f32",
+                        src=prev_levels[-1],
+                        dst=prev_dst,
+                    )
+                    prev_levels.append(prev_dst)
+                    level_shapes.append((dst_h, dst_w))
 
             current_flow = None
             for level in range(len(level_shapes) - 1, -1, -1):
                 lh, lw = level_shapes[level]
                 if current_flow is None:
-                    init_flow = _OutputArray((lh, lw, 2), np.float32)
+                    init_flow = _own(_OutputArray((lh, lw, 2), np.float32))
                 else:
-                    init_flow = _OutputArray((lh, lw, 2), np.float32)
+                    init_flow = _own(_OutputArray((lh, lw, 2), np.float32))
                     prev_h, _prev_w = level_shapes[level + 1]
                     scale = float(lh) / float(prev_h)
                     pyramid_mod.run(
@@ -1774,9 +1950,9 @@ def calcOpticalFlowPyrLK(
                 grid_h = max(
                     1, (lh - 2 * level_margin + level_grid_step - 1) // level_grid_step
                 )
-                grid_flow = _OutputArray((grid_h, grid_w, 3), np.float32)
-                grid_meta = _OutputArray((grid_h, grid_w, 4), np.float32)
-                flow_out = _OutputArray((lh, lw, 2), np.float32)
+                grid_flow = _own(_OutputArray((grid_h, grid_w, 3), np.float32))
+                grid_meta = _own(_OutputArray((grid_h, grid_w, 4), np.float32))
+                flow_out = _own(_OutputArray((lh, lw, 2), np.float32))
 
                 track_args = {
                     "prev": prev_levels[level],
@@ -1827,7 +2003,7 @@ def calcOpticalFlowPyrLK(
                         zero_init=init_flow if current_flow is None else None,
                     )
                 if mode == "auto" and level == 0:
-                    stats = _OutputArray((8,), np.float32)
+                    stats = _own(_OutputArray((8,), np.float32))
                     mod.run("flow_lk_zero_stats", stats=stats)
                     mod.run(
                         "flow_lk_motion_stats",
@@ -1857,6 +2033,19 @@ def calcOpticalFlowPyrLK(
                         or (high_ratio + med_ratio) > 0.55
                         or avg_motion > float(grid_step_i) * 0.42
                     )
+
+                # Descending-pyramid execution no longer needs the previous
+                # coarse flow or the level-local grid/meta/init buffers after
+                # ``flow_out`` has been produced. Retire them here instead of
+                # retaining every level until the final return.
+                if current_flow is not None:
+                    _release_owned(current_flow)
+                _release_owned(init_flow)
+                _release_owned(grid_flow)
+                _release_owned(grid_meta)
+                if level + 1 < len(prev_levels):
+                    _release_owned(prev_levels[level + 1])
+                    _release_owned(next_levels[level + 1])
                 current_flow = flow_out
 
         if rerun_high_motion:
@@ -1896,10 +2085,15 @@ def calcOpticalFlowPyrLK(
                         "selected_max_level": int(maxLevel),
                         "rerun_high_motion": False,
                     }
-                return current_flow, diagnostics
-            return current_flow
+                result = current_flow
+                _cleanup_owned(keep=result)
+                return result, diagnostics
+            result = current_flow
+            _cleanup_owned(keep=result)
+            return result
 
         result = current_flow.to_numpy()
+        _cleanup_owned()
         if return_diagnostics:
             if diagnostics is None:
                 diagnostics = {
@@ -2190,6 +2384,7 @@ def calcOpticalFlowBlockMatching(
                     adaptive_threshold=adaptive_threshold,
                     motion_mode=motion_mode, dense_mode=dense_mode,
                     max_flow_px=max_flow_px, return_gpu=False,
+                    reference_pyramid=reference_pyramid,
                     return_diagnostics=return_diagnostics,
                 )
                 if return_diagnostics:
@@ -2248,6 +2443,8 @@ def calcOpticalFlowBlockMatching(
             # The invariant reference levels are supplied by the resident
             # aligner cache when available.  Otherwise create only the levels
             # needed by this call and release them on every exit path.
+            prev_dev_owned = not is_prev_gpu
+            next_dev_owned = not is_next_gpu
             ref_owned = []
             supp_owned = []
             if cached_levels is not None:
@@ -2351,6 +2548,15 @@ def calcOpticalFlowBlockMatching(
                     buffer.destroy()
                 except Exception:
                     pass
+            for buffer in (
+                locals().get("prev_dev") if locals().get("prev_dev_owned") else None,
+                locals().get("next_dev") if locals().get("next_dev_owned") else None,
+            ):
+                try:
+                    if buffer is not None:
+                        buffer.destroy()
+                except Exception:
+                    pass
 
     win = winSize[0] if isinstance(winSize, tuple) else int(winSize)
     win_radius = max(2, int(win) // 2)
@@ -2358,6 +2564,31 @@ def calcOpticalFlowBlockMatching(
         epsilon = 0.02
     else:
         epsilon = float(criteria[2])
+
+    # Every temporary produced by the dense block path is owned by this call.
+    # Keep an explicit ledger so the public ``return_gpu`` result is the only
+    # allocation that survives the call.  Previously pyramid levels, grid
+    # metadata, and coarse flow buffers were left in the engine's retired
+    # queue on every support frame.
+    owned_buffers = []
+
+    def _own(buffer):
+        if buffer is not None and buffer not in owned_buffers:
+            owned_buffers.append(buffer)
+        return buffer
+
+    def _cleanup_owned(keep=None):
+        for buffer in tuple(owned_buffers):
+            if buffer is keep:
+                continue
+            try:
+                buffer.destroy()
+            except Exception:
+                try:
+                    buffer.release()
+                except Exception:
+                    pass
+        owned_buffers[:] = [keep] if keep is not None else []
 
     try:
         mod = _get_module("block_matching")
@@ -2386,9 +2617,11 @@ def calcOpticalFlowBlockMatching(
                     for level in cached_levels
                 ]
             else:
-                prev_levels = [_InputArray(prev_f)]
+                prev_base = _InputArray(prev_f)
+                prev_levels = [_own(prev_base) if not is_prev_gpu else prev_base]
                 level_shapes = [(h, w)]
-            next_levels = [_InputArray(next_f)]
+            next_base = _InputArray(next_f)
+            next_levels = [_own(next_base) if not is_next_gpu else next_base]
 
             # A cached reference pyramid may already contain all requested
             # levels.  The support frame still needs a matching pyramid; the
@@ -2402,7 +2635,7 @@ def calcOpticalFlowBlockMatching(
                 dst_w = src_w // 2
                 if dst_h < 32 or dst_w < 32:
                     break
-                next_dst = _OutputArray((dst_h, dst_w), np.float32)
+                next_dst = _own(_OutputArray((dst_h, dst_w), np.float32))
                 pyramid_mod.run(
                     "downsample_2x_f32",
                     src=next_levels[-1],
@@ -2410,7 +2643,7 @@ def calcOpticalFlowBlockMatching(
                 )
                 next_levels.append(next_dst)
                 if len(prev_levels) < target_levels:
-                    prev_dst = _OutputArray((dst_h, dst_w), np.float32)
+                    prev_dst = _own(_OutputArray((dst_h, dst_w), np.float32))
                     pyramid_mod.run(
                         "downsample_2x_f32",
                         src=prev_levels[-1],
@@ -2432,12 +2665,12 @@ def calcOpticalFlowBlockMatching(
                 grid_h = max(
                     1, (lh - 2 * level_margin + level_grid_step - 1) // level_grid_step
                 )
-                grid_flow = _OutputArray((grid_h, grid_w, 3), np.float32)
-                grid_meta = _OutputArray((grid_h, grid_w, 4), np.float32)
-                flow_out = _OutputArray((lh, lw, 2), np.float32)
+                grid_flow = _own(_OutputArray((grid_h, grid_w, 3), np.float32))
+                grid_meta = _own(_OutputArray((grid_h, grid_w, 4), np.float32))
+                flow_out = _own(_OutputArray((lh, lw, 2), np.float32))
 
                 if coarse_grid_flow is None:
-                    dummy_prev = _OutputArray((1, 1, 3), np.float32)
+                    dummy_prev = _own(_OutputArray((1, 1, 3), np.float32))
                     prev_grid_flow = dummy_prev
                     has_prev_flow = 0
                 else:
@@ -2505,6 +2738,8 @@ def calcOpticalFlowBlockMatching(
                     mod.run("flow_lk_grid_track", **track_args)
 
         if return_gpu:
+            returned_buffer = current_flow
+            _cleanup_owned(keep=returned_buffer)
             if return_diagnostics:
                 if diagnostics is None:
                     diagnostics = {
@@ -2515,6 +2750,7 @@ def calcOpticalFlowBlockMatching(
             return current_flow
 
         result = current_flow.to_numpy()
+        _cleanup_owned()
         if return_diagnostics:
             if diagnostics is None:
                 diagnostics = {
@@ -2524,6 +2760,11 @@ def calcOpticalFlowBlockMatching(
             return result, diagnostics
         return result
     except Exception:
+        try:
+            _cleanup_owned()
+        except Exception:
+            pass
+        _cleanup_owned()
         if str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}:
             raise
         if is_prev_gpu or is_next_gpu:

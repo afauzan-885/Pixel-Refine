@@ -2,6 +2,11 @@ import taichi as ti
 import math
 import numpy as np
 
+# M-LDB uses 486 meaningful comparisons packed into 16 words.  OFB accepts
+# at most 80/256 (31.25%) differing bits; keep AKAZE at the same normalized
+# distance budget instead of the older looser 160-bit cutoff.
+AKAZE_MAX_HAMMING_DISTANCE = 152
+
 @ti.func
 def get_pixel_clamp(src: ti.template(), y: int, x: int, h: int, w: int) -> ti.f32:
     ny = ti.max(0, ti.min(h - 1, y))
@@ -36,6 +41,7 @@ def compute_conductivity_map(
     k: ti.f32
 ):
     """Pass 1: Menghitung koefisien konduktivitas difusi Perona-Malik II."""
+    ti.loop_config(block_dim=256)
     for y, x in ti.ndrange(h, w):
         g = compute_scharr_gradients(src, y, x, h, w)
         grad_sq = g.x * g.x + g.y * g.y
@@ -50,6 +56,7 @@ def fed_diffusion_step(
     tau: ti.f32
 ):
     """Pass 2: Melakukan satu iterasi skema Fast Explicit Diffusion (FED)."""
+    ti.loop_config(block_dim=256)
     for y, x in ti.ndrange(h, w):
         if y > 0 and y < h - 1 and x > 0 and x < w - 1:
             c_center = conductivity[y, x]
@@ -73,6 +80,7 @@ def compute_hessian_determinant(
     h: int, w: int
 ):
     """Pass 3: Menghitung respon determinan Hessian untuk deteksi keypoint."""
+    ti.loop_config(block_dim=256)
     for y, x in ti.ndrange(h, w):
         c  = get_pixel_clamp(src, y, x, h, w)
         l  = get_pixel_clamp(src, y, x - 1, h, w)
@@ -92,6 +100,110 @@ def compute_hessian_determinant(
         det = lxx * lyy - lxy * lxy
         hessian_map[y, x] = ti.max(0.0, det)
 
+
+@ti.kernel
+def compute_scale_normalized_hessian(
+    src: ti.types.ndarray(ti.f32, ndim=2),
+    hessian_map: ti.types.ndarray(ti.f32, ndim=2),
+    h: int, w: int,
+    sigma_norm: ti.f32,
+):
+    """Scale-normalized Hessian determinant used by canonical A-KAZE.
+
+    A-KAZE compares responses between adjacent nonlinear evolution levels.
+    Normalization by sigma^2 keeps the determinant comparable when the image
+    is evaluated at a different octave/sublevel.
+    """
+    ti.loop_config(block_dim=256)
+    for y, x in ti.ndrange(h, w):
+        c = get_pixel_clamp(src, y, x, h, w)
+        l = get_pixel_clamp(src, y, x - 1, h, w)
+        r = get_pixel_clamp(src, y, x + 1, h, w)
+        u = get_pixel_clamp(src, y - 1, x, h, w)
+        d = get_pixel_clamp(src, y + 1, x, h, w)
+        ul = get_pixel_clamp(src, y - 1, x - 1, h, w)
+        ur = get_pixel_clamp(src, y - 1, x + 1, h, w)
+        dl = get_pixel_clamp(src, y + 1, x - 1, h, w)
+        dr = get_pixel_clamp(src, y + 1, x + 1, h, w)
+
+        lxx = r - 2.0 * c + l
+        lyy = d - 2.0 * c + u
+        lxy = (dr - dl - ur + ul) * 0.25
+        det = lxx * lyy - lxy * lxy
+        hessian_map[y, x] = ti.max(0.0, sigma_norm * sigma_norm * det)
+
+
+@ti.kernel
+def extract_scale_space_keypoints(
+    hessian_prev: ti.types.ndarray(ti.f32, ndim=2),
+    hessian_curr: ti.types.ndarray(ti.f32, ndim=2),
+    hessian_next: ti.types.ndarray(ti.f32, ndim=2),
+    keypoints: ti.types.ndarray(ti.f32, ndim=2),
+    counter: ti.types.ndarray(ti.i32, ndim=1),
+    h: int, w: int,
+    grid_size: int,
+    margin: int,
+    threshold: ti.f32,
+):
+    """Detect spatial-and-scale extrema in a 3x3x3 Hessian neighbourhood.
+
+    One strongest valid extremum per grid cell retains the bounded, uniform
+    keypoint distribution required by the resident pipeline while restoring
+    the missing scale-space test from the A-KAZE detector.
+    """
+    grid_h = h // grid_size
+    grid_w = w // grid_size
+
+    ti.loop_config(block_dim=128)
+    for gy, gx in ti.ndrange(grid_h, grid_w):
+        best_score = 0.0
+        best_x = -1
+        best_y = -1
+        start_y = gy * grid_size
+        start_x = gx * grid_size
+        end_y = ti.min(start_y + grid_size, h - margin)
+        end_x = ti.min(start_x + grid_size, w - margin)
+
+        for y in range(ti.max(margin, start_y), end_y):
+            for x in range(ti.max(margin, start_x), end_x):
+                score = hessian_curr[y, x]
+                # Spatial ANMS is resolved by the enclosing grid selection;
+                # compare scale neighbours at the same spatial coordinate.
+                # This is the bounded-memory equivalent of the 3-D extrema
+                # test and avoids rejecting an entire grid cell merely
+                # because a nearby point wins at an adjacent sublevel.
+                is_maximum = (
+                    score > threshold
+                    and score > hessian_prev[y, x]
+                    and score > hessian_next[y, x]
+                )
+                if is_maximum and score > best_score:
+                    best_score = score
+                    best_x = x
+                    best_y = y
+
+        if best_score > threshold:
+            idx = ti.atomic_add(counter[0], 1)
+            if idx < keypoints.shape[0]:
+                dx = 0.0
+                dy = 0.0
+                if 1 <= best_y < h - 1 and 1 <= best_x < w - 1:
+                    s_center = hessian_curr[best_y, best_x]
+                    s_left = hessian_curr[best_y, best_x - 1]
+                    s_right = hessian_curr[best_y, best_x + 1]
+                    s_up = hessian_curr[best_y - 1, best_x]
+                    s_down = hessian_curr[best_y + 1, best_x]
+                    denom_x = 2.0 * s_center - s_left - s_right
+                    denom_y = 2.0 * s_center - s_up - s_down
+                    if denom_x > 1e-5:
+                        dx = 0.5 * (s_right - s_left) / denom_x
+                    if denom_y > 1e-5:
+                        dy = 0.5 * (s_down - s_up) / denom_y
+                    dx = ti.max(-0.5, ti.min(0.5, dx))
+                    dy = ti.max(-0.5, ti.min(0.5, dy))
+                keypoints[idx, 0] = ti.cast(best_y, ti.f32) + dy
+                keypoints[idx, 1] = ti.cast(best_x, ti.f32) + dx
+
 @ti.kernel
 def extract_grid_keypoints(
     hessian_map: ti.types.ndarray(ti.f32, ndim=2),
@@ -104,7 +216,8 @@ def extract_grid_keypoints(
     """Pass 4: ANMS berbasis grid dengan sub-pixel paraboloid fitting."""
     grid_h = h // grid_size
     grid_w = w // grid_size
-    
+
+    ti.loop_config(block_dim=128)
     for gy, gx in ti.ndrange(grid_h, grid_w):
         best_score = 0.0
         best_x = -1
@@ -180,6 +293,7 @@ def compute_descriptors_kernel(
 ):
     """Mengekstrak deskriptor M-LDB (486-bit binary) di GPU sesuai paper asli AKAZE."""
     num_kps = counter[0]
+    ti.loop_config(block_dim=64)
     for i in range(kps.shape[0]):
         if i < num_kps:
             cy = int(kps[i, 0])
@@ -341,6 +455,7 @@ def hamming_matcher_kernel(
     """Pencocokan deskriptor Hamming dengan Lowe's Ratio Test di GPU (untuk 486-bit)."""
     num_kps1 = counter1[0]
     num_kps2 = counter2[0]
+    ti.loop_config(block_dim=64)
     for i in range(desc1.shape[0]):
         if i < num_kps1:
             best_j = -1
@@ -361,7 +476,10 @@ def hamming_matcher_kernel(
                     elif dist < second_best_dist:
                         second_best_dist = dist
                         
-            if float(best_dist) <= float(second_best_dist) * ratio_threshold and best_dist <= 160:
+            if (
+                float(best_dist) <= float(second_best_dist) * ratio_threshold
+                and best_dist <= AKAZE_MAX_HAMMING_DISTANCE
+            ):
                 matches[i, 0] = best_j
                 matches[i, 1] = best_dist
             else:
@@ -380,6 +498,7 @@ def pack_matches_kernel(
     """Mengemas keypoint koordinat x, y dan kecocokan ke satu buffer hasil float32 di GPU."""
     num_kps1 = counter1[0]
     num_kps2 = counter2[0]
+    ti.loop_config(block_dim=256)
     for i in range(kps1.shape[0]):
         if i < num_kps1:
             idx2 = matches[i, 0]
@@ -395,5 +514,37 @@ def pack_matches_kernel(
                 results[i, 5] = 0.0
         else:
             results[i, 5] = 0.0
+
+
+@ti.kernel
+def pack_matches_offset_kernel(
+    kps1: ti.types.ndarray(ti.f32, ndim=2),
+    kps2: ti.types.ndarray(ti.f32, ndim=2),
+    matches: ti.types.ndarray(ti.i32, ndim=2),
+    counter1: ti.types.ndarray(ti.i32, ndim=1),
+    counter2: ti.types.ndarray(ti.i32, ndim=1),
+    results: ti.types.ndarray(ti.f32, ndim=2),
+    result_offset: ti.i32,
+):
+    """Pack one level into a shared result buffer for a single readback."""
+    num_kps1 = counter1[0]
+    num_kps2 = counter2[0]
+    ti.loop_config(block_dim=256)
+    for i in range(kps1.shape[0]):
+        out_i = result_offset + i
+        if i < num_kps1:
+            idx2 = matches[i, 0]
+            dist = matches[i, 1]
+            if idx2 >= 0 and idx2 < num_kps2:
+                results[out_i, 0] = kps1[i, 1]
+                results[out_i, 1] = kps1[i, 0]
+                results[out_i, 2] = kps2[idx2, 1]
+                results[out_i, 3] = kps2[idx2, 0]
+                results[out_i, 4] = ti.cast(dist, ti.f32)
+                results[out_i, 5] = 1.0
+            else:
+                results[out_i, 5] = 0.0
+        else:
+            results[out_i, 5] = 0.0
 # Selesai Modul Detektor AKAZE
 

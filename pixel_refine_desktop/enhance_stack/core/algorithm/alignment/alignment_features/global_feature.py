@@ -41,64 +41,61 @@ except Exception:
 # =========================================================================
 
 
+def _safe_run_exiftool(args, timeout=15):
+    """Safely execute exiftool with DEVNULL stdin and timeout to prevent hanging on Windows pipes."""
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    try:
+        return subprocess.run(
+            args,
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            creationflags=creationflags,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f" [ExifTool] Warning: Command {args[:2]} failed or timed out: {e}")
+        return None
+
+
+
 def get_all_image_paths_for_single_process(db_path: str) -> list:
     """
-    Mengambil semua path gambar, memvalidasi keberadaannya di disk,
-    dan menghapus entri yang tidak valid dari database.
+    Mengambil semua path gambar untuk mode single process.
+    Dalam arsitektur Full Batch Mode, ini otomatis diarahkan ke batch default (batch_id=1
+    atau batch pertama yang ditemukan).
     """
     try:
         if not os.path.isfile(db_path):
             return []
 
+        # Cari batch_id pertama yang ada di database
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
-            # Ambil semua data yang relevan: path dan ID
-            sql_query = """
+            cursor.execute("SELECT id FROM batch_process ORDER BY id ASC LIMIT 1")
+            row = cursor.fetchone()
+            default_batch_id = row[0] if row else 1
+
+        batch_paths = get_all_image_paths_for_batch_process(db_path, default_batch_id)
+        if batch_paths:
+            return batch_paths
+
+        # Fallback to legacy single_process_image if batch table has no images
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
                 SELECT i.id, i.path
                 FROM images i
                 JOIN single_process_image spi ON i.id = spi.image_id_single
-                ORDER BY
-                    spi.is_reference DESC,
-                    i.path ASC
-            """
-            cursor.execute(sql_query)
-
+                ORDER BY spi.is_reference DESC, i.path ASC
+                """
+            )
             all_rows = cursor.fetchall()
-
-            valid_image_paths = []
-            ids_to_delete = []
-
-            # --- Validasi dan Pemisahan ---
-            for image_id, image_path in all_rows:
-                if os.path.exists(image_path):
-                    # Jika file ada, simpan path-nya
-                    valid_image_paths.append(image_path)
-                else:
-                    # Jika file tidak ada, tandai ID-nya untuk dihapus
-                    print(f"Path not found, marking for deletion from DB: {image_path}")
-                    ids_to_delete.append(image_id)
-
-            # --- Pembersihan Database (jika ada yang perlu dihapus) ---
-            if ids_to_delete:
-                print(
-                    f"Deleting {len(ids_to_delete)} invalid entries from the database..."
-                )
-                # Buat placeholder string, misal: (?, ?, ?)
-                placeholders = ", ".join(["?"] * len(ids_to_delete))
-
-                # Hapus dari tabel relasi terlebih dahulu
-                cursor.execute(
-                    f"DELETE FROM single_process_image WHERE image_id_single IN ({placeholders})",
-                    ids_to_delete,
-                )
-
-                # Kemudian hapus dari tabel utama 'images'
-                cursor.execute(
-                    f"DELETE FROM images WHERE id IN ({placeholders})", ids_to_delete
-                )
-
-                conn.commit()  # Simpan perubahan
-
+            valid_image_paths = [path for _, path in all_rows if os.path.exists(path)]
             return valid_image_paths
 
     except sqlite3.Error as e:
@@ -442,10 +439,10 @@ def load_images_from_paths(
                 if img.mode in ("RGBA", "LA", "P"):
                     img = img.convert("RGB")
                 img_np = np.array(img)
-                return cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                return np.ascontiguousarray(img_np[..., ::-1])
         except Exception as e:
             print(f"Error loading standard image {path} with PIL: {e}")
-            return cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            return None
 
     def _load_and_process_standard_alignment(path):
         try:
@@ -750,12 +747,12 @@ def save_align_to_folder(
         return None
     # =====================================================================
 
-    # Logika multithreading untuk exiftool tidak berubah, karena sudah benar
+    # Logika multithreading untuk exiftool menggunakan _safe_run_exiftool
     try:
         num_threads = os.cpu_count() or 4
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             future = executor.submit(
-                subprocess.run,
+                _safe_run_exiftool,
                 [
                     "exiftool",
                     "-overwrite_original",
@@ -763,9 +760,6 @@ def save_align_to_folder(
                     original_path,
                     file_path,
                 ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
             )
             future.result()  # Tunggu hingga proses selesai
     except Exception as e:
@@ -839,7 +833,7 @@ def save_image(
     Input `image` diasumsikan RGB secara standar kecuali `is_bgr=True`.
     """
     try:
-        image_to_save = image.copy() if hasattr(image, "copy") else image
+        image_to_save = image
         ext = os.path.splitext(output_path)[1].lower()
         success = False
 
@@ -850,30 +844,49 @@ def save_image(
 
         # Convert to RGB if input is BGR
         if is_bgr and len(image_to_save.shape) == 3 and image_to_save.shape[2] >= 3:
-            image_to_save = cv2.cvtColor(image_to_save, cv2.COLOR_BGR2RGB)
+            image_to_save = np.ascontiguousarray(image_to_save[..., ::-1])
         # Apply end-to-end Natural Tone Mapping (AutoEnhance v2)
         if apply_tonemapping:
             try:
                 from taichi_vision import taichi_aot
 
-                img_f32 = image_to_save.astype(np.float32, copy=False)
-                max_v = float(np.max(img_f32)) if img_f32.size > 0 else 1.0
-                if max_v > 1.5:
-                    img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
+                is_u8 = image_to_save.dtype == np.uint8
+                if image_to_save.dtype == np.uint16:
+                    img_f32 = taichi_aot.cast(image_to_save, np.float32)
+                elif image_to_save.dtype == np.uint8:
+                    img_f32 = taichi_aot.cast(image_to_save, np.float32)
+                else:
+                    img_f32 = image_to_save.astype(np.float32, copy=False)
+                    max_v = float(np.max(img_f32)) if img_f32.size > 0 else 1.0
+                    if max_v > 1.5:
+                        img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
+
+                del image_to_save
+                del image
 
                 auto_params = taichi_aot.analyze_auto_enhance_params(
                     img_f32, mode="natural"
                 )
                 img_tm = taichi_aot.AutoEnhance(img_f32, params=auto_params)
+                del img_f32
 
-                if image_to_save.dtype == np.uint8 and max_v <= 255.0 and max_v > 1.0:
-                    image_to_save = np.clip(img_tm * 255.0 + 0.5, 0, 255).astype(
-                        np.uint8
-                    )
+                if is_u8:
+                    image_to_save = taichi_aot.cast(img_tm, np.uint8)
                 else:
-                    image_to_save = np.clip(img_tm * 65535.0 + 0.5, 0, 65535).astype(
-                        np.uint16
-                    )
+                    image_to_save = taichi_aot.cast(img_tm, np.uint16)
+                del img_tm
+
+                try:
+                    engine = taichi_aot.get_engine()
+                    engine.sync()
+                    if hasattr(engine, "buffer_pool") and engine.buffer_pool is not None:
+                        engine.buffer_pool.clear()
+                    if hasattr(engine, "get_device_block_cache"):
+                        engine.get_device_block_cache().clear()
+                except Exception:
+                    pass
+                import gc
+                gc.collect()
             except Exception as e_tm:
                 print(f"[save_image] AutoEnhance v2 tone mapping warning: {e_tm}")
 
@@ -886,19 +899,41 @@ def save_image(
                     compression=None,
                     extratags=[(274, "H", 1, 1, False)],
                 )
+                del image_to_save
+                import gc
+                gc.collect()
                 success = True
             except Exception as e:
                 print(f"Error: Failed to save TIFF to '{output_path}': {e}")
                 success = False
 
         else:
-            # OpenCV imwrite expects BGR for standard formats (PNG, JPG, etc.)
-            if len(image_to_save.shape) == 3 and image_to_save.shape[2] >= 3:
-                image_bgr_to_save = cv2.cvtColor(image_to_save, cv2.COLOR_RGB2BGR)
-            else:
-                image_bgr_to_save = image_to_save
-            save_params = []
-            success = cv2.imwrite(output_path, image_bgr_to_save, save_params)
+            # Standard formats: use PIL Image to save RGB natively without cv2
+            try:
+                from PIL import Image
+
+                if image_to_save.dtype != np.uint8:
+                    max_val = (
+                        float(np.max(image_to_save)) if image_to_save.size > 0 else 1.0
+                    )
+                    scale = 255.0 / (65535.0 if max_val > 255.0 else 1.0)
+                    image_u8 = np.clip(image_to_save * scale + 0.5, 0, 255).astype(
+                        np.uint8
+                    )
+                else:
+                    image_u8 = image_to_save
+                del image_to_save
+
+                pil_img = Image.fromarray(image_u8)
+                del image_u8
+                pil_img.save(output_path)
+                del pil_img
+                import gc
+                gc.collect()
+                success = True
+            except Exception as e_pil_save:
+                print(f"Error: Failed to save image to '{output_path}': {e_pil_save}")
+                success = False
 
         if not success:
             return None
@@ -907,7 +942,7 @@ def save_image(
         if reference_image_path and os.path.exists(reference_image_path):
             try:
                 # Salin metadata dari referensi
-                subprocess.run(
+                _safe_run_exiftool(
                     [
                         "exiftool",
                         "-q",
@@ -916,18 +951,14 @@ def save_image(
                         reference_image_path,
                         "-IFD0:Orientation#=1",
                         output_path,
-                    ],
-                    check=True,
-                    capture_output=True,
+                    ]
                 )
                 # ExifTool may copy the source Orientation after writing the
                 # output tags; normalize it again after the copy.
-                subprocess.run(
-                    ["exiftool", "-q", "-overwrite_original", "-IFD0:Orientation#=1", output_path],
-                    check=True,
-                    capture_output=True,
+                _safe_run_exiftool(
+                    ["exiftool", "-q", "-overwrite_original", "-IFD0:Orientation#=1", output_path]
                 )
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            except Exception as e:
                 # Ini bukan error fatal, hanya peringatan
                 print(
                     f" Warning: Failed to copy metadata to '{output_path}'. ExifTool may not be installed. Error: {e}"
@@ -977,7 +1008,7 @@ def _copy_output_metadata(reference_image_path, output_path):
     """Copy MFDenoiser's metadata contract without touching pixel buffers."""
     if reference_image_path and os.path.exists(reference_image_path):
         try:
-            subprocess.run(
+            _safe_run_exiftool(
                 [
                     "exiftool",
                     "-q",
@@ -986,22 +1017,18 @@ def _copy_output_metadata(reference_image_path, output_path):
                     reference_image_path,
                     "-IFD0:Orientation#=1",
                     output_path,
-                ],
-                check=True,
-                capture_output=True,
+                ]
             )
-            subprocess.run(
+            _safe_run_exiftool(
                 [
                     "exiftool",
                     "-q",
                     "-overwrite_original",
                     "-IFD0:Orientation#=1",
                     output_path,
-                ],
-                check=True,
-                capture_output=True,
+                ]
             )
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        except Exception as exc:
             print(
                 " Warning: Failed to copy metadata to "
                 f"'{output_path}'. ExifTool may not be installed. Error: {exc}"
@@ -1263,7 +1290,7 @@ def save_linear_dng(image, output_path, reference_image_path):
     # 2. Inject DNG Tags dengan ExifTool
     # Kita menggunakan tag dari Reference Image, tapi override beberapa hal penting
     if reference_image_path and os.path.exists(reference_image_path):
-        subprocess.run(
+        _safe_run_exiftool(
             [
                 "exiftool",
                 "-q",
@@ -1278,10 +1305,7 @@ def save_linear_dng(image, output_path, reference_image_path):
                 "-BlackLevel=0",  # Data sudah bersih
                 "-WhiteLevel=65535",  # Full range
                 output_path,
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            ]
         )
 
     return output_path
@@ -1332,7 +1356,7 @@ def save_linear_dng_streaming(
             compression="zlib",
         )
         if reference_image_path and os.path.exists(reference_image_path):
-            subprocess.run(
+            _safe_run_exiftool(
                 [
                     "exiftool",
                     "-q",
@@ -1347,10 +1371,7 @@ def save_linear_dng_streaming(
                     "-BlackLevel=0",
                     "-WhiteLevel=65535",
                     output_path,
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                ]
             )
         return output_path
     except Exception as exc:
@@ -1418,19 +1439,16 @@ def save_special_jpg_and_png(
     # Logika menyalin metadata (tetap sama)
     if reference_image_path and os.path.exists(reference_image_path):
         try:
-            subprocess.run(
+            _safe_run_exiftool(
                 [
                     "exiftool",
                     "-overwrite_original",
                     "-TagsFromFile",
                     reference_image_path,
                     dst_path,
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                ]
             )
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except Exception:
             pass
 
     return dst_path
@@ -1501,30 +1519,8 @@ def prepare_gray(img):
         raise ValueError(f"Invalid image dimensions/channels: {img.shape}")
 
     if gray.dtype != np.uint8:
-        max_val = np.max(gray)
-        if gray.dtype == np.float32 or gray.dtype == np.float64:
-            if max_val <= 1.0 and np.min(gray) >= 0:
-                gray_norm = (gray * 255.0).astype(np.uint8)
-            else:
-                if gray.dtype == np.uint16:
-                    gray_norm = (gray / 256.0).astype(
-                        np.uint8
-                    )  # Asumsi 16-bit ke 8-bit
-                elif gray.dtype == np.int16:
-                    gray_norm = ((gray / 256.0) + 128).astype(
-                        np.uint8
-                    )  # Perkiraan kasar
-                else:
-                    gray_norm = cv2.normalize(
-                        gray, None, 0, 255, cv2.NORM_MINMAX
-                    ).astype(np.uint8)
-        elif gray.dtype == np.uint16:
-            gray_norm = (gray / 256.0).astype(np.uint8)
-        else:
-            gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(
-                np.uint8
-            )
-        return gray_norm
+        from taichi_vision import taichi_aot
+        return taichi_aot.cast(gray, np.uint8)
     return gray
 
 
@@ -1756,7 +1752,7 @@ def estimate_noise_in_python(ref_image_gray_float):
             estimate_noise,
         )
 
-        score = estimate_noise(ref_image_gray_float)
+        score, _ = estimate_noise(ref_image_gray_float)
         return float(np.clip(score, 0.00001, 0.99999))
     except Exception:
         # Fallback to Laplacian MAD

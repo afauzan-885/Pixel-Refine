@@ -537,21 +537,26 @@ class ToggleSwitch(QWidget):
             super().mousePressEvent(event)
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter = QPainter()
+        if not painter.begin(self):
+            return
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Draw track
-        track_color = QColor("#2ECC71") if self._checked else QColor("#BDC3C7")
-        painter.setBrush(QBrush(track_color))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(
-            0, 0, self.width(), self.height(), self.height() / 2, self.height() / 2
-        )
+            # Draw track
+            track_color = QColor("#2ECC71") if self._checked else QColor("#BDC3C7")
+            painter.setBrush(QBrush(track_color))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(
+                0, 0, self.width(), self.height(), self.height() / 2, self.height() / 2
+            )
 
-        # Draw thumb
-        painter.setBrush(QBrush(QColor("#FFFFFF")))
-        thumb_size = self.height() - 4
-        painter.drawEllipse(self._thumb_position, 2, thumb_size, thumb_size)
+            # Draw thumb
+            painter.setBrush(QBrush(QColor("#FFFFFF")))
+            thumb_size = self.height() - 4
+            painter.drawEllipse(self._thumb_position, 2, thumb_size, thumb_size)
+        finally:
+            painter.end()
 
     def to_qml(self, indent=0):
         tab = "    " * indent

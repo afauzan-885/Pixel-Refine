@@ -85,6 +85,24 @@ def parabolic_refinement_gated(
 
 
 @ti.func
+def owns_tile_output(
+    py: ti.i32,
+    px: ti.i32,
+    write_y0: ti.i32,
+    write_y1: ti.i32,
+    write_x0: ti.i32,
+    write_x1: ti.i32,
+) -> ti.i32:
+    """Return the unique output region owned by one search tile."""
+    return (
+        py >= write_y0
+        and py < write_y1
+        and px >= write_x0
+        and px < write_x1
+    )
+
+
+@ti.func
 def compute_regularization_params(
     flow: ti.template(), y: ti.i32, x: ti.i32, tile_h: ti.i32, tile_w: ti.i32, grad_energy: ti.f32
 ):
@@ -127,13 +145,17 @@ def block_search_kernel(
     max_search_radius: ti.i32,
 ):
     h, w = ref_layer.shape[0], ref_layer.shape[1]
-    step_y, step_x = ti.max(1, tile_h // 2), ti.max(1, tile_w // 2)
+    step_y, step_x = ti.max(1, tile_h), ti.max(1, tile_w)
 
     for tile_y_idx, tile_x_idx in ti.ndrange(
         (h + step_y - 1) // step_y, (w + step_x - 1) // step_x
     ):
-        y, x = ti.max(0, ti.min(tile_y_idx * step_y, h - tile_h)), ti.max(
-            0, ti.min(tile_x_idx * step_x, w - tile_w)
+        write_y0, write_x0 = tile_y_idx * step_y, tile_x_idx * step_x
+        write_y1, write_x1 = ti.min(h, write_y0 + step_y), ti.min(
+            w, write_x0 + step_x
+        )
+        y, x = ti.max(0, ti.min(write_y0, h - tile_h)), ti.max(
+            0, ti.min(write_x0, w - tile_w)
         )
 
         grad_energy = compute_tile_gradient_energy(ref_layer, y, x, tile_h, tile_w)
@@ -228,8 +250,15 @@ def block_search_kernel(
                 0.00015
             )
             for r, c in ti.ndrange(sub_h, sub_w):
-                if y + r < h and x + c < w:
-                    refined_flow[y + r, x + c, 0], refined_flow[y + r, x + c, 1] = -sub_dx0, sub_dy0
+                if owns_tile_output(
+                    y + r, x + c, write_y0, write_y1, write_x0, write_x1
+                ):
+                    # ``remap_with_flow`` samples the support frame at
+                    # ``(x + dx, y + dy)``.  The SSD candidate already uses
+                    # that same support-frame offset, so both components must
+                    # retain their sign here.  Negating only X made the
+                    # historical graph mirror horizontal motion.
+                    refined_flow[y + r, x + c, 0], refined_flow[y + r, x + c, 1] = sub_dx0, sub_dy0
 
             sub_dx1 += parabolic_refinement_gated(
                 compute_alignment_ssd(ref_layer, comp_layer, y, x + sub_w, y + int(sub_dy1), x + sub_w + int(sub_dx1) - 1, sub_h, sub_w, 1),
@@ -244,8 +273,15 @@ def block_search_kernel(
                 0.00015
             )
             for r, c in ti.ndrange(sub_h, sub_w):
-                if y + r < h and x + sub_w + c < w:
-                    refined_flow[y + r, x + sub_w + c, 0], refined_flow[y + r, x + sub_w + c, 1] = -sub_dx1, sub_dy1
+                if owns_tile_output(
+                    y + r,
+                    x + sub_w + c,
+                    write_y0,
+                    write_y1,
+                    write_x0,
+                    write_x1,
+                ):
+                    refined_flow[y + r, x + sub_w + c, 0], refined_flow[y + r, x + sub_w + c, 1] = sub_dx1, sub_dy1
 
             sub_dx2 += parabolic_refinement_gated(
                 compute_alignment_ssd(ref_layer, comp_layer, y + sub_h, x, y + sub_h + int(sub_dy2), x + int(sub_dx2) - 1, sub_h, sub_w, 1),
@@ -260,8 +296,15 @@ def block_search_kernel(
                 0.00015
             )
             for r, c in ti.ndrange(sub_h, sub_w):
-                if y + sub_h + r < h and x + c < w:
-                    refined_flow[y + sub_h + r, x + c, 0], refined_flow[y + sub_h + r, x + c, 1] = -sub_dx2, sub_dy2
+                if owns_tile_output(
+                    y + sub_h + r,
+                    x + c,
+                    write_y0,
+                    write_y1,
+                    write_x0,
+                    write_x1,
+                ):
+                    refined_flow[y + sub_h + r, x + c, 0], refined_flow[y + sub_h + r, x + c, 1] = sub_dx2, sub_dy2
 
             sub_dx3 += parabolic_refinement_gated(
                 compute_alignment_ssd(ref_layer, comp_layer, y + sub_h, x + sub_w, y + sub_h + int(sub_dy3), x + sub_w + int(sub_dx3) - 1, sub_h, sub_w, 1),
@@ -276,8 +319,15 @@ def block_search_kernel(
                 0.00015
             )
             for r, c in ti.ndrange(sub_h, sub_w):
-                if y + sub_h + r < h and x + sub_w + c < w:
-                    refined_flow[y + sub_h + r, x + sub_w + c, 0], refined_flow[y + sub_h + r, x + sub_w + c, 1] = -sub_dx3, sub_dy3
+                if owns_tile_output(
+                    y + sub_h + r,
+                    x + sub_w + c,
+                    write_y0,
+                    write_y1,
+                    write_x0,
+                    write_x1,
+                ):
+                    refined_flow[y + sub_h + r, x + sub_w + c, 0], refined_flow[y + sub_h + r, x + sub_w + c, 1] = sub_dx3, sub_dy3
         else:
             if (
                 -local_search_radius < best_dx < local_search_radius
@@ -300,9 +350,11 @@ def block_search_kernel(
                 best_dx += parabolic_refinement_gated(cx_m1, c0, cx_p1, 0.00015)
                 best_dy += parabolic_refinement_gated(cy_m1, c0, cy_p1, 0.00015)
             for r, c in ti.ndrange(tile_h, tile_w):
-                if y + r < h and x + c < w:
+                if owns_tile_output(
+                    y + r, x + c, write_y0, write_y1, write_x0, write_x1
+                ):
                     refined_flow[y + r, x + c, 0], refined_flow[y + r, x + c, 1] = (
-                        -best_dx,
+                        best_dx,
                         best_dy,
                     )
 
@@ -321,7 +373,7 @@ def search_coarse_level_kernel(
 ):
     h, w = ref_layer.shape[0], ref_layer.shape[1]
     prev_h, prev_w = previous_flow.shape[0], previous_flow.shape[1]
-    step_y, step_x = ti.max(1, tile_h // 2), ti.max(1, tile_w // 2)
+    step_y, step_x = ti.max(1, tile_h), ti.max(1, tile_w)
     tile_area_inv = 1.0 / float(tile_h * tile_w)
     neighbor_offsets = ti.static(
         [
@@ -346,8 +398,12 @@ def search_coarse_level_kernel(
     for tile_y_idx, tile_x_idx in ti.ndrange(
         (h + step_y - 1) // step_y, (w + step_x - 1) // step_x
     ):
-        y, x = ti.max(0, ti.min(tile_y_idx * step_y, h - tile_h)), ti.max(
-            0, ti.min(tile_x_idx * step_x, w - tile_w)
+        write_y0, write_x0 = tile_y_idx * step_y, tile_x_idx * step_x
+        write_y1, write_x1 = ti.min(h, write_y0 + step_y), ti.min(
+            w, write_x0 + step_x
+        )
+        y, x = ti.max(0, ti.min(write_y0, h - tile_h)), ti.max(
+            0, ti.min(write_x0, w - tile_w)
         )
         center_y, center_x = y + tile_h // 2, x + tile_w // 2
 
@@ -368,8 +424,10 @@ def search_coarse_level_kernel(
             final_dx = spatial_mean_dx
             final_dy = spatial_mean_dy
             for r, c in ti.ndrange(tile_h, tile_w):
-                if y + r < h and x + c < w:
-                    refined_flow[y + r, x + c, 0] = -final_dx
+                if owns_tile_output(
+                    y + r, x + c, write_y0, write_y1, write_x0, write_x1
+                ):
+                    refined_flow[y + r, x + c, 0] = final_dx
                     refined_flow[y + r, x + c, 1] = final_dy
         else:
             for i in range(18):
@@ -446,9 +504,11 @@ def search_coarse_level_kernel(
                             float(cur_dy),
                         )
             for r, c in ti.ndrange(tile_h, tile_w):
-                if y + r < h and x + c < w:
+                if owns_tile_output(
+                    y + r, x + c, write_y0, write_y1, write_x0, write_x1
+                ):
                     refined_flow[y + r, x + c, 0], refined_flow[y + r, x + c, 1] = (
-                        -final_dx,
+                        final_dx,
                         final_dy,
                     )
 
@@ -465,14 +525,18 @@ def search_fine_level_kernel(
     downscale_factor: ti.i32,
 ):
     h, w = ref_layer.shape[0], ref_layer.shape[1]
-    step_y, step_x = ti.max(1, tile_h // 2), ti.max(1, tile_w // 2)
+    step_y, step_x = ti.max(1, tile_h), ti.max(1, tile_w)
     tile_area_inv = 1.0 / float(tile_h * tile_w)
 
     for tile_y_idx, tile_x_idx in ti.ndrange(
         (h + step_y - 1) // step_y, (w + step_x - 1) // step_x
     ):
-        y, x = ti.max(0, ti.min(tile_y_idx * step_y, h - tile_h)), ti.max(
-            0, ti.min(tile_x_idx * step_x, w - tile_w)
+        write_y0, write_x0 = tile_y_idx * step_y, tile_x_idx * step_x
+        write_y1, write_x1 = ti.min(h, write_y0 + step_y), ti.min(
+            w, write_x0 + step_x
+        )
+        y, x = ti.max(0, ti.min(write_y0, h - tile_h)), ti.max(
+            0, ti.min(write_x0, w - tile_w)
         )
         center_y, center_x = y + tile_h // 2, x + tile_w // 2
 
@@ -488,8 +552,10 @@ def search_fine_level_kernel(
             final_dx = spatial_mean_dx
             final_dy = spatial_mean_dy
             for r, c in ti.ndrange(tile_h, tile_w):
-                if y + r < h and x + c < w:
-                    refined_flow[y + r, x + c, 0] = -final_dx
+                if owns_tile_output(
+                    y + r, x + c, write_y0, write_y1, write_x0, write_x1
+                ):
+                    refined_flow[y + r, x + c, 0] = final_dx
                     refined_flow[y + r, x + c, 1] = final_dy
         else:
             # 🚀 Step 1: Evaluasi biaya tebakan awal (c0) dari upsampled coarse flow
@@ -542,9 +608,11 @@ def search_fine_level_kernel(
             final_dy = float(best_cand_dy) + parabolic_refinement_gated(c_m1_y, c_center, c_p1_y, 0.00015)
 
             for r, c in ti.ndrange(tile_h, tile_w):
-                if y + r < h and x + c < w:
+                if owns_tile_output(
+                    y + r, x + c, write_y0, write_y1, write_x0, write_x1
+                ):
                     refined_flow[y + r, x + c, 0], refined_flow[y + r, x + c, 1] = (
-                        -final_dx,
+                        final_dx,
                         final_dy,
                     )
 
@@ -652,6 +720,66 @@ def compile_compute_flow(arch=None, suffix="vulkan"):
     )
 
     module.add_graph("align_end_to_end_3layer", g_builder.compile())
+
+    # Keep coarse-to-fine sources immutable while adjacent tiles refine the
+    # next level.  The historical graph remains above for artifact rollback;
+    # V2 is consumed only by the resident aligner when the target archive
+    # contains it.
+    sym_flow_l1_seed = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "flow_l1_seed", dtype=ti.f32, ndim=3
+    )
+    sym_flow_l0_seed = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "flow_l0_seed", dtype=ti.f32, ndim=3
+    )
+    sym_flow_l0_raw = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "flow_l0_raw", dtype=ti.f32, ndim=3
+    )
+    g_builder_v2 = ti.graph.GraphBuilder()
+    g_builder_v2.dispatch(
+        block_search_kernel,
+        sym_ref_l2,
+        sym_comp_l2,
+        sym_flow_l2,
+        sym_tile_h,
+        sym_tile_w,
+        sym_max_search_radius,
+    )
+    g_builder_v2.dispatch(
+        upsample_flow_bicubic_kernel,
+        sym_flow_l2,
+        sym_flow_l1_seed,
+        sym_scale,
+    )
+    g_builder_v2.dispatch(
+        search_coarse_level_kernel,
+        sym_ref_l1,
+        sym_comp_l1,
+        sym_flow_l1_seed,
+        sym_flow_l2,
+        sym_flow_l1,
+        sym_tile_h,
+        sym_tile_w,
+        sym_search_dist,
+        sym_downscale,
+    )
+    g_builder_v2.dispatch(
+        upsample_flow_bicubic_kernel,
+        sym_flow_l1,
+        sym_flow_l0_seed,
+        sym_scale,
+    )
+    g_builder_v2.dispatch(
+        search_fine_level_kernel,
+        sym_ref_l0,
+        sym_comp_l0,
+        sym_flow_l0_seed,
+        sym_flow_l1,
+        sym_flow_l0_raw,
+        sym_tile_h,
+        sym_tile_w,
+        sym_downscale,
+    )
+    module.add_graph("align_end_to_end_3layer_v2", g_builder_v2.compile())
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../../"))
     target_dirs = [

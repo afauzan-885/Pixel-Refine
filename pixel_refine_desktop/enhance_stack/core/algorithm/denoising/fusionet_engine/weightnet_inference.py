@@ -9,16 +9,22 @@ Returns raw uncompressed float32 RGB array [H, W, 3] in range [0.0, 1.0].
 
 import os
 import threading
-from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-import cv2
 import numpy as np
+import cv2
 from PIL import Image, ImageOps
 
 DEFAULT_WEIGHTNET_ONNX = Path(
-    "database/Learning_Model/weightNet/GPU/weightnet_256_gpu_fp32.onnx"
+    "database/Learning_Model/weightNet/weightnet_master.bundle"
+)
+
+# DirectML feature outputs are device-resident OrtValues.  Keep only a small
+# bounded working set on the DML device; uncached reference features remain
+# ordinary CPU arrays and are uploaded by ONNX Runtime when needed.
+MAX_DML_REFERENCE_CACHE_TILES = max(
+    1, int(os.environ.get("PIXEL_REFINE_DML_CACHE_TILES", "2"))
 )
 RAW_EXTENSIONS = {
     ".dng",
@@ -81,6 +87,7 @@ def load_rgb_linear_image(path: str | Path, is_raw: bool = False) -> np.ndarray:
             img_np = np.asarray(demosaiced, dtype=np.float32)
         except Exception as exc:
             import rawpy
+
             with rawpy.imread(str(path)) as raw:
                 rgb = raw.postprocess(
                     gamma=(1, 1),
@@ -223,28 +230,31 @@ def burst_images_to_array(images: Sequence[np.ndarray]) -> np.ndarray:
 
 
 class DecoupledWeightNetSession:
-    """Encapsulates paired Encoder and Attention ONNX sessions with cached reference features."""
+    """Encapsulates paired Encoder and Attention ONNX sessions with native resident VRAM/RAM cached reference features."""
 
-    def __init__(self, encoder_session, attention_session, patch_size: int):
+    def __init__(
+        self,
+        encoder_session,
+        attention_session,
+        patch_size: int,
+        runtime: str = "cpu",
+    ):
         self.encoder_session = encoder_session
         self.attention_session = attention_session
         self.patch_size = patch_size
-        try:
-            self.reference_cache_tiles = max(
-                0,
-                int(
-                    os.environ.get(
-                        "MFDENOISER_WEIGHTNET_REFERENCE_CACHE_TILES", "16"
-                    )
-                ),
-            )
-        except (TypeError, ValueError):
-            self.reference_cache_tiles = 16
+        self.runtime = str(runtime).lower().strip()
         self._cached_ref_hash = None
         self._cached_tiles = None
+        self._is_vram_cached = False
 
     def get_providers(self):
         return self.attention_session.get_providers()
+
+    def clear_cache(self):
+        """Release cached reference features from VRAM and RAM cleanly."""
+        self._cached_ref_hash = None
+        self._cached_tiles = None
+        self._is_vram_cached = False
 
 
 def load_weightnet_onnx(
@@ -258,17 +268,29 @@ def load_weightnet_onnx(
         raise RuntimeError("ONNX inference requires the onnxruntime package.") from exc
 
     model_path = Path(model_path)
-    from pixel_refine_desktop.enhance_stack.core.algorithm.onnx_utils import (
-        resolve_onnx_runtime_and_providers,
-    )
-
-    runtime, providers = resolve_onnx_runtime_and_providers(runtime)
+    runtime = str(runtime).strip().lower()
+    available = set(ort.get_available_providers())
+    if runtime == "auto":
+        runtime = "dml" if "DmlExecutionProvider" in available else "cpu"
+    if runtime == "dml":
+        if "DmlExecutionProvider" not in available:
+            raise RuntimeError(
+                "DML runtime requested but DmlExecutionProvider is unavailable; "
+                f"available={sorted(available)}"
+            )
+        providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
+    elif runtime == "cpu":
+        providers = ["CPUExecutionProvider"]
+    else:
+        raise ValueError(
+            f"Unsupported ONNX runtime {runtime!r}; choose auto, dml, or cpu."
+        )
 
     options = ort.SessionOptions()
-    # Disable node fusion completely on DML/GPU to eliminate DmlFusedNode crashes across long bursts
+    # Disable node fusion completely on DML to eliminate DmlFusedNode crashes across long bursts
     options.graph_optimization_level = (
         ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-        if runtime in ("dml", "cuda")
+        if runtime == "dml"
         else ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     )
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -277,17 +299,63 @@ def load_weightnet_onnx(
         "session.use_device_allocator_for_initializers", "1"
     )
 
-    dev_suffix = "gpu" if runtime in ("dml", "cuda") else "cpu"
+    dev_suffix = "gpu" if runtime == "dml" else "cpu"
     dev_upper = dev_suffix.upper()
 
     search_dirs = [
-        model_path.parent,
-        model_path.parent / "decoupled",
-        Path("pixel_refine_desktop/ui/data/models"),
-        Path(f"database/Learning_Model/weightNet/{dev_upper}/decoupled"),
-        Path(f"database/Learning_Model/weightNet/{dev_upper}"),
+        model_path.parent if model_path.is_file() else model_path,
+        Path("database/Learning_Model/nanoFlow"),
         Path("database/Learning_Model/weightNet"),
+        Path("pixel_refine_desktop/ui/data/models"),
+        Path(f"database/Learning_Model/weightNet/{dev_upper}"),
+        Path(f"database/Learning_Model/nanoFlow/{dev_upper}"),
     ]
+
+    # 0. Check for Unified Model Archive Bundle (Zero-Disk In-Memory Streaming)
+    bundle_names = [
+        "weightnet_master.bundle",
+        "weightnet_v3_master.bundle",
+    ]
+    bundle_file = None
+    if model_path.is_file() and model_path.suffix.lower() == ".bundle":
+        bundle_file = model_path
+    else:
+        for d in search_dirs:
+            for bn in bundle_names:
+                bp = d / bn
+                if bp.is_file():
+                    bundle_file = bp
+                    break
+            if bundle_file:
+                break
+
+    if bundle_file:
+        try:
+            import zipfile
+            with zipfile.ZipFile(bundle_file, "r") as zf:
+                candidate_names = [
+                    f"weightnet_{patch_size}_{dev_suffix}_3c_fp32.onnx",
+                    f"weightnet_{patch_size}_{dev_suffix}_1c_fp32.onnx",
+                    f"weightnet_{patch_size}_{dev_suffix}_fp32.onnx",
+                ]
+                namelist = set(zf.namelist())
+                target_model = None
+                for cname in candidate_names:
+                    if cname in namelist:
+                        target_model = cname
+                        break
+                if target_model:
+                    model_bytes = zf.read(target_model)
+                    session = ort.InferenceSession(
+                        model_bytes, sess_options=options, providers=providers
+                    )
+                    print(
+                        f"[WeightNet ONNX Bundle] runtime={runtime} bundle={bundle_file.name} "
+                        f"model={target_model} providers={session.get_providers()} patch={patch_size}"
+                    )
+                    return session
+        except Exception as e:
+            print(f"[WeightNet ONNX Bundle Warning] Failed loading from {bundle_file}: {e}")
 
     # 1. Try to find Decoupled Model Pair first (Encoder + Attention)
     enc_names = [
@@ -329,7 +397,9 @@ def load_weightnet_onnx(
             f"[WeightNet ONNX Decoupled] runtime={runtime} patch={patch_size} "
             f"encoder={enc_file.name} attention={att_file.name}"
         )
-        return DecoupledWeightNetSession(enc_sess, att_sess, patch_size)
+        return DecoupledWeightNetSession(
+            enc_sess, att_sess, patch_size, runtime=runtime
+        )
 
     # 2. Fallback to Coupled Model if decoupled pair is not found
     coupled_names = [
@@ -399,7 +469,17 @@ def infer_single_support_weight_map(
         except Exception:
             pass
 
-    # 1. Compute Luma (Y) for structural & motion evaluation
+    # Check if model accepts native 3-channel RGB input [1, 3, H, W]
+    is_rgb_model = False
+    try:
+        active_sess = session.encoder_session if is_decoupled else session
+        in_shape = active_sess.get_inputs()[0].shape
+        if len(in_shape) >= 2 and in_shape[1] == 3:
+            is_rgb_model = True
+    except Exception:
+        is_rgb_model = False
+
+    # 1. Compute Luma (Y) for fallback 1-channel models
     ref_luma = (0.299 * ref_work[0] + 0.587 * ref_work[1] + 0.114 * ref_work[2]).astype(
         np.float32
     )
@@ -424,35 +504,99 @@ def infer_single_support_weight_map(
     if total_tiles == 0:
         return np.ones((3, work_h, work_w), dtype=np.float32), 1.0
 
-    # The SR adapter sets a bounded reference-feature cache. The old default
-    # encoded and retained every tile before attention started, so its RAM
-    # scaled with the entire image area instead of the resident tile budget.
-    cache_limit = getattr(session, "reference_cache_tiles", None)
-    # Denoising defaults to a bounded cache to keep multi-frame RSS stable;
-    # callers may raise it through the session attribute or environment.
-    reference_cache_tiles = (
-        len(tile_coords)
-        if cache_limit is None
-        else max(0, int(cache_limit))
-    )
-
-    # 2. Prepare a bounded reference-feature cache for decoupled architecture.
+    # 2. Extract and cache reference features once per burst (Native VRAM on DirectML, RAM on CPU)
     if is_decoupled:
         ref_id = id(ref_work)
         if session._cached_ref_hash != ref_id:
+            cached_tiles = []
+            is_dml = getattr(session, "runtime", "") == "dml"
+            use_vram = is_dml
+            for y_start, y_end, x_start, x_end in tile_coords:
+                cur_h, cur_w = y_end - y_start, x_end - x_start
+                if is_rgb_model:
+                    r_in = np.zeros((1, 3, tile_size, tile_size), dtype=np.float32)
+                    r_in[0, :, :cur_h, :cur_w] = ref_work[
+                        :, y_start:y_end, x_start:x_end
+                    ]
+                else:
+                    r_in = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
+                    r_in[0, 0, :cur_h, :cur_w] = ref_luma[y_start:y_end, x_start:x_end]
+                feat_obj = None
+                att_io = None
+                # Limit persistent DirectML feature/output bindings to three
+                # tiles.  Keeping every tile resident can consume most of the
+                # MX150's 2 GB heap before the Taichi alignment buffers run.
+                tile_use_vram = use_vram and (
+                    len(cached_tiles) < MAX_DML_REFERENCE_CACHE_TILES
+                )
+                if tile_use_vram:
+                    try:
+                        enc_io = session.encoder_session.io_binding()
+                        enc_io.bind_cpu_input("ref_img", r_in)
+                        enc_io.bind_output("ref_feat", device_type="dml", device_id=0)
+                        session.encoder_session.run_with_iobinding(enc_io)
+                        feat_obj = enc_io.get_outputs()[0]
+
+                        # Pre-create and bind persistent reference features and outputs once per burst
+                        att_io = session.attention_session.io_binding()
+                        att_io.bind_ortvalue_input("ref_feat", feat_obj)
+                        att_io.bind_cpu_input("ref_img", r_in)
+                        att_io.bind_output("weight_map")
+                        att_io.bind_output("alpha")
+                    except Exception:
+                        use_vram = False
+                        feat_obj = None
+                        att_io = None
+                if feat_obj is None:
+                    try:
+                        feat_np = session.encoder_session.run(
+                            ["ref_feat"],
+                            {"ref_img": r_in},
+                        )[0]
+                    except Exception:
+                        out_shape = session.encoder_session.get_outputs()[0].shape
+                        fb = (
+                            out_shape[0]
+                            if len(out_shape) > 0 and isinstance(out_shape[0], int)
+                            else (3 if is_rgb_model else 1)
+                        )
+                        fc = (
+                            out_shape[1]
+                            if len(out_shape) > 1 and isinstance(out_shape[1], int)
+                            else 16
+                        )
+                        fh = (
+                            out_shape[2]
+                            if len(out_shape) > 2 and isinstance(out_shape[2], int)
+                            else tile_size
+                        )
+                        fw = (
+                            out_shape[3]
+                            if len(out_shape) > 3 and isinstance(out_shape[3], int)
+                            else tile_size
+                        )
+                        feat_np = np.zeros((fb, fc, fh, fw), dtype=np.float32)
+                    feat_obj = feat_np
+                cached_tiles.append((r_in, feat_obj, att_io))
             session._cached_ref_hash = ref_id
-            session._cached_tiles = OrderedDict()
-        elif not isinstance(session._cached_tiles, OrderedDict):
-            session._cached_tiles = OrderedDict()
+            session._cached_tiles = cached_tiles
+            session._is_vram_cached = any(
+                item[2] is not None for item in cached_tiles
+            )
 
     # 3. High-throughput single-tile ONNX inference matching model
-    weight_map_luma = np.zeros((1, work_h, work_w), dtype=np.float32)
+    # Color-Neutral Design: Always accumulate a unified 1-channel weight map (mean of R, G, B)
+    # to eliminate chromatic fringing (bercak merah/biru) on moving objects, then broadcast to [3, H, W].
+    weight_map_accum = np.zeros((1, work_h, work_w), dtype=np.float32)
     weight_stitch_work = np.zeros((1, 1, work_h, work_w), dtype=np.float32)
     alpha_total = 0.0
 
-    ref_in = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
-    supp_in = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
-    ref_in_tile = np.zeros((1, 1, tile_size, tile_size), dtype=np.float32)
+    ref_in = np.zeros(
+        (1, 3 if is_rgb_model else 1, tile_size, tile_size), dtype=np.float32
+    )
+    supp_in = np.zeros(
+        (1, 3 if is_rgb_model else 1, tile_size, tile_size), dtype=np.float32
+    )
 
     for i, (y_start, y_end, x_start, x_end) in enumerate(tile_coords):
         if stop_event is not None:
@@ -463,93 +607,130 @@ def infer_single_support_weight_map(
         cur_h, cur_w = y_end - y_start, x_end - x_start
         cur_win = window_2d[:, :, :cur_h, :cur_w]
 
-        supp_in[0, 0, :cur_h, :cur_w] = supp_luma[y_start:y_end, x_start:x_end]
-
-        # Reuse the fixed-shape staging tensor; clear the padded region so
-        # edge tiles retain the same zero-padding semantics as the old
-        # per-tile allocation without repeated heap allocations.
-        ref_in_tile.fill(0.0)
-        ref_in_tile[0, 0, :cur_h, :cur_w] = ref_luma[
-            y_start:y_end, x_start:x_end
-        ]
+        if is_rgb_model:
+            supp_in[0, :, :cur_h, :cur_w] = supp_work[:, y_start:y_end, x_start:x_end]
+        else:
+            supp_in[0, 0, :cur_h, :cur_w] = supp_luma[y_start:y_end, x_start:x_end]
 
         if is_decoupled:
-            ref_feat_tile = session._cached_tiles.get(i)
-            if ref_feat_tile is None:
+            cached_item = session._cached_tiles[i]
+            ref_in_tile = cached_item[0]
+            ref_feat_obj = cached_item[1]
+            tile_att_io = cached_item[2] if len(cached_item) > 2 else None
+
+            weight_np, alpha_np = None, None
+
+            if tile_att_io is not None:
                 try:
-                    ref_feat_tile = session.encoder_session.run(
-                        ["ref_feat"],
-                        {"ref_img": ref_in_tile},
-                    )[0]
+                    tile_att_io.bind_cpu_input("support_img", supp_in)
+                    session.attention_session.run_with_iobinding(tile_att_io)
+                    outs = tile_att_io.get_outputs()
+                    weight_np = outs[0].numpy()
+                    alpha_np = outs[1].numpy()
                 except Exception:
-                    ref_feat_tile = np.zeros(
-                        (1, 16, tile_size, tile_size), dtype=np.float32
+                    weight_np, alpha_np = None, None
+
+            if weight_np is None:
+                try:
+                    feat_np = (
+                        ref_feat_obj.numpy()
+                        if hasattr(ref_feat_obj, "numpy")
+                        else ref_feat_obj
                     )
-                if len(session._cached_tiles) < reference_cache_tiles:
-                    session._cached_tiles[i] = ref_feat_tile
-            try:
-                weight_np, alpha_np = session.attention_session.run(
-                    ["weight_map", "alpha"],
-                    {
-                        "ref_feat": ref_feat_tile,
-                        "ref_img": ref_in_tile,
-                        "support_img": supp_in,
-                    },
-                )
-                weight_tile = np.asarray(weight_np, dtype=np.float32)[0, 0, :cur_h, :cur_w]
+                    weight_np, alpha_np = session.attention_session.run(
+                        ["weight_map", "alpha"],
+                        {
+                            "ref_feat": feat_np,
+                            "ref_img": ref_in_tile,
+                            "support_img": supp_in,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            if weight_np is not None:
+                raw_w = np.asarray(weight_np, dtype=np.float32)
+                if raw_w.shape[1] == 3:
+                    weight_tile = np.mean(raw_w[0, :, :cur_h, :cur_w], axis=0, keepdims=True)
+                else:
+                    weight_tile = raw_w[0, 0:1, :cur_h, :cur_w]
                 alpha_values = np.asarray(alpha_np, dtype=np.float32)
                 if np.isfinite(alpha_values).all():
                     alpha_total += float(alpha_values.mean())
-            except Exception:
-                diff = np.abs(ref_in_tile[0, 0, :cur_h, :cur_w] - supp_in[0, 0, :cur_h, :cur_w])
+            else:
+                if is_rgb_model:
+                    diff = np.mean(
+                        np.abs(
+                            ref_in_tile[0, :, :cur_h, :cur_w]
+                            - supp_in[0, :, :cur_h, :cur_w]
+                        ),
+                        axis=0,
+                        keepdims=True,
+                    )
+                else:
+                    diff = np.abs(
+                        ref_in_tile[0, 0:1, :cur_h, :cur_w]
+                        - supp_in[0, 0:1, :cur_h, :cur_w]
+                    )
                 weight_tile = np.clip(1.0 - diff * 3.0, 0.0, 1.0)
                 alpha_total += 0.5
         else:
-            ref_in[0, 0, :cur_h, :cur_w] = ref_luma[y_start:y_end, x_start:x_end]
+            if is_rgb_model:
+                ref_in[0, :, :cur_h, :cur_w] = ref_work[:, y_start:y_end, x_start:x_end]
+            else:
+                ref_in[0, 0, :cur_h, :cur_w] = ref_luma[y_start:y_end, x_start:x_end]
             try:
                 weight_np, alpha_np = session.run(
                     ["weight_map", "alpha"],
                     {"ref_img": ref_in, "support_img": supp_in},
                 )
-                weight_tile = np.asarray(weight_np, dtype=np.float32)[0, 0, :cur_h, :cur_w]
+                raw_w = np.asarray(weight_np, dtype=np.float32)
+                if raw_w.shape[1] == 3:
+                    # Color-neutral merge: average across 3 channels to eliminate chromatic fringing
+                    weight_tile = np.mean(raw_w[0, :, :cur_h, :cur_w], axis=0, keepdims=True)
+                else:
+                    weight_tile = raw_w[0, 0:1, :cur_h, :cur_w]
                 alpha_values = np.asarray(alpha_np, dtype=np.float32)
                 if np.isfinite(alpha_values).all():
                     alpha_total += float(alpha_values.mean())
             except Exception:
-                diff = np.abs(ref_in[0, 0, :cur_h, :cur_w] - supp_in[0, 0, :cur_h, :cur_w])
+                if is_rgb_model:
+                    diff = np.mean(
+                        np.abs(
+                            ref_in[0, :, :cur_h, :cur_w] - supp_in[0, :, :cur_h, :cur_w]
+                        ),
+                        axis=0,
+                        keepdims=True,
+                    )
+                else:
+                    diff = np.abs(
+                        ref_in[0, 0:1, :cur_h, :cur_w] - supp_in[0, 0:1, :cur_h, :cur_w]
+                    )
                 weight_tile = np.clip(1.0 - diff * 3.0, 0.0, 1.0)
                 alpha_total += 0.5
 
-        weight_map_luma[:, y_start:y_end, x_start:x_end] += weight_tile * cur_win[0, 0]
+        weight_map_accum[:, y_start:y_end, x_start:x_end] += weight_tile * cur_win[0]
         weight_stitch_work[:, :, y_start:y_end, x_start:x_end] += cur_win
 
     alpha_total = alpha_total / max(1, total_tiles)
 
-    weight_map_luma = np.clip(
-        weight_map_luma / (weight_stitch_work[0] + 1e-8), 0.0, 1.0
-    )[0]
+    weight_map_norm = np.clip(
+        weight_map_accum / (weight_stitch_work[0] + 1e-8), 0.0, 1.0
+    )
 
-    # Apply ghost penalty & cutoff on luma weight map
+    # Apply ghost penalty & cutoff
     if ghost_penalty != 1.0:
-        weight_map_luma = np.power(weight_map_luma, float(ghost_penalty))
+        weight_map_norm = np.power(weight_map_norm, float(ghost_penalty))
 
     if ghost_cutoff > 0.0:
-        weight_map_luma = np.clip(
-            (weight_map_luma - float(ghost_cutoff)) / (1.0 - float(ghost_cutoff)),
+        weight_map_norm = np.clip(
+            (weight_map_norm - float(ghost_cutoff)) / (1.0 - float(ghost_cutoff)),
             0.0,
             1.0,
         )
 
-    # 2. Fast Vectorized Chroma Gating (R & B color deviation protection)
-    delta_r = np.abs((supp_work[0] - supp_luma) - (ref_work[0] - ref_luma))
-    delta_b = np.abs((supp_work[2] - supp_luma) - (ref_work[2] - ref_luma))
-
-    sens = float(chroma_sensitivity)
-    w_r = weight_map_luma * np.clip(1.0 - sens * delta_r, 0.0, 1.0)
-    w_g = weight_map_luma
-    w_b = weight_map_luma * np.clip(1.0 - sens * delta_b, 0.0, 1.0)
-
-    weight_map_work = np.stack([w_r, w_g, w_b], axis=0).astype(np.float32)
+    # Pure AI Weight Map: Direct broadcast of color-neutral unified weight map to 3 channels [3, H, W]
+    weight_map_work = np.repeat(weight_map_norm, 3, axis=0).astype(np.float32)
 
     mean_alpha = alpha_total / max(1, total_tiles)
     return weight_map_work, mean_alpha
