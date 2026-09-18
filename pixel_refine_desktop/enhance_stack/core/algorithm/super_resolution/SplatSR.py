@@ -308,8 +308,8 @@ class SplatSRAlgorithm:
             ),
             "grid_step": max(4, int(config.get("grid_step", 48))),
             "border_margin": max(0, int(config.get("border_margin", 8))),
+            "overlap": float(config.get("overlap", 0.30)),
             "motion_mode": str(config.get("motion_mode", "fast")),
-            "dense_mode": "blocky_clamped",
             "max_flow_px": float(config.get("max_flow_px", 64.0)),
         }
 
@@ -1603,9 +1603,6 @@ def _build_weightnet_provider():
         overlap=float(os.environ.get("SPLATSR_WEIGHTNET_OVERLAP", "0.30")),
         ghost_penalty=float(
             os.environ.get("SPLATSR_WEIGHTNET_GHOST_PENALTY", "1.0")
-        ),
-        ghost_cutoff=float(
-            os.environ.get("SPLATSR_WEIGHTNET_GHOST_CUTOFF", "0.05")
         ),
         chroma_sensitivity=float(
             os.environ.get("SPLATSR_WEIGHTNET_CHROMA_SENSITIVITY", "1.0")

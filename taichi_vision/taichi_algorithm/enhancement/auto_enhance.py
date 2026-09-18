@@ -114,8 +114,10 @@ def analyze_auto_enhance_params(
             gamma = 2.20
             shadow_lift = float(np.clip(p_black * 0.5, 0.0, 0.015))
 
-        # 2. Compute dynamic gain (capped at 6.0x)
-        gain = float(np.clip(target_key / max(log_avg, 1e-4), 1.0, 6.0))
+        # 2. Compute dynamic gain directly from the measured log-average.
+        # Do not impose an arbitrary upper cap: very dark linear references
+        # may legitimately require gain above 6x for feature visibility.
+        gain = float(max(target_key / max(log_avg, 1e-4), 1.0))
 
         # 3. Filmic Extended White Level anchored to high percentiles (zero blown-out highlights)
         white_level = max(1.8, p_white * gain * 1.25)
@@ -126,7 +128,9 @@ def analyze_auto_enhance_params(
             "shadow_lift": shadow_lift,
             "gamma": gamma,
             "contrast_s_curve": 1.20,
-            "global_contrast": 1.30,  # Crisp Sigmoid slope for sharp edge & texture discrimination
+            # Neutral analysis contrast: AutoEnhance may still adapt exposure,
+            # white level and shadow lift, but adds no histogram contrast boost.
+            "global_contrast": 1.0,
             "saturation": 1.05,
             "adaptive_knee": True,  # Extended Filmic Knee protects highlights & midtones
             "metrics": {
@@ -244,9 +248,8 @@ def apply_auto_enhance_np(
 
     # 5. Normalized Sigmoid Contrast Curve with Hermite Highlight Protection
     # k controls the contrast slope, x0 is the perceptual midtone anchor (0.38 for +15% deeper blacks)
-    k = float(
-        np.clip(3.5 + (global_contrast - 1.0) * 3.0, 3.0, 6.0)
-    )  # e.g. k=4.7 for contrast=1.40
+    # AutoEnhance v1 owns the contrast range; do not impose an external clamp.
+    k = float(3.5 + (global_contrast - 1.0) * 3.0)
     x0 = 0.38
 
     s_x = 1.0 / (1.0 + np.exp(-k * (lum_gamma - x0)))
@@ -311,11 +314,8 @@ if TAICHI_AVAILABLE:
         use_adaptive_knee: ti.i32,
     ):
         w2 = white_level * white_level
+        # AutoEnhance v1 owns the contrast range; keep the analyzed slope.
         k = 3.5 + (global_contrast - 1.0) * 3.0
-        if k < 3.0:
-            k = 3.0
-        elif k > 6.0:
-            k = 6.0
         x0 = 0.38
 
         s_0 = 1.0 / (1.0 + tm.exp(-k * (0.0 - x0)))

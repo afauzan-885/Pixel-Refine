@@ -1128,7 +1128,13 @@ class DisplayPanel(QWidget):
         if batch_id in self._grid_cache:
             self._grid_cache.move_to_end(batch_id)
         while len(self._grid_cache) > self._grid_cache_limit:
-            self._grid_cache.popitem(last=False)
+            old_bid, (old_imgs, old_cards) = self._grid_cache.popitem(last=False)
+            for card in old_cards:
+                if card is not None and is_widget_alive(card):
+                    try:
+                        card.deleteLater()
+                    except RuntimeError:
+                        pass
 
     def invalidate_grid_cache(self, batch_id=None):
         """Drop one batch_id (int) or the entire grid cache (None).
@@ -1139,9 +1145,24 @@ class DisplayPanel(QWidget):
         a different visual_images list than the cached one.
         """
         if batch_id is None:
+            for b_id, (imgs, cards) in list(self._grid_cache.items()):
+                for card in cards:
+                    if card is not None and is_widget_alive(card):
+                        try:
+                            card.deleteLater()
+                        except RuntimeError:
+                            pass
             self._grid_cache.clear()
         else:
-            self._grid_cache.pop(batch_id, None)
+            entry = self._grid_cache.pop(batch_id, None)
+            if entry:
+                imgs, cards = entry
+                for card in cards:
+                    if card is not None and is_widget_alive(card):
+                        try:
+                            card.deleteLater()
+                        except RuntimeError:
+                            pass
 
     def _try_restore_from_grid_cache(self, batch_id, visual_images):
         """If the grid cache has a valid entry for *batch_id* whose
@@ -1156,7 +1177,7 @@ class DisplayPanel(QWidget):
         if not entry:
             return False
         cached_images, cached_cards = entry
-        if cached_images is None or cached_cards is None:
+        if not cached_images or not cached_cards:
             return False
         # Structural equality check on the visual_images list. Image
         # objects use ``id`` (basename) so list comparison is cheap.
@@ -1172,17 +1193,26 @@ class DisplayPanel(QWidget):
         # re-add them here.
         try:
             self.all_cards.clear()
-            self.grid_container.set_batch_update(True)
+            container = self.grid_container
+            container.set_batch_update(True)
             for card in cached_cards:
-                if card is None:
-                    continue
-                card_id = card.property("card_id") or getattr(card, "_card_id", None)
+                if card is None or not is_widget_alive(card):
+                    container.set_batch_update(False)
+                    return False
+                card_id = (
+                    card.property("card_id")
+                    or getattr(card, "_card_id", None)
+                    or getattr(card, "card_id", None)
+                )
                 if card_id is None:
                     continue
+                if hasattr(container, "container") and card.parent() != container.container:
+                    card.setParent(container.container)
                 self.all_cards[str(card_id)] = card
-                self.grid_container.add_item(card)
+                container.add_item(card)
+                card.show()
             self._touch_grid_cache(batch_id)
-            self.grid_container.set_batch_update(False)
+            container.set_batch_update(False)
             self.grid_manager._update_window()
             return True
         except Exception:
@@ -1195,12 +1225,17 @@ class DisplayPanel(QWidget):
         ``all_cards`` values so a later re-attach can re-use the
         widgets. Skips when batch_id is None or no cards exist.
         """
-        if batch_id is None or not self.all_cards:
+        if batch_id is None or not self.all_cards or not visual_images:
             return
         try:
-            cached_cards = list(self.all_cards.values())
-            self._grid_cache[batch_id] = (list(visual_images), cached_cards)
-            self._touch_grid_cache(batch_id)
+            cached_cards = [
+                card
+                for card in self.all_cards.values()
+                if card is not None and is_widget_alive(card)
+            ]
+            if cached_cards:
+                self._grid_cache[batch_id] = (list(visual_images), cached_cards)
+                self._touch_grid_cache(batch_id)
         except Exception:
             # Cache is best-effort; never fail the load path.
             pass
@@ -1210,6 +1245,18 @@ class DisplayPanel(QWidget):
         """
         Load batch images ke grid secara progresif (pure lazy loading).
         """
+        # Snapshot previous batch cards into cache before clearing
+        if (
+            self.current_batch_id is not None
+            and self.all_cards
+            and getattr(self, "_current_visual_images", None)
+            and self.current_batch_id not in getattr(self.import_manager, "active_import_batches", set())
+        ):
+            self._store_grid_cache(
+                self.current_batch_id,
+                getattr(self, "_current_visual_images", []),
+            )
+
         self.current_preview_path = None
         self.current_batch_id = batch_id
         self.current_batch_name = batch_name
@@ -1240,6 +1287,7 @@ class DisplayPanel(QWidget):
         # Zombies go first? Or last? Doesn't matter much for deletion, but maybe last.
         # However, to maintain index stability, let's append.
         visual_images = list(images) + pending_zombies
+        self._current_visual_images = list(visual_images)
 
         self.total_image_count = len(visual_images)
         self._success_toast_shown = False
@@ -1414,7 +1462,7 @@ class DisplayPanel(QWidget):
         ProcessManager.instance().cancel_context("display_populate")
         ProcessManager.instance().cancel_context("display_sequential_removal")
         self.grid_animator.stop_all()
-        self.all_cards.clear()
+        self.all_cards = {}
         self.selection_manager.clear()
         self.logic.grid_items.clear()
         self.grid_manager.stop_staged_timer()  # Menghentikan staged + recovery timer
@@ -1497,6 +1545,9 @@ class DisplayPanel(QWidget):
     def _on_thumbnail_ready(self, q_image, path, card_widget):
         """Callback when thumbnail is ready, updates card directly (No Fade-In)."""
         if card_widget is not None and is_widget_alive(card_widget):
+            # Never update or show an orphaned widget that has no parent container
+            if card_widget.parent() is None:
+                return
             # Kirim QImage langsung (Pixel-Perfect) guna menghindari bug gambar terpotong
             card_widget.set_image(q_image)
 

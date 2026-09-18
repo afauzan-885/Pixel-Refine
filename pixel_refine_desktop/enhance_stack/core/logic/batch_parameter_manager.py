@@ -230,6 +230,7 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
         "Farneback": "farneback_params",
         "Lucas Kanade": "lucas_kanade_params",
         "Block Matching GPU": "block_matching_gpu_params",
+        "Block Flow": "block_flow_params",
         "RAFT": "raft_params",
     }
     params_key = params_key_map.get(alignment_algo, "")

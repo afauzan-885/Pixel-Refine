@@ -228,6 +228,8 @@ class UIStateManager:
             return
 
         display_name = batch_name if batch_name else str(batch_id)
+        if isinstance(display_name, str) and display_name.lower().startswith("batch "):
+            display_name = display_name[6:].strip()
 
         # Use provided count or fall back to panel's total_image_count
         actual_count = count if count is not None else self.panel.total_image_count

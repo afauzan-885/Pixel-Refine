@@ -122,11 +122,6 @@ class BatchPageController(QObject):
         Returns:
             BatchModel or None if not found
         """
-        cached = self._batch_cache.get(batch_id)
-        if cached is not None:
-            self._touch_cache(batch_id)
-            return cached
-
         batch_row = self.batch_repo.get_by_id(batch_id)
         if not batch_row:
             return None

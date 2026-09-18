@@ -330,6 +330,44 @@ def compile_common_aot(arch=ti.vulkan, save_path="common_vulkan.tcm"):
     add_normalize_accum("normalize_accum_f32")
     add_normalize_accum("normalize_accum_vec3_f32", is_vec=True)
 
+    # 6b. Frame Accumulation Graphs
+    sym_curr_img_full = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "current_image_full", dtype=ti.f32, ndim=3)
+    sym_weight_work_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "weight_map_work", dtype=ti.f32, ndim=2)
+    sym_final_img_sum = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "final_image_sum", dtype=ti.f32, ndim=3)
+    sym_weight_sum_full_2d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "weight_map_sum_full", dtype=ti.f32, ndim=2)
+    sym_h_full = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h_full", dtype=ti.i32)
+    sym_w_full = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w_full", dtype=ti.i32)
+    sym_h_work = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h_work", dtype=ti.i32)
+    sym_w_work = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w_work", dtype=ti.i32)
+    sym_num_channels = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "num_channels", dtype=ti.i32)
+
+    g_accum = ti.graph.GraphBuilder()
+    g_accum.dispatch(
+        common_mod._accumulate_weighted_frame_kernel,
+        sym_curr_img_full, sym_weight_work_2d, sym_final_img_sum, sym_weight_sum_full_2d,
+        sym_h_full, sym_w_full, sym_h_work, sym_w_work, sym_num_channels,
+    )
+    module.add_graph("accumulate_weighted_frame_f32", g_accum.compile())
+
+    sym_weight_work_v3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "weight_map_work", dtype=ti.f32, ndim=3)
+    sym_weight_sum_full_v3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "weight_map_sum_full", dtype=ti.f32, ndim=3)
+
+    g_accum_v3 = ti.graph.GraphBuilder()
+    g_accum_v3.dispatch(
+        common_mod._accumulate_weighted_frame_vec3_kernel,
+        sym_curr_img_full, sym_weight_work_v3, sym_final_img_sum, sym_weight_sum_full_v3,
+        sym_h_full, sym_w_full, sym_h_work, sym_w_work, sym_num_channels,
+    )
+    module.add_graph("accumulate_weighted_frame_vec3_f32", g_accum_v3.compile())
+
+    g_accum_s2v = ti.graph.GraphBuilder()
+    g_accum_s2v.dispatch(
+        common_mod._accumulate_weighted_frame_scalar_to_vec3_kernel,
+        sym_curr_img_full, sym_weight_work_2d, sym_final_img_sum, sym_weight_sum_full_v3,
+        sym_h_full, sym_w_full, sym_h_work, sym_w_work, sym_num_channels,
+    )
+    module.add_graph("accumulate_weighted_frame_scalar_to_vec3_f32", g_accum_s2v.compile())
+
     # 7. Scale Kernels
     def add_scale(name, is_vec=False):
         builder = ti.graph.GraphBuilder()

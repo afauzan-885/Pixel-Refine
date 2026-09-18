@@ -1,0 +1,2079 @@
+diff --git "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//Average.py" "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//Average.py"
+index 439d99f..e1629d2 100644
+--- "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//Average.py"
++++ "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//Average.py"
+@@ -30,9 +30,11 @@ class AverageDenoisingAlgorithm:
+ 
+             is_raw = bool(getattr(ctx, "is_linear_mode", False))
+             storage_mode = "direct"
+-            work_scale = float(
+-                getattr(ctx, "params", {}).get("work_resolution_scale", 0.50)
+-            ) if hasattr(ctx, "params") else 0.50
++            work_scale = (
++                float(getattr(ctx, "params", {}).get("work_resolution_scale", 0.50))
++                if hasattr(ctx, "params")
++                else 0.50
++            )
+ 
+             stop_req = getattr(ctx, "stop_requested", None)
+             if stop_req is not None and callable(stop_req) and stop_req():
+@@ -43,13 +45,10 @@ class AverageDenoisingAlgorithm:
+                 f"frames={len(image_paths)} storage_mode={storage_mode}"
+             )
+ 
+-            alignment_plan = (
+-                getattr(ctx, "alignment_selection_name", None)
+-                or getattr(ctx, "params", {}).get("alignment_plan", "No Alignment")
+-            )
+-            alignment_config = getattr(ctx, "params", {}).get(
+-                "alignment_params", {}
+-            )
++            alignment_plan = getattr(ctx, "alignment_selection_name", None) or getattr(
++                ctx, "params", {}
++            ).get("alignment_plan", "No Alignment")
++            alignment_config = getattr(ctx, "params", {}).get("alignment_params", {})
+             batch_queue = int(
+                 getattr(ctx, "params", {}).get(
+                     "batch_queue", getattr(ctx, "params", {}).get("batch_size", 3)
+@@ -73,10 +72,22 @@ class AverageDenoisingAlgorithm:
+             if result_fp32 is None:
+                 return None
+ 
++            from .raw_result import RawNativeResult
++
++            if isinstance(result_fp32, RawNativeResult):
++                if ctx is not None:
++                    ctx.raw_native_result = result_fp32
++                display_rgb = result_fp32.preview_rgb
++            else:
++                display_rgb = result_fp32
++
+             ref_dtype = getattr(ctx, "ref_dtype", np.uint16 if is_raw else np.uint8)
+-            result = restore_output_dtype(result_fp32, ref_dtype)
++            result = restore_output_dtype(display_rgb, ref_dtype)
+             del result_fp32
++            if "display_rgb" in locals():
++                del display_rgb
+             import gc
++
+             gc.collect()
+             print(
+                 f"[Average] finished backend={backend} "
+
+diff --git "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//FusionNet.py" "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//FusionNet.py"
+index 11f1dad..8efa8bc 100644
+--- "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//FusionNet.py"
++++ "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//FusionNet.py"
+@@ -175,11 +175,22 @@ class FusionNetDenoisingAlgorithm:
+             if result_fp32 is None:
+                 return None
+ 
++            from .raw_result import RawNativeResult
++
++            if isinstance(result_fp32, RawNativeResult):
++                if ctx is not None:
++                    ctx.raw_native_result = result_fp32
++                display_rgb = result_fp32.preview_rgb
++            else:
++                display_rgb = result_fp32
++
+             # Always convert float32 to high-precision 16-bit uint16 TIFF [0, 65535] via native SIMD cast
+             from taichi_vision import taichi_aot
+ 
+-            result = taichi_aot.cast(result_fp32, np.uint16)
++            result = taichi_aot.cast(display_rgb, np.uint16)
+             del result_fp32
++            if "display_rgb" in locals():
++                del display_rgb
+             try:
+                 taichi_aot.get_engine().buffer_pool.clear()
+             except Exception:
+
+diff --git "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//MFDenoiser.py" "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//MFDenoiser.py"
+index 77d9582..8d42e66 100644
+--- "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//MFDenoiser.py"
++++ "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//MFDenoiser.py"
+@@ -501,7 +501,9 @@ class MFDenoiserAlgorithm:
+                     load_frame_to_gpu,
+                 )
+ 
+-                ref_gpu = load_frame_to_gpu(ctx.image_paths[0], is_raw=ctx.is_linear_mode)
++                ref_gpu = load_frame_to_gpu(
++                    ctx.image_paths[0], is_raw=ctx.is_linear_mode
++                )
+                 ref_np = ref_gpu.to_numpy()
+                 ref_gpu.destroy()
+                 scale = 65535.0 if ctx.is_linear_mode else 255.0
+@@ -530,18 +532,37 @@ class MFDenoiserAlgorithm:
+             or "stack"
+         )
+         output_suffix = ctx.params.get("output_suffix", "mf_denoiser")
+-        output_path = os.path.join(output_folder, f"{safe_name}_{output_suffix}.tif")
+-        print(
+-            f"[MFDenoiser][Save] output_path={output_path} result={_frame_info(ctx.result_image)}"
+-        )
++        raw_result = getattr(ctx, "raw_native_result", None)
++        if raw_result is not None:
++            output_path = os.path.join(
++                output_folder, f"{safe_name}_{output_suffix}.dng"
++            )
++            print(
++                f"[MFDenoiser][Save] Sensor-Native RAW output_path={output_path} "
++                f"mosaic={getattr(raw_result.normalized_mosaic, 'shape', None)}"
++            )
++            saved_dng = raw_result.save_dng(output_path)
++            print(f"[MFDenoiser][Save] Sensor-Native RAW persisted to: {saved_dng}")
++            return saved_dng
+ 
+         if ctx.is_linear_mode:
++            output_path = os.path.join(
++                output_folder, f"{safe_name}_{output_suffix}.dng"
++            )
++            print(
++                f"[MFDenoiser][Save] Linear DNG output_path={output_path} result={_frame_info(ctx.result_image)}"
++            )
+             return save_linear_dng(
+                 ctx.result_image,
+-                os.path.splitext(output_path)[0] + ".dng",
++                output_path,
+                 reference_image_path=ctx.image_paths[0] if ctx.image_paths else None,
+             )
+ 
++        output_path = os.path.join(output_folder, f"{safe_name}_{output_suffix}.tif")
++        print(
++            f"[MFDenoiser][Save] output_path={output_path} result={_frame_info(ctx.result_image)}"
++        )
++
+         # Apply tone mapping only on RAW input (linear sensor data).
+         # For standard non-RAW images (JPG, PNG, sRGB TIFF), tone mapping is already baked in,
+         # so we disable tone mapping to prevent double tone mapping (oversaturation / blown highlights).
+@@ -549,7 +570,15 @@ class MFDenoiserAlgorithm:
+         if ctx.image_paths:
+             _, ext = os.path.splitext(ctx.image_paths[0])
+             is_raw_input = ext.lower() in (
+-                ".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2", ".pef", ".raf"
++                ".dng",
++                ".cr2",
++                ".cr3",
++                ".nef",
++                ".arw",
++                ".orf",
++                ".rw2",
++                ".pef",
++                ".raf",
+             )
+ 
+         save_image(
+@@ -625,7 +654,9 @@ class MFDenoiserAlgorithm:
+                 update_progress,
+                 PROGRESS_DONE,
+                 ui="Tidak ada gambar.",
+-                console=getattr(_lang(), "NO_IMAGE_PATH_PROCESSED_IMAGE", "No image to process."),
++                console=getattr(
++                    _lang(), "NO_IMAGE_PATH_PROCESSED_IMAGE", "No image to process."
++                ),
+             )
+             return None
+         if stop_requested and stop_requested():
+@@ -859,4 +890,3 @@ if __name__ == "__main__":
+             "Set PIXEL_REFINE_SESSION_DB before running MFDenoiser directly."
+         )
+     _run_pipeline_entry(session_db)
+-
+
+diff --git a/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/raw_metadata.py b/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/raw_metadata.py
+new file mode 100644
+--- /dev/null
++++ b/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/raw_metadata.py
+@@ -0,0 +1,414 @@
++"""Reusable camera/DNG metadata extraction and Bayer CFA geometry helpers.
++
++Contains metadata extraction and orientation transformation utilities for
++sensor-native RAW processing and DNG persistence.
++"""
++
++from __future__ import annotations
++
++from fractions import Fraction
++from pathlib import Path
++from typing import Sequence, Tuple
++
++import numpy as np
++
++
++_DNG_CAMERA_TAGS = {
++    50710: (1, 3),   # CFAPlaneColor
++    50711: (3, 1),   # CFALayout
++    50713: (3, 2),   # BlackLevelRepeatDim
++    50718: (5, 2),   # DefaultScale
++    50721: (10, 9),  # ColorMatrix1
++    50722: (10, 9),  # ColorMatrix2
++    50723: (10, 9),  # CameraCalibration1
++    50724: (10, 9),  # CameraCalibration2
++    50727: (5, 3),   # AnalogBalance
++    50728: (5, 3),   # AsShotNeutral
++    50729: (5, 2),   # AsShotWhiteXY
++    50730: (10, 1),  # BaselineExposure
++    50731: (5, 1),   # BaselineNoise
++    50732: (5, 1),   # BaselineSharpness
++    50734: (5, 1),   # LinearResponseLimit
++    50778: (3, 1),   # CalibrationIlluminant1
++    50779: (3, 1),   # CalibrationIlluminant2
++    37398: (1, 4),   # TIFF/EPStandardID
++    50964: (10, None),  # ProfileHueSatMapData1
++    50965: (10, None),  # ProfileHueSatMapData2
++    51041: (12, None),  # ProfileLookTableData
++}
++
++
++def _ratio_pair(value) -> tuple[int, int]:
++    numerator = getattr(value, "num", None)
++    denominator = getattr(value, "den", None)
++    if numerator is not None and denominator is not None:
++        return int(numerator), max(1, int(denominator))
++    fraction = Fraction(float(value)).limit_denominator(1_000_000)
++    return int(fraction.numerator), int(fraction.denominator)
++
++
++def _exif_values(value):
++    raw = getattr(value, "values", None)
++    if raw is None:
++        return (value,)
++    if isinstance(raw, (bytes, bytearray, str)):
++        return (raw,)
++    return tuple(raw)
++
++
++def _exif_ascii(value) -> str:
++    text = getattr(value, "printable", value)
++    if isinstance(text, bytes):
++        text = text.decode("ascii", errors="ignore")
++    return str(text).rstrip("/x00")
++
++
++def extract_dng_camera_tags(frame, output_shape: tuple[int, int]):
++    """Extract camera colour/profile tags for a derived, baked DNG."""
++    source_tags = dict(getattr(frame, "metadata", {}).get("dng_tags", {}) or {})
++    entries = []
++    for tag, (type_id, count) in _DNG_CAMERA_TAGS.items():
++        if tag not in source_tags:
++            continue
++        value = source_tags[tag]
++        resolved_count = count
++        if resolved_count is None:
++            if isinstance(value, (bytes, bytearray)):
++                resolved_count = len(value)
++            elif isinstance(value, (tuple, list)):
++                resolved_count = len(value)
++            else:
++                resolved_count = 1
++        entries.append((tag, type_id, int(resolved_count), value))
++
++    height, width = map(int, output_shape)
++    entries.extend(
++        (
++            (50719, 4, 2, (0, 0)),
++            (50720, 4, 2, (width, height)),
++            (50829, 4, 4, (0, 0, height, width)),
++        )
++    )
++    return entries
++
++
++def extract_capture_exif(path: str | Path):
++    """Extract standard capture EXIF into native writer IFD entries."""
++    try:
++        import exifread
++
++        with Path(path).open("rb") as stream:
++            source = exifread.process_file(stream, details=True, strict=False)
++    except Exception:
++        return []
++
++    entries = []
++    seen = set()
++    named_tags = (
++        ("EXIF ExposureTime", 33434, 5),
++        ("EXIF FNumber", 33437, 5),
++        ("EXIF ExposureProgram", 34850, 3),
++        ("EXIF ISOSpeedRatings", 34855, 3),
++        ("EXIF SensitivityType", 34864, 3),
++        ("EXIF StandardOutputSensitivity", 34865, 4),
++        ("EXIF RecommendedExposureIndex", 34866, 4),
++        ("EXIF ISOSpeed", 34867, 4),
++        ("EXIF DateTimeOriginal", 36867, 2),
++        ("EXIF DateTimeDigitized", 36868, 2),
++        ("EXIF OffsetTime", 36880, 2),
++        ("EXIF OffsetTimeOriginal", 36881, 2),
++        ("EXIF OffsetTimeDigitized", 36882, 2),
++        ("EXIF ShutterSpeedValue", 37377, 10),
++        ("EXIF ApertureValue", 37378, 5),
++        ("EXIF BrightnessValue", 37379, 10),
++        ("EXIF ExposureBiasValue", 37380, 10),
++        ("EXIF MaxApertureValue", 37381, 5),
++        ("EXIF MeteringMode", 37383, 3),
++        ("EXIF LightSource", 37384, 3),
++        ("EXIF Flash", 37385, 3),
++        ("EXIF FocalLength", 37386, 5),
++        ("EXIF SubSecTime", 37520, 2),
++        ("EXIF SubSecTimeOriginal", 37521, 2),
++        ("EXIF SubSecTimeDigitized", 37522, 2),
++        ("EXIF FocalLengthIn35mmFilm", 41989, 3),
++        ("EXIF SceneCaptureType", 41990, 3),
++        ("EXIF BodySerialNumber", 42033, 2),
++        ("EXIF LensSpecification", 42034, 5),
++        ("EXIF LensMake", 42035, 2),
++        ("EXIF LensModel", 42036, 2),
++        ("EXIF LensSerialNumber", 42037, 2),
++    )
++
++    for name, tag, type_id in named_tags:
++        if name not in source:
++            continue
++        value = source[name]
++        try:
++            values = _exif_values(value)
++            if type_id in (5, 10):
++                encoded = tuple(_ratio_pair(item) for item in values)
++                entries.append((tag, type_id, len(encoded), encoded))
++            elif type_id in (3, 4):
++                encoded = tuple(int(item) for item in values)
++                entries.append((tag, type_id, len(encoded), encoded))
++            elif type_id in (1, 7):
++                raw = bytes(values[0]) if len(values) == 1 and isinstance(values[0], (bytes, bytearray)) else bytes(int(v) for v in values)
++                entries.append((tag, type_id, len(raw), raw))
++            elif type_id == 2:
++                text = _exif_ascii(value)
++                entries.append((tag, type_id, len(text.encode("ascii", "ignore")) + 1, text))
++            seen.add(tag)
++        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
++            continue
++
++    tiff_layout_tags = {
++        254, 255, 256, 257, 258, 259, 262, 273, 274, 277, 278, 279, 284, 296,
++        317, 322, 323, 324, 325, 330, 338, 513, 514,
++    }
++    reserved = {entry[0] for entry in entries} | {34665, 34853} | tiff_layout_tags
++    for name, value in source.items():
++        if not str(name).startswith("EXIF ") or str(name).startswith("EXIF SubIFD"):
++            continue
++        tag = getattr(value, "tag", None)
++        type_id = getattr(value, "field_type", None)
++        if tag is None or type_id is None:
++            continue
++        try:
++            tag, type_id = int(tag), int(type_id)
++            if tag in reserved or type_id not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
++                continue
++            values = _exif_values(value)
++            if type_id == 2:
++                text = _exif_ascii(value)
++                entry = (tag, type_id, len(text.encode("ascii", "ignore")) + 1, text)
++            elif type_id in (5, 10):
++                encoded = tuple(_ratio_pair(item) for item in values)
++                entry = (tag, type_id, len(encoded), encoded)
++            elif type_id in (1, 6, 7):
++                if len(values) == 1 and isinstance(values[0], (bytes, bytearray)):
++                    raw = bytes(values[0])
++                    entry = (tag, type_id, len(raw), raw)
++                else:
++                    encoded = tuple(int(item) for item in values)
++                    entry = (tag, type_id, len(encoded), encoded)
++            elif type_id in (3, 4, 8, 9, 11, 12):
++                encoded = tuple(
++                    float(item) if type_id in (11, 12) else int(item)
++                    for item in values
++                )
++                entry = (tag, type_id, len(encoded), encoded)
++            else:
++                continue
++            entries.append(entry)
++            reserved.add(tag)
++        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
++            continue
++    return entries
++
++
++def extract_gps_tags(path: str | Path):
++    """Extract GPS IFD entries without flattening them into EXIF."""
++    try:
++        import exifread
++
++        with Path(path).open("rb") as stream:
++            source = exifread.process_file(stream, details=True, strict=False)
++    except Exception:
++        return []
++
++    entries = []
++    for name, value in source.items():
++        if not str(name).startswith("GPS "):
++            continue
++        tag = getattr(value, "tag", None)
++        type_id = getattr(value, "field_type", None)
++        if tag is None or type_id is None:
++            continue
++        try:
++            tag, type_id = int(tag), int(type_id)
++            if not 0 <= tag <= 0xFFFF or type_id not in range(1, 13):
++                continue
++            values = _exif_values(value)
++            if type_id == 2:
++                text = _exif_ascii(value)
++                entry = (tag, type_id, len(text.encode("ascii", "ignore")) + 1, text)
++            elif type_id in (5, 10):
++                encoded = tuple(_ratio_pair(item) for item in values)
++                entry = (tag, type_id, len(encoded), encoded)
++            elif type_id in (1, 6, 7):
++                if len(values) == 1 and isinstance(values[0], (bytes, bytearray)):
++                    raw = bytes(values[0])
++                    entry = (tag, type_id, len(raw), raw)
++                else:
++                    encoded = tuple(int(item) for item in values)
++                    entry = (tag, type_id, len(encoded), encoded)
++            elif type_id in (3, 4, 8, 9, 11, 12):
++                encoded = tuple(
++                    float(item) if type_id in (11, 12) else int(item)
++                    for item in values
++                )
++                entry = (tag, type_id, len(encoded), encoded)
++            else:
++                continue
++            entries.append(entry)
++        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
++            continue
++    return list({entry[0]: entry for entry in entries}.values())
++
++
++def extract_root_capture_tags(frame):
++    """Extract safe root-IFD identity and resolution fields."""
++    source_tags = dict(getattr(frame, "metadata", {}).get("dng_tags", {}) or {})
++    entries = []
++    for tag, type_id in ((282, 5), (283, 5), (305, 2), (306, 2)):
++        if tag not in source_tags:
++            continue
++        value = source_tags[tag]
++        if type_id == 5:
++            if isinstance(value, tuple) and len(value) == 2 and not isinstance(value[0], (tuple, list)):
++                value = (value,)
++            entries.append((tag, type_id, len(value), value))
++        else:
++            text = str(value).rstrip("/x00")
++            entries.append((tag, type_id, len(text.encode("ascii", "ignore")) + 1, text))
++    return entries
++
++
++def extract_source_dng_metadata(
++    frame,
++    output_shape: tuple[int, int],
++    *,
++    source_path: str | Path = "",
++) -> dict:
++    """Build reusable writer metadata shared by every RAW-native algorithm."""
++    source_tags = dict(getattr(frame, "metadata", {}).get("dng_tags", {}) or {})
++    metadata = {
++        "camera_model": str(source_tags.get(50708, "Pixel Refine RAW Native")),
++        "dng_extra_tags": extract_dng_camera_tags(frame, output_shape),
++        "ifd0_tags": extract_root_capture_tags(frame),
++        "exif_tags": extract_capture_exif(source_path) if source_path else [],
++        "gps_tags": extract_gps_tags(source_path) if source_path else [],
++    }
++    if 271 in source_tags:
++        metadata["make"] = str(source_tags[271])
++    if 272 in source_tags:
++        metadata["model"] = str(source_tags[272])
++    return metadata
++
++
++def extract_demosaic_parameters(path: str | Path, cfa_pattern=None) -> dict:
++    """Extract the camera demosaic contract for a fused mosaic preview."""
++    import numpy as np
++    import rawpy
++
++    with rawpy.imread(str(path)) as raw:
++        wb = np.asarray(raw.camera_whitebalance, dtype=np.float32)
++        if wb.size == 4:
++            if wb[3] <= 0.01:
++                wb[3] = wb[1]
++            wb /= max(float((wb[1] + wb[3]) / 2.0), 1e-6)
++        else:
++            wb = np.asarray((1.5, 1.0, 2.0, 1.0), dtype=np.float32)
++        cfa = tuple(
++            int(value)
++            for value in (cfa_pattern or (
++                raw.raw_colors[0, 0], raw.raw_colors[0, 1],
++                raw.raw_colors[1, 0], raw.raw_colors[1, 1],
++            ))
++        )
++        return {
++            "wb_r": float(wb[0]),
++            "wb_g1": float(wb[1]),
++            "wb_b": float(wb[2]),
++            "wb_g2": float(wb[3]),
++            "cmatrix": np.ascontiguousarray(raw.color_matrix[:, :3], dtype=np.float32),
++            "black_level": float(raw.black_level_per_channel[0]),
++            "white_level": float(raw.white_level),
++            "c00": cfa[0],
++            "c01": cfa[1],
++            "c10": cfa[2],
++            "c11": cfa[3],
++        }
++
++
++def _apply_baked_orientation(image: np.ndarray, orientation: int) -> np.ndarray:
++    """Apply TIFF orientation transform to a 2D Bayer mosaic."""
++    if orientation == 2:
++        return np.fliplr(image)
++    if orientation == 3:
++        return np.rot90(image, 2)
++    if orientation == 4:
++        return np.flipud(image)
++    if orientation == 5:
++        return np.rot90(np.fliplr(image), -1)
++    if orientation == 6:
++        return np.rot90(image, -1)
++    if orientation == 7:
++        return np.rot90(np.fliplr(image), 1)
++    if orientation == 8:
++        return np.rot90(image, 1)
++    return image
++
++
++def _baked_cfa_pattern(frame) -> tuple[int, int, int, int]:
++    """Return the output CFA tile after applying TIFF orientation to samples."""
++    height, width = frame.shape
++
++    def source_coordinate(row: int, column: int) -> tuple[int, int]:
++        orientation = int(frame.orientation)
++        if orientation == 2:
++            return row, width - 1 - column
++        if orientation == 3:
++            return height - 1 - row, width - 1 - column
++        if orientation == 4:
++            return height - 1 - row, column
++        if orientation == 5:
++            return height - 1 - column, width - 1 - row
++        if orientation == 6:
++            return height - 1 - column, row
++        if orientation == 7:
++            return column, row
++        if orientation == 8:
++            return column, width - 1 - row
++        return row, column
++
++    return tuple(
++        int(frame.cfa_pattern[frame.phase_index(*source_coordinate(row, column))])
++        for row, column in ((0, 0), (0, 1), (1, 0), (1, 1))
++    )
++
++
++def _plane_slice(frame, index: int) -> tuple[slice, slice]:
++    """Return row and column slices for the 2x2 Bayer phase plane index (0=TL, 1=TR, 2=BL, 3=BR)."""
++    plane_row, plane_col = divmod(int(index), 2)
++    row = (plane_row - int(frame.phase_origin[0])) & 1
++    col = (plane_col - int(frame.phase_origin[1])) & 1
++    return slice(row, None, 2), slice(col, None, 2)
++
++
++def _plane_homography(matrix: np.ndarray, frame, index: int) -> np.ndarray:
++    """Conjugate a sensor-pixel homography into one half-resolution CFA plane."""
++    row_slice, col_slice = _plane_slice(frame, index)
++    origin_x, origin_y = int(col_slice.start), int(row_slice.start)
++    plane_to_sensor = np.array(
++        [[2.0, 0.0, origin_x], [0.0, 2.0, origin_y], [0.0, 0.0, 1.0]],
++        dtype=np.float32,
++    )
++    return np.ascontiguousarray(
++        np.linalg.inv(plane_to_sensor) @ np.asarray(matrix, dtype=np.float32) @ plane_to_sensor,
++        dtype=np.float32,
++    )
++
++
++__all__ = [
++    "extract_capture_exif",
++    "extract_gps_tags",
++    "extract_dng_camera_tags",
++    "extract_root_capture_tags",
++    "extract_demosaic_parameters",
++    "extract_source_dng_metadata",
++    "_apply_baked_orientation",
++    "_baked_cfa_pattern",
++    "_plane_slice",
++    "_plane_homography",
++]
+
+diff --git a/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/raw_result.py b/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/raw_result.py
+new file mode 100644
+--- /dev/null
++++ b/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/raw_result.py
+@@ -0,0 +1,126 @@
++"""Container for Sensor-Native RAW Fusion results and DNG persistence."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Sequence, Tuple
++
++import numpy as np
++
++from .raw_metadata import (
++    _apply_baked_orientation,
++    _baked_cfa_pattern,
++    extract_source_dng_metadata,
++)
++
++
++@dataclass
++class RawNativeResult:
++    """Sensor-native RAW fusion product with single-demosaic preview.
++
++    Attributes:
++        normalized_mosaic: 2D float32 array of fused Bayer mosaic normalized to [0, 1].
++        preview_rgb: 3D array (H, W, 3) of high-quality Hamilton demosaic for GUI display.
++        reference_frame: RawMosaicFrame representation of the reference DNG.
++        source_paths: Sequence of source image file paths.
++        report: Optional alignment/fusion report metrics.
++        linear_rgb: Optional raw linear RGB array if requested.
++        output_format: "RAW Native" or "RGB Linear".
++    """
++
++    normalized_mosaic: np.ndarray
++    preview_rgb: np.ndarray
++    reference_frame: object
++    source_paths: Sequence[str | Path]
++    report: object = None
++    linear_rgb: np.ndarray | None = None
++    output_format: str = "RAW Native"
++
++    def _quantized_mosaic(self) -> np.ndarray:
++        """Encode normalized CFA values back to sensor integer code space."""
++        frame = self.reference_frame
++        maximum_code = (1 << int(frame.bits_per_sample)) - 1
++        output = np.empty(frame.shape, dtype=frame.samples.dtype)
++        normalized = np.asarray(self.normalized_mosaic, dtype=np.float32)
++        if not np.isfinite(normalized).all():
++            raise ValueError(
++                "RAW Native fusion produced non-finite sensor samples; "
++                "refusing to encode a corrupted derived DNG."
++            )
++        values = normalized / np.float32(frame.exposure_scale)
++        output[...] = np.clip(
++            np.rint(values * np.float32(maximum_code)), 0, maximum_code
++        ).astype(output.dtype)
++        return output
++
++    def baked_oriented_mosaic(self) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
++        """Bake source orientation into mosaic pixels and matching CFA pattern."""
++        mosaic = _apply_baked_orientation(
++            self._quantized_mosaic(), int(self.reference_frame.orientation)
++        )
++        return np.ascontiguousarray(mosaic), _baked_cfa_pattern(self.reference_frame)
++
++    def save_dng(self, path: str | Path) -> str:
++        """Persist a derived sensor-native mosaiced DNG with complete camera metadata."""
++        from taichi_vision.taichi_algorithm.compression import save_dng_aot
++
++        frame = self.reference_frame
++        mosaic, cfa_pattern = self.baked_oriented_mosaic()
++        source_path = getattr(frame, "source_id", "") or (
++            str(self.source_paths[0]) if self.source_paths else ""
++        )
++        metadata = {
++            "cfa_pattern": cfa_pattern,
++            "orientation": 1,
++            "black_level": 0,
++            "white_level": (1 << int(frame.bits_per_sample)) - 1,
++            "rows_per_strip": min(256, int(frame.height)),
++        }
++        metadata.update(
++            extract_source_dng_metadata(
++                frame, mosaic.shape, source_path=source_path
++            )
++        )
++        target = Path(path)
++        save_dng_aot(
++            mosaic,
++            target,
++            metadata=metadata,
++            compression="none",
++            bits_per_sample=int(frame.bits_per_sample),
++        )
++        return str(target)
++
++    def save_linear_tiff(self, path: str | Path) -> str:
++        """Persist the one-demosaic RGB-linear result without display tone-mapping."""
++        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
++            save_image,
++        )
++
++        rgb = self.linear_rgb if self.linear_rgb is not None else self.preview_rgb
++        encoded = np.clip(np.asarray(rgb, dtype=np.float32), 0.0, 1.0)
++        if encoded.max() <= 1.0:
++            encoded = np.rint(encoded * 65535.0).astype(np.uint16)
++        else:
++            encoded = np.clip(encoded, 0.0, 65535.0).astype(np.uint16)
++
++        if not save_image(encoded, str(path), reference_image_path=None):
++            raise OSError(f"Failed to save RGB Linear TIFF: {path}")
++
++        source_path = getattr(self.reference_frame, "source_id", "") or (
++            str(self.source_paths[0]) if self.source_paths else ""
++        )
++        if source_path:
++            try:
++                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
++                    _copy_output_metadata,
++                )
++
++                _copy_output_metadata(source_path, str(path))
++            except Exception as exc:
++                print(f"[RawNativeResult] TIFF metadata preservation note: {exc}")
++        return str(path)
++
++
++__all__ = ["RawNativeResult"]
+
+diff --git a/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/resident_alignment.py b/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/resident_alignment.py
+new file mode 100644
+--- /dev/null
++++ b/pixel_refine_desktop/enhance_stack/core/algorithm/denoising/resident_alignment.py
+@@ -0,0 +1,79 @@
++"""Common alignment-estimation contract for resident image pipelines."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Optional, Tuple
++
++import numpy as np
++
++
++_FUSIONNET_ALIGNMENT_ALIASES = {
++    "block flow": "optical flow",
++    "compute flow": "optical flow",
++    "flownet": "optical flow",
++    "optical flow": "optical flow",
++    "dense optical flow": "optical flow",
++    "block matching": "block matching gpu",
++    "block matching gpu": "block matching gpu",
++    "blockmatching": "block matching gpu",
++    "block align": "block matching gpu",
++    "bm": "block matching gpu",
++    "no alignment": "no alignment",
++    "none": "no alignment",
++    "off": "no alignment",
++    "": "no alignment",
++}
++
++
++def resolve_fusionnet_alignment_plan(value: str) -> str:
++    """Return the canonical alignment plan for FusionNet."""
++    normalized = str(value or "").strip().casefold().replace("_", " ").replace("-", " ")
++    return _FUSIONNET_ALIGNMENT_ALIASES.get(normalized, normalized)
++
++
++@dataclass
++class ResidentAlignmentEstimate:
++    """One support-to-reference transform derived from an RGB proxy."""
++
++    plan: str
++    full_shape: Tuple[int, int]
++    proxy_shape: Tuple[int, int]
++    homography: Optional[np.ndarray] = None
++    flow_gpu: Optional[object] = None
++
++    def __post_init__(self) -> None:
++        if (self.homography is None) == (self.flow_gpu is None):
++            raise ValueError(
++                "ResidentAlignmentEstimate requires exactly one transform payload"
++            )
++        if self.homography is not None:
++            matrix = np.asarray(self.homography, dtype=np.float32)
++            if matrix.shape != (3, 3):
++                raise ValueError(f"homography must have shape (3, 3), got {matrix.shape}")
++            self.homography = np.ascontiguousarray(matrix)
++
++    @property
++    def kind(self) -> str:
++        return "homography" if self.homography is not None else "dense_flow"
++
++    def release(self) -> None:
++        """Release an owned dense-flow buffer, if this estimate owns one."""
++        flow = self.flow_gpu
++        self.flow_gpu = None
++        if flow is None:
++            return
++        for name in ("destroy", "release"):
++            callback = getattr(flow, name, None)
++            if callable(callback):
++                try:
++                    callback()
++                except Exception:
++                    pass
++                return
++
++
++__all__ = [
++    "ResidentAlignmentEstimate",
++    "resolve_fusionnet_alignment_plan",
++]
+
+diff --git "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//resident_pipeline.py" "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//resident_pipeline.py"
+index e08d8cf..f82826d 100644
+--- "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//resident_pipeline.py"
++++ "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//resident_pipeline.py"
+@@ -48,6 +48,17 @@ from typing import Any, Callable, Optional, Sequence, Tuple, Union
+ import numpy as np
+ 
+ from taichi_vision.taichi_aot import TaichiGPUBuffer, get_engine
++from taichi_vision.taichi_algorithm.compression import RawMosaicFrame, read_dng_aot
++from taichi_vision.taichi_algorithm.spatial_fusion import (
++    remap_accumulate_cfa_weighted_taichi,
++    normalize_accumulator_cfa_taichi,
++)
++from .raw_metadata import (
++    extract_demosaic_parameters,
++    _plane_slice,
++    _plane_homography,
++)
++from .raw_result import RawNativeResult
+ 
+ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
+     PROGRESS_ALIGN_MIN,
+@@ -189,9 +200,7 @@ def load_frame_to_gpu(
+             # Keep the conversion in the Taichi Vision/native cast boundary.
+             # Hamilton currently emits f32, but this compatibility branch is
+             # still needed for older uint8/uint16 demosaic artifacts.
+-            converted_gpu = taichi_aot.cast(
+-                rgb_gpu, np.float32, host_accessible=True
+-            )
++            converted_gpu = taichi_aot.cast(rgb_gpu, np.float32, host_accessible=True)
+             if converted_gpu is not rgb_gpu:
+                 rgb_gpu.destroy()
+             return converted_gpu
+@@ -287,7 +296,9 @@ def apply_clahe_16bit_reference(
+ 
+             # Discretize to 16-bit uint16 [0..65535]
+             lum_u16 = np.clip(lum * 65535.0 + 0.5, 0.0, 65535.0).astype(np.uint16)
+-            clahe = cv2.createCLAHE(clipLimit=float(clip_limit), tileGridSize=tile_grid_size)
++            clahe = cv2.createCLAHE(
++                clipLimit=float(clip_limit), tileGridSize=tile_grid_size
++            )
+             lum_clahe_u16 = clahe.apply(lum_u16)
+             lum_clahe = lum_clahe_u16.astype(np.float32) / 65535.0
+         except Exception:
+@@ -342,6 +353,12 @@ class NoAlignmentGPUAligner:
+     def close(self):
+         pass
+ 
++    def take_last_flow(self):
++        return None
++
++    def take_last_homography(self):
++        return None
++
+ 
+ class BlockMatchingResidentAligner:
+     """Persistent native Block-Matching session for the resident pipeline.
+@@ -388,7 +405,8 @@ class BlockMatchingResidentAligner:
+             ref_analysis_gpu, taichi_aot.COLOR_RGB2GRAY
+         )
+         self.work_h, self.work_w = (
+-            int(self.ref_gray_gpu.shape[0]), int(self.ref_gray_gpu.shape[1])
++            int(self.ref_gray_gpu.shape[0]),
++            int(self.ref_gray_gpu.shape[1]),
+         )
+         levels = max(1, int(self.config.get("max_level", 2)) + 1)
+         self.reference_pyramid = tuple(
+@@ -401,6 +419,7 @@ class BlockMatchingResidentAligner:
+         # The native pyramid returns L0 as the caller-owned reference buffer.
+         # Keep a single ownership path so close() cannot double-retire it.
+         self.ref_gray_gpu = self.reference_pyramid[0]
++        self._last_flow = None
+         print(
+             "[GPU Pipeline] Aligner: Block Matching GPU "
+             f"(mode={mode}, window={self.config.get('win_size')}, "
+@@ -437,6 +456,7 @@ class BlockMatchingResidentAligner:
+         secondary_frame_to_warp=None,
+         stop_event=None,
+         return_gpu=True,
++        keep_flow=False,
+     ):
+         from taichi_vision import taichi_aot
+         from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
+@@ -447,7 +467,9 @@ class BlockMatchingResidentAligner:
+             if callable(stop_event) and stop_event():
+                 raise RuntimeError("Block Matching alignment cancelled.")
+ 
+-        source = analysis_frame_gpu if analysis_frame_gpu is not None else supp_linear_gpu
++        source = (
++            analysis_frame_gpu if analysis_frame_gpu is not None else supp_linear_gpu
++        )
+         supp_gray_gpu = taichi_aot.cvtColor(source, taichi_aot.COLOR_RGB2GRAY)
+         flow_gpu = None
+         try:
+@@ -469,13 +491,15 @@ class BlockMatchingResidentAligner:
+             )
+             if isinstance(flow_gpu, tuple):
+                 flow_gpu = flow_gpu[0]
+-            warped_primary = taichi_aot.remap_with_flow(
+-                supp_linear_gpu,
+-                flow_gpu,
+-                self.full_h,
+-                self.full_w,
+-                return_gpu=True,
+-            )
++            warped_primary = None
++            if supp_linear_gpu is not None:
++                warped_primary = taichi_aot.remap_with_flow(
++                    supp_linear_gpu,
++                    flow_gpu,
++                    self.full_h,
++                    self.full_w,
++                    return_gpu=True,
++                )
+             warped_secondary = None
+             if secondary_frame_to_warp is not None:
+                 sec_h, sec_w = (int(v) for v in secondary_frame_to_warp.shape[:2])
+@@ -486,6 +510,9 @@ class BlockMatchingResidentAligner:
+                     sec_w,
+                     return_gpu=True,
+                 )
++            if keep_flow:
++                self._last_flow = flow_gpu
++                flow_gpu = None
+             return warped_primary, warped_secondary
+         finally:
+             if flow_gpu is not None and hasattr(flow_gpu, "destroy"):
+@@ -493,6 +520,14 @@ class BlockMatchingResidentAligner:
+             if supp_gray_gpu is not None and hasattr(supp_gray_gpu, "destroy"):
+                 supp_gray_gpu.destroy()
+ 
++    def take_last_flow(self):
++        flow = getattr(self, "_last_flow", None)
++        self._last_flow = None
++        return flow
++
++    def take_last_homography(self):
++        return None
++
+     def close(self):
+         # L0 is the same object as ``ref_gray_gpu``; destroy every pyramid
+         # level exactly once so the allocator can reuse or retire it safely.
+@@ -504,6 +539,12 @@ class BlockMatchingResidentAligner:
+                 pass
+         self.reference_pyramid = ()
+         self.ref_gray_gpu = None
++        if self._last_flow is not None and hasattr(self._last_flow, "destroy"):
++            try:
++                self._last_flow.destroy()
++            except Exception:
++                pass
++        self._last_flow = None
+ 
+ 
+ class FeatureMatchingGPUAligner:
+@@ -543,7 +584,9 @@ class FeatureMatchingGPUAligner:
+             if inlier_mask is None:
+                 inliers = np.ones(n, dtype=bool)
+             else:
+-                inliers = np.asarray(inlier_mask).reshape(-1)[:n].astype(bool, copy=False)
++                inliers = (
++                    np.asarray(inlier_mask).reshape(-1)[:n].astype(bool, copy=False)
++                )
+             inlier_count = int(inliers.sum())
+             min_inliers = max(8, min(32, int(np.ceil(0.08 * n))))
+ 
+@@ -586,7 +629,9 @@ class FeatureMatchingGPUAligner:
+             projected = projected_h[:, :2] / denom[:, None]
+             errors = np.linalg.norm(projected - dst[inliers], axis=1)
+             p90 = float(np.percentile(errors, 90)) if errors.size else float("inf")
+-            if not np.isfinite(errors).all() or p90 > max(10.0, 2.5 * float(reproj_threshold)):
++            if not np.isfinite(errors).all() or p90 > max(
++                10.0, 2.5 * float(reproj_threshold)
++            ):
+                 return _translation_fallback()
+ 
+             affine = H[:2, :2]
+@@ -602,7 +647,12 @@ class FeatureMatchingGPUAligner:
+                 return _translation_fallback()
+ 
+             corners = np.asarray(
+-                [[0.0, 0.0], [float(width), 0.0], [0.0, float(height)], [float(width), float(height)]],
++                [
++                    [0.0, 0.0],
++                    [float(width), 0.0],
++                    [0.0, float(height)],
++                    [float(width), float(height)],
++                ],
+                 dtype=np.float64,
+             )
+             corners_h = np.concatenate((corners, np.ones((4, 1))), axis=1) @ H.T
+@@ -673,20 +723,23 @@ class FeatureMatchingGPUAligner:
+                 feature_arch in {"cuda", "vulkan", "opengl"}
+                 and os.environ.get("TAICHI_CUDA_FEATURE_CACHE", "1") != "0"
+             ):
+-                self._feature_reference_cache = taichi_aot.create_feature_reference_cache(
+-                    self.feature_type,
+-                    self.ref_gray_gpu,
+-                    ratio_threshold=float(self.config.get("ratio", 0.75)),
+-                    grid_size=max(8, int(self.config.get("grid_size", 32))),
+-                    threshold=float(
+-                        self.config.get(
+-                            "threshold", 0.001 if self.feature_type == "akaze" else 0.015
+-                        )
+-                    ),
+-                    margin=max(4, int(self.config.get("margin", 15))),
+-                    max_keypoints=int(self.config.get("max_keypoints", 1200)),
+-                    k_contrast=float(self.config.get("k_contrast", 0.02)),
+-                    num_fed_steps=max(1, int(self.config.get("num_fed_steps", 8))),
++                self._feature_reference_cache = (
++                    taichi_aot.create_feature_reference_cache(
++                        self.feature_type,
++                        self.ref_gray_gpu,
++                        ratio_threshold=float(self.config.get("ratio", 0.75)),
++                        grid_size=max(8, int(self.config.get("grid_size", 32))),
++                        threshold=float(
++                            self.config.get(
++                                "threshold",
++                                0.001 if self.feature_type == "akaze" else 0.015,
++                            )
++                        ),
++                        margin=max(4, int(self.config.get("margin", 15))),
++                        max_keypoints=int(self.config.get("max_keypoints", 1200)),
++                        k_contrast=float(self.config.get("k_contrast", 0.02)),
++                        num_fed_steps=max(1, int(self.config.get("num_fed_steps", 8))),
++                    )
+                 )
+                 # The cache owns only derived keypoints/descriptors.  The
+                 # grayscale reference itself is no longer needed per frame.
+@@ -783,9 +836,11 @@ class FeatureMatchingGPUAligner:
+                     int(
+                         self.config.get(
+                             "ransac_hypotheses",
+-                            1024
+-                            if self.feature_type == "akaze" and akaze_ransac_quality
+-                            else 256,
++                            (
++                                1024
++                                if self.feature_type == "akaze" and akaze_ransac_quality
++                                else 256
++                            ),
+                         )
+                     ),
+                 )
+@@ -794,9 +849,11 @@ class FeatureMatchingGPUAligner:
+                     int(
+                         self.config.get(
+                             "ransac_iters",
+-                            3
+-                            if self.feature_type == "akaze" and akaze_ransac_quality
+-                            else 2,
++                            (
++                                3
++                                if self.feature_type == "akaze" and akaze_ransac_quality
++                                else 2
++                            ),
+                         )
+                     ),
+                 )
+@@ -829,14 +886,17 @@ class FeatureMatchingGPUAligner:
+                 else:
+                     H_matrix = H_candidate
+ 
++        self._last_homography = H_matrix
+         if H_matrix is not None:
+             # Warp primary linear frame directly on GPU
+-            warped_primary = taichi_aot.warp_perspective(
+-                supp_linear_gpu,
+-                H_matrix,
+-                (self.target_w, self.target_h),
+-                return_gpu=True,
+-            )
++            warped_primary = None
++            if supp_linear_gpu is not None:
++                warped_primary = taichi_aot.warp_perspective(
++                    supp_linear_gpu,
++                    H_matrix,
++                    (self.target_w, self.target_h),
++                    return_gpu=True,
++                )
+             warped_secondary = None
+             if secondary_frame_to_warp is not None:
+                 scale_mat = np.array(
+@@ -858,6 +918,14 @@ class FeatureMatchingGPUAligner:
+         else:
+             return supp_linear_gpu, secondary_frame_to_warp
+ 
++    def take_last_homography(self):
++        h = getattr(self, "_last_homography", None)
++        self._last_homography = None
++        return h
++
++    def take_last_flow(self):
++        return None
++
+     def close(self):
+         cache = getattr(self, "_feature_reference_cache", None)
+         if cache is not None:
+@@ -870,6 +938,7 @@ class FeatureMatchingGPUAligner:
+         if ref_gray_gpu is not None and hasattr(ref_gray_gpu, "destroy"):
+             ref_gray_gpu.destroy()
+         self.ref_gray_gpu = None
++        self._last_homography = None
+ 
+ 
+ def create_resident_aligner(
+@@ -895,6 +964,14 @@ def create_resident_aligner(
+             full_shape=full_shape,
+             feature_config=alignment_config,
+         )
++    elif "block" in plan_clean or "bm" in plan_clean:
++        print("[GPU Pipeline] Aligner: Block Matching GPU")
++        return BlockMatchingResidentAligner(
++            ref_analysis_gpu,
++            work_scale=work_scale,
++            full_shape=full_shape,
++            alignment_config=alignment_config,
++        )
+     elif plan_clean in ("sift", "lightglue", "light glue"):
+         raise ValueError(
+             f"Unsupported resident feature aligner '{alignment_plan}'. "
+@@ -957,6 +1034,84 @@ def _gpu_blend_frame(sum_img_gpu, weight_sum_gpu, supp_aligned_gpu, weight_work_
+     )
+ 
+ 
++def _cfa_blend_frame(
++    sum_cfa_gpu,
++    weight_cfa_gpu,
++    supp_aligned_rgb_gpu,
++    ref_raw_frame,
++    weight_work_gpu=None,
++    engine=None,
++):
++    """Blend one support frame directly into resident CFA accumulators via Phase-Locked Bayer Carrier Sampling.
++
++    Zero cross-channel lattice tearing: the continuous 3D vector RGB frame is warped
++    with cross-channel cohesion, and then sampled onto the reference Bayer CFA grid.
++    """
++    import cv2
++    from taichi_vision import taichi_aot
++
++    if engine is None:
++        engine = taichi_aot.get_engine()
++
++    H, W = ref_raw_frame.shape
++    c00, c01, c10, c11 = ref_raw_frame.cfa_pattern
++    cfa_to_rgb = {0: 0, 1: 1, 2: 2, 3: 1}
++
++    # Extract continuous RGB to host for phase-locked Bayer carrier extraction
++    if isinstance(supp_aligned_rgb_gpu, taichi_aot.TaichiGPUBuffer):
++        supp_aligned_rgb_np = supp_aligned_rgb_gpu.to_numpy()
++    else:
++        supp_aligned_rgb_np = np.asarray(supp_aligned_rgb_gpu, dtype=np.float32)
++
++    warped_cfa = np.empty((H, W), dtype=np.float32)
++    warped_cfa[0::2, 0::2] = supp_aligned_rgb_np[0::2, 0::2, cfa_to_rgb.get(c00, 0)]
++    warped_cfa[0::2, 1::2] = supp_aligned_rgb_np[0::2, 1::2, cfa_to_rgb.get(c01, 1)]
++    warped_cfa[1::2, 0::2] = supp_aligned_rgb_np[1::2, 0::2, cfa_to_rgb.get(c10, 1)]
++    warped_cfa[1::2, 1::2] = supp_aligned_rgb_np[1::2, 1::2, cfa_to_rgb.get(c11, 2)]
++
++    # Resize weight map to full resolution (single channel 2D)
++    if weight_work_gpu is not None:
++        if isinstance(weight_work_gpu, taichi_aot.TaichiGPUBuffer):
++            weight_work_np = weight_work_gpu.to_numpy()
++        else:
++            weight_work_np = np.asarray(weight_work_gpu)
++
++        if weight_work_np.ndim == 3:
++            # Use green/luminance channel for scalar CFA weight
++            weight_2d = (
++                weight_work_np[..., 1]
++                if weight_work_np.shape[2] > 1
++                else weight_work_np[..., 0]
++            )
++        else:
++            weight_2d = weight_work_np
++
++        if weight_2d.shape != (H, W):
++            weight_full_2d = cv2.resize(
++                weight_2d, (W, H), interpolation=cv2.INTER_LINEAR
++            )
++        else:
++            weight_full_2d = weight_2d
++    else:
++        weight_full_2d = np.ones((H, W), dtype=np.float32)
++
++    # Accumulate in 2D scalar Bayer space
++    if isinstance(sum_cfa_gpu, np.ndarray):
++        sum_cfa_gpu[...] += warped_cfa * weight_full_2d
++    elif hasattr(sum_cfa_gpu, "to_numpy"):
++        sum_cfa_np = sum_cfa_gpu.to_numpy() + (warped_cfa * weight_full_2d)
++        sum_cfa_gpu.destroy()
++        sum_cfa_gpu = engine.upload(sum_cfa_np)
++
++    if isinstance(weight_cfa_gpu, np.ndarray):
++        weight_cfa_gpu[...] += weight_full_2d
++    elif hasattr(weight_cfa_gpu, "to_numpy"):
++        weight_cfa_np = weight_cfa_gpu.to_numpy() + weight_full_2d
++        weight_cfa_gpu.destroy()
++        weight_cfa_gpu = engine.upload(weight_cfa_np)
++
++
++
+ # ---------------------------------------------------------------------------
+ # Main GPU-Resident Pipeline
+ # ---------------------------------------------------------------------------
+@@ -1047,7 +1202,11 @@ def run_gpu_resident_pipeline(
+     try:
+         pool = getattr(engine, "buffer_pool", None)
+         if pool is not None and hasattr(pool, "set_budget"):
+-            status = engine.get_memory_status() if hasattr(engine, "get_memory_status") else {}
++            status = (
++                engine.get_memory_status()
++                if hasattr(engine, "get_memory_status")
++                else {}
++            )
+             resident_limit = int(status.get("resident_limit", 0) or 0)
+             default_pool_mb = 128 if 0 < resident_limit <= 3 * 1024**3 else 384
+             pool_mb = max(
+@@ -1070,8 +1229,14 @@ def run_gpu_resident_pipeline(
+         raise ValueError(f"Need at least 2 images, got {num_images}")
+ 
+     if session is None and weight_engine == "fusionet" and not alignment_only:
+-        from .fusionet_engine.weightnet_inference import DEFAULT_WEIGHTNET_ONNX, load_weightnet_onnx
+-        session = load_weightnet_onnx(DEFAULT_WEIGHTNET_ONNX, runtime="dml", patch_size=tile_size)
++        from .fusionet_engine.weightnet_inference import (
++            DEFAULT_WEIGHTNET_ONNX,
++            load_weightnet_onnx,
++        )
++
++        session = load_weightnet_onnx(
++            DEFAULT_WEIGHTNET_ONNX, runtime="dml", patch_size=tile_size
++        )
+ 
+     # ------------------------------------------------------------------
+     # PHASE 1: Load reference frame directly to GPU
+@@ -1081,6 +1246,11 @@ def run_gpu_resident_pipeline(
+     if not is_raw and first_ext in RAW_EXTS:
+         is_raw = True
+ 
++    is_cfa_raw = bool(
++        is_raw
++        and all(os.path.splitext(str(p))[1].lower() == ".dng" for p in image_paths)
++    )
++
+     if progress_callback:
+         progress_callback(
+             PROGRESS_LOAD_IMAGES_MIN,
+@@ -1088,14 +1258,37 @@ def run_gpu_resident_pipeline(
+             console=f"Memuat gambar referensi ke GPU VRAM ({len(image_paths)} frame)...",
+         )
+ 
+-    ref_gpu = load_frame_to_gpu(image_paths[0], is_raw=is_raw)
+-    target_h, target_w = ref_gpu.shape[:2]
+-
+-    print(
+-        f"[GPU Pipeline] Reference loaded to VRAM: "
+-        f"shape=({target_h}, {target_w}, 3) dtype={ref_gpu.dtype} "
+-        f"size={ref_gpu.nbytes / (1024*1024):.1f} MB (engine={weight_engine})"
+-    )
++    ref_raw_frame = None
++    ref_raw_np = None
++    if is_cfa_raw:
++        ref_dng = read_dng_aot(image_paths[0])
++        ref_raw_frame = RawMosaicFrame.from_dng(ref_dng, source_id=str(image_paths[0]))
++        ref_raw_np = ref_raw_frame.normalized_headroom()
++        target_h, target_w = ref_raw_frame.shape
++        # On-the-fly demosaic via Hamilton on GPU strictly as guide proxy
++        ref_gpu = taichi_aot.demosaic(
++            str(image_paths[0]),
++            wb_r=1.0,
++            wb_g1=1.0,
++            wb_b=1.0,
++            wb_g2=1.0,
++            cmatrix=np.eye(3, dtype=np.float32),
++            method="hamilton",
++            return_gpu=True,
++        )
++        print(
++            f"[GPU Pipeline] Reference RAW Native loaded: "
++            f"shape=({target_h}, {target_w}) cfa={ref_raw_frame.cfa_pattern} "
++            f"guide_size={ref_gpu.nbytes / (1024*1024):.1f} MB (engine={weight_engine})"
++        )
++    else:
++        ref_gpu = load_frame_to_gpu(image_paths[0], is_raw=is_raw)
++        target_h, target_w = ref_gpu.shape[:2]
++        print(
++            f"[GPU Pipeline] Reference loaded to VRAM: "
++            f"shape=({target_h}, {target_w}, 3) dtype={ref_gpu.dtype} "
++            f"size={ref_gpu.nbytes / (1024*1024):.1f} MB (engine={weight_engine})"
++        )
+     # ------------------------------------------------------------------
+     # PHASE 2: Tier 1 Analysis AutoEnhance for Feature Extraction
+     # ------------------------------------------------------------------
+@@ -1112,8 +1305,16 @@ def run_gpu_resident_pipeline(
+     # ------------------------------------------------------------------
+     # PHASE 3: Create Analysis Reference & Work-Resolution Copy
+     # ------------------------------------------------------------------
+-    flow_scale = float(flownet_work_scale) if flownet_work_scale is not None else float(work_scale)
+-    weight_scale = float(weightnet_work_scale) if weightnet_work_scale is not None else float(work_scale)
++    flow_scale = (
++        float(flownet_work_scale)
++        if flownet_work_scale is not None
++        else float(work_scale)
++    )
++    weight_scale = (
++        float(weightnet_work_scale)
++        if weightnet_work_scale is not None
++        else float(work_scale)
++    )
+ 
+     max_dimension = max(target_h, target_w)
+     if max_dimension > 2048:
+@@ -1180,18 +1381,18 @@ def run_gpu_resident_pipeline(
+         print(f"[GPU Pipeline] Noise estimation note: {e_noise}")
+ 
+     # Noise-Adaptive Ghost Penalty (reuses the single analysis score):
+-    # - Score <= 0.50 (low-to-moderate noise): crisp ghost penalty = 3.0
+-    # - Score in (0.50, 0.90): smooth cosine transition dropping from 3.0 down to 1.0
++    # - Score <= 0.50 (low-to-moderate noise): crisp ghost penalty = 2.5
++    # - Score in (0.50, 0.90): smooth cosine transition dropping from 2.5 down to 1.0
+     # - Score >= 0.90 (extreme noise): generous ghost penalty = 1.0
+     try:
+         if ref_noise_score is None:
+             raise RuntimeError("analysis reference noise score unavailable")
+         if ref_noise_score <= 0.50:
+-            active_ghost_penalty = 3.0
++            active_ghost_penalty = 2.5
+         elif ref_noise_score < 0.90:
+             t = (ref_noise_score - 0.50) / 0.40  # Normalized progress [0, 1]
+             factor = 0.5 * (1.0 + np.cos(np.pi * t))  # Cosine ease-in-out
+-            active_ghost_penalty = float(1.0 + (3.0 - 1.0) * factor)
++            active_ghost_penalty = float(1.0 + (2.5 - 1.0) * factor)
+         else:
+             active_ghost_penalty = 1.0
+ 
+@@ -1400,17 +1601,29 @@ def run_gpu_resident_pipeline(
+         ref_analysis_flow_gpu.destroy()
+ 
+     # ------------------------------------------------------------------
+-    # PHASE 5: Initialize GPU accumulators with 100% True Linear RAW Reference
++    # PHASE 5: Initialize GPU accumulators
+     # ------------------------------------------------------------------
+-    # Directly use ref_gpu as sum_img_gpu accumulator to save 144MB VRAM
+-    sum_img_gpu = ref_gpu
+-    if weight_engine == "spatial_fusion":
+-        weight_sum_gpu = engine.upload(np.ones((target_h, target_w), dtype=np.float32))
++    if is_cfa_raw:
++        sum_cfa_gpu = engine.upload(ref_raw_np)
++        weight_cfa_gpu = engine.upload(np.ones((target_h, target_w), dtype=np.float32))
++        sum_img_gpu = None
++        weight_sum_gpu = None
++        del ref_raw_np
++        if ref_gpu is not None:
++            ref_gpu.destroy()
++            ref_gpu = None
+     else:
+-        # FusionNet/WeightNet outputs a 3-channel (vec3) weightmap [H, W, 3]
+-        weight_sum_gpu = engine.upload(
+-            np.ones((target_h, target_w, 3), dtype=np.float32)
+-        )
++        sum_cfa_gpu = None
++        weight_cfa_gpu = None
++        sum_img_gpu = ref_gpu
++        if weight_engine == "spatial_fusion":
++            weight_sum_gpu = engine.upload(
++                np.ones((target_h, target_w), dtype=np.float32)
++            )
++        else:
++            weight_sum_gpu = engine.upload(
++                np.ones((target_h, target_w, 3), dtype=np.float32)
++            )
+ 
+     alpha_total = 0.0
+     total_supp = num_images - 1
+@@ -1492,7 +1705,9 @@ def run_gpu_resident_pipeline(
+                     break
+                 f_path = image_paths[idx]
+                 f_name = Path(f_path).name
+-                if is_raw:
++                if is_cfa_raw:
++                    s_input = (f_path, None)
++                elif is_raw:
+                     # Stage support RAW frames on the host while another frame
+                     # is being aligned.  GPU demosaic allocates a temporary
+                     # Bayer/input buffer plus the RGB output; doing that in
+@@ -1565,30 +1780,52 @@ def run_gpu_resident_pipeline(
+                     if _is_stopped():
+                         _destroy_work_item(supp_linear_input)
+                         break
+-                    # Upload single frame to VRAM in background (PCIe DMA transfer)
+-                    if isinstance(supp_linear_input, TaichiGPUBuffer):
+-                        supp_linear_gpu = supp_linear_input
+-                    else:
+-                        supp_linear_gpu = engine.upload(supp_linear_input)
+-                        del supp_linear_input
+-
+-                    # Pre-downscale linear frame to FlowNet work-res directly in VRAM (144MB -> 9-36MB)
+-                    if (flow_work_h, flow_work_w) != (target_h, target_w):
+-                        supp_linear_flow_gpu = taichi_aot.resize(
+-                            supp_linear_gpu,
+-                            (flow_work_w, flow_work_h),
+-                            interpolation=taichi_aot.INTER_AREA,
++                    if is_cfa_raw:
++                        f_path, _ = supp_linear_input
++                        supp_raw_rgb_gpu = taichi_aot.demosaic(
++                            str(f_path),
++                            wb_r=1.0,
++                            wb_g1=1.0,
++                            wb_b=1.0,
++                            wb_g2=1.0,
++                            cmatrix=np.eye(3, dtype=np.float32),
++                            method="hamilton",
+                             return_gpu=True,
+                         )
++                        if (flow_work_h, flow_work_w) != (target_h, target_w):
++                            supp_linear_flow_gpu = taichi_aot.resize(
++                                supp_raw_rgb_gpu,
++                                (flow_work_w, flow_work_h),
++                                interpolation=taichi_aot.INTER_AREA,
++                                return_gpu=True,
++                            )
++                        else:
++                            supp_linear_flow_gpu = supp_raw_rgb_gpu
++                        primary_input = supp_raw_rgb_gpu
+                     else:
+-                        supp_linear_flow_gpu = supp_linear_gpu
++                        if isinstance(supp_linear_input, TaichiGPUBuffer):
++                            supp_linear_gpu = supp_linear_input
++                        else:
++                            supp_linear_gpu = engine.upload(supp_linear_input)
++                            del supp_linear_input
++
++                        if (flow_work_h, flow_work_w) != (target_h, target_w):
++                            supp_linear_flow_gpu = taichi_aot.resize(
++                                supp_linear_gpu,
++                                (flow_work_w, flow_work_h),
++                                interpolation=taichi_aot.INTER_AREA,
++                                return_gpu=True,
++                            )
++                        else:
++                            supp_linear_flow_gpu = supp_linear_gpu
++                        primary_input = supp_linear_gpu
+ 
+                     # Generate on-the-fly Versi 1 (Analysis High-Key) on work-res directly in VRAM
+                     if analysis_params is not None:
+                         supp_analysis_flow_gpu = apply_auto_enhance_on_gpu(
+                             supp_linear_flow_gpu, analysis_params
+                         )
+-                        if supp_linear_flow_gpu is not supp_linear_gpu:
++                        if supp_linear_flow_gpu is not primary_input:
+                             supp_linear_flow_gpu.destroy()
+                     else:
+                         supp_analysis_flow_gpu = supp_linear_flow_gpu
+@@ -1606,13 +1843,13 @@ def run_gpu_resident_pipeline(
+ 
+                 while not _is_stopped():
+                     if pipeline_error is not None:
+-                        supp_linear_gpu.destroy()
++                        _destroy_work_item(primary_input)
+                         if (
+                             supp_analysis_flow_gpu is not supp_analysis_sec_gpu
+-                            and supp_analysis_flow_gpu is not supp_linear_gpu
++                            and supp_analysis_flow_gpu is not primary_input
+                         ):
+                             supp_analysis_flow_gpu.destroy()
+-                        if supp_analysis_sec_gpu is not supp_linear_gpu:
++                        if supp_analysis_sec_gpu is not primary_input:
+                             supp_analysis_sec_gpu.destroy()
+                         return
+                     try:
+@@ -1620,7 +1857,7 @@ def run_gpu_resident_pipeline(
+                             (
+                                 curr_idx,
+                                 curr_name,
+-                                supp_linear_gpu,
++                                primary_input,
+                                 supp_analysis_flow_gpu,
+                                 supp_analysis_sec_gpu,
+                             ),
+@@ -1659,29 +1896,28 @@ def run_gpu_resident_pipeline(
+                 (
+                     curr_idx,
+                     curr_name,
+-                    supp_linear_gpu,
++                    primary_input,
+                     supp_analysis_flow_gpu,
+                     supp_analysis_sec_gpu,
+                 ) = item
+ 
+-                supp_aligned_linear_gpu = None
++                aligned_primary_item = None
+                 supp_work_item = None
+                 raw_np = None
+ 
+                 with gpu_hardware_lock:
+                     if _is_stopped():
+-                        supp_linear_gpu.destroy()
++                        _destroy_work_item(primary_input)
+                         if (
+                             supp_analysis_flow_gpu is not supp_analysis_sec_gpu
+-                            and supp_analysis_flow_gpu is not supp_linear_gpu
++                            and supp_analysis_flow_gpu is not primary_input
+                         ):
+                             supp_analysis_flow_gpu.destroy()
+-                        if supp_analysis_sec_gpu is not supp_linear_gpu:
++                        if supp_analysis_sec_gpu is not primary_input:
+                             supp_analysis_sec_gpu.destroy()
+                         break
+ 
+-                    # Dual-Warp on GPU (Primary in full-res 12MP, Secondary directly in weight-res)
+-                    # 100% Taichi Vision GPU-resident, zero OpenCV, zero numpy round-trip
++                    supp_linear_gpu = primary_input
+                     supp_aligned_linear_gpu, supp_aligned_sec_gpu = (
+                         aligner.align_frame(
+                             supp_linear_gpu,
+@@ -1693,6 +1929,8 @@ def run_gpu_resident_pipeline(
+                     )
+                     if supp_aligned_linear_gpu is not supp_linear_gpu:
+                         supp_linear_gpu.destroy()
++                    aligned_primary_item = supp_aligned_linear_gpu
++
+                     if (
+                         supp_analysis_flow_gpu is not supp_analysis_sec_gpu
+                         and supp_analysis_flow_gpu is not supp_aligned_sec_gpu
+@@ -1722,7 +1960,7 @@ def run_gpu_resident_pipeline(
+                     del raw_np
+ 
+                 if alignment_only:
+-                    supp_aligned_linear_gpu.destroy()
++                    _destroy_work_item(aligned_primary_item)
+                     _destroy_work_item(supp_work_item)
+                     if progress_callback:
+                         progress_callback(
+@@ -1732,7 +1970,10 @@ def run_gpu_resident_pipeline(
+                     continue
+ 
+                 # Apply Precomputed Reference Transfer Map on CPU NumPy OUTSIDE gpu_hardware_lock
+-                if weight_engine not in ("spatial_fusion", "average") and supp_work_item is not None:
++                if (
++                    weight_engine not in ("spatial_fusion", "average")
++                    and supp_work_item is not None
++                ):
+                     if ref_transfer_map is not None:
+                         try:
+                             supp_work_item = apply_precomputed_transfer_map(
+@@ -1743,7 +1984,7 @@ def run_gpu_resident_pipeline(
+ 
+                 while not _is_stopped():
+                     if pipeline_error is not None:
+-                        supp_aligned_linear_gpu.destroy()
++                        _destroy_work_item(aligned_primary_item)
+                         _destroy_work_item(supp_work_item)
+                         return
+                     try:
+@@ -1751,7 +1992,7 @@ def run_gpu_resident_pipeline(
+                             (
+                                 curr_idx,
+                                 curr_name,
+-                                supp_aligned_linear_gpu,
++                                aligned_primary_item,
+                                 supp_work_item,
+                             ),
+                             timeout=0.05,
+@@ -1786,11 +2027,11 @@ def run_gpu_resident_pipeline(
+                 if item is _SENTINEL:
+                     break
+ 
+-                curr_idx, curr_name, supp_aligned_linear_gpu, supp_work_item = item
++                curr_idx, curr_name, alignment_primary_item, supp_work_item = item
+ 
+                 if _is_stopped():
+                     with gpu_hardware_lock:
+-                        supp_aligned_linear_gpu.destroy()
++                        _destroy_work_item(alignment_primary_item)
+                     _destroy_work_item(supp_work_item)
+                     break
+ 
+@@ -1835,9 +2076,7 @@ def run_gpu_resident_pipeline(
+                         weight_work_item = weight_work_gpu
+                         alpha_mean = 1.0
+                 elif weight_engine == "average":
+-                    weight_work_item = np.ones(
+-                        (work_h, work_w, 3), dtype=np.float32
+-                    )
++                    weight_work_item = np.ones((work_h, work_w, 3), dtype=np.float32)
+                     alpha_mean = 1.0
+                 else:
+                     # DirectML ONNX AI inference runs asynchronously on dedicated GPU
+@@ -1861,11 +2100,10 @@ def run_gpu_resident_pipeline(
+ 
+                 while not _is_stopped():
+                     if pipeline_error is not None:
+-                        supp_aligned_linear_gpu.destroy()
+-                        if (
+-                            hasattr(weight_work_item, "destroy")
+-                            and not _is_persistent_spatial_weight(weight_work_item)
+-                        ):
++                        _destroy_work_item(alignment_primary_item)
++                        if hasattr(
++                            weight_work_item, "destroy"
++                        ) and not _is_persistent_spatial_weight(weight_work_item):
+                             weight_work_item.destroy()
+                         return
+                     try:
+@@ -1873,7 +2111,7 @@ def run_gpu_resident_pipeline(
+                             (
+                                 curr_idx,
+                                 curr_name,
+-                                supp_aligned_linear_gpu,
++                                alignment_primary_item,
+                                 weight_work_item,
+                                 alpha_mean,
+                             ),
+@@ -1913,31 +2151,55 @@ def run_gpu_resident_pipeline(
+                         raise pipeline_error
+                     break
+ 
+-                curr_idx, curr_name, supp_linear_np = item
++                curr_idx, curr_name, supp_input = item
+                 if _is_stopped():
+-                    del supp_linear_np
++                    _destroy_work_item(supp_input)
+                     break
+ 
+-                supp_linear_gpu = engine.upload(supp_linear_np)
+-                del supp_linear_np
+-
+-                # Downscale linear frame to FlowNet work-res directly FIRST across all backends
+-                if (flow_work_h, flow_work_w) != (target_h, target_w):
+-                    supp_linear_flow_gpu = taichi_aot.resize(
+-                        supp_linear_gpu,
+-                        (flow_work_w, flow_work_h),
+-                        interpolation=taichi_aot.INTER_AREA,
++                if is_cfa_raw:
++                    f_path, _ = supp_input
++                    supp_raw_rgb_gpu = taichi_aot.demosaic(
++                        str(f_path),
++                        wb_r=1.0,
++                        wb_g1=1.0,
++                        wb_b=1.0,
++                        wb_g2=1.0,
++                        cmatrix=np.eye(3, dtype=np.float32),
++                        method="hamilton",
+                         return_gpu=True,
+                     )
++                    if (flow_work_h, flow_work_w) != (target_h, target_w):
++                        supp_linear_flow_gpu = taichi_aot.resize(
++                            supp_raw_rgb_gpu,
++                            (flow_work_w, flow_work_h),
++                            interpolation=taichi_aot.INTER_AREA,
++                            return_gpu=True,
++                        )
++                    else:
++                        supp_linear_flow_gpu = supp_raw_rgb_gpu
++                    primary_input = supp_raw_rgb_gpu
+                 else:
+-                    supp_linear_flow_gpu = supp_linear_gpu
++                    supp_linear_gpu = engine.upload(supp_input)
++                    del supp_input
++
++                    # Downscale linear frame to FlowNet work-res directly FIRST across all backends
++                    if (flow_work_h, flow_work_w) != (target_h, target_w):
++                        supp_linear_flow_gpu = taichi_aot.resize(
++                            supp_linear_gpu,
++                            (flow_work_w, flow_work_h),
++                            interpolation=taichi_aot.INTER_AREA,
++                            return_gpu=True,
++                        )
++                    else:
++                        supp_linear_flow_gpu = supp_linear_gpu
++                    primary_input = supp_linear_gpu
+ 
+                 # Generate on-the-fly Versi 1 (Analysis High-Key) on work-res directly
+                 if analysis_params is not None:
+                     supp_analysis_flow_gpu = apply_auto_enhance_on_gpu(
+                         supp_linear_flow_gpu, analysis_params
+                     )
+-                    if supp_linear_flow_gpu is not supp_linear_gpu:
++                    if supp_linear_flow_gpu is not primary_input:
+                         supp_linear_flow_gpu.destroy()
+                 else:
+                     supp_analysis_flow_gpu = supp_linear_flow_gpu
+@@ -1953,18 +2215,18 @@ def run_gpu_resident_pipeline(
+                 else:
+                     supp_analysis_sec_gpu = supp_analysis_flow_gpu
+ 
+-                # Dual-Warp on GPU (Primary in full-res 12MP, Secondary directly in weight-res)
+-                supp_aligned_linear_gpu, supp_aligned_sec_gpu = (
+-                    aligner.align_frame(
+-                        supp_linear_gpu,
+-                        analysis_frame_gpu=supp_analysis_flow_gpu,
+-                        secondary_frame_to_warp=supp_analysis_sec_gpu,
+-                        stop_event=stop_event,
+-                        return_gpu=True,
+-                    )
++                # Unified 3D continuous RGB vector warp on GPU
++                supp_linear_gpu = primary_input
++                supp_aligned_linear_gpu, supp_aligned_sec_gpu = aligner.align_frame(
++                    supp_linear_gpu,
++                    analysis_frame_gpu=supp_analysis_flow_gpu,
++                    secondary_frame_to_warp=supp_analysis_sec_gpu,
++                    stop_event=stop_event,
++                    return_gpu=True,
+                 )
+                 if supp_aligned_linear_gpu is not supp_linear_gpu:
+                     supp_linear_gpu.destroy()
++
+                 if (
+                     supp_analysis_flow_gpu is not supp_analysis_sec_gpu
+                     and supp_analysis_flow_gpu is not supp_aligned_sec_gpu
+@@ -2062,14 +2324,26 @@ def run_gpu_resident_pipeline(
+                     weight_work_gpu = engine.upload(weight_work_item)
+                     del weight_work_item
+ 
+-                _gpu_blend_frame(
+-                    sum_img_gpu,
+-                    weight_sum_gpu,
+-                    supp_aligned_linear_gpu,
+-                    weight_work_gpu,
+-                )
++                if is_cfa_raw:
++                    supp_aligned_rgb_gpu = supp_aligned_linear_gpu
++                    _cfa_blend_frame(
++                        sum_cfa_gpu,
++                        weight_cfa_gpu,
++                        supp_aligned_rgb_gpu,
++                        ref_raw_frame,
++                        weight_work_gpu=weight_work_gpu,
++                        engine=engine,
++                    )
++                    supp_aligned_rgb_gpu.destroy()
++                else:
++                    _gpu_blend_frame(
++                        sum_img_gpu,
++                        weight_sum_gpu,
++                        supp_aligned_linear_gpu,
++                        weight_work_gpu,
++                    )
++                    supp_aligned_linear_gpu.destroy()
+ 
+-                supp_aligned_linear_gpu.destroy()
+                 if not _is_persistent_spatial_weight(weight_work_gpu):
+                     weight_work_gpu.destroy()
+                 if weight_engine != "spatial_fusion":
+@@ -2113,11 +2387,19 @@ def run_gpu_resident_pipeline(
+             t_preloader.join()
+             t_uploader.join()
+             t_aligner.join()
+-            ref_out = ref_gpu.to_numpy()
+-            aligner.close()
+-            ref_gpu.destroy()
+-            sum_img_gpu.destroy()
+-            weight_sum_gpu.destroy()
++            if is_cfa_raw:
++                ref_out = sum_cfa_gpu.to_numpy()
++                aligner.close()
++                if sum_cfa_gpu is not None:
++                    sum_cfa_gpu.destroy()
++                if weight_cfa_gpu is not None:
++                    weight_cfa_gpu.destroy()
++            else:
++                ref_out = ref_gpu.to_numpy()
++                aligner.close()
++                ref_gpu.destroy()
++                sum_img_gpu.destroy()
++                weight_sum_gpu.destroy()
+             if ref_spatial_gray_gpu is not None:
+                 ref_spatial_gray_gpu.destroy()
+             if spatial_rows_gpu is not None:
+@@ -2155,7 +2437,7 @@ def run_gpu_resident_pipeline(
+                 (
+                     curr_idx,
+                     curr_name,
+-                    supp_aligned_linear_gpu,
++                    alignment_primary_item,
+                     weight_work_item,
+                     alpha_mean,
+                 ) = item
+@@ -2177,7 +2459,7 @@ def run_gpu_resident_pipeline(
+ 
+                 with gpu_hardware_lock:
+                     if _is_stopped():
+-                        supp_aligned_linear_gpu.destroy()
++                        _destroy_work_item(alignment_primary_item)
+                         if hasattr(weight_work_item, "destroy"):
+                             weight_work_item.destroy()
+                         break
+@@ -2188,14 +2470,27 @@ def run_gpu_resident_pipeline(
+                         weight_work_gpu = engine.upload(weight_work_item)
+                         del weight_work_item
+ 
+-                    _gpu_blend_frame(
+-                        sum_img_gpu,
+-                        weight_sum_gpu,
+-                        supp_aligned_linear_gpu,
+-                        weight_work_gpu,
+-                    )
++                    if is_cfa_raw:
++                        supp_aligned_rgb_gpu = alignment_primary_item
++                        _cfa_blend_frame(
++                            sum_cfa_gpu,
++                            weight_cfa_gpu,
++                            supp_aligned_rgb_gpu,
++                            ref_raw_frame,
++                            weight_work_gpu=weight_work_gpu,
++                            engine=engine,
++                        )
++                        supp_aligned_rgb_gpu.destroy()
++                    else:
++                        supp_aligned_linear_gpu = alignment_primary_item
++                        _gpu_blend_frame(
++                            sum_img_gpu,
++                            weight_sum_gpu,
++                            supp_aligned_linear_gpu,
++                            weight_work_gpu,
++                        )
++                        supp_aligned_linear_gpu.destroy()
+ 
+-                    supp_aligned_linear_gpu.destroy()
+                     if not _is_persistent_spatial_weight(weight_work_gpu):
+                         weight_work_gpu.destroy()
+                     if is_cpu_backend and (
+@@ -2266,12 +2561,18 @@ def run_gpu_resident_pipeline(
+                 # If an actual error occurred, destroy accumulation buffers
+                 if pipeline_error is not None:
+                     try:
+-                        if sum_img_gpu is not None:
+-                            sum_img_gpu.destroy()
+-                        if weight_sum_gpu is not None:
+-                            weight_sum_gpu.destroy()
+-                        if ref_gpu is not None:
+-                            ref_gpu.destroy()
++                        if is_cfa_raw:
++                            if sum_cfa_gpu is not None:
++                                sum_cfa_gpu.destroy()
++                            if weight_cfa_gpu is not None:
++                                weight_cfa_gpu.destroy()
++                        else:
++                            if sum_img_gpu is not None:
++                                sum_img_gpu.destroy()
++                            if weight_sum_gpu is not None:
++                                weight_sum_gpu.destroy()
++                            if ref_gpu is not None:
++                                ref_gpu.destroy()
+                     except Exception:
+                         pass
+                     try:
+@@ -2336,6 +2637,61 @@ def run_gpu_resident_pipeline(
+     except Exception:
+         pass
+ 
++    if is_cfa_raw:
++        normalize_accumulator_cfa_taichi(sum_cfa_gpu, weight_cfa_gpu)
++        weight_cfa_gpu.destroy()
++        fused_cfa_mosaic = np.ascontiguousarray(
++            sum_cfa_gpu.to_numpy(), dtype=np.float32
++        )
++        sum_cfa_gpu.destroy()
++
++        demosaic_params = extract_demosaic_parameters(
++            image_paths[0], cfa_pattern=ref_raw_frame.cfa_pattern
++        )
++        preview_linear = taichi_aot.demosaic(
++            fused_cfa_mosaic,
++            wb_r=demosaic_params["wb_r"],
++            wb_g1=demosaic_params["wb_g1"],
++            wb_b=demosaic_params["wb_b"],
++            wb_g2=demosaic_params["wb_g2"],
++            cmatrix=demosaic_params["cmatrix"],
++            black_level=0.0,
++            white_level=1.0,
++            c00=demosaic_params["c00"],
++            c01=demosaic_params["c01"],
++            c10=demosaic_params["c10"],
++            c11=demosaic_params["c11"],
++            method="hamilton",
++            return_gpu=False,
++        )
++        from taichi_vision.taichi_algorithm.enhancement.auto_enhance import (
++            apply_auto_enhance_np,
++            analyze_auto_enhance_params,
++        )
++
++        natural_params = analyze_auto_enhance_params(preview_linear, mode="natural")
++        preview_rgb = apply_auto_enhance_np(preview_linear, **natural_params)
++
++        mean_alpha = alpha_total / max(1, total_supp)
++        raw_result = RawNativeResult(
++            normalized_mosaic=fused_cfa_mosaic,
++            preview_rgb=preview_rgb,
++            reference_frame=ref_raw_frame,
++            source_paths=image_paths,
++            report={"mean_alpha": mean_alpha, "total_supp": total_supp},
++            linear_rgb=preview_linear,
++            output_format="RAW Native",
++        )
++        try:
++            engine.sync()
++        except Exception:
++            pass
++        print(
++            f"[GPU Pipeline] Complete RAW Native: mosaic_shape={fused_cfa_mosaic.shape} "
++            f"preview_shape={preview_rgb.shape} mean_alpha={mean_alpha:.4f}"
++        )
++        return raw_result, mean_alpha
++
+     # Normalization with reference fallback
+     # Directly passing ref_gpu (already resident in VRAM, 0 overhead!)
+     from taichi_vision.taichi_algorithm.spatial_fusion import (
+
+diff --git "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//SpatialFusion.py" "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//SpatialFusion.py"
+index fee98f3..07f46d8 100644
+--- "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//SpatialFusion.py"
++++ "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//SpatialFusion.py"
+@@ -122,13 +122,10 @@ class SpatialFusionDenoisingAlgorithm:
+                 f"storage_mode={storage_mode}"
+             )
+ 
+-            alignment_plan = (
+-                getattr(ctx, "alignment_selection_name", None)
+-                or getattr(ctx, "params", {}).get("alignment_plan", "No Alignment")
+-            )
+-            alignment_config = getattr(ctx, "params", {}).get(
+-                "alignment_params", {}
+-            )
++            alignment_plan = getattr(ctx, "alignment_selection_name", None) or getattr(
++                ctx, "params", {}
++            ).get("alignment_plan", "No Alignment")
++            alignment_config = getattr(ctx, "params", {}).get("alignment_params", {})
+ 
+             batch_queue = int(
+                 getattr(ctx, "params", {}).get(
+@@ -182,10 +179,22 @@ class SpatialFusionDenoisingAlgorithm:
+             if result_fp32 is None:
+                 return None
+ 
++            from .raw_result import RawNativeResult
++
++            if isinstance(result_fp32, RawNativeResult):
++                if ctx is not None:
++                    ctx.raw_native_result = result_fp32
++                display_rgb = result_fp32.preview_rgb
++            else:
++                display_rgb = result_fp32
++
+             ref_dtype = getattr(ctx, "ref_dtype", np.uint16 if is_raw else np.uint8)
+-            result = restore_output_dtype(result_fp32, ref_dtype)
++            result = restore_output_dtype(display_rgb, ref_dtype)
+             del result_fp32
++            if "display_rgb" in locals():
++                del display_rgb
+             import gc
++
+             gc.collect()
+             print(
+                 f"[SpatialFusion] finished backend={backend} "
+
+diff --git "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//fusionet_engine//flownet_inference.py" "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//fusionet_engine//flownet_inference.py"
+index f036aa9..4401184 100644
+--- "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//fusionet_engine//flownet_inference.py"
++++ "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//fusionet_engine//flownet_inference.py"
+@@ -449,20 +449,23 @@ class AOTOpticalFlowAligner:
+             # Host-return callers retain the established compatibility route.
+             if used_fast_graph and return_gpu:
+                 active_flow_gpu = self._smooth_flow_resident()
+-                warped = self._remap_resident(
+-                    supp_rgb_f32,
+-                    active_flow_gpu,
+-                    self.full_h,
+-                    self.full_w,
+-                )
+-                if warped is None:
+-                    warped = taichi_aot.remap_with_flow(
++                if supp_rgb_f32 is not None:
++                    warped = self._remap_resident(
+                         supp_rgb_f32,
+                         active_flow_gpu,
+                         self.full_h,
+                         self.full_w,
+-                        return_gpu=True,
+                     )
++                    if warped is None:
++                        warped = taichi_aot.remap_with_flow(
++                            supp_rgb_f32,
++                            active_flow_gpu,
++                            self.full_h,
++                            self.full_w,
++                            return_gpu=True,
++                        )
++                else:
++                    warped = None
+ 
+                 if secondary_frame_to_warp is not None:
+                     sec_shape = getattr(
+@@ -494,13 +497,16 @@ class AOTOpticalFlowAligner:
+                 )
+                 active_flow_gpu = smooth_flow_gpu
+                 transient_flow_gpu = smooth_flow_gpu
+-                warped = taichi_aot.remap_with_flow(
+-                    supp_rgb_f32,
+-                    active_flow_gpu,
+-                    self.full_h,
+-                    self.full_w,
+-                    return_gpu=return_gpu,
+-                )
++                if supp_rgb_f32 is not None:
++                    warped = taichi_aot.remap_with_flow(
++                        supp_rgb_f32,
++                        active_flow_gpu,
++                        self.full_h,
++                        self.full_w,
++                        return_gpu=return_gpu,
++                    )
++                else:
++                    warped = None
+ 
+                 if secondary_frame_to_warp is not None:
+                     sec_shape = getattr(
+@@ -538,7 +544,7 @@ class AOTOpticalFlowAligner:
+ 
+         if secondary_frame_to_warp is not None:
+             return warped, warped_secondary
+-        if return_gpu:
++        if return_gpu or warped is None:
+             return warped
+         return np.ascontiguousarray(np.clip(warped, 0.0, 1.0), dtype=np.float32)
+ 
+
+diff --git "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//fusionet_engine//weightnet_inference.py" "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//fusionet_engine//weightnet_inference.py"
+index 2982a19..7956e0e 100644
+--- "a/pixel_refine_desktop//enhance_stack//core//algorithm//denoising//fusionet_engine//weightnet_inference.py"
++++ "b/raw-native-development//pixel_refine_desktop//enhance_stack//core//algorithm//denoising//fusionet_engine//weightnet_inference.py"
+@@ -332,7 +332,25 @@ def load_weightnet_onnx(
+     if bundle_file:
+         try:
+             import zipfile
++
+             with zipfile.ZipFile(bundle_file, "r") as zf:
++                if runtime == "dml" and "manifest.json" in zf.namelist():
++                    try:
++                        import json
++
++                        bundle_manifest = json.loads(
++                            zf.read("manifest.json").decode("utf-8")
++                        )
++                        if (
++                            bundle_manifest.get("dml_static_shape_graph") is True
++                            and bundle_manifest.get("dml_graph_optimization")
++                            == "extended"
++                        ):
++                            options.graph_optimization_level = (
++                                ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
++                            )
++                    except (OSError, ValueError, UnicodeDecodeError):
++                        pass
+                 candidate_names = [
+                     f"weightnet_{patch_size}_{dev_suffix}_3c_fp32.onnx",
+                     f"weightnet_{patch_size}_{dev_suffix}_1c_fp32.onnx",

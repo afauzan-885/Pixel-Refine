@@ -31,10 +31,11 @@ try:
     )
     from taichi_vision.taichi_algorithm.demosaicing.demosaic_postprocess import (
         rgb_to_bgr_i32,
+        rgb_to_bgr_u16,
     )
 except ImportError:
     from demosaic_aot_builder import register_hamilton_graphs
-    from demosaic_postprocess import rgb_to_bgr_i32
+    from demosaic_postprocess import rgb_to_bgr_i32, rgb_to_bgr_u16
 
 
 @ti.func
@@ -693,6 +694,7 @@ def compile_hamilton_tcm(arch=ti.vulkan, save_path=None, target_variant=None):
             "preprocess_wb": _ha_preprocess_wb_kernel,
             "grayscale": _ha_grayscale_from_green_kernel,
             "rgb_to_bgr_i32": rgb_to_bgr_i32,
+            "rgb_to_bgr_u16": rgb_to_bgr_u16,
         },
     )
 

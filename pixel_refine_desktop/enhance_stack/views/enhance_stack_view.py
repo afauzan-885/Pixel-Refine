@@ -6,8 +6,8 @@ Subclass of WorkspaceView from workplace framework.
 
 from PySide6.QtCore import QThread, QTimer, Signal, QObject, Slot, Qt
 from PySide6.QtGui import QKeySequence, QShortcut, QIcon, QPixmap
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget, QMenu, QProgressDialog, QLabel
-from resources.GenericUILibrary import Button, Modal
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget, QProgressDialog, QLabel
+from resources.GenericUILibrary import AlertModal
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from pixel_refine_desktop.enhance_stack.core.logic.project_archive import (
     load_project,
@@ -152,6 +152,26 @@ class EnhanceStackView(WorkspaceView):
                 QMessageBox.critical(self, "Project Error", str(exc))
         return False
 
+    def _resolve_current_active_batch_id(self):
+        panel = self._active_display_panel()
+        right_panel = getattr(panel, "right_panel", None) if panel else None
+        active_batch_id = getattr(right_panel, "current_batch_id", None) or getattr(
+            panel, "current_batch_id", None
+        )
+        if (
+            active_batch_id is None
+            and right_panel
+            and hasattr(right_panel, "list_group")
+        ):
+            selected = right_panel.list_group.get_selected_values()
+            if selected:
+                active_batch_id = selected[0]
+            else:
+                all_vals = right_panel.list_group.get_all_values()
+                if all_vals:
+                    active_batch_id = all_vals[-1]
+        return active_batch_id
+
     def _start_background_save(self, path):
         self._save_dialog = QProgressDialog("Saving project...", None, 0, 0, self)
         self._save_dialog.setWindowTitle("Save Project")
@@ -162,8 +182,7 @@ class EnhanceStackView(WorkspaceView):
         self._save_dialog.show()
 
         self._save_thread = QThread(self)
-        panel = self._active_display_panel()
-        active_batch_id = getattr(panel, "current_batch_id", None)
+        active_batch_id = self._resolve_current_active_batch_id()
         self._save_worker = _ProjectSaveWorker(path, self.db_path, active_batch_id)
         self._save_worker.moveToThread(self._save_thread)
         self._save_thread.started.connect(self._save_worker.run)
@@ -199,11 +218,11 @@ class EnhanceStackView(WorkspaceView):
         QMessageBox.critical(self, "Project Error", message)
 
     def _write_project(self, path):
-        panel = self._active_display_panel()
+        active_batch_id = self._resolve_current_active_batch_id()
         manifest = save_project(
             path,
             self.db_path,
-            active_batch_id=getattr(panel, "current_batch_id", None),
+            active_batch_id=active_batch_id,
             page="enhance_stack",
         )
         self._current_project_path = manifest["path"]
@@ -223,6 +242,8 @@ class EnhanceStackView(WorkspaceView):
             result = load_project(path, self.db_path, replace=True)
             self._current_project_path = result["path"]
             panel = self._active_display_panel()
+            if panel and hasattr(panel, "invalidate_grid_cache"):
+                panel.invalidate_grid_cache(None)
             right_panel = getattr(panel, "right_panel", None) if panel else None
             if right_panel:
                 refresh = getattr(right_panel, "refresh_after_project_load", None)
@@ -239,17 +260,45 @@ class EnhanceStackView(WorkspaceView):
                 if legacy_refresh:
                     legacy_refresh()
             active_id = result.get("active_batch_id")
+            all_batch_ids = []
+            if (
+                right_panel
+                and hasattr(right_panel, "list_group")
+                and hasattr(right_panel.list_group, "get_all_values")
+            ):
+                all_batch_ids = right_panel.list_group.get_all_values()
+            if (
+                not all_batch_ids
+                and right_panel
+                and getattr(right_panel, "controller", None)
+            ):
+                all_batch_ids = [b.id for b in right_panel.controller.get_all_batches()]
+            elif not all_batch_ids and panel and getattr(panel, "controller", None):
+                all_batch_ids = [b.id for b in panel.controller.get_all_batches()]
+
+            # Default to the last batch if none was actively saved or found
+            str_all_ids = [str(x) for x in all_batch_ids]
+            if (
+                active_id is None
+                or (all_batch_ids and str(active_id) not in str_all_ids)
+            ) and all_batch_ids:
+                active_id = all_batch_ids[-1]
+
             restored = False
             if active_id is not None and right_panel:
-                # Use the normal selection route so the right-panel state,
-                # parameter store, header, and preview stay synchronized.
-                right_panel.list_group.blockSignals(True)
-                try:
-                    restored = right_panel.list_group.select_item_by_value(active_id)
-                finally:
-                    right_panel.list_group.blockSignals(False)
-                if restored:
-                    right_panel.selection_handler.handle_selection([active_id])
+                if hasattr(right_panel, "select_batch_sync"):
+                    restored = right_panel.select_batch_sync(active_id)
+                else:
+                    right_panel.list_group.blockSignals(True)
+                    try:
+                        restored = right_panel.list_group.select_item_by_value(
+                            active_id
+                        )
+                    finally:
+                        right_panel.list_group.blockSignals(False)
+                    if restored:
+                        right_panel.selection_handler.handle_selection([active_id])
+
             if not restored and active_id is not None and panel and panel.controller:
                 # Defensive fallback for legacy/custom panels without a list group.
                 batch = panel.controller.get_batch(active_id)
@@ -258,58 +307,44 @@ class EnhanceStackView(WorkspaceView):
                         active_id, [image.path for image in batch.images], batch.name
                     )
                     restored = True
-            if not restored and panel:
+
+            # Only clear display if project is truly empty (0 batches)
+            if not restored and not all_batch_ids and panel:
                 if right_panel and hasattr(right_panel, "list_group"):
                     if hasattr(right_panel.list_group, "clear_selection"):
                         right_panel.list_group.clear_selection()
                     else:
                         right_panel.list_group.clearSelection()
                 panel.clear_display()
+
             # Selection restoration can normalize persisted settings; capture
             # the clean baseline only after that synchronization is complete.
             self._project_baseline_token = session_state_token(self.db_path)
             from resources.GenericUILibrary import trigger_live_update
+
             QTimer.singleShot(0, trigger_live_update)
-            self._show_project_loaded_modal(result)
-            QTimer.singleShot(0, trigger_live_update)
+            # Defer modal by 100ms so window paint events finish smoothly without tearing
+            QTimer.singleShot(100, lambda r=result: self._show_project_loaded_modal(r))
         except Exception as exc:
             QMessageBox.critical(self, "Project Error", str(exc))
             return False
         return True
 
     def _show_project_loaded_modal(self, result):
-        """Show the standard GenericUILibrary success modal after project load."""
+        """Show the standard GenericUILibrary success modal after project load with 3s auto-dismiss."""
         project_name = os.path.basename(self._current_project_path or "project.prf")
         batch_map = result.get("batch_id_map", {}) if isinstance(result, dict) else {}
         batch_count = len(batch_map) if isinstance(batch_map, dict) else 0
 
-        modal = Modal(
-            title="",
-            size="small",
+        modal = AlertModal(
+            message=f"Berhasil memuat {batch_count} batch",
             parent=self,
+            title=f"Berhasil memuat {project_name}",
+            variant="info",
+            width=380,
+            height=160,
+            auto_dismiss_seconds=3,
         )
-
-        # Gunakan title-bar sebagai satu-satunya header agar tidak ada judul
-        # besar yang terduplikasi di dalam isi modal.
-        modal.header.hide()
-        modal.setWindowTitle(f"Berhasil memuat {project_name}")
-
-        # Padatkan layout khusus modal informasi ini agar tidak menyisakan
-        # ruang vertikal kosong yang berlebihan.
-        modal.body.layout.setContentsMargins(15, 5, 15, 5)
-        modal.footer.layout().setContentsMargins(15, 4, 15, 7)
-
-        message = QLabel(f"Berhasil memuat {batch_count} batch")
-        message.setWordWrap(True)
-        message_font = message.font()
-        base_point_size = message_font.pointSizeF()
-        if base_point_size <= 0:
-            base_point_size = 10.0
-        message_font.setPointSizeF(base_point_size + 2.0)
-        message.setFont(message_font)
-        modal.set_body(message)
-        modal.add_footer_button("OK", variant="primary")
-        modal.fit_to_content(max_width=420, max_height=180)
         modal.exec()
 
     def project_has_unsaved_changes(self) -> bool:
@@ -338,8 +373,13 @@ class EnhanceStackView(WorkspaceView):
         logo_path = os.path.abspath(
             os.path.join(
                 os.path.dirname(__file__),
-                "..", "..", "..",
-                "resources", "assets", "images", "Logo_Pixel_Refine.png",
+                "..",
+                "..",
+                "..",
+                "resources",
+                "assets",
+                "images",
+                "Logo_Pixel_Refine.png",
             )
         )
         if os.path.isfile(logo_path):
@@ -347,7 +387,8 @@ class EnhanceStackView(WorkspaceView):
             if not pixmap.isNull():
                 dialog.setIconPixmap(
                     pixmap.scaled(
-                        72, 72,
+                        72,
+                        72,
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation,
                     )
@@ -455,12 +496,27 @@ class EnhanceStackView(WorkspaceView):
                 self.batch_page_view.batch_layout.stop_thumbnail()
                 self.batch_page_view.batch_layout.limit = 10
 
+            # Invalidate caches because Bulk Mode created or modified batches and images in DB
+            panel = self._active_display_panel()
+            if panel and hasattr(panel, "invalidate_grid_cache"):
+                panel.invalidate_grid_cache(None)
+            if (
+                hasattr(self.single_page_view, "controller")
+                and self.single_page_view.controller
+            ):
+                self.single_page_view.controller.invalidate_batch_cache(None)
+
             # Synchronize batches: refresh V2
             if (
                 hasattr(self.single_page_view, "batch_panel")
                 and self.single_page_view.batch_panel
             ):
-                self.single_page_view.batch_panel._load_batches()
+                batches = self.single_page_view.batch_panel._load_batches()
+                curr_id = self.single_page_view.batch_panel.current_batch_id
+                if curr_id is not None and any(b.id == curr_id for b in (batches or [])):
+                    self.single_page_view.batch_panel.select_batch_sync(curr_id)
+                elif batches:
+                    self.single_page_view.batch_panel.select_batch_sync(batches[0].id)
             # Synchronize switch on V2 header
             if (
                 hasattr(self.single_page_view, "workspace_panel")

@@ -108,17 +108,16 @@ class ListGroup(QWidget, RealtimeMixin):
             QListWidget::item:alternate {{
                 background-color: {theme.bg_secondary};
             }}
-            QListWidget::item:hover {{
-                background-color: {theme.bg_secondary};
+            QListWidget::item:hover:!selected {{
+                background-color: #E2E8F0;
+                color: {theme.text_primary};
             }}
-            QListWidget::item:selected {{
+            QListWidget::item:selected,
+            QListWidget::item:selected:active,
+            QListWidget::item:selected:!active {{
                 background-color: {theme.primary};
                 color: {theme.text_white};
                 font-weight: bold;
-            }}
-            QListWidget::item:selected:!active {{
-                background-color: {theme.bg_secondary};
-                color: {theme.text_primary};
             }}
         """
         )
@@ -260,11 +259,19 @@ class ListGroup(QWidget, RealtimeMixin):
         self._list_widget.clearSelection()
         for i in range(self._list_widget.count()):
             item = self._list_widget.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) == value:
+            item_val = item.data(Qt.ItemDataRole.UserRole)
+            if item_val == value or (value is not None and str(item_val) == str(value)):
                 item.setSelected(True)
                 self._list_widget.setCurrentItem(item)
                 return True
         return False
+
+    def get_all_values(self):
+        """Return a list of values (data) of all items in the list."""
+        return [
+            self._list_widget.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._list_widget.count())
+        ]
 
     def set_move_mode(self, enabled: bool):
         """Enable or disable keyboard move mode."""

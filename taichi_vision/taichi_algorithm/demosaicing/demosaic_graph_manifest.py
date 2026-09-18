@@ -39,6 +39,7 @@ _MANIFEST: dict[str, dict[str, str]] = {
         "rgb_half_res": "hamilton_demosaic_rgb_half_res",
         "3channel": "hamilton_demosaic_3channel",
         "rgb_to_bgr_i32": "rgb_to_bgr_i32",
+        "rgb_to_bgr_u16": "rgb_to_bgr_u16",
     },
     "dcb": {
         "default": "dcb_demosaic",

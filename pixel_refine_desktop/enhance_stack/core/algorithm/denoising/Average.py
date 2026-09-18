@@ -29,7 +29,6 @@ class AverageDenoisingAlgorithm:
             )
 
             is_raw = bool(getattr(ctx, "is_linear_mode", False))
-            storage_mode = "direct"
             work_scale = float(
                 getattr(ctx, "params", {}).get("work_resolution_scale", 0.50)
             ) if hasattr(ctx, "params") else 0.50
@@ -40,7 +39,7 @@ class AverageDenoisingAlgorithm:
 
             print(
                 f"[Average] Routing to GPU-resident pipeline: backend={backend} "
-                f"frames={len(image_paths)} storage_mode={storage_mode}"
+                f"frames={len(image_paths)}"
             )
 
             alignment_plan = (
@@ -64,7 +63,6 @@ class AverageDenoisingAlgorithm:
                 alignment_config=alignment_config,
                 work_scale=work_scale,
                 is_raw=is_raw,
-                storage_mode=storage_mode,
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=getattr(ctx, "update_progress", None),

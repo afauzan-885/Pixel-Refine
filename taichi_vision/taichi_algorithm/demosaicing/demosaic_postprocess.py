@@ -152,3 +152,28 @@ def rgb_to_bgr_i32(
         dst[r, c, 0] = ti.cast(ti.round(val_b), ti.i32)
         dst[r, c, 1] = ti.cast(ti.round(val_g), ti.i32)
         dst[r, c, 2] = ti.cast(ti.round(val_r), ti.i32)
+
+
+@ti.kernel
+def rgb_to_bgr_u16(
+    src: ti.types.ndarray(dtype=ti.f32, ndim=3),
+    dst: ti.types.ndarray(dtype=ti.u16, ndim=3),
+    h: ti.i32,
+    w: ti.i32,
+):
+    """Convert linear RGB f32 directly to rounded BGR u16.
+
+    This is intentionally numerically identical to ``rgb_to_bgr_i32``.  The
+    only difference is the destination type, which removes the transient i32
+    buffer and the subsequent GPU cast in the RAW export path.  The graph is
+    registered only for targets whose AOT ABI supports u16 ndarrays (currently
+    CUDA); other backends continue using the established i32 path.
+    """
+    for r, c in ti.ndrange(h, w):
+        val_r = ti.math.clamp(src[r, c, 0] * 65535.0 + 0.5, 0.0, 65535.0)
+        val_g = ti.math.clamp(src[r, c, 1] * 65535.0 + 0.5, 0.0, 65535.0)
+        val_b = ti.math.clamp(src[r, c, 2] * 65535.0 + 0.5, 0.0, 65535.0)
+
+        dst[r, c, 0] = ti.cast(ti.round(val_b), ti.u16)
+        dst[r, c, 1] = ti.cast(ti.round(val_g), ti.u16)
+        dst[r, c, 2] = ti.cast(ti.round(val_r), ti.u16)

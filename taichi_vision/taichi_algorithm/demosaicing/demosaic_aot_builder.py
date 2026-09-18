@@ -72,6 +72,16 @@ def rgb_to_bgr_i32_args():
     }
 
 
+def rgb_to_bgr_u16_args():
+    """Args for the CUDA-only f32->u16 BGR converter graph."""
+    return {
+        "src": ndarray_arg("src", ti.f32, 3),
+        "dst": ndarray_arg("dst", ti.u16, 3),
+        "h": scalar_arg("h", ti.i32),
+        "w": scalar_arg("w", ti.i32),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Bilinear family
 # ---------------------------------------------------------------------------
@@ -159,6 +169,8 @@ def register_bilinear_graphs(module, kernels):
     g.dispatch(kernels["rgb_to_bgr_i32"], conv["src"], conv["dst"], conv["h"], conv["w"])
     module.add_graph("rgb_to_bgr_i32", g.compile())
 
+    # CUDA supports u16 ndarray ABI; SPIR-V targets do not consistently expose
+    # it, so keep the graph target-qualified instead of weakening portability.
     return module
 
 
@@ -253,6 +265,12 @@ def register_hamilton_graphs(module, kernels):
     g = ti.graph.GraphBuilder()
     g.dispatch(kernels["rgb_to_bgr_i32"], conv["src"], conv["dst"], conv["h"], conv["w"])
     module.add_graph("rgb_to_bgr_i32", g.compile())
+
+    if getattr(module, "_arch", getattr(module, "arch", None)) == ti.cuda and kernels.get("rgb_to_bgr_u16") is not None:
+        conv16 = rgb_to_bgr_u16_args()
+        g = ti.graph.GraphBuilder()
+        g.dispatch(kernels["rgb_to_bgr_u16"], conv16["src"], conv16["dst"], conv16["h"], conv16["w"])
+        module.add_graph("rgb_to_bgr_u16", g.compile())
 
     return module
 

@@ -208,9 +208,15 @@ class GridContainer(QScrollArea, RealtimeMixin):
 
     def set_batch_update(self, active: bool):
         """Enable or disable batch update mode to optimize bulk additions."""
+        was_active = getattr(self, "_is_batch_updating", False)
         self._is_batch_updating = active
-        if not active:
-            self._rebuild_grid()
+        if was_active and not active:
+            if self.column_mode == "responsive":
+                new_cols = self._calculate_responsive_columns()
+                if new_cols != self.columns or self.grid_layout.count() != len(self._stored_widgets):
+                    self._rebuild_grid()
+            elif self.grid_layout.count() != len(self._stored_widgets):
+                self._rebuild_grid()
 
     # --- Realtime System ---
 

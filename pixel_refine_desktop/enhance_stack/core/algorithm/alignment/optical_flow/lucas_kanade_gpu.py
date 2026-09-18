@@ -23,56 +23,58 @@ DEFAULT_LUCAS_KANADE_GPU_CONFIG = {
 
 LUCAS_KANADE_GPU_PRESETS = {
     "fast": {
-        # Lowest dispatch/iteration count for preview and interactive use.
-        "grid_step": 64,
+        # 32x32 grid step for high responsiveness and low memory footprint.
+        "grid_step": 32,
         "border_margin": 8,
         "win_size": 13,
         "max_level": 1,
-        "iterations": 6,
+        "iterations": 8,
         "epsilon": 0.05,
-        "overlap": 0.15,
-        "dense_mode": "blocky_clamped",
+        "overlap": 0.50,
         "motion_mode": "fast",
         "adaptive": False,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_overlap": 0.15,
+        "tile_overlap": 0.50,
         "max_flow_px": 48.0,
+        "dense_mode": "smooth",
+        "smooth": True,
     },
     "balance": {
-        # Recommended default: smooth densification without adaptive reruns.
-        "grid_step": 32,
+        # 16x16 grid step for optimal quality-performance balance.
+        "grid_step": 16,
         "border_margin": 8,
         "win_size": 17,
         "max_level": 2,
         "iterations": 16,
         "epsilon": 0.015,
-        "overlap": 0.25,
-        "dense_mode": "smooth",
+        "overlap": 0.50,
         "motion_mode": "fast",
         "adaptive": False,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_overlap": 0.25,
+        "tile_overlap": 0.50,
         "max_flow_px": 64.0,
+        "dense_mode": "smooth",
+        "smooth": True,
     },
     "high": {
-        # High deliberately increases samples, window, pyramid depth and
-        # solver iterations, then adds adaptive refinement/auto rerun.
-        "grid_step": 16,
+        # 2x2 ultra-dense micro-grid for highest spatial accuracy, capturing fine details.
+        "grid_step": 2,
         "border_margin": 8,
         "win_size": 25,
         "max_level": 3,
         "iterations": 32,
         "epsilon": 0.005,
-        "overlap": 0.35,
-        "dense_mode": "smooth",
+        "overlap": 0.50,
         "motion_mode": "auto",
         "adaptive": True,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_overlap": 0.30,
+        "tile_overlap": 0.50,
         "max_flow_px": 96.0,
+        "dense_mode": "smooth",
+        "smooth": True,
     },
 }
 
@@ -226,7 +228,8 @@ class LucasKanadeGPU(LucasKanadeCPU):
                     engine.buffer_pool.clear()
         except Exception as exc:
             print(f"[LucasKanadeGPU] VRAM cleanup skipped ({reason}): {exc}")
-        gc.collect()
+        if clear_pool:
+            gc.collect()
 
     def _init_tile_buffers(self, reference, tiles, config):
         return {
@@ -244,9 +247,22 @@ class LucasKanadeGPU(LucasKanadeCPU):
         ref_roi = reference[ry0:ry1, rx0:rx1]
         if reuse_reference and reuse_reference.get("ref_gray_gpu") is not None:
             ref_gray_gpu = reuse_reference["ref_gray_gpu"]
+        elif hasattr(ref_roi, "handle"):
+            if getattr(ref_roi, "is_vector", False):
+                ref_gray_gpu = taichi_aot.cvtColor(ref_roi, taichi_aot.COLOR_RGB2GRAY)
+            else:
+                ref_gray_gpu = ref_roi
         else:
-            ref_gray_cpu = to_flow_gray_u8(ref_roi).astype(np.float32, copy=False)
-            ref_gray_gpu = taichi_aot.upload(ref_gray_cpu, is_vector=False)
+            if ref_roi.ndim == 3:
+                ref_color_gpu = taichi_aot.upload(
+                    np.ascontiguousarray(ref_roi, dtype=np.float32), is_vector=True
+                )
+                ref_gray_gpu = taichi_aot.cvtColor(ref_color_gpu, taichi_aot.COLOR_RGB2GRAY)
+                ref_color_gpu.release()
+            else:
+                ref_gray_gpu = taichi_aot.upload(
+                    np.ascontiguousarray(ref_roi, dtype=np.float32), is_vector=False
+                )
         is_color = reference.ndim == 3
         shape = (roi_h, roi_w, 3) if is_color else (roi_h, roi_w)
         target_gpu = engine.allocate(
@@ -394,6 +410,14 @@ class LucasKanadeGPU(LucasKanadeCPU):
         if win_size % 2 == 0:
             win_size += 1
 
+        smooth = config.get("smooth", None)
+        if smooth is not None:
+            dense_mode = "smooth" if bool(smooth) else "blocky_clamped"
+            overlap = 0.50 if bool(smooth) else 0.0
+        else:
+            dense_mode = str(config.get("dense_mode", "smooth"))
+            overlap = float(config.get("overlap", 0.50))
+
         return {
             "winSize": (win_size, win_size),
             "maxLevel": max(0, int(config.get("max_level", 2))),
@@ -402,15 +426,15 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 max(1, int(config.get("iterations", 8))),
                 float(config.get("epsilon", 0.03)),
             ),
-            "grid_step": max(4, int(config.get("grid_step", 48))),
+            "grid_step": max(1, int(config.get("grid_step", 16))),
             "border_margin": max(0, int(config.get("border_margin", 8))),
-            "overlap": float(config.get("overlap", 0.35)),
+            "overlap": overlap,
             "adaptive": bool(config.get("adaptive", False)),
             "adaptive_threshold": max(
                 1, int(config.get("adaptive_threshold", 1))
             ),
             "motion_mode": str(config.get("motion_mode", "fast")),
-            "dense_mode": str(config.get("dense_mode", "smooth")),
+            "dense_mode": dense_mode,
             "max_flow_px": float(config.get("max_flow_px", 64.0)),
         }
 
@@ -470,6 +494,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         point_executor=None,
         matching_reference=None,
         matching_target=None,
+        return_gpu=False,
     ):
         config = config or self.load_config()
         if reference is None or target is None:
@@ -527,6 +552,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
                     stop_requested=stop_requested,
                     matching_reference=matching_reference,
                     matching_target=matching_target,
+                    return_gpu=return_gpu,
                 )
             if bool(config.get("conservative_vram", True)):
                 self._cleanup_tile_buffers(
@@ -615,6 +641,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         stop_requested=None,
         matching_reference=None,
         matching_target=None,
+        return_gpu=False,
     ):
         from taichi_vision import taichi_aot
 
@@ -668,7 +695,11 @@ class LucasKanadeGPU(LucasKanadeCPU):
             self._current_ref_id = ref_id
 
         t_prepare = time.perf_counter()
-        target_gray_full = to_flow_gray_u8(matching_target).astype(np.float32, copy=False)
+        target_gray_full = (
+            None
+            if single_full_frame_tile
+            else to_flow_gray_u8(matching_target).astype(np.float32, copy=False)
+        )
         profile["prepare"] += time.perf_counter() - t_prepare
 
         accumulator = weights = None
@@ -733,6 +764,16 @@ class LucasKanadeGPU(LucasKanadeCPU):
                     continue
 
                 if single_full_frame_tile:
+                    if return_gpu:
+                        elapsed = time.perf_counter() - t_total
+                        print(
+                            f"[LucasKanadeGPU Profile] Align completed (GPU-Resident) in {elapsed*1000:.1f}ms | "
+                            f"Prepare: {profile['prepare']*1000:.1f}ms | "
+                            f"Flow Calc: {profile['flow_calc']*1000:.1f}ms | "
+                            f"Warp: {profile['warp']*1000:.1f}ms"
+                        )
+                        return warped_gpu
+
                     result = self._download_restore_dtype(
                         warped_gpu,
                         target.dtype,
@@ -775,6 +816,9 @@ class LucasKanadeGPU(LucasKanadeCPU):
                         flush_stitch_batch()
 
             flush_stitch_batch()
+
+            if return_gpu:
+                return accumulator
 
             result = self._download_restore_dtype(
                 accumulator,
@@ -876,8 +920,10 @@ class LucasKanadeGPU(LucasKanadeCPU):
             np.clip(image, info.min, info.max, out=image)
             result = np.empty(image.shape, dtype=dtype)
             np.copyto(result, image, casting="unsafe")
+        elif image.dtype == dtype:
+            result = image.copy()
         else:
-            result = image.astype(dtype, copy=True)
+            result = image.astype(dtype, copy=False)
         profile["dtype_restore"] += time.perf_counter() - t_restore
         profile["download"] += time.perf_counter() - t_download
         return result
@@ -912,36 +958,41 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
             # 1. CPU preprocess (target gray only - ref is static and pre-uploaded)
             t0 = time.perf_counter()
-            target_gray_view = None
-            if target_gray_full is not None:
-                target_gray_view = target_gray_full[ry0:ry1, rx0:rx1]
-            else:
-                target_gray_cpu = to_flow_gray_u8(target_roi_original).astype(
-                    np.float32, copy=False
-                )
-                target_gray_view = target_gray_cpu
-            if profile is not None:
+            target_gray_view = (
+                target_gray_full[ry0:ry1, rx0:rx1]
+                if target_gray_full is not None
+                else None
+            )
+            if profile is not None and target_gray_view is not None:
                 profile["cpu_gray"] += time.perf_counter() - t0
 
-            # 2. Upload BGR and gray target buffers directly to existing VRAM allocations
+            # 2. Upload BGR target buffer directly to existing VRAM allocations (or reuse if already on GPU)
             t0 = time.perf_counter()
-            np.copyto(target_host, target_roi_original, casting="unsafe")
-            _LIB.write_to_gpu_buffer(
-                _RUNTIME,
-                target_gpu.handle,
-                target_host.ctypes.data,
-                target_gpu.nbytes,
-            )
-            color_elapsed = time.perf_counter() - t0
+            if hasattr(target_roi_original, "handle"):
+                target_gpu = target_roi_original
+                color_elapsed = 0.0
+            else:
+                np.copyto(target_host, target_roi_original, casting="unsafe")
+                _LIB.write_to_gpu_buffer(
+                    _RUNTIME,
+                    target_gpu.handle,
+                    target_host.ctypes.data,
+                    target_gpu.nbytes,
+                )
+                color_elapsed = time.perf_counter() - t0
 
+            # 2b. Compute grayscale: use native GPU cvtColor when target_gray_view is omitted (zero CPU overhead)
             t0 = time.perf_counter()
-            np.copyto(target_gray_host, target_gray_view, casting="unsafe")
-            _LIB.write_to_gpu_buffer(
-                _RUNTIME,
-                target_gray_gpu.handle,
-                target_gray_host.ctypes.data,
-                target_gray_gpu.nbytes,
-            )
+            if target_gray_view is not None:
+                np.copyto(target_gray_host, target_gray_view, casting="unsafe")
+                _LIB.write_to_gpu_buffer(
+                    _RUNTIME,
+                    target_gray_gpu.handle,
+                    target_gray_host.ctypes.data,
+                    target_gray_gpu.nbytes,
+                )
+            else:
+                target_gray_gpu = taichi_aot.cvtColor(target_gpu, taichi_aot.COLOR_RGB2GRAY)
             gray_elapsed = time.perf_counter() - t0
 
             taichi_aot.engine.sync()
@@ -1090,7 +1141,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
             winSize=lk_params["winSize"],
             maxLevel=lk_params["maxLevel"],
             criteria=lk_params["criteria"],
-            grid_step=max(4, int(config.get("grid_step", 48))),
+            grid_step=max(1, int(config.get("grid_step", 48))),
             border_margin=max(0, int(config.get("border_margin", 8))),
             motion_mode=str(config.get("motion_mode", "fast")),
         )

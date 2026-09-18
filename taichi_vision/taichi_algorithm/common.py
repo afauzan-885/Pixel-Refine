@@ -407,6 +407,128 @@ if TAICHI_AVAILABLE:
             dst[i, j] = sum_img[i, j] * inv_w
 
     @ti.kernel
+    def _accumulate_weighted_frame_kernel(
+        current_image_full: ti.types.ndarray(),
+        weight_map_work: ti.types.ndarray(),
+        final_image_sum: ti.types.ndarray(),
+        weight_map_sum_full: ti.types.ndarray(),
+        h_full: ti.i32,
+        w_full: ti.i32,
+        h_work: ti.i32,
+        w_work: ti.i32,
+        num_channels: ti.i32
+    ):
+        """Bilinearly interpolates work resolution weights to full resolution and accumulates frames."""
+        y_scale = float(h_work) / float(h_full)
+        x_scale = float(w_work) / float(w_full)
+        for i, j in ti.ndrange(h_full, w_full):
+            y_work_f = float(i) * y_scale
+            x_work_f = float(j) * x_scale
+
+            y0 = ti.cast(ti.floor(y_work_f), ti.i32)
+            x0 = ti.cast(ti.floor(x_work_f), ti.i32)
+            y1 = ti.min(y0 + 1, h_work - 1)
+            x1 = ti.min(x0 + 1, w_work - 1)
+            y0 = ti.max(0, y0)
+            x0 = ti.max(0, x0)
+
+            wy = y_work_f - float(y0)
+            wx = x_work_f - float(x0)
+
+            w_val = (
+                (1.0 - wy) * (1.0 - wx) * weight_map_work[y0, x0] +
+                (1.0 - wy) * wx * weight_map_work[y0, x1] +
+                wy * (1.0 - wx) * weight_map_work[y1, x0] +
+                wy * wx * weight_map_work[y1, x1]
+            )
+
+            weight_map_sum_full[i, j] += w_val
+            for c in range(num_channels):
+                final_image_sum[i, j, c] += current_image_full[i, j, c] * w_val
+
+    @ti.kernel
+    def _accumulate_weighted_frame_vec3_kernel(
+        current_image_full: ti.types.ndarray(),
+        weight_map_work: ti.types.ndarray(),
+        final_image_sum: ti.types.ndarray(),
+        weight_map_sum_full: ti.types.ndarray(),
+        h_full: ti.i32,
+        w_full: ti.i32,
+        h_work: ti.i32,
+        w_work: ti.i32,
+        num_channels: ti.i32
+    ):
+        """Vec3 variant: bilinearly interpolates per-channel (3D) work-res weights
+        to full resolution and accumulates frames with per-channel weighting.
+        """
+        y_scale = float(h_work) / float(h_full)
+        x_scale = float(w_work) / float(w_full)
+        for i, j in ti.ndrange(h_full, w_full):
+            y_work_f = float(i) * y_scale
+            x_work_f = float(j) * x_scale
+
+            y0 = ti.cast(ti.floor(y_work_f), ti.i32)
+            x0 = ti.cast(ti.floor(x_work_f), ti.i32)
+            y1 = ti.min(y0 + 1, h_work - 1)
+            x1 = ti.min(x0 + 1, w_work - 1)
+            y0 = ti.max(0, y0)
+            x0 = ti.max(0, x0)
+
+            wy = y_work_f - float(y0)
+            wx = x_work_f - float(x0)
+
+            for c in range(num_channels):
+                w_val = (
+                    (1.0 - wy) * (1.0 - wx) * weight_map_work[y0, x0, c] +
+                    (1.0 - wy) * wx * weight_map_work[y0, x1, c] +
+                    wy * (1.0 - wx) * weight_map_work[y1, x0, c] +
+                    wy * wx * weight_map_work[y1, x1, c]
+                )
+                weight_map_sum_full[i, j, c] += w_val
+                final_image_sum[i, j, c] += current_image_full[i, j, c] * w_val
+
+    @ti.kernel
+    def _accumulate_weighted_frame_scalar_to_vec3_kernel(
+        current_image_full: ti.types.ndarray(),
+        weight_map_work: ti.types.ndarray(),
+        final_image_sum: ti.types.ndarray(),
+        weight_map_sum_full: ti.types.ndarray(),
+        h_full: ti.i32,
+        w_full: ti.i32,
+        h_work: ti.i32,
+        w_work: ti.i32,
+        num_channels: ti.i32
+    ):
+        """Scalar-to-vec3 variant: bilinearly interpolates 1-channel 2D weights
+        to full resolution and accumulates into a 3D (vec3) accumulator.
+        """
+        y_scale = float(h_work) / float(h_full)
+        x_scale = float(w_work) / float(w_full)
+        for i, j in ti.ndrange(h_full, w_full):
+            y_work_f = float(i) * y_scale
+            x_work_f = float(j) * x_scale
+
+            y0 = ti.cast(ti.floor(y_work_f), ti.i32)
+            x0 = ti.cast(ti.floor(x_work_f), ti.i32)
+            y1 = ti.min(y0 + 1, h_work - 1)
+            x1 = ti.min(x0 + 1, w_work - 1)
+            y0 = ti.max(0, y0)
+            x0 = ti.max(0, x0)
+
+            wy = y_work_f - float(y0)
+            wx = x_work_f - float(x0)
+
+            w_val = (
+                (1.0 - wy) * (1.0 - wx) * weight_map_work[y0, x0] +
+                (1.0 - wy) * wx * weight_map_work[y0, x1] +
+                wy * (1.0 - wx) * weight_map_work[y1, x0] +
+                wy * wx * weight_map_work[y1, x1]
+            )
+            for c in range(num_channels):
+                weight_map_sum_full[i, j, c] += w_val
+                final_image_sum[i, j, c] += current_image_full[i, j, c] * w_val
+
+    @ti.kernel
     def _scale_f32_2d_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), scale: float):
         for i, j in dst:
             dst[i, j] = src[i, j] * scale

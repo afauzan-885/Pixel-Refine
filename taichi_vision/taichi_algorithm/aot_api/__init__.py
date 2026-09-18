@@ -2020,6 +2020,74 @@ def normalize_accumulator(
     return dst
 
 
+def accumulate_weighted_frame(
+    current_image_full: TaichiGPUBuffer,
+    weight_map_work: TaichiGPUBuffer,
+    final_image_sum: TaichiGPUBuffer,
+    weight_map_sum_full: TaichiGPUBuffer,
+    **kwargs,
+) -> None:
+    """General fused bilinear frame accumulation via common.tcm.
+
+    Supports both 1-channel (2D) and 3-channel (3D vec3) weight maps,
+    automatically dispatching to the optimal kernel.
+    """
+    h_full, w_full = int(final_image_sum.shape[0]), int(final_image_sum.shape[1])
+    h_work, w_work = int(weight_map_work.shape[0]), int(weight_map_work.shape[1])
+    num_channels = int(final_image_sum.shape[2]) if len(final_image_sum.shape) > 2 else 3
+
+    def _scalar_3d(buf):
+        if getattr(buf, "is_vector", False):
+            return buf.view_as_vector(False)
+        return buf
+
+    weight_dim = getattr(weight_map_work, "ndim", len(weight_map_work.shape))
+    weight_sum_dim = getattr(weight_map_sum_full, "ndim", len(weight_map_sum_full.shape))
+    is_vec3_weight = weight_dim == 3 and weight_map_work.shape[2] >= 3
+    is_vec3_sum = weight_sum_dim == 3 and weight_map_sum_full.shape[2] >= 3
+
+    common_module = _mod("common")
+    if is_vec3_weight and is_vec3_sum:
+        common_module.run(
+            "accumulate_weighted_frame_vec3_f32",
+            current_image_full=_scalar_3d(current_image_full),
+            weight_map_work=_scalar_3d(weight_map_work),
+            final_image_sum=_scalar_3d(final_image_sum),
+            weight_map_sum_full=_scalar_3d(weight_map_sum_full),
+            h_full=h_full,
+            w_full=w_full,
+            h_work=h_work,
+            w_work=w_work,
+            num_channels=num_channels,
+        )
+    elif not is_vec3_weight and is_vec3_sum:
+        common_module.run(
+            "accumulate_weighted_frame_scalar_to_vec3_f32",
+            current_image_full=_scalar_3d(current_image_full),
+            weight_map_work=weight_map_work,
+            final_image_sum=_scalar_3d(final_image_sum),
+            weight_map_sum_full=_scalar_3d(weight_map_sum_full),
+            h_full=h_full,
+            w_full=w_full,
+            h_work=h_work,
+            w_work=w_work,
+            num_channels=num_channels,
+        )
+    else:
+        common_module.run(
+            "accumulate_weighted_frame_f32",
+            current_image_full=_scalar_3d(current_image_full),
+            weight_map_work=weight_map_work,
+            final_image_sum=_scalar_3d(final_image_sum),
+            weight_map_sum_full=weight_map_sum_full,
+            h_full=h_full,
+            w_full=w_full,
+            h_work=h_work,
+            w_work=w_work,
+            num_channels=num_channels,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Spatial Merging — Ghost Reduction & Multi-Frame Fusion
 # ---------------------------------------------------------------------------
@@ -8558,6 +8626,59 @@ def rotate_by_flip(img: np.ndarray, flip: int) -> np.ndarray:
     return img
 
 
+def _export_rgb_to_bgr_u16(rgb_f32_gpu, module_name, *, return_gpu=False, flip=0):
+    """Export an RGB f32 GPU result as BGR u16 with the smallest safe peak.
+
+    CUDA demosaic archives may expose ``rgb_to_bgr_u16``.  When present, the
+    conversion writes the final dtype directly and removes the historical
+    f32 -> i32 -> u16 chain.  Backends without that ABI keep the established
+    i32 graph and cast path, preserving numerical and lifecycle behavior.
+    """
+    h, w = rgb_f32_gpu.shape[:2]
+    direct_u16_enabled = os.environ.get("PIXEL_REFINE_DEMOSAIC_DIRECT_U16", "1").strip().lower() not in {
+        "0", "false", "off", "no"
+    }
+    if direct_u16_enabled and aot_graph_available(module_name, "rgb_to_bgr_u16"):
+        bgr_u16_gpu = engine.allocate(
+            (h, w, 3), dtype=np.uint16, host_accessible=True
+        )
+        _mod(module_name).run(
+            "rgb_to_bgr_u16", src=rgb_f32_gpu, dst=bgr_u16_gpu, h=int(h), w=int(w)
+        )
+        engine.sync()
+        rgb_f32_gpu.release()
+        if return_gpu:
+            return bgr_u16_gpu
+        result = bgr_u16_gpu.to_numpy()
+        bgr_u16_gpu.release()
+        if flip != 0:
+            result = rotate_by_flip(result, flip)
+        return result
+
+    # Portable compatibility path for CPU/OpenGL/Vulkan and older CUDA TCMs.
+    bgr_i32_gpu = engine.allocate(
+        (h, w, 3), dtype=np.int32, host_accessible=True
+    )
+    _mod(module_name).run(
+        "rgb_to_bgr_i32", src=rgb_f32_gpu, dst=bgr_i32_gpu, h=int(h), w=int(w)
+    )
+    engine.sync()
+    rgb_f32_gpu.release()
+    if return_gpu:
+        engine.sync()
+        bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
+        bgr_i32_gpu.release()
+        return bgr_u16_gpu
+
+    bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
+    bgr_u16_cpu = bgr_u16_gpu.to_numpy()
+    bgr_u16_gpu.release()
+    bgr_i32_gpu.release()
+    if flip != 0:
+        bgr_u16_cpu = rotate_by_flip(bgr_u16_cpu, flip)
+    return bgr_u16_cpu
+
+
 def demosaic(
     raw_input,
     wb_r=None,
@@ -8824,37 +8945,9 @@ def demosaic(
                 return_gpu=True,
                 dst=None,
             )
-            h, w = rgb_f32_gpu.shape[:2]
-
-            # Step 2: Allocate host-accessible intermediate i32 BGR buffer in VRAM
-            bgr_i32_gpu = engine.allocate(
-                (h, w, 3), dtype=np.int32, host_accessible=True
+            return _export_rgb_to_bgr_u16(
+                rgb_f32_gpu, "hamilton", return_gpu=return_gpu, flip=flip
             )
-
-            # Step 3: Run the conversion/channel-swapping graph on GPU
-            _mod("hamilton").run(
-                "rgb_to_bgr_i32", src=rgb_f32_gpu, dst=bgr_i32_gpu, h=int(h), w=int(w)
-            )
-
-            # Step 4: Clean up GPU intermediate float32 buffer immediately
-            engine.sync()
-            rgb_f32_gpu.release()
-
-            # Step 5: Convert and return
-            if not return_gpu:
-                engine.sync()
-                bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
-                bgr_u16_cpu = bgr_u16_gpu.to_numpy()
-                bgr_u16_gpu.release()
-                bgr_i32_gpu.release()
-                if flip != 0:
-                    bgr_u16_cpu = rotate_by_flip(bgr_u16_cpu, flip)
-                return bgr_u16_cpu
-            else:
-                engine.sync()
-                bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
-                bgr_i32_gpu.release()
-                return bgr_u16_gpu
         else:
             res = hamilton(
                 bayer,
@@ -9256,29 +9349,9 @@ def demosaic(
                 return_gpu=True,
                 dst=None,
             )
-            h, w = rgb_f32_gpu.shape[:2]
-            bgr_i32_gpu = engine.allocate(
-                (h, w, 3), dtype=np.int32, host_accessible=True
+            return _export_rgb_to_bgr_u16(
+                rgb_f32_gpu, "arm", return_gpu=return_gpu, flip=flip
             )
-            _mod("arm").run(
-                "rgb_to_bgr_i32", src=rgb_f32_gpu, dst=bgr_i32_gpu, h=int(h), w=int(w)
-            )
-            engine.sync()
-            rgb_f32_gpu.release()
-            if not return_gpu:
-                engine.sync()
-                bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
-                bgr_u16_cpu = bgr_u16_gpu.to_numpy()
-                bgr_u16_gpu.release()
-                bgr_i32_gpu.release()
-                if flip != 0:
-                    bgr_u16_cpu = rotate_by_flip(bgr_u16_cpu, flip)
-                return bgr_u16_cpu
-            else:
-                engine.sync()
-                bgr_u16_gpu = bgr_i32_gpu.cast(np.uint16, host_accessible=True)
-                bgr_i32_gpu.release()
-                return bgr_u16_gpu
         else:
             res = arm(
                 bayer,

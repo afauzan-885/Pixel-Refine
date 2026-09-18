@@ -43,6 +43,12 @@ class ImageCard(QWidget):
 
         # No internal components/layouts to avoid layout-engine overhead during scroll
 
+    def setVisible(self, visible: bool):
+        """Never allow an ImageCard to be displayed as an orphan top-level desktop window."""
+        if visible and self.parent() is None:
+            return
+        super().setVisible(visible)
+
     def set_image(self, q_image: Union[QImage, QPixmap], scale_to_fit: bool = True):
         """Display an image on the card (Pixel-Perfect Image Drawing)."""
         self._is_loading = False

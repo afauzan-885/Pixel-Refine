@@ -125,7 +125,8 @@ class ImportManager(QObject):
         if str(img.id) in self.panel.all_cards:
             return
 
-        card = ImageCard(card_id=str(img.id), size=110)
+        parent_container = getattr(self.panel.grid_container, "container", None)
+        card = ImageCard(card_id=str(img.id), size=110, parent=parent_container)
         card._image_path = img.path
         if not thumbnail_creation_enabled(self.panel.logic.thumbnail_policy):
             card.set_placeholder_text(os.path.basename(img.path).replace("_", "\n"))
@@ -141,6 +142,10 @@ class ImportManager(QObject):
 
         # Increment total count
         self.panel.total_image_count += 1
+        if hasattr(self.panel, "_current_visual_images") and isinstance(
+            self.panel._current_visual_images, list
+        ):
+            self.panel._current_visual_images.append(img)
 
         # Update header count
         self.panel._update_header_title()
@@ -189,7 +194,9 @@ class ImportManager(QObject):
         if batch_id in self.active_import_batches:
             self.active_import_batches.remove(batch_id)
 
-        # Invalidate controller batch cache so subsequent get_batch reads fresh DB rows
+        # Invalidate controller and panel caches so subsequent switches read fresh DB rows
+        if hasattr(self.panel, "invalidate_grid_cache"):
+            self.panel.invalidate_grid_cache(batch_id)
         if hasattr(self.panel, "controller") and self.panel.controller:
             self.panel.controller.invalidate_batch_cache(batch_id)
 

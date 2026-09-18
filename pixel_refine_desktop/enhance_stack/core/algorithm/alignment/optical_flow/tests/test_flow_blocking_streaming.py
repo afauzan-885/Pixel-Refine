@@ -151,7 +151,10 @@ def test_block_flow_accepts_lazy_block_iterator(monkeypatch):
                     "roi": (x0, y0, min(x0 + 4, width), min(y0 + 4, height)),
                 }
 
-    fake_aot = SimpleNamespace(get_block_config=lambda: _Config())
+    fake_aot = SimpleNamespace(
+        get_block_config=lambda: _Config(),
+        remap_with_flow=lambda target, flow, h, w, return_gpu=False: target,
+    )
     fake_package = SimpleNamespace(taichi_aot=fake_aot)
     monkeypatch.setitem(sys.modules, "taichi_vision", fake_package)
     monkeypatch.setattr(
@@ -193,7 +196,10 @@ def test_block_flow_counts_rectangular_runtime_blocks(monkeypatch):
                     "roi": (x0, y0, min(x0 + 8, width), min(y0 + 4, height)),
                 }
 
-    fake_aot = SimpleNamespace(get_block_config=lambda: _Config())
+    fake_aot = SimpleNamespace(
+        get_block_config=lambda: _Config(),
+        remap_with_flow=lambda target, flow, h, w, return_gpu=False: target,
+    )
     monkeypatch.setitem(
         sys.modules,
         "taichi_vision",

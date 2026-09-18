@@ -6,6 +6,7 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
 
 BLOCK_MATCHING_GPU_DEFAULTS = {
     "mode": "fast",
+    "smooth": False,
 }
 
 GPU_PARAMETER_SCHEMA = [
@@ -16,6 +17,12 @@ GPU_PARAMETER_SCHEMA = [
         "options": ["fast", "balance", "high"],
         "default": "fast",
         "tooltip_key": "LUCAS_KANADE_GPU_MODE_TOOLTIP",
+    },
+    {
+        "key": "smooth",
+        "label": "Smooth Blending",
+        "type": "checkbox",
+        "default": False,
     },
 ]
 

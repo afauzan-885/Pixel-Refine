@@ -399,6 +399,18 @@ class MFDenoiserAlgorithm:
                         nested = b_cfg.get(key)
                         if isinstance(nested, dict):
                             params.update(nested)
+
+                    align_settings = (
+                        batch_parameter_manager.get_alignment_settings_for_batch(
+                            batch_id
+                        )
+                    )
+                    if (
+                        align_settings
+                        and "params" in align_settings
+                        and isinstance(align_settings["params"], dict)
+                    ):
+                        params["alignment_params"] = align_settings["params"]
             except Exception:
                 pass
 

@@ -39,6 +39,8 @@ class AOTOpticalFlowAligner:
         search_dist: int = 2,
         max_search_radius: int = 12,
         noise_score: Optional[float] = None,
+        smooth: bool = True,
+        adaptive: bool = True,
     ):
         from taichi_vision.taichi_aot import get_engine
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
@@ -63,6 +65,8 @@ class AOTOpticalFlowAligner:
         self.tile_size = int(tile_size)
         self.search_dist = int(search_dist)
         self.max_search_radius = int(max_search_radius)
+        self.smooth = bool(smooth)
+        self.adaptive = bool(adaptive)
 
         # Noise-Aware Analysis Pre-Filter on Reference Frame.  The resident
         # pipeline can provide the score computed from the linear reference;
@@ -141,6 +145,7 @@ class AOTOpticalFlowAligner:
         self._fast_graph_enabled = False
         self.flow_l1_seed = None
         self.flow_l0_seed = None
+        self.grid_flow_l0 = None
         self.flow_l0_raw = None
         self._smooth_weights = None
         self._remap_mod = None
@@ -148,34 +153,50 @@ class AOTOpticalFlowAligner:
         try:
             from taichi_vision import taichi_aot
             from taichi_vision.taichi_algorithm.aot_api import (
-                InputArray,
                 aot_graph_available,
-            )
-            from taichi_vision.taichi_algorithm.smoothing.gaussian import (
-                compute_gaussian_weights,
             )
 
             enabled_by_env = os.environ.get(
                 "PIXEL_REFINE_COMPUTE_FLOW_FAST_PATH", "1"
             ).strip().lower() not in {"0", "false", "off", "no"}
+
+            target_graph = None
+            if self.adaptive:
+                target_graph = (
+                    "align_end_to_end_3layer_adaptive_smooth"
+                    if self.smooth
+                    else "align_end_to_end_3layer_adaptive_blocky"
+                )
+            if target_graph is None or not (enabled_by_env and aot_graph_available("compute_flow", target_graph)):
+                target_graph = (
+                    "align_end_to_end_3layer_v2"
+                    if self.smooth
+                    else "align_end_to_end_3layer_v2_blocky"
+                )
+                self._is_adaptive_graph = False
+            else:
+                self._is_adaptive_graph = True
+
             if enabled_by_env and aot_graph_available(
-                "compute_flow", "align_end_to_end_3layer_v2"
+                "compute_flow", target_graph
             ):
+                self.target_graph_name = target_graph
                 self.flow_l1_seed = self.engine.allocate(
                     (self.h1, self.w1, 2), dtype=np.float32, is_vector=False
                 )
                 self.flow_l0_seed = self.engine.allocate(
                     (self.h0, self.w0, 2), dtype=np.float32, is_vector=False
                 )
-                self.flow_l0_raw = self.engine.allocate(
-                    (self.h0, self.w0, 2), dtype=np.float32, is_vector=False
-                )
-                self._smooth_weights = InputArray(
-                    np.ascontiguousarray(
-                        compute_gaussian_weights(1.0, 2), dtype=np.float32
+                if not self._is_adaptive_graph and self.smooth:
+                    step_y0 = max(1, self.tile_size // 2)
+                    step_x0 = max(1, self.tile_size // 2)
+                    grid_h0 = (self.h0 + step_y0 - 1) // step_y0
+                    grid_w0 = (self.w0 + step_x0 - 1) // step_x0
+                    self.grid_flow_l0 = self.engine.allocate(
+                        (grid_h0, grid_w0, 2), dtype=np.float32, is_vector=False
                     )
-                )
-                self._remap_mod = taichi_aot.load_tcm("remap")
+                # flow_l0 directly receives the output.
+                self.flow_l0_raw = self.flow_l0
                 self._fast_graph_enabled = True
         except Exception:
             # The established graph remains the same-backend recovery route
@@ -184,7 +205,7 @@ class AOTOpticalFlowAligner:
             for attr in (
                 "flow_l1_seed",
                 "flow_l0_seed",
-                "flow_l0_raw",
+                "grid_flow_l0",
                 "_smooth_weights",
             ):
                 buf = getattr(self, attr, None)
@@ -194,22 +215,41 @@ class AOTOpticalFlowAligner:
                 except Exception:
                     pass
                 setattr(self, attr, None)
+            self.flow_l0_raw = None
 
     def _run_flow_graph(self, args):
         """Run the non-aliasing graph when its target artifact is available."""
         if self._fast_graph_enabled:
             try:
                 v2_args = dict(args)
-                # V2 produces its unsmoothed final level in ``flow_l0_raw``.
+                # V2 produces its final level into flow_l0_raw.
                 # Do not marshal the legacy-only output into this graph.
                 v2_args.pop("flow_l0", None)
-                self.mod.run(
-                    "align_end_to_end_3layer_v2",
-                    **v2_args,
-                    flow_l1_seed=self.flow_l1_seed,
-                    flow_l0_seed=self.flow_l0_seed,
-                    flow_l0_raw=self.flow_l0_raw,
-                )
+                if getattr(self, "_is_adaptive_graph", False):
+                    self.mod.run(
+                        self.target_graph_name,
+                        **v2_args,
+                        flow_l1_seed=self.flow_l1_seed,
+                        flow_l0_seed=self.flow_l0_seed,
+                        flow_l0_raw=self.flow_l0,
+                    )
+                elif self.smooth:
+                    self.mod.run(
+                        "align_end_to_end_3layer_v2",
+                        **v2_args,
+                        flow_l1_seed=self.flow_l1_seed,
+                        flow_l0_seed=self.flow_l0_seed,
+                        grid_flow_l0=self.grid_flow_l0,
+                        flow_l0_raw=self.flow_l0,
+                    )
+                else:
+                    self.mod.run(
+                        "align_end_to_end_3layer_v2_blocky",
+                        **v2_args,
+                        flow_l1_seed=self.flow_l1_seed,
+                        flow_l0_seed=self.flow_l0_seed,
+                        flow_l0_raw=self.flow_l0,
+                    )
                 return True
             except Exception as exc:
                 # Do not fall back to CPU or retain a failed graph state for
@@ -219,7 +259,7 @@ class AOTOpticalFlowAligner:
                 for attr in (
                     "flow_l1_seed",
                     "flow_l0_seed",
-                    "flow_l0_raw",
+                    "grid_flow_l0",
                     "_smooth_weights",
                 ):
                     buf = getattr(self, attr, None)
@@ -229,6 +269,7 @@ class AOTOpticalFlowAligner:
                     except Exception:
                         pass
                     setattr(self, attr, None)
+                self.flow_l0_raw = None
                 self._remap_mod = None
                 print(
                     "[FlowNet] compute_flow v2 unavailable at runtime; "
@@ -238,25 +279,7 @@ class AOTOpticalFlowAligner:
         return False
 
     def _smooth_flow_resident(self):
-        """Run the existing two-pass Gaussian graph without per-frame pool work."""
-        self._remap_mod.run(
-            "smooth_flow_x",
-            src=self.flow_l0_raw,
-            dst=self.flow_l0_seed,
-            h=self.h0,
-            w=self.w0,
-            weights=self._smooth_weights,
-            radius=2,
-        )
-        self._remap_mod.run(
-            "smooth_flow_y",
-            src=self.flow_l0_seed,
-            dst=self.flow_l0,
-            h=self.h0,
-            w=self.w0,
-            weights=self._smooth_weights,
-            radius=2,
-        )
+        """Return the flow buffer; WOLA graph output is already smooth."""
         return self.flow_l0
 
     def _retain_flow(self, flow):
@@ -445,23 +468,32 @@ class AOTOpticalFlowAligner:
 
             # The resident v2 route keeps the exact same two-pass Gaussian
             # kernels but reuses their temporary/weight buffers and does not
-            # impose the public API's host synchronization between stages.
-            # Host-return callers retain the established compatibility route.
-            if used_fast_graph and return_gpu:
-                active_flow_gpu = self._smooth_flow_resident()
-                warped = self._remap_resident(
-                    supp_rgb_f32,
-                    active_flow_gpu,
-                    self.full_h,
-                    self.full_w,
-                )
-                if warped is None:
+            if used_fast_graph:
+                # Flow is already smoothly stitched via fused WOLA in the AOT graph;
+                # no external Gaussian blur is required.
+                active_flow_gpu = self.flow_l0
+                if return_gpu:
+                    warped = self._remap_resident(
+                        supp_rgb_f32,
+                        active_flow_gpu,
+                        self.full_h,
+                        self.full_w,
+                    )
+                    if warped is None:
+                        warped = taichi_aot.remap_with_flow(
+                            supp_rgb_f32,
+                            active_flow_gpu,
+                            self.full_h,
+                            self.full_w,
+                            return_gpu=True,
+                        )
+                else:
                     warped = taichi_aot.remap_with_flow(
                         supp_rgb_f32,
                         active_flow_gpu,
                         self.full_h,
                         self.full_w,
-                        return_gpu=True,
+                        return_gpu=False,
                     )
 
                 if secondary_frame_to_warp is not None:
@@ -471,24 +503,31 @@ class AOTOpticalFlowAligner:
                         (self.full_h, self.full_w),
                     )
                     sec_h, sec_w = int(sec_shape[0]), int(sec_shape[1])
-                    warped_secondary = self._remap_resident(
-                        secondary_frame_to_warp,
-                        active_flow_gpu,
-                        sec_h,
-                        sec_w,
-                    )
-                    if warped_secondary is None:
+                    if return_gpu:
+                        warped_secondary = self._remap_resident(
+                            secondary_frame_to_warp,
+                            active_flow_gpu,
+                            sec_h,
+                            sec_w,
+                        )
+                        if warped_secondary is None:
+                            warped_secondary = taichi_aot.remap_with_flow(
+                                secondary_frame_to_warp,
+                                active_flow_gpu,
+                                sec_h,
+                                sec_w,
+                                return_gpu=True,
+                            )
+                    else:
                         warped_secondary = taichi_aot.remap_with_flow(
                             secondary_frame_to_warp,
                             active_flow_gpu,
                             sec_h,
                             sec_w,
-                            return_gpu=True,
+                            return_gpu=False,
                         )
             else:
-                flow_source = (
-                    self.flow_l0_raw if used_fast_graph else self.flow_l0
-                )
+                flow_source = self.flow_l0
                 smooth_flow_gpu = taichi_aot.smooth_flow_gpu(
                     flow_source, sigma=1.0, kernel_size=5
                 )
@@ -558,23 +597,27 @@ class AOTOpticalFlowAligner:
                     buf.destroy()
             except Exception:
                 pass
+        seen = set()
         for buf in [
             getattr(self, "flow_l0", None),
             getattr(self, "flow_l1", None),
             getattr(self, "flow_l2", None),
             getattr(self, "flow_l1_seed", None),
             getattr(self, "flow_l0_seed", None),
+            getattr(self, "grid_flow_l0", None),
             getattr(self, "flow_l0_raw", None),
             getattr(self, "_smooth_weights", None),
             getattr(self, "last_flow_gpu", None),
             getattr(self, "comp_l1_warped", None),
             getattr(self, "comp_l0_warped", None),
         ]:
-            try:
-                if buf is not None and hasattr(buf, "destroy"):
-                    buf.destroy()
-            except Exception:
-                pass
+            if buf is not None and id(buf) not in seen:
+                seen.add(id(buf))
+                try:
+                    if hasattr(buf, "destroy"):
+                        buf.destroy()
+                except Exception:
+                    pass
         self.engine.sync()
         gc.collect()
         gc.collect()

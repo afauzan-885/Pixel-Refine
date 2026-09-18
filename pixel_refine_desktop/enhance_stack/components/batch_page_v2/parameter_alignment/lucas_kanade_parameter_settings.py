@@ -6,6 +6,7 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
 
 LUCAS_KANADE_DEFAULTS = {
     "mode": "fast",
+    "smooth": True,
 }
 
 PARAMETER_SCHEMA = [
@@ -16,6 +17,12 @@ PARAMETER_SCHEMA = [
         "options": ["fast", "balance", "high"],
         "default": "fast",
         "tooltip_key": "LUCAS_KANADE_GRID_STEP_TOOLTIP",
+    },
+    {
+        "key": "smooth",
+        "label": "Smooth Blending",
+        "type": "checkbox",
+        "default": True,
     },
 ]
 

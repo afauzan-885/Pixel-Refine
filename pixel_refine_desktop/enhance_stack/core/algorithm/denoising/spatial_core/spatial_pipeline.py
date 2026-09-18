@@ -192,7 +192,7 @@ def process_in_gpu(
         download_taichi_ndarray,
         clear_vram,
     )
-    from taichi_vision.taichi_algorithm.spatial_fusion import (
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi import (
         generate_spatial_weights_taichi,
         accumulate_spatial_merging_taichi,
         SpatialScratchCache,

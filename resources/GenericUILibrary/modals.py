@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QApplication,
 )
-from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve, QTimer
 from PySide6.QtGui import QColor
 
 
@@ -716,6 +716,7 @@ class AlertModal(QDialog):
         variant="warning",
         width=400,
         height=180,
+        auto_dismiss_seconds=None,
     ):
         super().__init__(parent)
         self._drag_active = False
@@ -836,6 +837,48 @@ class AlertModal(QDialog):
 
         main_layout.addWidget(self.container)
 
+        self._countdown = auto_dismiss_seconds
+        self._dismiss_timer = None
+        if self._countdown is not None and self._countdown > 0:
+            self._update_countdown_text()
+            self._dismiss_timer = QTimer(self)
+            self._dismiss_timer.setInterval(1000)
+            self._dismiss_timer.timeout.connect(self._on_dismiss_tick)
+            self._dismiss_timer.start()
+
+    def _update_countdown_text(self):
+        if self._countdown is not None and self._countdown > 0:
+            self.ok_button.setText(f"OK ({self._countdown}s)")
+            self.ok_button.setFixedWidth(85)
+        else:
+            self.ok_button.setText("OK")
+            self.ok_button.setFixedWidth(75)
+
+    def _on_dismiss_tick(self):
+        if self._countdown is not None:
+            self._countdown -= 1
+            if self._countdown <= 0:
+                if self._dismiss_timer is not None:
+                    self._dismiss_timer.stop()
+                self.accept()
+            else:
+                self._update_countdown_text()
+
+    def closeEvent(self, event):
+        if self._dismiss_timer is not None:
+            self._dismiss_timer.stop()
+        super().closeEvent(event)
+
+    def accept(self):
+        if self._dismiss_timer is not None:
+            self._dismiss_timer.stop()
+        super().accept()
+
+    def reject(self):
+        if self._dismiss_timer is not None:
+            self._dismiss_timer.stop()
+        super().reject()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             pos_in_title = self.title_bar.mapFrom(self, event.position().toPoint())
@@ -865,8 +908,14 @@ class AlertModal(QDialog):
         self.fade_anim.start()
 
     @staticmethod
-    def show_alert(parent, message, title="Notice", variant="warning"):
-        dialog = AlertModal(message, parent=parent, title=title, variant=variant)
+    def show_alert(parent, message, title="Notice", variant="warning", auto_dismiss_seconds=None):
+        dialog = AlertModal(
+            message,
+            parent=parent,
+            title=title,
+            variant=variant,
+            auto_dismiss_seconds=auto_dismiss_seconds,
+        )
         dialog.exec()
 
 

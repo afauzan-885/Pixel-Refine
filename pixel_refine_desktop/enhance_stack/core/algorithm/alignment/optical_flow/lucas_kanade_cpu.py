@@ -16,7 +16,7 @@ DEFAULT_LUCAS_KANADE_CONFIG = {
 
 LUCAS_KANADE_CPU_PRESETS = {
     "fast": {
-        # Sparse sampling and one fewer pyramid level keep latency bounded.
+        # 32x32 grid step for fast processing.
         "grid_step": 32,
         "border_margin": 8,
         "point_workers": 2,
@@ -24,48 +24,50 @@ LUCAS_KANADE_CPU_PRESETS = {
         "max_level": 1,
         "iterations": 8,
         "epsilon": 0.04,
-        "overlap": 0.15,
-        "dense_mode": "blocky_clamped",
+        "overlap": 0.50,
         "adaptive": False,
         "adaptive_threshold": 1,
         "max_flow_px": 32.0,
         "use_multi_core": True,
-        "tile_overlap": 0.15,
+        "tile_overlap": 0.50,
+        "dense_mode": "smooth",
+        "smooth": True,
     },
     "balance": {
-        # Production trade-off: denser samples and smooth interpolation.
-        "grid_step": 20,
+        # 16x16 grid step for standard quality.
+        "grid_step": 16,
         "border_margin": 8,
         "point_workers": 2,
         "win_size": 17,
         "max_level": 2,
         "iterations": 16,
         "epsilon": 0.015,
-        "overlap": 0.25,
-        "dense_mode": "smooth",
+        "overlap": 0.50,
         "adaptive": False,
         "adaptive_threshold": 1,
         "max_flow_px": 64.0,
         "use_multi_core": True,
-        "tile_overlap": 0.20,
+        "tile_overlap": 0.50,
+        "dense_mode": "smooth",
+        "smooth": True,
     },
     "high": {
-        # High is materially denser/more iterative and enables adaptive
-        # refinement for difficult low-texture and parallax regions.
-        "grid_step": 12,
+        # 2x2 ultra-dense micro-grid for highest spatial accuracy.
+        "grid_step": 2,
         "border_margin": 8,
         "point_workers": 4,
         "win_size": 25,
         "max_level": 3,
         "iterations": 32,
         "epsilon": 0.005,
-        "overlap": 0.35,
-        "dense_mode": "smooth",
+        "overlap": 0.50,
         "adaptive": True,
         "adaptive_threshold": 1,
         "max_flow_px": 128.0,
         "use_multi_core": True,
-        "tile_overlap": 0.30,
+        "tile_overlap": 0.50,
+        "dense_mode": "smooth",
+        "smooth": True,
     },
 }
 
@@ -139,6 +141,15 @@ class LucasKanadeCPU:
         win_size = max(5, int(config.get("win_size", 17)))
         if win_size % 2 == 0:
             win_size += 1
+
+        smooth = config.get("smooth", None)
+        if smooth is not None:
+            dense_mode = "smooth" if bool(smooth) else "blocky_clamped"
+            overlap = 0.50 if bool(smooth) else 0.0
+        else:
+            dense_mode = str(config.get("dense_mode") or "smooth")
+            overlap = float(config.get("overlap", 0.50))
+
         flow = calcOpticalFlowPyrLK(
             np.ascontiguousarray(reference_gray),
             np.ascontiguousarray(target_gray),
@@ -149,13 +160,13 @@ class LucasKanadeCPU:
                 max(1, int(config.get("iterations", 8))),
                 float(config.get("epsilon", 0.03)),
             ),
-            grid_step=max(4, int(config.get("grid_step", 16))),
+            grid_step=max(1, int(config.get("grid_step", 16))),
             border_margin=max(0, int(config.get("border_margin", 8))),
-            overlap=float(config.get("overlap", 0.35)),
+            overlap=overlap,
             adaptive=bool(config.get("adaptive", False)),
             adaptive_threshold=max(1, int(config.get("adaptive_threshold", 1))),
             motion_mode=str(config.get("motion_mode") or "fast"),
-            dense_mode=str(config.get("dense_mode") or "smooth"),
+            dense_mode=dense_mode,
             max_flow_px=float(config.get("max_flow_px", 0.0)),
         )
         if isinstance(flow, tuple):
@@ -169,7 +180,7 @@ class LucasKanadeCPU:
         return np.ascontiguousarray(flow)
 
     def _make_grid_points(self, width, height, config):
-        step = max(4, int(config.get("grid_step", 16)))
+        step = max(1, int(config.get("grid_step", 16)))
         margin = max(0, int(config.get("border_margin", 8)))
         x_start = min(margin, max(0, width - 1))
         y_start = min(margin, max(0, height - 1))

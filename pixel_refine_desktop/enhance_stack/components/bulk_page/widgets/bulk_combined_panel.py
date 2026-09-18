@@ -184,27 +184,19 @@ class CombinedPanel(QWidget):
         self.checkboxes = {}
         self.comboboxes = {}
 
-        # Hitung jumlah gambar dalam batch ini sekali (dan validasi keberadaan file fisik)
+        # Hitung jumlah gambar dalam batch ini
         self.image_paths_in_batch = []
         self.image_count_in_batch = 0
-        if self.batch_id is not None:
+        if self.preloaded_image_paths is not None:
+            self.image_paths_in_batch = list(self.preloaded_image_paths)
+            self.image_count_in_batch = len(self.image_paths_in_batch)
+        elif self.batch_id is not None:
             try:
                 raw_paths = self.database_manager.get_images_by_batch(self.batch_id)
-                # Cek keberadaan file di disk secara sangat efisien
-                exists_flags = self._exists_flags(raw_paths)
-                missing_paths = [p for p, ok in zip(raw_paths, exists_flags) if not ok]
-                if missing_paths:
-                    self.database_manager.batch_process_delete_selected_images(
-                        self.batch_id, missing_paths
-                    )
-                    self.image_paths_in_batch = (
-                        self.database_manager.get_images_by_batch(self.batch_id)
-                    )
-                else:
-                    self.image_paths_in_batch = raw_paths
+                self.image_paths_in_batch = raw_paths
                 self.image_count_in_batch = len(self.image_paths_in_batch)
             except Exception as e:
-                print(f"Error getting/validating images for batch {self.batch_id}: {e}")
+                print(f"Error getting images for batch {self.batch_id}: {e}")
 
         # Flag untuk mengecek apakah overlay masih “alive”
         self._overlay_alive = False
@@ -304,7 +296,10 @@ class CombinedPanel(QWidget):
 
         # === Thumbnail generation logic
         if self.batch_id is not None and create_thumbnail:
-            QTimer.singleShot(50, self.delay_thumbnails)
+            # If parent layout manages thumbnail loading via queue, let it schedule;
+            # otherwise trigger directly as fallback for standalone usage.
+            if not hasattr(self.parent_widget, "_enqueue_thumbnail_loading"):
+                QTimer.singleShot(50, self.delay_thumbnails)
         elif self.batch_id is not None:
             self.load_text_labels()
 
@@ -407,6 +402,12 @@ class CombinedPanel(QWidget):
                 completion_callback()
             return
 
+        if getattr(self, "_thumbnail_loading_started", False) and not getattr(self, "_loading_finished", False):
+            if completion_callback and not getattr(self, "_thumbnail_completion_callback", None):
+                self._thumbnail_completion_callback = completion_callback
+            return
+        self._thumbnail_loading_started = True
+
         self._thumbnail_completion_callback = completion_callback
         self._loading_finished = False
         self._thumbnail_retry_counts = {}
@@ -417,15 +418,15 @@ class CombinedPanel(QWidget):
             self._inactivity_timer.timeout.connect(self._on_inactivity_timeout)
 
         if getattr(self, "preloaded_image_paths", None) is not None:
-            raw_paths = self.preloaded_image_paths
+            self.pending_thumbnail_paths = list(self.preloaded_image_paths)
         else:
             raw_paths = (
                 self.database_manager.get_images_by_batch(self.batch_id)
                 if self.batch_id is not None
                 else []
             )
-        exists_flags = self._exists_flags(raw_paths)
-        self.pending_thumbnail_paths = [p for p, ok in zip(raw_paths, exists_flags) if ok]
+            exists_flags = self._exists_flags(raw_paths)
+            self.pending_thumbnail_paths = [p for p, ok in zip(raw_paths, exists_flags) if ok]
         self.total_images = len(self.pending_thumbnail_paths)
         self.thumbnails_loaded = 0
         self.active_thumbnail_loaders = 0
@@ -457,6 +458,7 @@ class CombinedPanel(QWidget):
         if getattr(self, "_loading_finished", False):
             return
         self._loading_finished = True
+        self._thumbnail_loading_started = False
 
         if hasattr(self, "_inactivity_timer") and self._inactivity_timer.isActive():
             self._inactivity_timer.stop()
@@ -484,6 +486,21 @@ class CombinedPanel(QWidget):
             percent = int((self.thumbnails_loaded / self.total_images) * 100)
             self.progress_overlay.setText(f"Create thumbnail: {percent}%")
 
+    def set_waiting_state(self):
+        """Tampilkan placeholder awal 80x80 berstatus 'Memuat....' saat batch masih dalam antrean."""
+        if not self.get_thumbnail_setting():
+            return
+        if self.list_layout.count() > 0:
+            return
+        loading_text = getattr(language_config, "LOADING_THUMBNAIL", "Memuat....")
+        for path in self.image_paths_in_batch:
+            thumbnail_placeholder(
+                self.list_layout,
+                path,
+                self.thumbnail_placeholders,
+                text=loading_text,
+            )
+
     def _start_next_thumbnail_loaders(self):
         """
         Jalankan loading thumbnail secara asynchronous hingga semua selesai.
@@ -492,16 +509,28 @@ class CombinedPanel(QWidget):
             self.disable_thumbnail_loading()
             return
 
+        loading_text = getattr(language_config, "LOADING_THUMBNAIL", "Memuat....")
+
         while (
             self.active_thumbnail_loaders < self.max_concurrent_loaders
             and self.pending_thumbnail_paths
         ):
             path = self.pending_thumbnail_paths.pop(0)
 
-            # Buat placeholder dulu (misal thumbnail_placeholder akan menaruh widget kosong)
-            placeholder = thumbnail_placeholder(
-                self.list_layout, path, self.thumbnail_placeholders
-            )
+            # Jika placeholder sudah ada (dari status antrean Menunggu), ubah teksnya ke 'Memuat....'
+            existing_stacked = self.thumbnail_placeholders.get(path)
+            if existing_stacked is not None and hasattr(existing_stacked, "placeholder_label"):
+                try:
+                    existing_stacked.placeholder_label.setText(loading_text)
+                except Exception:
+                    pass
+            elif existing_stacked is None:
+                thumbnail_placeholder(
+                    self.list_layout,
+                    path,
+                    self.thumbnail_placeholders,
+                    text=loading_text,
+                )
 
             self.active_thumbnail_loaders += 1
             self._start_thumbnail_loader(path, self.animator)
@@ -540,7 +569,11 @@ class CombinedPanel(QWidget):
             displayed = False
             try:
                 displayed = show_thumbnail(
-                    weakref.ref(self.list_layout), image, image_path, animator_ref
+                    weakref.ref(self.list_layout),
+                    image,
+                    image_path,
+                    animator_ref,
+                    placeholders=self.thumbnail_placeholders,
                 )
             except Exception as e:
                 print(f"Error while loading thumbnail: {e}")

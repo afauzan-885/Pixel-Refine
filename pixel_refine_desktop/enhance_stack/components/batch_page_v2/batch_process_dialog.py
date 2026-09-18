@@ -56,6 +56,7 @@ class MassAlgorithmEditDialog(QDialog):
             language_config.UI_NO_CHANGE,
             "OFB",
             "AKAZE",
+            "Block Flow",
             "Farneback",
             "Lucas Kanade",
             "Block Matching GPU",

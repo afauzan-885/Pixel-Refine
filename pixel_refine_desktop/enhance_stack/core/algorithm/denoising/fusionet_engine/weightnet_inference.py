@@ -334,8 +334,8 @@ def load_weightnet_onnx(
             import zipfile
             with zipfile.ZipFile(bundle_file, "r") as zf:
                 candidate_names = [
-                    f"weightnet_{patch_size}_{dev_suffix}_3c_fp32.onnx",
                     f"weightnet_{patch_size}_{dev_suffix}_1c_fp32.onnx",
+                    f"weightnet_{patch_size}_{dev_suffix}_3c_fp32.onnx",
                     f"weightnet_{patch_size}_{dev_suffix}_fp32.onnx",
                 ]
                 namelist = set(zf.namelist())
@@ -598,6 +598,50 @@ def infer_single_support_weight_map(
         (1, 3 if is_rgb_model else 1, tile_size, tile_size), dtype=np.float32
     )
 
+    # Reuse DirectML output storage for coupled static models.  session.run()
+    # allocates fresh NumPy outputs for every tile; binding the already reused
+    # input arrays and fixed output buffers removes that allocator/copy setup
+    # without changing the FP32 graph or its results.
+    coupled_io = None
+    coupled_weight_out = None
+    coupled_alpha_out = None
+    if not is_decoupled:
+        try:
+            is_dml_session = "DmlExecutionProvider" in session.get_providers()
+            output_shapes = [output.shape for output in session.get_outputs()]
+            static_outputs = all(
+                all(isinstance(dim, int) and dim >= 0 for dim in shape)
+                for shape in output_shapes
+            )
+            if is_dml_session and static_outputs and len(output_shapes) >= 2:
+                coupled_weight_out = np.empty(
+                    tuple(output_shapes[0]), dtype=np.float32
+                )
+                coupled_alpha_out = np.empty(
+                    tuple(output_shapes[1]), dtype=np.float32
+                )
+                coupled_io = session.io_binding()
+                coupled_io.bind_output(
+                    "weight_map",
+                    "cpu",
+                    0,
+                    np.float32,
+                    coupled_weight_out.shape,
+                    coupled_weight_out.ctypes.data,
+                )
+                coupled_io.bind_output(
+                    "alpha",
+                    "cpu",
+                    0,
+                    np.float32,
+                    coupled_alpha_out.shape,
+                    coupled_alpha_out.ctypes.data,
+                )
+        except Exception:
+            coupled_io = None
+            coupled_weight_out = None
+            coupled_alpha_out = None
+
     for i, (y_start, y_end, x_start, x_end) in enumerate(tile_coords):
         if stop_event is not None:
             if hasattr(stop_event, "is_set") and stop_event.is_set():
@@ -680,10 +724,20 @@ def infer_single_support_weight_map(
             else:
                 ref_in[0, 0, :cur_h, :cur_w] = ref_luma[y_start:y_end, x_start:x_end]
             try:
-                weight_np, alpha_np = session.run(
-                    ["weight_map", "alpha"],
-                    {"ref_img": ref_in, "support_img": supp_in},
-                )
+                if coupled_io is not None:
+                    # bind_cpu_input materializes an OrtValue from the current
+                    # NumPy contents; rebind after filling each tile so ORT
+                    # cannot reuse the previous tile's captured input.
+                    coupled_io.bind_cpu_input("ref_img", ref_in)
+                    coupled_io.bind_cpu_input("support_img", supp_in)
+                    session.run_with_iobinding(coupled_io)
+                    weight_np = coupled_weight_out
+                    alpha_np = coupled_alpha_out
+                else:
+                    weight_np, alpha_np = session.run(
+                        ["weight_map", "alpha"],
+                        {"ref_img": ref_in, "support_img": supp_in},
+                    )
                 raw_w = np.asarray(weight_np, dtype=np.float32)
                 if raw_w.shape[1] == 3:
                     # Color-neutral merge: average across 3 channels to eliminate chromatic fringing

@@ -455,13 +455,20 @@ class RightPanel(QWidget, SyncMixin):
     def _load_batches(self):
         """Load batches from controller."""
         if not self.controller:
-            return
+            return []
 
-        self.list_group.clear()
-        batches = self.controller.get_all_batches()
+        self._selection_timer.stop()
+        self._pending_selection = None
 
-        for batch in batches:
-            self.list_group.add_item(batch.name, value=batch.id)
+        self.list_group.blockSignals(True)
+        try:
+            self.list_group.clear()
+            batches = self.controller.get_all_batches()
+
+            for batch in batches:
+                self.list_group.add_item(batch.name, value=batch.id)
+        finally:
+            self.list_group.blockSignals(False)
 
         # The header shortcut is only useful for an empty project.  Keep this
         # synchronized here as well as in page_layout so project restores (and
@@ -478,11 +485,28 @@ class RightPanel(QWidget, SyncMixin):
         # Re-pin the algorithm cards to the bottom of the right panel
         # now that the list size has changed.
         QTimer.singleShot(0, self._balance_splitter_sizes)
+        return batches
+
+    def select_batch_sync(self, batch_id):
+        """Select a batch synchronously and cancel any pending debounced selection."""
+        self._selection_timer.stop()
+        self._pending_selection = None
+
+        self.list_group.blockSignals(True)
+        try:
+            selected = self.list_group.select_item_by_value(batch_id)
+        finally:
+            self.list_group.blockSignals(False)
+
+        if selected:
+            self.current_batch_id = int(batch_id)
+            self.selection_handler.handle_selection([batch_id])
+            return True
+        return False
 
     def refresh_after_project_load(self):
         """Refresh project-backed batches and restore panel visibility."""
-        self._load_batches()
-        batches = self.controller.get_all_batches() if self.controller else []
+        batches = self._load_batches() or []
         if batches:
             self.setMaximumWidth(16777215)
             self.show()

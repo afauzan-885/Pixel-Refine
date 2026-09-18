@@ -110,7 +110,6 @@ class SpatialFusionDenoisingAlgorithm:
             work_scale = float(
                 config.get("work_resolution_scale", config.get("proxy_scale", 0.50))
             )
-            storage_mode = "direct"
 
             stop_req = getattr(ctx, "stop_requested", None)
             if stop_req is not None and callable(stop_req) and stop_req():
@@ -118,8 +117,7 @@ class SpatialFusionDenoisingAlgorithm:
 
             print(
                 f"[SpatialFusion] Routing to GPU-resident pipeline: backend={backend} "
-                f"frames={len(image_paths)} tile={tile_size} overlap={overlap:.2f} "
-                f"storage_mode={storage_mode}"
+                f"frames={len(image_paths)} tile={tile_size} overlap={overlap:.2f}"
             )
 
             alignment_plan = (
@@ -137,7 +135,6 @@ class SpatialFusionDenoisingAlgorithm:
             )
 
             ghost_penalty = float(config.get("ghost_penalty", 1.0))
-            ghost_cutoff = float(config.get("ghost_cutoff", 0.05))
             chroma_sensitivity = float(
                 config.get(
                     "chroma_sensitivity",
@@ -170,10 +167,8 @@ class SpatialFusionDenoisingAlgorithm:
                 tile_size=tile_size,
                 overlap=overlap,
                 ghost_penalty=ghost_penalty,
-                ghost_cutoff=ghost_cutoff,
                 chroma_sensitivity=chroma_sensitivity,
                 is_raw=is_raw,
-                storage_mode=storage_mode,
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=getattr(ctx, "update_progress", None),

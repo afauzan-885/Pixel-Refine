@@ -27,7 +27,6 @@ class WeightNetConfidenceProvider:
         work_scale: float = 0.5,
         overlap: float = 0.30,
         ghost_penalty: float = 1.0,
-        ghost_cutoff: float = 0.05,
         chroma_sensitivity: float = 1.0,
     ):
         from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
@@ -47,7 +46,6 @@ class WeightNetConfidenceProvider:
             self.reference_cache_tiles = 16
         self.overlap = float(np.clip(overlap, 0.0, 0.95))
         self.ghost_penalty = float(ghost_penalty)
-        self.ghost_cutoff = float(ghost_cutoff)
         self.chroma_sensitivity = float(chroma_sensitivity)
         self.session = load_weightnet_onnx(
             self.model_path,
@@ -212,7 +210,6 @@ class WeightNetConfidenceProvider:
             tile_size=self.tile_size,
             overlap=self.overlap,
             ghost_penalty=self.ghost_penalty,
-            ghost_cutoff=self.ghost_cutoff,
             chroma_sensitivity=self.chroma_sensitivity,
         )
         weight_map = np.asarray(weight_map, dtype=np.float32)

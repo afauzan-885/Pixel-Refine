@@ -10,7 +10,7 @@ THUMBNAIL_RETRY_DELAY_MS = 100
 MAX_THUMBNAIL_RETRIES = 3
 
 
-def thumbnail_placeholder(list_layout, image_path, placeholders, retry_count=0):
+def thumbnail_placeholder(list_layout, image_path, placeholders, text=None, retry_count=0):
     try:
         if list_layout is None:
             raise RuntimeError("Layout is None")
@@ -20,12 +20,13 @@ def thumbnail_placeholder(list_layout, image_path, placeholders, retry_count=0):
             QTimer.singleShot(
                 THUMBNAIL_RETRY_DELAY_MS,
                 lambda: thumbnail_placeholder(
-                    list_layout, image_path, placeholders, retry_count + 1
+                    list_layout, image_path, placeholders, text=text, retry_count=retry_count + 1
                 ),
             )
         return None
 
-    placeholder_label = QLabel(language_config.LOADING_THUMBNAIL)
+    display_text = text if text is not None else language_config.LOADING_THUMBNAIL
+    placeholder_label = QLabel(display_text)
     placeholder_label.setFixedSize(80, 80)
     placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     placeholder_label.setStyleSheet(
@@ -38,6 +39,7 @@ def thumbnail_placeholder(list_layout, image_path, placeholders, retry_count=0):
     stacked = QStackedWidget()
     stacked.setFixedSize(80, 80)
     stacked.addWidget(placeholder_label)
+    stacked.placeholder_label = placeholder_label
     stacked.image_path = image_path
 
     try:
@@ -45,11 +47,12 @@ def thumbnail_placeholder(list_layout, image_path, placeholders, retry_count=0):
     except RuntimeError:
         return None
 
-    placeholders[image_path] = list_layout
+    if placeholders is not None:
+        placeholders[image_path] = stacked
     return stacked
 
 
-def make_safe_callback(current_path, layout_ref):
+def make_safe_callback(current_path, layout_ref, placeholders=None):
     def safe_callback(image, image_path):
         layout = layout_ref() if layout_ref else None
         try:
@@ -59,7 +62,7 @@ def make_safe_callback(current_path, layout_ref):
                 or layout.parent() is None
             ):
                 return
-            show_thumbnail(layout, image, current_path, animator=None)
+            show_thumbnail(layout, image, current_path, animator=None, placeholders=placeholders)
         except RuntimeError:
             pass
         except Exception:
@@ -68,7 +71,7 @@ def make_safe_callback(current_path, layout_ref):
     return safe_callback
 
 
-def show_thumbnail(ref_layout, image, image_path, animator=None, retry_count=0):
+def show_thumbnail(ref_layout, image, image_path, animator=None, retry_count=0, placeholders=None):
     if image is None or image.isNull():
         return False
 
@@ -78,54 +81,66 @@ def show_thumbnail(ref_layout, image, image_path, animator=None, retry_count=0):
             raise RuntimeError("Layout is None")
 
         _ = list_layout.parent()
-        count = list_layout.count()
         pixmap = QPixmap.fromImage(image)
+        if pixmap.height() != 80:
+            pixmap = pixmap.scaledToHeight(80, Qt.TransformationMode.SmoothTransformation)
 
-        for i in range(count):
-            item = list_layout.itemAt(i)
-            widget = item.widget()
+        target_widget = None
+        if placeholders is not None:
+            candidate = placeholders.get(image_path)
+            if candidate is not None:
+                try:
+                    if isinstance(candidate, QStackedWidget) and getattr(candidate, "image_path", None) == image_path:
+                        target_widget = candidate
+                except RuntimeError:
+                    target_widget = None
 
-            if (
-                isinstance(widget, QStackedWidget)
-                and getattr(widget, "image_path", None) == image_path
-            ):
-                for j in range(widget.count()):
-                    w = widget.widget(j)
-                    if (
-                        isinstance(w, QLabel)
-                        and w.pixmap() is not None
-                        and not w.pixmap().isNull()
-                    ):
-                        return True
+        if target_widget is None:
+            count = list_layout.count()
+            for i in range(count):
+                item = list_layout.itemAt(i)
+                widget = item.widget()
+                if (
+                    isinstance(widget, QStackedWidget)
+                    and getattr(widget, "image_path", None) == image_path
+                ):
+                    target_widget = widget
+                    break
 
-                thumb_label = QLabel()
-                thumb_label.setPixmap(
-                    pixmap.scaledToHeight(
-                        80, Qt.TransformationMode.SmoothTransformation
-                    )
-                )
-                thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                thumb_label.setScaledContents(False)
-                thumb_label.setMaximumHeight(80)
-                thumb_label.setStyleSheet(
-                    "background-color: lightgray; border: 1px solid gray;"
-                )
+        if target_widget is not None:
+            for j in range(target_widget.count()):
+                w = target_widget.widget(j)
+                if (
+                    isinstance(w, QLabel)
+                    and w.pixmap() is not None
+                    and not w.pixmap().isNull()
+                ):
+                    return True
 
-                widget.addWidget(thumb_label)
-                widget.setCurrentWidget(thumb_label)
+            thumb_label = QLabel()
+            thumb_label.setPixmap(pixmap)
+            thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            thumb_label.setScaledContents(False)
+            thumb_label.setMaximumHeight(80)
+            thumb_label.setStyleSheet(
+                "background-color: lightgray; border: 1px solid gray;"
+            )
 
-                if animator:
-                    thumb_label.setGraphicsEffect(None)
-                    fade_in(animator, thumb_label, widget)
+            target_widget.addWidget(thumb_label)
+            target_widget.setCurrentWidget(thumb_label)
 
-                return True
+            if animator:
+                thumb_label.setGraphicsEffect(None)
+                fade_in(animator, thumb_label, target_widget)
+
+            return True
 
     except RuntimeError:
         if retry_count < MAX_THUMBNAIL_RETRIES:
             QTimer.singleShot(
                 THUMBNAIL_RETRY_DELAY_MS,
                 lambda: show_thumbnail(
-                    ref_layout, image, image_path, animator, retry_count + 1
+                    ref_layout, image, image_path, animator, retry_count + 1, placeholders=placeholders
                 ),
             )
     return False

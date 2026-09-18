@@ -55,7 +55,7 @@ def _as_gray_f32(image):
 
 
 def _cpu_grid_points(width, height, grid_step, border_margin):
-    step = max(4, int(grid_step))
+    step = max(1, int(grid_step))
     margin = max(0, int(border_margin))
     x0 = min(margin, max(0, width - 1))
     y0 = min(margin, max(0, height - 1))
@@ -605,7 +605,7 @@ def calcOpticalFlowPyrLK(
     next_gpu, next_temp = common.ensure_taichi_field(
         next_np, dtype=ti.f32, buffer_provider=buffer_provider
     )
-    grid_step_i = max(4, int(grid_step))
+    grid_step_i = max(1, int(grid_step))
     margin_i = max(0, int(border_margin))
     grid_w = max(1, (w - 2 * margin_i + grid_step_i - 1) // grid_step_i)
     grid_h = max(1, (h - 2 * margin_i + grid_step_i - 1) // grid_step_i)

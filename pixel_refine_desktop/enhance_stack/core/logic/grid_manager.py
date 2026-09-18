@@ -14,7 +14,7 @@ import os
 
 from PySide6.QtCore import QTimer, QPoint, QRect
 from PySide6.QtWidgets import QWidget
-from typing import Optional, Callable, List, Dict, Any
+from typing import List, Any
 from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
     ProcessManager,
     is_widget_alive,
@@ -67,23 +67,35 @@ class GridManager:
     # === GRID POPULATION ===
     # =========================================================================
 
-    def clear_grid(self):
-        """Remove all widgets from grid container."""
+    def clear_grid(self, detach_only=True):
+        """Remove all widgets from grid container safely preserving cached card instances."""
         self._loaded_card_ids.clear()
         self.panel.grid_animator.stop_all()
-        self.panel.grid_container.set_batch_update(False)
-        self.panel.grid_container.clear_items()
+        if detach_only:
+            container = self.panel.grid_container
+            layout = container.grid_layout
+            while layout.count():
+                item = layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.hide()
+            container.item_count = 0
+            container._stored_widgets.clear()
+            container._items_map.clear()
+        else:
+            self.panel.grid_container.clear_items()
 
     def populate_grid_incremental(self, visual_images: List[Any]):
         """
         Start incremental population of grid with images.
-        Mounts the first chunk immediately for instant UI feedback (<2ms),
-        then loads the remaining cards via a fast 16ms timer.
+        Mounts the first chunk (up to 50 cards) immediately for instant UI switch,
+        then loads any remaining cards via a fast 16ms timer.
 
         Args:
             visual_images: List of image objects to populate
         """
         self._populate_queue = list(visual_images)
+        self._total_populating = len(visual_images)
 
         if self._populate_timer and self._populate_timer.isActive():
             self._populate_timer.stop()
@@ -95,17 +107,18 @@ class GridManager:
             "display_populate", self._populate_timer
         )
 
-        # Immediate first chunk for instant UI switch (< 2ms for viewport)
-        self._process_incremental_population()
+        # Immediate first chunk for instant UI switch (up to 50 cards directly)
+        self._process_incremental_population(chunk_size=50)
 
         # If there are remaining cards beyond the initial chunk, stream them at 16ms (60fps)
         if self._populate_queue:
             self._populate_timer.start(16)
 
-    def _process_incremental_population(self):
+    def _process_incremental_population(self, chunk_size=25):
         """Tambah gambar ke grid dalam chunk untuk menghindari UI freeze."""
         if not self._populate_queue:
-            self._populate_timer.stop()
+            if self._populate_timer and self._populate_timer.isActive():
+                self._populate_timer.stop()
             self.panel.grid_container.set_batch_update(False)
 
             # Trigger window update pertama setelah semua card ada di grid
@@ -114,10 +127,20 @@ class GridManager:
             # Breathing room sebelum background sync untuk card di luar viewport
             if self._real_paths_for_sync:
                 self.staged_load_timer.start()
+
+            if (
+                hasattr(self.panel, "_store_grid_cache")
+                and self.panel.current_batch_id is not None
+            ):
+                self.panel._store_grid_cache(
+                    self.panel.current_batch_id,
+                    getattr(self.panel, "_current_visual_images", []),
+                )
             return
 
-        CHUNK_SIZE = 25
-        for _ in range(CHUNK_SIZE):
+        from resources.GenericUILibrary import ImageCard
+
+        for _ in range(chunk_size):
             if not self._populate_queue:
                 break
 
@@ -127,14 +150,11 @@ class GridManager:
                 hasattr(img, "__class__") and img.__class__.__name__ == "ZombieImg"
             )
 
-            from resources.GenericUILibrary import ImageCard
-
-            card = ImageCard(card_id=str(img.id), size=110)
+            parent_container = getattr(self.panel.grid_container, "container", None)
+            card = ImageCard(card_id=str(img.id), size=110, parent=parent_container)
             card._image_path = img.path
             if not thumbnail_creation_enabled(self.panel.logic.thumbnail_policy):
-                card.set_placeholder_text(
-                    os.path.basename(img.path).replace("_", "\n")
-                )
+                card.set_placeholder_text(os.path.basename(img.path).replace("_", "\n"))
 
             if not is_zombie:
                 card.double_clicked.connect(self.panel._on_card_double_clicked)
@@ -165,6 +185,14 @@ class GridManager:
             self._update_window()
             if self._real_paths_for_sync:
                 self.staged_load_timer.start()
+            if (
+                hasattr(self.panel, "_store_grid_cache")
+                and self.panel.current_batch_id is not None
+            ):
+                self.panel._store_grid_cache(
+                    self.panel.current_batch_id,
+                    getattr(self.panel, "_current_visual_images", []),
+                )
 
     # =========================================================================
     # === WINDOWED LAZY LOADING ===
@@ -231,8 +259,8 @@ class GridManager:
         # Sort berdasarkan jarak (terdekat ke viewport = index kecil = prioritas tinggi)
         card_distances.sort(key=lambda x: x[0])
 
-        in_window = card_distances[:WINDOW_SIZE]    # 50 terdekat → harus termuat
-        out_window = card_distances[WINDOW_SIZE:]   # Sisanya → unload
+        in_window = card_distances[:WINDOW_SIZE]  # 50 terdekat → harus termuat
+        out_window = card_distances[WINDOW_SIZE:]  # Sisanya → unload
 
         # --- UNLOAD: Card di luar window ---
         for _dist, card_id, card in out_window:
@@ -255,10 +283,13 @@ class GridManager:
         # Bangun pairs (path, callback) — JPG sudah di disk, ini akan cepat
         pairs = []
         for path, card, card_id in to_fetch:
+
             def make_cb(c, cid):
                 def cb(q_img, p):
                     self._on_card_loaded(q_img, p, c, cid)
+
                 return cb
+
             pairs.append((path, make_cb(card, card_id)))
 
         self.panel.logic.load_thumbnails_bulk_async(pairs)
@@ -296,10 +327,13 @@ class GridManager:
             card = path_to_card.get(path)
             card_id = path_to_id.get(path)
             if card is not None:
+
                 def make_cb(c, cid):
                     def cb(q_img, p):
                         self._on_card_loaded(q_img, p, c, cid)
+
                     return cb
+
                 pairs.append((path, make_cb(card, card_id)))
             else:
                 pairs.append((path, None))
@@ -376,10 +410,13 @@ class GridManager:
 
         pairs = []
         for path, card, card_id in missing:
+
             def make_cb(c, cid):
                 def cb(q_img, p):
                     self._on_card_loaded(q_img, p, c, cid)
+
                 return cb
+
             card._is_fetching = True
             pairs.append((path, make_cb(card, card_id)))
 

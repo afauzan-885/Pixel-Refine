@@ -236,8 +236,9 @@ class BulkPageLayout(QWidget):
         # Hook scroll listener for lazy loading (Task 4)
         self.limit = 10
         self.load_timer_running = False
+        self.MAX_CONCURRENT_BATCH_LOADERS = 5
         self._thumbnail_batch_queue = []
-        self._is_thumbnail_queue_running = False
+        self._active_thumbnail_batches = []
         self.main_scroll_area.verticalScrollBar().valueChanged.connect(
             self._on_scroll_changed
         )
@@ -388,7 +389,6 @@ class BulkPageLayout(QWidget):
                     pass
 
         for batch_id in ids_to_add:
-
             # --- CACHE HIT: Reuse panel yang sudah pernah dibuat ---
             cached_panel = self._panel_cache.get(batch_id)
             if cached_panel is not None:
@@ -402,37 +402,30 @@ class BulkPageLayout(QWidget):
                         self.main_panel_container.addWidget(cached_panel)
                     cached_panel.show()
                     self.active_batch_panels[batch_id] = cached_panel
-                    self._schedule_reorder()
-                    self._manage_placeholder_and_spacer()
-                    continue  # langsung ke batch_id berikutnya, tanpa skeleton
+                    continue  # langsung ke batch_id berikutnya
                 except RuntimeError:
                     # Panel sudah dihancurkan, hapus dari cache
                     self._panel_cache.pop(batch_id, None)
 
-            # --- CACHE MISS: Buat skeleton dulu, lalu load panel asli ---
-            skeleton = SkeletonCombinedPanel(self)
-            self.active_skeletons[batch_id] = skeleton
-
-            # Tambahkan skeleton ke layout. Jika ada spacer, tambahkan sebelum spacer.
+            # --- DIRECT PANEL CREATION (Setara V0.5.1, instan & bebas stutter) ---
+            new_panel = self.setup_combined_panel(batch_id)
             if self._spacer_item:
-                self.main_panel_container.insertWidget(
-                    self.main_panel_container.count() - 1, skeleton
-                )
+                insert_idx = self.main_panel_container.count() - 1
+                self.main_panel_container.insertWidget(insert_idx, new_panel)
             else:
-                self.main_panel_container.addWidget(skeleton)
+                self.main_panel_container.addWidget(new_panel)
 
-            self.loading_queue.append(batch_id)
-
-        # Trigger incremental loading timer tanpa delay (langsung mulai render)
-        if self.loading_queue and not self.load_timer_running:
-            self.load_timer_running = True
-            QTimer.singleShot(0, self._load_next_batch_incrementally)
+            if len(ids_to_add) <= 2:
+                self._start_fade_in_animation(new_panel)
 
         # 4. Atur ulang nomor urut visual untuk semua panel yang ada
         self._schedule_reorder()
 
         # 5. Kelola tampilan placeholder atau spacer
         self._manage_placeholder_and_spacer()
+
+        if hasattr(self.main_scroll_area, "update_inner_dimensions"):
+            self.main_scroll_area.update_inner_dimensions()
 
     def _reorder_visual_batch_numbers(self):
         """Mengatur ulang label nomor urut (Batch #1, Batch #2, dst.) pada semua panel."""
@@ -605,41 +598,53 @@ class BulkPageLayout(QWidget):
         return combined_panel
 
     def _enqueue_thumbnail_loading(self, panel):
-        """Tambahkan panel ke dalam antrean pemuatan thumbnail sekuensial."""
+        """Tambahkan panel ke dalam antrean pemuatan thumbnail paralel hingga 5 batch."""
         if not thumbnail_creation_enabled(self.thumbnail_policy):
             return
 
         if not hasattr(self, "_thumbnail_batch_queue"):
             self._thumbnail_batch_queue = []
-        if panel not in self._thumbnail_batch_queue:
+        if not hasattr(self, "_active_thumbnail_batches"):
+            self._active_thumbnail_batches = []
+
+        if panel not in self._thumbnail_batch_queue and panel not in self._active_thumbnail_batches:
             self._thumbnail_batch_queue.append(panel)
+            # Jika kapasitas 5 batch aktif sedang penuh, tampilkan placeholder antrean 'Menunggu'
+            if len(self._active_thumbnail_batches) >= self.MAX_CONCURRENT_BATCH_LOADERS:
+                if hasattr(panel, "set_waiting_state"):
+                    panel.set_waiting_state()
+
         self._process_thumbnail_queue()
 
     def _process_thumbnail_queue(self):
-        """Proses antrean thumbnail secara sekuensial per batch (1 batch 100% baru lanjut ke batch berikutnya)."""
+        """Proses antrean thumbnail secara paralel hingga 5 batch sekaligus."""
         if not thumbnail_creation_enabled(self.thumbnail_policy):
             self._thumbnail_batch_queue.clear()
-            self._is_thumbnail_queue_running = False
+            if hasattr(self, "_active_thumbnail_batches"):
+                self._active_thumbnail_batches.clear()
             return
 
-        if getattr(self, "_is_thumbnail_queue_running", False):
-            return
+        if not hasattr(self, "_active_thumbnail_batches"):
+            self._active_thumbnail_batches = []
         if not getattr(self, "_thumbnail_batch_queue", None):
             return
-
-        self._is_thumbnail_queue_running = True
-        next_panel = self._thumbnail_batch_queue.pop(0)
 
         from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
             is_widget_alive,
         )
 
-        if is_widget_alive(next_panel):
+        while (
+            len(self._active_thumbnail_batches) < self.MAX_CONCURRENT_BATCH_LOADERS
+            and self._thumbnail_batch_queue
+        ):
+            next_panel = self._thumbnail_batch_queue.pop(0)
+            if not is_widget_alive(next_panel):
+                continue
+
+            self._active_thumbnail_batches.append(next_panel)
             next_panel.delay_thumbnails(
-                completion_callback=self._on_batch_thumbnail_completed
+                completion_callback=lambda p=next_panel: self._on_batch_thumbnail_completed(p)
             )
-        else:
-            self._on_batch_thumbnail_completed()
 
     @Slot(bool)
     def _on_thumbnail_policy_changed(self, enabled):
@@ -647,10 +652,8 @@ class BulkPageLayout(QWidget):
             return
 
         self._thumbnail_batch_queue.clear()
-        self._is_thumbnail_queue_running = False
-        # Cancel workers but keep the visible panels in place.  The regular
-        # stop_thumbnail() path also hides/caches panels for mode switching,
-        # which is not appropriate for a settings toggle.
+        if hasattr(self, "_active_thumbnail_batches"):
+            self._active_thumbnail_batches.clear()
         stop_process_thumbnails(self.thumbnail_threads)
 
         panels = list(self.active_batch_panels.values()) + list(
@@ -666,9 +669,10 @@ class BulkPageLayout(QWidget):
             except Exception:
                 pass
 
-    def _on_batch_thumbnail_completed(self):
+    def _on_batch_thumbnail_completed(self, panel=None):
         """Dipanggil ketika satu batch selesai memuat thumbnail 100% atau setelah 6 detik inactivity watchdog."""
-        self._is_thumbnail_queue_running = False
+        if hasattr(self, "_active_thumbnail_batches") and panel in self._active_thumbnail_batches:
+            self._active_thumbnail_batches.remove(panel)
         QTimer.singleShot(10, self._process_thumbnail_queue)
 
     # --- Event Handling ---
@@ -1216,9 +1220,13 @@ class BulkPageLayout(QWidget):
         """
         stop_process_thumbnails(self.thumbnail_threads)
 
-        # Clear incremental loading queue
+        # Clear incremental loading and thumbnail batch queues
         self.loading_queue.clear()
         self.load_timer_running = False
+        if hasattr(self, "_thumbnail_batch_queue"):
+            self._thumbnail_batch_queue.clear()
+        if hasattr(self, "_active_thumbnail_batches"):
+            self._active_thumbnail_batches.clear()
 
         # Safely remove active skeletons from layout (skeleton tidak di-cache)
         from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (

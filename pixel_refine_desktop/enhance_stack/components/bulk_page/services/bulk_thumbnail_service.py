@@ -1,6 +1,6 @@
 import os
 from PySide6.QtGui import QImage
-from PySide6.QtCore import QThread, Signal, QMutex, QWaitCondition, QFile, QSemaphore
+from PySide6.QtCore import QThread, Signal, QMutex, QWaitCondition, QFile, QSemaphore, Qt
 from PIL import Image, ImageOps
 import rawpy
 from config import CACHE_DIR, SUPPORTED_FORMATS
@@ -8,7 +8,7 @@ from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
     thumbnail_creation_enabled,
 )
 
-semaphore = QSemaphore(4) # Limit to 4 concurrent thumbnail processing threads
+semaphore = QSemaphore(15) # Allow parallel processing across up to 5 concurrent batches
 
 try:
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -51,12 +51,14 @@ class ThumbnailLoader(QThread):
                 self.cond.wait(self.mutex)
             self.mutex.unlock()
 
-            THUMBNAIL_SIZE = (128, 128)
+            THUMBNAIL_SIZE = (80, 80)
             cache_path = os.path.join(CACHE_DIR, os.path.basename(self.image_path) + ".jpg")
 
             if QFile.exists(cache_path):
                 cached_image = QImage(cache_path)
                 if not cached_image.isNull():
+                    if cached_image.height() != 80:
+                        cached_image = cached_image.scaledToHeight(80, Qt.TransformationMode.SmoothTransformation)
                     result_image = cached_image
                     return
 
@@ -71,7 +73,7 @@ class ThumbnailLoader(QThread):
                 if ext in SUPPORTED_FORMATS["jpg"] + SUPPORTED_FORMATS["png"] + SUPPORTED_FORMATS["tiff"]:
                     with Image.open(self.image_path) as img:
                         img_corrected = ImageOps.exif_transpose(img)
-                        img_corrected.thumbnail(THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+                        img_corrected.thumbnail(THUMBNAIL_SIZE, Image.Resampling.BICUBIC)
                         pil_thumb = img_corrected
 
                 # RAW Formats
@@ -85,7 +87,7 @@ class ThumbnailLoader(QThread):
                         )
                     
                     pil_img = Image.fromarray(img_array, 'RGB')
-                    pil_img.thumbnail(THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+                    pil_img.thumbnail(THUMBNAIL_SIZE, Image.Resampling.BICUBIC)
                     pil_thumb = pil_img
 
             except Exception as e:

@@ -24,33 +24,36 @@ class FarnebackFlowCPU:
     PRESETS = {
         "fast": {
             "pyr_scale": 0.5,
-            # One pyramid level/iteration keeps the latency floor low.  A
-            # small window is intentional: this preset targets responsive
-            # preview alignment and accepts reduced large-motion robustness.
+            # Fast profile: ~32x32 window (33px) for low-latency fast search.
             "levels": 1,
-            "winsize": 9,
+            "winsize": 33,
             "iterations": 1,
             "poly_n": 5,
             "poly_sigma": 1.1,
+            "grid_step": 32,
+            "tile_size": 32,
         },
         "balance": {
             "pyr_scale": 0.5,
+            # Balance profile: ~16x16 window (17px) for balanced trade-off.
             "levels": 3,
-            "winsize": 15,
+            "winsize": 17,
             "iterations": 3,
             "poly_n": 5,
             "poly_sigma": 1.2,
+            "grid_step": 16,
+            "tile_size": 16,
         },
         "high": {
             "pyr_scale": 0.5,
+            # High accuracy profile: ~2x2 micro window with deep 5-level refinement for highest accuracy.
             "levels": 5,
-            # Extra refinement and a wider support window make this the
-            # accuracy-first profile.  It deliberately spends more latency
-            # on difficult motion, parallax, and low-texture regions.
-            "winsize": 25,
+            "winsize": 5,
             "iterations": 7,
             "poly_n": 7,
             "poly_sigma": 1.5,
+            "grid_step": 2,
+            "tile_size": 2,
         },
     }
 

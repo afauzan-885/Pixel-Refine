@@ -12,10 +12,8 @@ DEFAULT_BLOCK_MATCHING_GPU_CONFIG = {
 
 BLOCK_MATCHING_GPU_PRESETS = {
     "fast": {
-        # Latency profile: half the grid density of balance and a 9px window.
-        # Keep the native pyramid path disabled here: on low-end CUDA devices
-        # its extra staging dominates the sparse-search savings.
-        "grid_step": 48,
+        # Latency profile: 32x32 block grid and 9px window.
+        "grid_step": 32,
         "border_margin": 8,
         "win_size": 9,
         "max_level": 2,
@@ -25,15 +23,16 @@ BLOCK_MATCHING_GPU_PRESETS = {
         "adaptive": False,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_overlap": 0.20,
+        "tile_overlap": 0.0,
         "max_flow_px": 48.0,
         "decoupled_scale": 0,
         "dense_mode": "blocky_clamped",
+        "overlap": 0.0,
+        "smooth": False,
     },
     "balance": {
-        # Denser grid and smooth interpolation preserve detail; one adaptive
-        # residual pass keeps balance mode accuracy-oriented as requested.
-        "grid_step": 24,
+        # Balance profile: 16x16 block grid.
+        "grid_step": 16,
         "border_margin": 8,
         "win_size": 17,
         "max_level": 3,
@@ -43,16 +42,17 @@ BLOCK_MATCHING_GPU_PRESETS = {
         "adaptive": True,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_overlap": 0.20,
+        "tile_overlap": 0.0,
         "max_flow_px": 64.0,
-        "dense_mode": "smooth",
+        "dense_mode": "blocky_clamped",
+        "overlap": 0.0,
+        "smooth": False,
         "decoupled_scale": 0,
         "cache_reference_pyramid": True,
     },
     "high": {
-        # Accuracy profile: finest grid, extra pyramid level, smooth dense
-        # interpolation, and adaptive residual refinement.
-        "grid_step": 16,
+        # Accuracy profile: 4x4 fine grid, dedicated to highest precision.
+        "grid_step": 4,
         "border_margin": 8,
         "win_size": 17,
         "max_level": 3,
@@ -62,9 +62,11 @@ BLOCK_MATCHING_GPU_PRESETS = {
         "adaptive": True,
         "adaptive_threshold": 1,
         "use_multi_core": False,
-        "tile_overlap": 0.20,
+        "tile_overlap": 0.0,
         "max_flow_px": 96.0,
-        "dense_mode": "smooth",
+        "dense_mode": "blocky_clamped",
+        "overlap": 0.0,
+        "smooth": False,
         "decoupled_scale": 0,
         "cache_reference_pyramid": True,
     },
@@ -89,6 +91,22 @@ class BlockMatchingGPU(LucasKanadeGPU):
             flow = flow[0]
         return np.ascontiguousarray(flow, dtype=np.float32)
 
+    def _calculate_flow_gpu_buffer(
+        self, reference_gray, target_gray, config, reference_pyramid=None
+    ):
+        from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
+
+        flow_kwargs = self._build_lk_params(config)
+        flow_kwargs["return_gpu"] = True
+        if reference_pyramid is not None:
+            flow_kwargs["reference_pyramid"] = reference_pyramid
+        flow = calcOpticalFlowBlockMatching(reference_gray, target_gray, **flow_kwargs)
+        if isinstance(flow, tuple):
+            flow = flow[0]
+        if flow is None or not hasattr(flow, "shape"):
+            raise RuntimeError("Block Matching AOT did not return a GPU flow buffer")
+        return flow
+
     def _build_opengl_safe_params(self, reference_gray, config):
         params = self._build_lk_params(config)
         from taichi_vision import taichi_aot
@@ -105,7 +123,16 @@ class BlockMatchingGPU(LucasKanadeGPU):
     def _build_lk_params(self, config):
         """Build block-matching parameters, including optional decoupling."""
         params = super()._build_lk_params(config)
-        params["dense_mode"] = str(config.get("dense_mode", "blocky_clamped"))
+        smooth = config.get("smooth", None)
+        if smooth is not None:
+            params["dense_mode"] = "smooth" if bool(smooth) else "blocky_clamped"
+            params["overlap"] = 0.50 if bool(smooth) else 0.0
+        else:
+            params["dense_mode"] = str(config.get("dense_mode", "blocky_clamped"))
+            if "overlap" in config:
+                params["overlap"] = float(config["overlap"])
+            else:
+                params["overlap"] = 0.50 if params["dense_mode"] == "smooth" else 0.0
         params["adaptive"] = bool(config.get("adaptive", False))
         params["adaptive_threshold"] = max(
             1, int(config.get("adaptive_threshold", 1))
@@ -125,6 +152,7 @@ class BlockMatchingGPU(LucasKanadeGPU):
         point_executor=None,
         matching_reference=None,
         matching_target=None,
+        return_gpu=False,
     ):
         # Resolve the selected preset here as well as in load_config().  UI
         # callers commonly pass only {"mode": "fast"}; forwarding that
@@ -132,7 +160,7 @@ class BlockMatchingGPU(LucasKanadeGPU):
         cfg = self._resolve_mode_config(dict(config or self.load_config()))
         cfg.setdefault("cache_reference_pyramid", True)
         cfg.setdefault("retain_native_pool", True)
-        cfg.setdefault("conservative_vram", True)
+        cfg.setdefault("conservative_vram", False)
         cfg.setdefault("_reference_cache_key", id(reference))
         try:
             from taichi_vision import taichi_aot
@@ -142,19 +170,7 @@ class BlockMatchingGPU(LucasKanadeGPU):
                 pool.set_budget(128 * 1024 * 1024)
         except Exception:
             pass
-        try:
-            from taichi_vision.taichi_aot import naturalTonemapping
-            from config import CALCULATION_TONE_MAPPING_PARAMS
-            matching_reference = naturalTonemapping(
-                reference, return_gpu=False, **CALCULATION_TONE_MAPPING_PARAMS
-            )
-            matching_target = naturalTonemapping(
-                target, return_gpu=False, **CALCULATION_TONE_MAPPING_PARAMS
-            )
-            print("[BlockMatchingGPU] naturalTonemapping enabled for flow matching; original frame retained for warping")
-        except Exception as exc:
-            print(f"[BlockMatchingGPU] Tone mapping unavailable, using original frames: {exc}")
-            matching_reference, matching_target = reference, target
+
         return super().align_frame(
             reference,
             target,
@@ -164,6 +180,7 @@ class BlockMatchingGPU(LucasKanadeGPU):
             point_executor=point_executor,
             matching_reference=matching_reference,
             matching_target=matching_target,
+            return_gpu=return_gpu,
         )
 
     @staticmethod

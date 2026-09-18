@@ -1759,7 +1759,7 @@ def calcOpticalFlowPyrLK(
                 criteria=criteria,
                 flags=flags,
                 minEigThreshold=minEigThreshold,
-                grid_step=max(4, grid_step // 2),
+                grid_step=max(1, grid_step // 2),
                 border_margin=border_margin,
                 overlap=overlap,
                 adaptive=adaptive,
@@ -1832,7 +1832,7 @@ def calcOpticalFlowPyrLK(
             pyramid_mod = _get_module("pyramid")
         except Exception:
             pyramid_mod = None
-        grid_step_i = max(4, int(grid_step))
+        grid_step_i = max(1, int(grid_step))
         margin_i = max(0, int(border_margin))
         levels_i = max(1, int(maxLevel) + 1)
         mode = str(motion_mode or "fast").lower()
@@ -2216,7 +2216,7 @@ def calcOpticalFlowPyrLKGrid(
 
     mod = _get_module("lucas_kanade")
     pyramid_mod = _get_module("pyramid")
-    grid_step_i = max(4, int(grid_step))
+    grid_step_i = max(1, int(grid_step))
     margin_i = max(0, int(border_margin))
     levels_i = max(1, int(maxLevel) + 1)
     mode = str(motion_mode or "fast").lower()
@@ -2582,10 +2582,10 @@ def calcOpticalFlowBlockMatching(
             if buffer is keep:
                 continue
             try:
-                buffer.destroy()
+                buffer.release()
             except Exception:
                 try:
-                    buffer.release()
+                    buffer.destroy()
                 except Exception:
                     pass
         owned_buffers[:] = [keep] if keep is not None else []

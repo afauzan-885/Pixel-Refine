@@ -25,14 +25,11 @@ class FusionNetDenoisingAlgorithm:
 
     # Default Config Parameters (Configurable default parameters)
     DEFAULT_CONFIG = {
-        "work_scale": 0.75,  # 50% scaling for FlowNet & WeightNet analysis
-        "flownet_work_scale": 0.75,  # Optical flow work scale (defaults to work_scale)
-        "weightnet_work_scale": 0.75,  # WeightNet ONNX work scale (defaults to work_scale)
-        "tile_size": 256,  # ONNX patch size (256, 512, 1024)
+        "work_scale": 0.50,  # Scaling factor for alignment and ONNX analysis
+        "tile_size": 1024,  # ONNX patch size (256, 512, 1024)
         "tile_overlap": 0.20,  # Tile overlap ratio (20% optimal for speed & seamless blend)
-        "ghost_penalty": 1.0,  # Exponent penalty for motion/ghost artifacts
-        "ghost_cutoff": 0.05,  # Low-weight threshold cutoff
-        "chroma_sensitivity": 1.0,  # Color deviation protection sensitivity
+        "ghost_penalty": 0.85,  # Maximum ghost penalty for clean/low-noise regions
+        "ghost_penalty_min": 0.65,  # Minimum ghost penalty for high-noise regions
     }
 
     def _load_inputs(self, ctx, frames):
@@ -61,18 +58,14 @@ class FusionNetDenoisingAlgorithm:
         # Resolve parameters with DEFAULT_CONFIG fallbacks
         params_cfg = getattr(ctx, "params", {}) or {}
         work_scale = float(
-            params_cfg.get("work_scale", self.DEFAULT_CONFIG.get("work_scale", 0.4))
-        )
-        flownet_work_scale = float(
             params_cfg.get(
-                "flownet_work_scale",
-                self.DEFAULT_CONFIG.get("flownet_work_scale", work_scale),
-            )
-        )
-        weightnet_work_scale = float(
-            params_cfg.get(
-                "weightnet_work_scale",
-                self.DEFAULT_CONFIG.get("weightnet_work_scale", work_scale),
+                "work_scale",
+                params_cfg.get(
+                    "flownet_work_scale",
+                    params_cfg.get(
+                        "weightnet_work_scale", self.DEFAULT_CONFIG["work_scale"]
+                    ),
+                ),
             )
         )
         tile_size = int(
@@ -97,12 +90,9 @@ class FusionNetDenoisingAlgorithm:
         ghost_pen = float(
             params_cfg.get("ghost_penalty", self.DEFAULT_CONFIG["ghost_penalty"])
         )
-        ghost_cut = float(
-            params_cfg.get("ghost_cutoff", self.DEFAULT_CONFIG["ghost_cutoff"])
-        )
-        chroma_sens = float(
+        ghost_pen_min = float(
             params_cfg.get(
-                "chroma_sensitivity", self.DEFAULT_CONFIG["chroma_sensitivity"]
+                "ghost_penalty_min", self.DEFAULT_CONFIG["ghost_penalty_min"]
             )
         )
         is_raw = bool(getattr(ctx, "is_linear_mode", False))
@@ -114,11 +104,13 @@ class FusionNetDenoisingAlgorithm:
         print(
             f"[FusionNet] Starting FlowNet + FusionNet pipeline: "
             f"source={source} frames={len(inputs)} is_raw={is_raw} "
-            f"tile_size={tile_size} flow_scale={flownet_work_scale} weight_scale={weightnet_work_scale}"
+            f"tile_size={tile_size} work_scale={work_scale} "
+            f"ghost_penalty_range=[{ghost_pen_min:.2f}, {ghost_pen:.2f}]"
         )
 
         update_prog = getattr(ctx, "update_progress", None)
         stop_req = getattr(ctx, "stop_requested", None)
+        stop_ev = stop_req
 
         if stop_req is not None:
             if callable(stop_req) and stop_req():
@@ -143,7 +135,10 @@ class FusionNetDenoisingAlgorithm:
             alignment_plan = getattr(ctx, "alignment_selection_name", None) or getattr(
                 ctx, "params", {}
             ).get("alignment_plan", "FlowNet")
-            alignment_config = getattr(ctx, "params", {}).get("alignment_params", {})
+            alignment_config = dict(
+                getattr(ctx, "params", {}).get("alignment_params", {}) or {}
+            )
+            alignment_config.setdefault("work_scale", work_scale)
             batch_queue = int(
                 getattr(ctx, "params", {}).get(
                     "batch_queue", getattr(ctx, "params", {}).get("batch_size", 4)
@@ -157,13 +152,14 @@ class FusionNetDenoisingAlgorithm:
                 alignment_plan=alignment_plan,
                 alignment_config=alignment_config,
                 work_scale=work_scale,
-                flownet_work_scale=flownet_work_scale,
-                weightnet_work_scale=weightnet_work_scale,
+                flownet_work_scale=work_scale,
+                weightnet_work_scale=work_scale,
                 tile_size=tile_size,
                 overlap=overlap,
                 ghost_penalty=ghost_pen,
-                ghost_cutoff=ghost_cut,
-                chroma_sensitivity=chroma_sens,
+                ghost_penalty_min=ghost_pen_min,
+                ghost_cutoff=0.0,
+                chroma_sensitivity=1.0,
                 is_raw=is_raw,
                 storage_mode="direct",
                 batch_queue=batch_queue,
@@ -276,7 +272,9 @@ class FusionNetDenoisingAlgorithm:
             with AOTOpticalFlowAligner(
                 ref_enhanced,
                 work_scale=work_scale,
-                tile_size=16,
+                tile_size=32,
+                smooth=True,
+                adaptive=True,
             ) as aligner:
                 del ref_enhanced
                 gc.collect()
@@ -348,8 +346,8 @@ class FusionNetDenoisingAlgorithm:
                         tile_size=tile_size,
                         overlap=overlap,
                         ghost_penalty=ghost_pen,
-                        ghost_cutoff=ghost_cut,
-                        chroma_sensitivity=chroma_sens,
+                        ghost_cutoff=0.0,
+                        chroma_sensitivity=1.0,
                         stop_event=stop_ev,
                     )
                     alpha_total += alpha_mean

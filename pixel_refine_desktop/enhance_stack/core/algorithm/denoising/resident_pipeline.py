@@ -411,6 +411,16 @@ class BlockMatchingResidentAligner:
         win_size = max(5, int(self.config.get("win_size", 13)))
         if win_size % 2 == 0:
             win_size += 1
+        smooth = self.config.get("smooth", None)
+        if smooth is not None:
+            dense_mode = "smooth" if bool(smooth) else "blocky_clamped"
+            overlap = 0.50 if bool(smooth) else 0.0
+        else:
+            dense_mode = str(self.config.get("dense_mode", "blocky_clamped"))
+            if "overlap" in self.config:
+                overlap = float(self.config["overlap"])
+            else:
+                overlap = 0.50 if dense_mode == "smooth" else 0.0
         return {
             "winSize": (win_size, win_size),
             "maxLevel": max(0, int(self.config.get("max_level", 2))),
@@ -419,10 +429,11 @@ class BlockMatchingResidentAligner:
                 max(1, int(self.config.get("iterations", 1))),
                 float(self.config.get("epsilon", 0.02)),
             ),
-            "grid_step": max(4, int(self.config.get("grid_step", 48))),
+            "grid_step": max(4, int(self.config.get("grid_step", 32))),
             "border_margin": max(0, int(self.config.get("border_margin", 8))),
             "motion_mode": str(self.config.get("motion_mode", "fast")),
-            "dense_mode": "blocky_clamped",
+            "dense_mode": dense_mode,
+            "overlap": overlap,
             "max_flow_px": float(self.config.get("max_flow_px", 48.0)),
             "adaptive": bool(self.config.get("adaptive", False)),
             "adaptive_threshold": max(1, int(self.config.get("adaptive_threshold", 1))),
@@ -496,6 +507,172 @@ class BlockMatchingResidentAligner:
     def close(self):
         # L0 is the same object as ``ref_gray_gpu``; destroy every pyramid
         # level exactly once so the allocator can reuse or retire it safely.
+        for buffer in getattr(self, "reference_pyramid", ()):
+            try:
+                if buffer is not None and hasattr(buffer, "destroy"):
+                    buffer.destroy()
+            except Exception:
+                pass
+        self.reference_pyramid = ()
+        self.ref_gray_gpu = None
+
+
+class LucasKanadeResidentAligner:
+    """Persistent native Lucas-Kanade session for the resident pipeline.
+
+    Provides smooth continuous optical flow using Taichi AOT Lucas-Kanade
+    pyramid tracking with anisotropic dense interpolation, eliminating
+    blocky mosaicing artifacts.
+    """
+
+    def __init__(
+        self,
+        ref_analysis_gpu: TaichiGPUBuffer,
+        *,
+        work_scale: float = 0.50,
+        full_shape: Optional[Tuple[int, int]] = None,
+        alignment_config: Optional[dict] = None,
+    ):
+        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_algorithm.pyramid.pyramid import (
+            build_image_pyramid_gpu,
+        )
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
+            LUCAS_KANADE_GPU_PRESETS,
+        )
+
+        requested = dict(alignment_config or {})
+        mode = str(requested.get("mode", "balance")).strip().lower()
+        if mode in ("balanced", "balance mode", "medium", "normal"):
+            mode = "balance"
+        if mode not in LUCAS_KANADE_GPU_PRESETS:
+            mode = "balance"
+        self.config = dict(LUCAS_KANADE_GPU_PRESETS[mode])
+        self.config.update(requested)
+        self.config["mode"] = mode
+        self.full_h, self.full_w = (
+            (int(full_shape[0]), int(full_shape[1]))
+            if full_shape is not None
+            else tuple(int(v) for v in ref_analysis_gpu.shape[:2])
+        )
+
+        self.ref_gray_gpu = taichi_aot.cvtColor(
+            ref_analysis_gpu, taichi_aot.COLOR_RGB2GRAY
+        )
+        self.work_h, self.work_w = (
+            int(self.ref_gray_gpu.shape[0]), int(self.ref_gray_gpu.shape[1])
+        )
+        levels = max(1, int(self.config.get("max_level", 2)) + 1)
+        self.reference_pyramid = tuple(
+            build_image_pyramid_gpu(
+                self.ref_gray_gpu,
+                n_levels=levels,
+                min_size=32,
+            )
+        )
+        self.ref_gray_gpu = self.reference_pyramid[0]
+        print(
+            "[GPU Pipeline] Aligner: Lucas Kanade GPU "
+            f"(mode={mode}, window={self.config.get('win_size')}, "
+            f"levels={len(self.reference_pyramid)}, resident-reference=true)"
+        )
+
+    def _flow_params(self):
+        win_size = max(5, int(self.config.get("win_size", 17)))
+        if win_size % 2 == 0:
+            win_size += 1
+        smooth = self.config.get("smooth", None)
+        if smooth is not None:
+            dense_mode = "smooth" if bool(smooth) else "blocky_clamped"
+            overlap = 0.50 if bool(smooth) else 0.0
+        else:
+            dense_mode = str(self.config.get("dense_mode", "smooth"))
+            overlap = float(
+                self.config.get("overlap", self.config.get("tile_overlap", 0.50 if dense_mode == "smooth" else 0.0))
+            )
+        return {
+            "winSize": (win_size, win_size),
+            "maxLevel": max(0, int(self.config.get("max_level", 2))),
+            "criteria": (
+                3,
+                max(1, int(self.config.get("iterations", 16))),
+                float(self.config.get("epsilon", 0.015)),
+            ),
+            "grid_step": max(1, int(self.config.get("grid_step", 16))),
+            "border_margin": max(0, int(self.config.get("border_margin", 8))),
+            "overlap": overlap,
+            "motion_mode": str(self.config.get("motion_mode", "fast")),
+            "dense_mode": dense_mode,
+            "max_flow_px": float(self.config.get("max_flow_px", 64.0)),
+            "adaptive": bool(self.config.get("adaptive", False)),
+            "adaptive_threshold": max(1, int(self.config.get("adaptive_threshold", 1))),
+        }
+
+    def align_frame(
+        self,
+        supp_linear_gpu,
+        *,
+        analysis_frame_gpu=None,
+        secondary_frame_to_warp=None,
+        stop_event=None,
+        return_gpu=True,
+    ):
+        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
+
+        if stop_event is not None:
+            if hasattr(stop_event, "is_set") and stop_event.is_set():
+                raise RuntimeError("Lucas Kanade alignment cancelled.")
+            if callable(stop_event) and stop_event():
+                raise RuntimeError("Lucas Kanade alignment cancelled.")
+
+        source = analysis_frame_gpu if analysis_frame_gpu is not None else supp_linear_gpu
+        supp_gray_gpu = taichi_aot.cvtColor(source, taichi_aot.COLOR_RGB2GRAY)
+        flow_gpu = None
+        try:
+            if tuple(supp_gray_gpu.shape[:2]) != (self.work_h, self.work_w):
+                resized = taichi_aot.resize(
+                    supp_gray_gpu,
+                    (self.work_w, self.work_h),
+                    interpolation=taichi_aot.INTER_AREA,
+                    return_gpu=True,
+                )
+                supp_gray_gpu.destroy()
+                supp_gray_gpu = resized
+            flow_gpu = calcOpticalFlowPyrLK(
+                self.ref_gray_gpu,
+                supp_gray_gpu,
+                **self._flow_params(),
+                return_gpu=True,
+                reference_pyramid=self.reference_pyramid,
+            )
+            if isinstance(flow_gpu, tuple):
+                flow_gpu = flow_gpu[0]
+            warped_primary = taichi_aot.remap_with_flow(
+                supp_linear_gpu,
+                flow_gpu,
+                self.full_h,
+                self.full_w,
+                return_gpu=True,
+            )
+            warped_secondary = None
+            if secondary_frame_to_warp is not None:
+                sec_h, sec_w = (int(v) for v in secondary_frame_to_warp.shape[:2])
+                warped_secondary = taichi_aot.remap_with_flow(
+                    secondary_frame_to_warp,
+                    flow_gpu,
+                    sec_h,
+                    sec_w,
+                    return_gpu=True,
+                )
+            return warped_primary, warped_secondary
+        finally:
+            if flow_gpu is not None and hasattr(flow_gpu, "destroy"):
+                flow_gpu.destroy()
+            if supp_gray_gpu is not None and hasattr(supp_gray_gpu, "destroy"):
+                supp_gray_gpu.destroy()
+
+    def close(self):
         for buffer in getattr(self, "reference_pyramid", ()):
             try:
                 if buffer is not None and hasattr(buffer, "destroy"):
@@ -895,21 +1072,44 @@ def create_resident_aligner(
             full_shape=full_shape,
             feature_config=alignment_config,
         )
+    elif "block" in plan_clean or "bm" in plan_clean:
+        print("[GPU Pipeline] Aligner: Block Matching GPU")
+        return BlockMatchingResidentAligner(
+            ref_analysis_gpu,
+            work_scale=work_scale,
+            full_shape=full_shape,
+            alignment_config=alignment_config,
+        )
+    elif "lucas" in plan_clean or "lk" in plan_clean:
+        print("[GPU Pipeline] Aligner: Lucas Kanade GPU")
+        return LucasKanadeResidentAligner(
+            ref_analysis_gpu,
+            work_scale=work_scale,
+            full_shape=full_shape,
+            alignment_config=alignment_config,
+        )
     elif plan_clean in ("sift", "lightglue", "light glue"):
         raise ValueError(
             f"Unsupported resident feature aligner '{alignment_plan}'. "
             "Use OFB/ORB or AKAZE; SIFT and LightGlue were removed from the native path."
         )
     else:
-        print(f"[GPU Pipeline] Aligner: Dense Optical Flow ({plan_clean})")
+        print(f"[GPU Pipeline] Aligner: Dense Optical Flow Adaptive Multi-Tile ({plan_clean})")
         from .fusionet_engine.flownet_inference import AOTOpticalFlowAligner
+
+        smooth = True
+        if alignment_config:
+            if "smooth" in alignment_config:
+                smooth = bool(alignment_config["smooth"])
 
         return AOTOpticalFlowAligner(
             ref_analysis_gpu,
             work_scale=work_scale,
             full_shape=full_shape,
-            tile_size=16,
+            tile_size=32,
             noise_score=noise_score,
+            smooth=smooth,
+            adaptive=True,
         )
 
 
@@ -945,7 +1145,7 @@ def _gpu_blend_frame(sum_img_gpu, weight_sum_gpu, supp_aligned_gpu, weight_work_
     The vec3 kernel performs per-channel bilinear upsample + multiply + accumulate
     entirely on GPU on-the-fly — saving 144 MB VRAM per frame.
     """
-    from taichi_vision.taichi_algorithm.spatial_fusion import (
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi import (
         accumulate_spatial_merging_taichi,
     )
 
@@ -976,6 +1176,7 @@ def run_gpu_resident_pipeline(
     tile_size: int = 512,
     overlap: float = 0.30,
     ghost_penalty: float = 1.0,
+    ghost_penalty_min: Optional[float] = None,
     ghost_cutoff: float = 0.05,
     chroma_sensitivity: float = 6.0,
     is_raw: bool = False,
@@ -1007,7 +1208,8 @@ def run_gpu_resident_pipeline(
         weightnet_work_scale: Downscale factor for WeightNet ONNX inference.
         tile_size: Tile size for weight computation.
         overlap: Tile overlap ratio.
-        ghost_penalty: Ghost artifact suppression exponent.
+        ghost_penalty: Ghost artifact suppression exponent (maximum penalty).
+        ghost_penalty_min: Minimum ghost penalty for high-noise regions.
         ghost_cutoff: Ghost cutoff threshold.
         chroma_sensitivity: Color deviation protection scale.
         is_raw: Whether images are RAW/DNG.
@@ -1034,7 +1236,7 @@ def run_gpu_resident_pipeline(
         infer_single_support_weight_map,
         load_rgb_linear_image,
     )
-    from taichi_vision.taichi_algorithm.spatial_fusion import (
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi import (
         postprocess_spatial_weight_taichi,
     )
 
@@ -1180,25 +1382,32 @@ def run_gpu_resident_pipeline(
         print(f"[GPU Pipeline] Noise estimation note: {e_noise}")
 
     # Noise-Adaptive Ghost Penalty (reuses the single analysis score):
-    # - Score <= 0.50 (low-to-moderate noise): crisp ghost penalty = 2.5
-    # - Score in (0.50, 0.90): smooth cosine transition dropping from 2.5 down to 1.0
-    # - Score >= 0.90 (extreme noise): generous ghost penalty = 1.0
+    # - Score <= 0.50 (low-to-moderate noise): max ghost penalty
+    # - Score in (0.50, 0.90): smooth cosine transition dropping from max down to min
+    # - Score >= 0.90 (extreme noise): min ghost penalty
     try:
         if ref_noise_score is None:
             raise RuntimeError("analysis reference noise score unavailable")
+        max_penalty = float(ghost_penalty)
+        min_penalty = float(
+            ghost_penalty_min if ghost_penalty_min is not None else min(max_penalty, 0.65)
+        )
+        if min_penalty > max_penalty:
+            min_penalty, max_penalty = max_penalty, min_penalty
+
         if ref_noise_score <= 0.50:
-            active_ghost_penalty = 2.5
+            active_ghost_penalty = max_penalty
         elif ref_noise_score < 0.90:
             t = (ref_noise_score - 0.50) / 0.40  # Normalized progress [0, 1]
             factor = 0.5 * (1.0 + np.cos(np.pi * t))  # Cosine ease-in-out
-            active_ghost_penalty = float(1.0 + (2.5 - 1.0) * factor)
+            active_ghost_penalty = float(min_penalty + (max_penalty - min_penalty) * factor)
         else:
-            active_ghost_penalty = 1.0
+            active_ghost_penalty = min_penalty
 
         print(
             f"[GPU Pipeline] Noise-Adaptive Ghost Penalty: score={ref_noise_score:.4f} -> "
             f"penalty={active_ghost_penalty:.2f} (source={noise_estimation_source}, "
-            f"configured base={ghost_penalty})"
+            f"range=[{min_penalty:.2f}, {max_penalty:.2f}])"
         )
         ghost_penalty = active_ghost_penalty
     except Exception as e_noise:
@@ -1226,13 +1435,15 @@ def run_gpu_resident_pipeline(
     spatial_col_starts = []
 
     if weight_engine == "spatial_fusion":
-        from taichi_vision.taichi_algorithm.spatial_fusion import (
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi import (
             SpatialScratchCache,
             generate_spatial_weights_taichi,
-            resolve_spatial_thresholds,
         )
-        from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
             _compute_tile_starts,
+        )
+        from taichi_vision.taichi_algorithm.spatial_fusion import (
+            resolve_spatial_thresholds,
         )
 
         cfg = spatial_config or {}
@@ -1857,6 +2068,10 @@ def run_gpu_resident_pipeline(
                     weight_work_item = np.ascontiguousarray(
                         np.transpose(weight_work_np, (1, 2, 0)), dtype=np.float32
                     )
+                    if weight_work_item.ndim == 3 and weight_work_item.shape[2] == 1:
+                        weight_work_item = np.repeat(weight_work_item, 3, axis=2)
+                    elif weight_work_item.ndim == 2:
+                        weight_work_item = np.repeat(weight_work_item[:, :, None], 3, axis=2)
                     del weight_work_np
 
                 while not _is_stopped():
@@ -2039,6 +2254,10 @@ def run_gpu_resident_pipeline(
                     weight_work_item = np.ascontiguousarray(
                         np.transpose(weight_work_np, (1, 2, 0)), dtype=np.float32
                     )
+                    if weight_work_item.ndim == 3 and weight_work_item.shape[2] == 1:
+                        weight_work_item = np.repeat(weight_work_item, 3, axis=2)
+                    elif weight_work_item.ndim == 2:
+                        weight_work_item = np.repeat(weight_work_item[:, :, None], 3, axis=2)
                     del weight_work_np
 
                 processed_count += 1
@@ -2338,7 +2557,7 @@ def run_gpu_resident_pipeline(
 
     # Normalization with reference fallback
     # Directly passing ref_gpu (already resident in VRAM, 0 overhead!)
-    from taichi_vision.taichi_algorithm.spatial_fusion import (
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi import (
         mean_division_vec3_weight_taichi,
     )
 

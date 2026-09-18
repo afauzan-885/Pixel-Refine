@@ -88,6 +88,12 @@ from ..parameter_alignment.raft_parameter_settings import (
     save_raft_config,
     save_raft_config_for_active_batch,
 )
+from ..parameter_alignment.block_flow_parameter_settings import (
+    PARAMETER_SCHEMA as BLOCK_FLOW_PARAMETER_SCHEMA,
+    load_block_flow_config,
+    save_block_flow_config,
+    save_block_flow_config_for_active_batch,
+)
 from ..parameter_alignment.alignment_config_provider import (
     save_alignment_config_for_active_batch,
 )
@@ -399,10 +405,10 @@ ALIGNMENT_PARAMETER_PROVIDERS = {
         "save_batch": save_lucas_kanade_config_for_active_batch,
     },
     "Block Flow": {
-        "schema": [],
-        "load": lambda: {},
-        "save": lambda cfg: None,
-        "save_batch": lambda cfg: None,
+        "schema": BLOCK_FLOW_PARAMETER_SCHEMA,
+        "load": load_block_flow_config,
+        "save": save_block_flow_config,
+        "save_batch": save_block_flow_config_for_active_batch,
     },
     "Block Matching GPU": {
         "schema": BLOCK_MATCHING_GPU_PARAMETER_SCHEMA,
@@ -714,7 +720,7 @@ class AlignmentParameterPage(QWidget):
             self.controls[key] = (field, form)
             return form
 
-        if field_type == "toggle":
+        if field_type in ("toggle", "checkbox"):
             row_layout, button = toggle(label, bool(value), tooltip=tooltip)
             button.setText("ON" if button.isChecked() else "OFF")
             button.toggled.connect(
@@ -767,7 +773,7 @@ class AlignmentParameterPage(QWidget):
             return control.input.currentText()
         if field_type == "text":
             return control.input.text()
-        if field_type == "toggle":
+        if field_type in ("toggle", "checkbox"):
             return control.isChecked()
         if field_type == "slider":
             return control.value() * float(field.get("scale", 1.0))
@@ -853,7 +859,7 @@ class AlignmentParameterPage(QWidget):
                 control.set_value(str(value))
             elif field["type"] == "text":
                 control.input.setText(str(value))
-            elif field["type"] == "toggle":
+            elif field["type"] in ("toggle", "checkbox"):
                 control.setChecked(bool(value))
                 control.setText("ON" if control.isChecked() else "OFF")
             elif field["type"] == "slider":

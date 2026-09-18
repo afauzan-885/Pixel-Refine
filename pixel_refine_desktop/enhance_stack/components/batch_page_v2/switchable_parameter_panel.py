@@ -110,7 +110,7 @@ class SwitchableParameterPanel(QWidget):
     def _repopulate_alignment_combo(self):
         """Rebuild the alignment combo items based on current backend arch & denoising algorithm.
 
-        For FusionNet: Only offers 'Block Flow' and 'Block Matching GPU'.
+        For FusionNet: Offers each native flow variant plus 'No Alignment'.
         For others: Offers the full list of compatible algorithms.
         """
         from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import get_backend_arch
@@ -128,7 +128,13 @@ class SwitchableParameterPanel(QWidget):
         combo.clear()
 
         if getattr(self, "current_denoising_algo", "") == "FusionNet":
-            fusionet_options = ["Block Flow", "Block Matching GPU"]
+            fusionet_options = [
+                "Block Flow",
+                "Block Matching GPU",
+                "Lucas Kanade",
+                "Farneback",
+                "No Alignment",
+            ]
             for name in fusionet_options:
                 if name not in self.alignment_algorithm_names:
                     # Dynamically add page if not yet present
@@ -567,6 +573,11 @@ class SwitchableParameterPanel(QWidget):
     def _update_styles(self, active_color):
         is_expanded = self.content_wrapper.isVisible()
         compact = self.width() < 380
+        style_key = (is_expanded, compact, str(active_color), self.active_tab)
+        if getattr(self, "_last_style_key", None) == style_key:
+            return
+        self._last_style_key = style_key
+
         panel_bg = COLOR_BACKGROUND
         soft_border = "#DDE5EC"
         selection_bg = "#EAF2F8"
