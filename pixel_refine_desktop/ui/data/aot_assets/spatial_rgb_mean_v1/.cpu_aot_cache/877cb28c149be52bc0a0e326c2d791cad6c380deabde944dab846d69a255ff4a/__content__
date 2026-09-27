@@ -1,0 +1,13 @@
+cgraph:precompute_gradients
+cgraph:precompute_gradients_pair
+cgraph:clear_f32_2d
+cgraph:spatial_streaming_gradient_v1
+cgraph:equalize_brightness
+cgraph:phase1_coarse_analysis
+cgraph:phase2_fine_analysis
+cgraph:generate_fine_weights_4passes
+cgraph:generate_spatial_weights_compact_v1
+cgraph:generate_spatial_weights_compact_rgb_mean_v1
+cgraph:postprocess_spatial_weight
+cgraph:mean_division_vec3_weight
+cgraph:mean_division_vec3_scalar_weight
