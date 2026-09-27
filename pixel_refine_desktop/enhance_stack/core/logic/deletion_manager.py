@@ -89,6 +89,9 @@ class DeletionManager(QObject):
     deletion_finished = Signal(int)
     deletion_error = Signal(str)
 
+    # Jeda antar kartu terlihat agar efek domino tetap terbaca user.
+    VISIBLE_FADE_STEP_MS = 100
+
     def __init__(self, display_panel):
         super().__init__()
         self.panel = display_panel
@@ -149,18 +152,31 @@ class DeletionManager(QObject):
 
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
+    def _untrack_card(self, card_id, card_widget):
+        """Drop one card from the grid bookkeeping before it is destroyed."""
+        if hasattr(self.panel.grid_container, "_stored_widgets"):
+            if card_widget in self.panel.grid_container._stored_widgets:
+                self.panel.grid_container._stored_widgets.remove(card_widget)
+
+        self.panel.drop_card(card_id)
+        self.panel.logic.unregister_grid_item(card_id)
+
+    def _decrement_count(self):
+        self.panel.total_image_count -= 1
+        if self.panel.total_image_count < 0:
+            self.panel.total_image_count = 0
+
     def _process_one_item(self):
         """
-        Mengambil 1 item dari antrean UI dan memprosesnya.
+        Kosongkan antrean removal UI.
+
+        The whole queue is drained in this tick.  Previously one card was
+        handled per 5-100 ms tick, so deleting a few hundred images chained
+        hundreds of timer ticks before the grid was rebuilt.  Visible cards
+        still fade one after another - their animations are simply scheduled
+        ``VISIBLE_FADE_STEP_MS`` apart instead of driving the timer chain.
         """
         if not self.removal_queue:
-            return
-
-        card_id, card_widget = self.removal_queue.pop(0)
-
-        # Safety Check: Widget mati? Skip instan.
-        if not is_widget_alive(card_widget):
-            self.ui_removal_timer.start(0)
             return
 
         current_batch_id = self.panel.current_batch_id
@@ -169,64 +185,63 @@ class DeletionManager(QObject):
             return
 
         next_delay = 0
+        removed_any = False
+        visible_index = 0
 
-        try:
-            # --- Hapus Data Logis UI ---
-            if hasattr(self.panel.grid_container, "_stored_widgets"):
-                if card_widget in self.panel.grid_container._stored_widgets:
-                    self.panel.grid_container._stored_widgets.remove(card_widget)
+        while self.removal_queue:
+            card_id, card_widget = self.removal_queue.pop(0)
 
-            if card_id in self.panel.all_cards:
-                del self.panel.all_cards[card_id]
+            # Safety Check: Widget mati? Skip instan.
+            if not is_widget_alive(card_widget):
+                continue
 
-            self.panel.logic.unregister_grid_item(card_id)
+            try:
+                self._untrack_card(card_id, card_widget)
 
-            # --- Logika Visual (Domino Effect) ---
-            is_visible = self._is_widget_in_viewport(card_widget)
+                # --- Logika Visual (Domino Effect) ---
+                if self._is_widget_in_viewport(card_widget):
+                    # KASUS A: Visible -> Fade Out, dijadwalkan berurutan
+                    if visible_index == 0:
+                        self._lite_fade_out(
+                            widget=card_widget,
+                            duration=250,
+                            callback=card_widget.deleteLater,
+                        )
+                    else:
+                        delay = visible_index * self.VISIBLE_FADE_STEP_MS
+                        QTimer.singleShot(
+                            delay,
+                            lambda w=card_widget: self._lite_fade_out(
+                                widget=w, duration=250, callback=w.deleteLater
+                            ),
+                        )
+                    visible_index += 1
+                else:
+                    # KASUS B: Off-Screen -> Hapus Instan
+                    card_widget.hide()
+                    card_widget.deleteLater()
 
-            if is_visible:
-                # KASUS A: Visible -> Animasi Fade Out
-                self._lite_fade_out(
-                    widget=card_widget, duration=250, callback=card_widget.deleteLater
-                )
+                self._decrement_count()
+                removed_any = True
 
-                # --- PACING LOGIC ---
-                # Default 100ms agar terlihat satu per satu.
-                next_delay = 100
+            except Exception as e:
+                print(f"Error vanishing: {e}")
+                next_delay = 10
+                break
 
-                # CATCH-UP LOGIC:
-                # Karena DB sekarang ngebut (chunk 50), antrean UI akan cepat penuh.
-                # Jika antrean menumpuk > 100 item, kita percepat sedikit (30ms)
-                # agar user tidak menunggu animasi selesai terlalu lama,
-                # tapi tetap mempertahankan efek urutan.
-                q_len = len(self.removal_queue)
-                if q_len > 100:
-                    next_delay = 20
-                elif q_len > 50:
-                    next_delay = 50
-
-            else:
-                # KASUS B: Off-Screen -> Hapus Instan
-                card_widget.hide()
-                card_widget.deleteLater()
-                next_delay = 5
-
+        if removed_any:
             # Update Header Count
-            self.panel.total_image_count -= 1
-            if self.panel.total_image_count < 0:
-                self.panel.total_image_count = 0
             self.panel._update_header_title()
 
-        except Exception as e:
-            print(f"Error vanishing: {e}")
-            next_delay = 10
-
-        # --- JADWALKAN ITEM BERIKUTNYA ---
+        # --- JADWALKAN SISA / REBUILD ---
         if self.removal_queue:
             self.ui_removal_timer.start(next_delay)
         else:
-            # Rebuild grid jika antrean habis
-            QTimer.singleShot(300, self.panel.grid_container._rebuild_grid)
+            # Rebuild setelah fade terakhir selesai
+            fade_tail_ms = max(0, (visible_index - 1)) * self.VISIBLE_FADE_STEP_MS
+            QTimer.singleShot(
+                fade_tail_ms + 300, self.panel.grid_container._rebuild_grid
+            )
 
     def request_deletion(self, selected_ids):
         """Request deletion of selected images with confirmation."""

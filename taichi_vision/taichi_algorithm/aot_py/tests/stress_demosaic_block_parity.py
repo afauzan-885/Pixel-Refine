@@ -48,8 +48,13 @@ def main(argv: list[str] | None = None) -> int:
     from taichi_vision.taichi_aot import engine
 
     method = str(args.method).strip().lower()
-    if method not in {"dcb", "hamilton", "bilinear"}:
-        raise SystemExit("Supported methods: dcb, hamilton, bilinear")
+    # Every demosaic family that ships a block path must be parity-checked here;
+    # ARM and MLRI were previously unreachable from this probe even though their
+    # kernels are covered by the same full-frame-versus-block contract.  These
+    # are the canonical selectors ``aot_api.demosaic`` dispatches on, so MLRI is
+    # ``mlri-admm`` even though the standalone entry point is ``mlri_admm``.
+    if method not in {"dcb", "hamilton", "bilinear", "arm", "mlri-admm"}:
+        raise SystemExit("Supported methods: dcb, hamilton, bilinear, arm, mlri-admm")
 
     cmatrix = np.eye(3, dtype=np.float32)
     results = []

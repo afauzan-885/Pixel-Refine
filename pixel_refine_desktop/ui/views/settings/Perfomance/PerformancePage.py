@@ -30,6 +30,10 @@ from pixel_refine_desktop.ui.views.settings.General.GeneralSetting import (
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from resources.GenericUILibrary.modals import modal_confirm
 from pixel_refine_desktop.ui.views.settings.General.helpers import restart_application
+from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
+    PREFETCH_SETTING_KEY,
+    normalize_prefetch_depth,
+)
 
 
 class PerformanceSettingsPage(GeneralSettingsPage):
@@ -71,8 +75,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         split_layout.addWidget(self.performance_left, 1)
         split_layout.addWidget(self.performance_right, 1)
 
-        hardware_backends = self._scan_hardware_backend_options()
-        self._migrate_saved_backend_option(hardware_backends)
+        hardware_backends = self._prepare_backend_options()
 
         left_form = FormRow()
         right_form = FormRow()
@@ -116,6 +119,18 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         left_form.form_layout.setAlignment(self.test_btn, Qt.AlignmentFlag.AlignCenter)
         self._update_test_button_width()
         self.test_btn.setVisible(False)
+
+        self.retry_btn = Button(
+            getattr(language_config, "BTN_RETRY_GPU_DETECTION", "Retry GPU Detection"),
+            variant="secondary",
+        )
+        self.retry_btn.setMinimumHeight(35)
+        self.retry_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.retry_btn.clicked.connect(self._on_retry_gpu_detection_clicked)
+        left_form.add_row(self.retry_btn)
+        left_form.form_layout.setAlignment(
+            self.retry_btn, Qt.AlignmentFlag.AlignCenter
+        )
 
         auto_fb_label = getattr(language_config, "LBL_AUTO_FALLBACK", "Auto Fallback")
         auto_fb_tip = getattr(
@@ -166,6 +181,33 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.compute_block_size_group.bind_store(self.store, "compute_block_size")
         self.compute_block_size_group.setVisible(False)
 
+        prefetch_label = getattr(
+            language_config, "LBL_PIPELINE_PREFETCH", "Host Frame Prefetch"
+        )
+        prefetch_tip = getattr(
+            language_config,
+            "PIPELINE_PREFETCH_TIP",
+            "Number of decoded support frames allowed to wait in host RAM. "
+            "0 disables prefetch; 1-4 bounds the host queue. Higher values can "
+            "increase RAM use. Frames are not prefetched to GPU memory.",
+        )
+        self.pipeline_prefetch_group = FormGroup(
+            label=prefetch_label, input_type="number", auto_sync=False
+        )
+        self.pipeline_prefetch_group.input.setRange(0, 4)
+        self.pipeline_prefetch_group.input.setSingleStep(1)
+        self.pipeline_prefetch_group.input.setToolTip(prefetch_tip)
+        self.pipeline_prefetch_group.setToolTip(prefetch_tip)
+        saved_prefetch = self.store.get(PREFETCH_SETTING_KEY, 0)
+        effective_prefetch = normalize_prefetch_depth(saved_prefetch)
+        if saved_prefetch != effective_prefetch:
+            self.store.set(PREFETCH_SETTING_KEY, effective_prefetch)
+        self.pipeline_prefetch_group.input.setValue(effective_prefetch)
+        self.pipeline_prefetch_group.input.valueChanged.connect(
+            self._on_pipeline_prefetch_changed
+        )
+        right_form.add_row(self.pipeline_prefetch_group)
+
         onnx_label = getattr(language_config, "LBL_ONNX_RUNTIME", "ONNX Runtime")
         self.onnx_runtime_group = FormGroup(
             label=onnx_label, input_type="select", auto_sync=False
@@ -191,6 +233,9 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.performance_right.add_stretch()
         self._update_block_processing_controls()
         self.update_device_dropdown_style()
+        self._flag_unavailable_backend_option()
+        self._connect_gpu_watch_signals()
+        self._update_retry_button_visibility()
 
         self.add_widget(self.performance_container, stretch=1)
         QTimer.singleShot(0, self._compact_performance_inputs)
@@ -623,7 +668,23 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         if value in ("auto", "dml", "cpu"):
             self.store.set("onnx_runtime", value)
 
+    def _on_pipeline_prefetch_changed(self, value: int):
+        self.store.set(PREFETCH_SETTING_KEY, normalize_prefetch_depth(value))
+
     def _on_performance_store_changed(self, key, _value):
+        if key is None or key == PREFETCH_SETTING_KEY:
+            group = getattr(self, "pipeline_prefetch_group", None)
+            if group is not None:
+                raw_value = self.store.get(PREFETCH_SETTING_KEY, 0)
+                depth = normalize_prefetch_depth(raw_value)
+                if raw_value != depth:
+                    self.store.set(PREFETCH_SETTING_KEY, depth)
+                    return
+                spinbox = group.input
+                if spinbox.value() != depth:
+                    spinbox.blockSignals(True)
+                    spinbox.setValue(depth)
+                    spinbox.blockSignals(False)
         if key is None or key == "compute_block_mode":
             mode_text = self._block_mode_text(
                 self.store.get("compute_block_mode", "auto")
@@ -654,6 +715,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         inputs = (
             getattr(getattr(self, "device_group", None), "input", None),
             getattr(getattr(self, "compute_block_size_group", None), "input", None),
+            getattr(getattr(self, "pipeline_prefetch_group", None), "input", None),
             getattr(
                 getattr(self, "compute_block_threshold_group", None), "input", None
             ),
@@ -764,37 +826,348 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         if hasattr(self.store, "save_to_file"):
             self.store.save_to_file()
 
+    def _prepare_backend_options(self):
+        """Return the dropdown options while preserving an undetected GPU.
+
+        A failed or incomplete enumeration must not be read as "the saved GPU is
+        gone".  It used to be: the option list collapsed to CPU, the migration
+        rewrote the persisted preference to CPU, and the user had to select the
+        GPU again by hand once the scan succeeded once more.
+        """
+        options = self._scan_hardware_backend_options()
+        self._unavailable_saved_backend = self._detect_unavailable_saved_backend(
+            options
+        )
+        if self._unavailable_saved_backend is None:
+            self._migrate_saved_backend_option(options)
+            return options
+        self._log_unavailable_saved_backend(self._unavailable_saved_backend)
+        return [*options, self._unavailable_saved_backend]
+
+    def _connect_gpu_watch_signals(self):
+        """Listen for the background GPU watch, without persisting any state."""
+        try:
+            from pixel_refine_desktop.app_core.gpu_watch import signals
+
+            watch_signals = signals()
+            watch_signals.device_available.connect(self._on_gpu_device_available)
+            watch_signals.watch_finished.connect(self._on_gpu_watch_finished)
+            watch_signals.backend_switch_finished.connect(
+                self._on_worker_backend_switch_finished
+            )
+        except Exception as exc:
+            print(f"[PerformanceSettingsPage] GPU watch signals unavailable: {exc}")
+
+    def _update_retry_button_visibility(self):
+        """Offer the manual retry only while the saved GPU is missing."""
+        if not hasattr(self, "retry_btn"):
+            return
+        self.retry_btn.setVisible(
+            getattr(self, "_unavailable_saved_backend", None) is not None
+        )
+
+    def refresh_backend_availability(self):
+        """Rebuild the device list after the GPU became reachable again.
+
+        Reuses the same scan/migrate/restore path as startup, so there is one
+        implementation of the preference rules.  The scan is a cache hit right
+        after a successful probe, so this stays cheap on the GUI thread.
+        """
+        combo = getattr(getattr(self, "device_group", None), "input", None)
+        if not isinstance(combo, QComboBox):
+            return
+        options = self._prepare_backend_options()
+        combo.blockSignals(True)
+        combo.clear()
+        for option in options:
+            combo.addItem(option["text"], option)
+        combo.blockSignals(False)
+        self._restore_saved_backend_selection(options)
+        self.update_device_dropdown_style()
+        self._flag_unavailable_backend_option()
+        self._update_retry_button_visibility()
+        if self._unavailable_saved_backend is None:
+            self._apply_selected_backend_to_process()
+
+    def _current_backend_worker_config(self, backend_text=None):
+        """Backend contract for the isolated worker, built from the store."""
+        return {
+            "arch": self.store.get(
+                "device_backend_arch", os.environ.get("AOT_ARCH", "cpu")
+            ),
+            "device_id": self.store.get(
+                "device_backend_id", os.environ.get("AOT_DEVICE", "0")
+            ),
+            "vendor": self.store.get(
+                "device_vendor", os.environ.get("TARGET_VENDOR", "")
+            ),
+            "backend_text": backend_text
+            if backend_text is not None
+            else self.store.get("device_backend", "CPU (Universal)"),
+            "auto_fallback": bool(self.store.get("auto_fallback", True)),
+            "onnx_runtime": self.store.get("onnx_runtime", "auto"),
+        }
+
+    def _on_gpu_device_available(self, _device):
+        """The saved GPU reappeared: refresh the list and hand work back to it."""
+        # Repopulating the list makes the saved option selectable again and
+        # re-applies the persisted backend to this process.
+        self.refresh_backend_availability()
+        if getattr(self, "_unavailable_saved_backend", None) is not None:
+            return
+        # Batches can move to the GPU right away; switches are deferred while a
+        # task is running so an active job is never terminated.
+        from pixel_refine_desktop.app_core.gpu_watch import (
+            switch_worker_backend_when_idle,
+        )
+
+        switch_worker_backend_when_idle(self._current_backend_worker_config())
+
+    def _on_gpu_watch_finished(self, result):
+        """Re-enable the manual retry; report a failed attempt honestly."""
+        if hasattr(self, "retry_btn"):
+            self.retry_btn.setEnabled(True)
+            self.retry_btn.setText(
+                getattr(
+                    language_config, "BTN_RETRY_GPU_DETECTION", "Retry GPU Detection"
+                )
+            )
+        if not isinstance(result, dict) or result.get("found"):
+            return
+        if not getattr(self, "_manual_gpu_retry", False):
+            return
+        self._manual_gpu_retry = False
+        try:
+            from resources.GenericUILibrary import Toast
+
+            Toast(
+                getattr(
+                    language_config,
+                    "MSG_GPU_NOT_DETECTED_YET",
+                    "GPU belum terdeteksi. Pilihan Anda tetap tersimpan dan akan "
+                    "dipakai begitu perangkat tersedia.",
+                ),
+                variant="secondary",
+                parent=self.window(),
+            ).show_toast(duration=4000)
+        except Exception:
+            pass
+
+    def _on_worker_backend_switch_finished(self, switched, config):
+        """Report the worker move and offer the restart the main runtime needs."""
+        try:
+            from resources.GenericUILibrary import Toast
+
+            if switched:
+                Toast(
+                    getattr(
+                        language_config,
+                        "MSG_GPU_WORKER_READY",
+                        "GPU terdeteksi: pemrosesan batch sudah memakai GPU. "
+                        "Restart aplikasi agar pratinjau ikut memakai GPU.",
+                    ),
+                    variant="success",
+                    parent=self.window(),
+                ).show_toast(duration=6000)
+                self._offer_restart_for_gpu(config)
+            else:
+                Toast(
+                    getattr(
+                        language_config,
+                        "MSG_GPU_WORKER_SWITCH_FAILED",
+                        "GPU terdeteksi tetapi pemrosesan belum dapat dipindah ke GPU "
+                        "saat ini.",
+                    ),
+                    variant="secondary",
+                    parent=self.window(),
+                ).show_toast(duration=5000)
+        except Exception as exc:
+            print(f"[PerformanceSettingsPage] GPU recovery notification error: {exc}")
+
+    def _offer_restart_for_gpu(self, config):
+        """Ask before restarting: never restart the application automatically."""
+        try:
+            from resources.GenericUILibrary.modals import modal_confirm
+
+            dialog = modal_confirm(
+                getattr(
+                    language_config,
+                    "MSG_RESTART_FOR_GPU",
+                    "Restart aplikasi sekarang agar pratinjau dan pipeline utama "
+                    "juga memakai GPU?",
+                ),
+                self.window(),
+            )
+            dialog.title_text.setText(
+                getattr(
+                    language_config,
+                    "MSG_RESTART_FOR_GPU_TITLE",
+                    "GPU Siap Digunakan",
+                )
+            )
+            dialog.yes_button.setText(
+                getattr(language_config, "EXIT_APPLICATION_YES", "Yes")
+            )
+            dialog.no_button.setText(
+                getattr(language_config, "EXIT_APPLICATION_NO", "No")
+            )
+            if dialog.exec() == dialog.DialogCode.Accepted:
+                restart_application()
+        except Exception as exc:
+            print(f"[PerformanceSettingsPage] Restart offer failed: {exc}")
+
+    def _on_retry_gpu_detection_clicked(self):
+        """Manual re-detection; the probe itself runs off the GUI thread."""
+        from pixel_refine_desktop.app_core.gpu_watch import probe_saved_gpu_once
+
+        self._manual_gpu_retry = True
+        if hasattr(self, "retry_btn"):
+            self.retry_btn.setEnabled(False)
+            self.retry_btn.setText(
+                getattr(language_config, "LBL_CHECKING_GPU", "Checking GPU...")
+            )
+        if not probe_saved_gpu_once(parent=self.window()):
+            self._manual_gpu_retry = False
+            if hasattr(self, "retry_btn"):
+                self.retry_btn.setEnabled(True)
+                self.retry_btn.setText(
+                    getattr(
+                        language_config,
+                        "BTN_RETRY_GPU_DETECTION",
+                        "Retry GPU Detection",
+                    )
+                )
+
+    def _saved_backend_identity(self):
+        """Return the persisted backend preference used for option matching."""
+        selector = self.store.get("device_selector", {})
+        selector = selector if isinstance(selector, dict) else {}
+        return {
+            "key": str(self.store.get("device_backend_key", "") or ""),
+            "text": str(self.store.get("device_backend", "") or ""),
+            "vendor": str(selector.get("vendor", "")).lower(),
+            "name": str(selector.get("name", "")).lower(),
+            "arch": str(self.store.get("device_backend_arch", "") or "").lower(),
+        }
+
+    @staticmethod
+    def _saved_backend_matches(saved, option):
+        """Whether a scanned option is the device the preference points at."""
+        if saved.get("key") and option.get("key") == saved["key"]:
+            return True
+        if saved.get("text") and option.get("text") == saved["text"]:
+            return True
+        vendor = saved.get("vendor")
+        if vendor and vendor != "unknown" and option.get("vendor") == vendor:
+            return True
+        name = saved.get("name")
+        if name and name in str(option.get("raw_name", "")).lower():
+            return True
+        return False
+
+    def _detect_unavailable_saved_backend(self, options):
+        """Build a placeholder for a saved GPU the current scan did not see.
+
+        Returns ``None`` when the preference is CPU (always available) or when
+        the scanned options already contain the saved device.  The placeholder
+        keeps the saved identity selectable so a transient enumeration failure
+        can never silently replace the user's GPU choice with CPU.
+        """
+        saved = self._saved_backend_identity()
+        if not saved["key"] and not saved["text"]:
+            return None
+        if saved["arch"] in ("", "cpu") and saved["vendor"] in ("", "cpu", "unknown"):
+            return None
+        if any(
+            self._saved_backend_matches(saved, option) for option in options if option
+        ):
+            return None
+
+        label = saved["text"] or saved["name"] or saved["key"]
+        placeholder = {
+            "key": saved["key"] or f"{saved['vendor']}|unavailable",
+            "text": label,
+            "device_type": "unavailable",
+            "backend": saved["arch"] or "cpu",
+            "device_id": self.store.get("device_backend_id", -1),
+            "vendor": saved["vendor"] or "unknown",
+            "raw_name": label,
+            "fallback_chain": self.store.get("device_fallback_chain", ["cpu"]),
+            "not_detected": True,
+        }
+        selector = self.store.get("device_selector", {})
+        if isinstance(selector, dict):
+            placeholder["device_selector"] = selector
+        return placeholder
+
+    def _log_unavailable_saved_backend(self, placeholder):
+        """Record why the saved GPU is missing so the cause is diagnosable."""
+        reason = self._hardware_scan_failure_summary()
+        print(
+            f"[Hardware Scan] Saved device '{placeholder.get('text')}' was not "
+            f"detected in this launch"
+            + (f" ({reason})" if reason else "")
+            + ". Keeping the saved preference."
+        )
+
+    def _hardware_scan_failure_summary(self):
+        failures = getattr(self, "_hardware_scan_failures", None) or []
+        return "; ".join(
+            f"{backend}: {type(error).__name__}: {error}"
+            for backend, error in failures
+        )
+
+    def _flag_unavailable_backend_option(self):
+        """Explain, in the dropdown itself, that the saved GPU is absent.
+
+        Runs after the combo items and their test-status styling exist, so the
+        marker is not cleared by ``update_device_dropdown_style``.
+        """
+        placeholder = getattr(self, "_unavailable_saved_backend", None)
+        combo = getattr(getattr(self, "device_group", None), "input", None)
+        if placeholder is None or not isinstance(combo, QComboBox):
+            return
+
+        reason = self._hardware_scan_failure_summary()
+        combo.setToolTip(
+            getattr(
+                language_config,
+                "DEVICE_ACCELERATION_TIP",
+                "Select the hardware acceleration device used for image processing.",
+            )
+            + "\n\n"
+            + (
+                f"'{placeholder.get('text')}' was not detected in this launch. "
+                "The saved choice is preserved and is used again once the device "
+                "is available."
+                + (f"\n{reason}" if reason else "")
+            )
+        )
+
+        model = combo.model()
+        if model is None or not hasattr(model, "item"):
+            return
+        from PySide6.QtGui import QBrush, QColor
+
+        for index in range(combo.count()):
+            if combo.itemData(index) is placeholder:
+                item = model.item(index)
+                if item is not None:
+                    item.setBackground(QBrush(QColor(220, 53, 69, 38)))
+                    item.setForeground(QBrush(QColor(220, 53, 69, 150)))
+
     def _restore_saved_backend_selection(self, options):
         """Select the persisted physical hardware option."""
         if not isinstance(getattr(self.device_group, "input", None), QComboBox):
             return
-        saved_key = str(self.store.get("device_backend_key", "") or "")
-        saved_text = str(self.store.get("device_backend", "") or "")
-        selector = self.store.get("device_selector", {})
-        saved_vendor = str(
-            selector.get("vendor", "") if isinstance(selector, dict) else ""
-        ).lower()
-        saved_name = str(
-            selector.get("name", "") if isinstance(selector, dict) else ""
-        ).lower()
-
-        def matches(option):
-            if saved_key and option.get("key") == saved_key:
-                return True
-            if option.get("text") == saved_text:
-                return True
-            if (
-                saved_vendor
-                and option.get("vendor") == saved_vendor
-                and saved_vendor != "unknown"
-            ):
-                return True
-            if saved_name and saved_name in str(option.get("raw_name", "")).lower():
-                return True
-            return False
+        saved = self._saved_backend_identity()
 
         selected = next(
-            (option for option in options if matches(option)),
+            (
+                option
+                for option in options
+                if self._saved_backend_matches(saved, option)
+            ),
             options[0] if options else None,
         )
         if selected is None:
@@ -878,6 +1251,12 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         )
         self.test_btn.setText(language_config.BTN_TEST_BACKEND_HARDWARE)
         self.test_btn.setVisible(False)
+        if hasattr(self, "retry_btn"):
+            self.retry_btn.setText(
+                getattr(
+                    language_config, "BTN_RETRY_GPU_DETECTION", "Retry GPU Detection"
+                )
+            )
         self.compute_block_mode_group.setVisible(False)
         self.compute_block_threshold_group.setVisible(False)
         self.compute_block_size_group.setVisible(False)
@@ -886,6 +1265,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         )
         self.update_theme()
         self.update_device_dropdown_style()
+        self._flag_unavailable_backend_option()
         self._update_test_button_width()
 
     def update_theme(self):
@@ -926,7 +1306,13 @@ class PerformanceSettingsPage(GeneralSettingsPage):
 
     def _on_apply_clicked(self):
         selected_backend_text = self.device_group.input.currentText()
-        backend_changed = selected_backend_text != self._initial_device_backend
+        selected_option = self._get_selected_backend_option() or {}
+        # A not-detected entry only preserves the stored preference: there is no
+        # reachable device to switch the worker to and no restart is required.
+        device_reachable = not selected_option.get("not_detected")
+        backend_changed = device_reachable and (
+            selected_backend_text != self._initial_device_backend
+        )
         self._apply_selected_backend_to_process()
         if hasattr(self.store, "save_to_file"):
             self.store.save_to_file()
@@ -937,23 +1323,13 @@ class PerformanceSettingsPage(GeneralSettingsPage):
                 BackendWorkerManager,
             )
 
-            backend_config = {
-                "arch": self.store.get(
-                    "device_backend_arch", os.environ.get("AOT_ARCH", "cpu")
-                ),
-                "device_id": self.store.get(
-                    "device_backend_id", os.environ.get("AOT_DEVICE", "0")
-                ),
-                "vendor": self.store.get(
-                    "device_vendor", os.environ.get("TARGET_VENDOR", "")
-                ),
-                "backend_text": selected_backend_text,
-                "auto_fallback": bool(self.store.get("auto_fallback", True)),
-                "onnx_runtime": self.store.get("onnx_runtime", "auto"),
-            }
-            BackendWorkerManager.instance().switch_backend(
-                backend_config, force_restart=backend_changed
+            backend_config = self._current_backend_worker_config(
+                selected_backend_text
             )
+            if device_reachable:
+                BackendWorkerManager.instance().switch_backend(
+                    backend_config, force_restart=backend_changed
+                )
         except Exception as exc:
             print(
                 f"[PerformanceSettingsPage] Realtime worker backend switch error: {exc}"

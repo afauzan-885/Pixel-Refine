@@ -97,7 +97,10 @@ class ImageLoaderThread(QThread):
     Support untuk JPEG, PNG, TIFF, RAW formats.
     """
 
-    image_loaded = Signal(QPixmap, str)  # (pixmap, image_path)
+    # (q_image, image_path).  QImage is a value type and is safe to produce on a
+    # worker thread; QPixmap is a GUI-thread object, so the receiving slots
+    # convert it with QPixmap.fromImage().
+    image_loaded = Signal(QImage, str)  # (q_image, image_path)
     error_occurred = Signal(str)  # error_message
 
     def __init__(
@@ -146,10 +149,10 @@ class ImageLoaderThread(QThread):
                     print(
                         f"[ComparisonCache] Thread loading from cache (Batch {self.batch_id}): {self.image_path}"
                     )
-                    pixmap = QPixmap(cached_file)
+                    pixmap = QImage(cached_file)
                     if not pixmap.isNull():
                         if self.max_width or self.max_height:
-                            pixmap = self._resize_pixmap(pixmap)
+                            pixmap = self._resize_image(pixmap)
                         self.image_loaded.emit(pixmap, self.image_path)
                         return
 
@@ -168,8 +171,8 @@ class ImageLoaderThread(QThread):
                     self.batch_id, self.image_path, image_array
                 )
 
-            # Convert to QPixmap
-            pixmap = self._array_to_pixmap(image_array)
+            # Convert to QImage (QPixmap conversion happens on the GUI thread)
+            pixmap = self._array_to_image(image_array)
 
             if pixmap is None or pixmap.isNull():
                 self.error_occurred.emit(f"Failed to convert image to pixmap")
@@ -177,7 +180,7 @@ class ImageLoaderThread(QThread):
 
             # Resize jika diperlukan (untuk large images)
             if self.max_width or self.max_height:
-                pixmap = self._resize_pixmap(pixmap)
+                pixmap = self._resize_image(pixmap)
 
             self.image_loaded.emit(pixmap, self.image_path)
 
@@ -229,8 +232,13 @@ class ImageLoaderThread(QThread):
 
         return image_array
 
-    def _array_to_pixmap(self, image_array):
-        """Convert numpy array ke QPixmap."""
+    def _array_to_image(self, image_array):
+        """Convert numpy array ke QImage.
+
+        Safe to call from a worker thread: QImage is a value type.  The result
+        owns its buffer (``copy()``) because the source array is a local that
+        would otherwise be freed before the queued slot consumes the image.
+        """
         try:
             if image_array is None or image_array.size == 0:
                 return None
@@ -266,28 +274,34 @@ class ImageLoaderThread(QThread):
             else:
                 return None
 
-            pixmap = QPixmap.fromImage(q_image)
-            return pixmap
+            return q_image.copy()
 
         except Exception as e:
-            print(f"Error converting array to pixmap: {e}")
+            print(f"Error converting array to image: {e}")
             return None
 
-    def _resize_pixmap(self, pixmap):
-        """Resize pixmap jika terlalu besar."""
-        width = pixmap.width()
-        height = pixmap.height()
+    def _array_to_pixmap(self, image_array):
+        """Convert numpy array ke QPixmap (GUI thread only)."""
+        q_image = self._array_to_image(image_array)
+        if q_image is None:
+            return None
+        return QPixmap.fromImage(q_image)
+
+    def _resize_image(self, q_image):
+        """Resize QImage jika terlalu besar (worker-thread safe)."""
+        width = q_image.width()
+        height = q_image.height()
 
         max_w = self.max_width or width
         max_h = self.max_height or height
 
         if width > max_w or height > max_h:
             # Maintain aspect ratio
-            pixmap = pixmap.scaledToWidth(
+            q_image = q_image.scaledToWidth(
                 max_w, Qt.TransformationMode.SmoothTransformation
             )
 
-        return pixmap
+        return q_image
 
 
 def setup_zoomable_preview(
@@ -308,8 +322,14 @@ def setup_zoomable_preview(
     zoomable_widget.scene().clear()
 
     # Create loader thread
-    def on_image_loaded(pixmap, path):
-        if pixmap is None or pixmap.isNull():
+    def on_image_loaded(q_image, path):
+        if q_image is None or q_image.isNull():
+            return
+
+        # The loader emits a QImage (worker-safe); QPixmap is created here on the
+        # GUI thread.
+        pixmap = QPixmap.fromImage(q_image)
+        if pixmap.isNull():
             return
 
         # Add pixmap ke scene
@@ -353,7 +373,7 @@ def setup_zoomable_preview(
         max_height=max_h,
         is_reference=is_reference,
         batch_id=batch_id,
-        half_res=False,
+        half_res=half_res,
     )
     loader.image_loaded.connect(on_image_loaded)
     loader.error_occurred.connect(on_error)
@@ -388,7 +408,12 @@ def display_image_in_zoomable(
 
 
 def load_and_display_image(
-    image_path, max_width=None, max_height=None, is_reference=False, batch_id=None
+    image_path,
+    max_width=None,
+    max_height=None,
+    is_reference=False,
+    batch_id=None,
+    raw_presentation="natural",
 ):
     """
     Load dan return QPixmap dari image path.
@@ -401,6 +426,7 @@ def load_and_display_image(
         max_height: Max height untuk resize
         is_reference: Jika True, gunakan/update comparison cache
         batch_id: ID batch untuk caching referensi
+        raw_presentation: Presentation curve untuk RAW ("natural" atau "autoenhance")
     """
     try:
         if not os.path.exists(image_path):
@@ -419,7 +445,11 @@ def load_and_display_image(
                 pixmap = QPixmap(cached_file)
                 if not pixmap.isNull():
                     # Resize if needed
-                    if pixmap.width() > max_width or pixmap.height() > max_height:
+                    if (
+                        max_width is not None
+                        and max_height is not None
+                        and (pixmap.width() > max_width or pixmap.height() > max_height)
+                    ):
                         pixmap = pixmap.scaled(
                             max_width,
                             max_height,
@@ -449,7 +479,9 @@ def load_and_display_image(
             from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
                 load_raw_as_8bit_rgb,
             )
-            image_array = load_raw_as_8bit_rgb(image_path)
+            image_array = load_raw_as_8bit_rgb(
+                image_path, presentation=raw_presentation
+            )
 
         else:
             print(f"Unsupported format: {ext}")
@@ -497,10 +529,10 @@ def load_and_display_image(
 
         pixmap = QPixmap.fromImage(q_image)
 
+        # The local references are dropped here; an explicit full GC on every
+        # preview load only added a visible stall to the display path.
         del image_array
         del q_image
-        import gc
-        gc.collect()
 
         return pixmap
 

@@ -237,7 +237,7 @@ def process_in_gpu(
         _cols_gpu.dtype = np.int32
 
         _weight_work_gpu = engine.allocate(
-            (work_res_h, work_res_w), dtype=np.float32, host_accessible=True
+            (work_res_h, work_res_w), dtype=np.float32, host_accessible=False
         )
 
         batch_size = 4
@@ -344,6 +344,10 @@ def process_in_gpu(
 
                         curr_full_gpu.destroy()
                         processed_frames_spatial[0] += 1
+                        # Eagerly free the processed frame from host RAM
+                        chunk_images[chunk_i] = None
+                        if not data_source and i < len(images):
+                            images[i] = None
 
                         if update_progress:
                             prog = int(
@@ -369,9 +373,6 @@ def process_in_gpu(
 
                     # Free chunk RAM instantly
                     del chunk_images
-                    if not data_source:
-                        for idx in range(start_idx, end_idx):
-                            images[idx] = None
                     import gc
 
                     gc.collect()
@@ -432,6 +433,8 @@ def process_in_gpu(
                 taichi_aot.unload_all_modules()
                 engine.buffer_pool.clear()
             spatial_scratch.clear()
+            import gc
+            gc.collect()
 
     try:
         is_aot = os.environ.get("AOT_MODE", "1") == "1"

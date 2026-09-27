@@ -22,6 +22,9 @@ DEFAULTS = {
     "compute_block_size": 1024,
     "compute_block_threshold_mp": 12.0,
     "compute_block_mode": "auto",
+    # Host-side decoded support frames waiting ahead of resident processing.
+    # Zero keeps the historical low-memory synchronous loading behavior.
+    "pipeline_prefetch_depth": 0,
     # The current resident pipeline processes decoded RGB.  Keep that route as
     # the compatible default while the pre-demosaic RAW fusion route is added.
     "processing_format": "RGB Linear",

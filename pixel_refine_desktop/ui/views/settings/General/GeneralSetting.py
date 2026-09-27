@@ -878,6 +878,7 @@ class GeneralSettingsPage(Container, SyncMixin):
 
     def _scan_hardware_backend_options(self):
         """Enumerate physical hardware devices (CPU, iGPU, Dedicated GPU) without exposing API names."""
+        self._hardware_scan_failures = []
         options = [
             {
                 "key": "cpu",
@@ -895,12 +896,17 @@ class GeneralSettingsPage(Container, SyncMixin):
             try:
                 vk_records = scan_vulkan_device_records()
             except Exception as e:
+                # Keep the reason: a failed enumeration is not the same as a
+                # machine without the saved GPU, and the difference decides
+                # whether the persisted preference may be rewritten.
+                self._hardware_scan_failures.append(("vulkan", e))
                 print(f"[Hardware Scan] Failed to scan Vulkan devices: {e}")
                 vk_records = []
 
             try:
                 cuda_records = scan_cuda_device_records()
             except Exception as e:
+                self._hardware_scan_failures.append(("cuda", e))
                 print(f"[Hardware Scan] Failed to scan CUDA devices: {e}")
                 cuda_records = []
 
@@ -1087,6 +1093,11 @@ class GeneralSettingsPage(Container, SyncMixin):
             option = self._get_selected_backend_option()
         if not option:
             return
+        if option.get("not_detected"):
+            # The device was not visible during this launch.  Leave the stored
+            # preference and the startup-resolved process backend untouched
+            # instead of overwriting the user's GPU choice with CPU.
+            return
 
         import os
         from taichi_vision.backend_config import (
@@ -1206,6 +1217,10 @@ class GeneralSettingsPage(Container, SyncMixin):
         for i in range(self.device_group.input.count()):
             data = self.device_group.input.itemData(i)
             if not isinstance(data, dict):
+                continue
+            if data.get("not_detected"):
+                # Nothing to probe: this entry only preserves a saved
+                # preference for a device the scan could not enumerate.
                 continue
             vendor = str(data.get("vendor", "")).lower()
             raw_name = str(data.get("raw_name", "") or data.get("text", ""))

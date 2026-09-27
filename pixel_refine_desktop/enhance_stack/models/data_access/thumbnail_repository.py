@@ -71,6 +71,70 @@ class ThumbnailRepository(BaseRepository):
                 except Exception as e:
                     print(f"[ThumbnailRepo] Error deleting {target_path}: {e}")
 
+    # --- Cache maintenance ---
+    SHA1_NAME_LENGTH = 40
+
+    @classmethod
+    def _is_hashed_name(cls, name: str) -> bool:
+        """True when *name* follows the current SHA-1 cache naming scheme."""
+        if not name.endswith(".jpg"):
+            return False
+        stem = name[: -len(".jpg")]
+        return len(stem) == cls.SHA1_NAME_LENGTH and all(
+            c in "0123456789abcdef" for c in stem
+        )
+
+    def prune_cache(self, max_files: int = 5000, max_bytes: int = 256 * 1024 * 1024):
+        """Drop leftover thumbnails and cap the cache by age.
+
+        The SHA-1 naming scheme is the single source of truth for what is
+        current, so any other name in this directory is a leftover from an older
+        naming scheme and is removed.  The remaining files are then capped by
+        count and total size, oldest first.  Only this repository's own cache
+        directory is touched.
+
+        Returns the number of files removed.
+        """
+        removed = 0
+        try:
+            entries = []
+            for name in os.listdir(self.cache_dir):
+                full = os.path.join(self.cache_dir, name)
+                if not os.path.isfile(full):
+                    continue
+                if not self._is_hashed_name(name):
+                    try:
+                        os.remove(full)
+                        removed += 1
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    stat = os.stat(full)
+                except OSError:
+                    continue
+                entries.append((stat.st_mtime, stat.st_size, full))
+
+            entries.sort()  # oldest first
+            total_bytes = sum(size for _mtime, size, _path in entries)
+            remaining = len(entries)
+            for _mtime, size, full in entries:
+                if remaining <= max_files and total_bytes <= max_bytes:
+                    break
+                try:
+                    os.remove(full)
+                    remaining -= 1
+                    total_bytes -= size
+                    removed += 1
+                except OSError:
+                    pass
+        except Exception as exc:
+            print(f"[ThumbnailRepo] Cache prune warning: {exc}")
+
+        if removed:
+            print(f"[ThumbnailRepo] Pruned {removed} thumbnail cache file(s)")
+        return removed
+
     # --- Methods for compatibility or future use ---
     def execute_query(self, *args, **kwargs):
         return []

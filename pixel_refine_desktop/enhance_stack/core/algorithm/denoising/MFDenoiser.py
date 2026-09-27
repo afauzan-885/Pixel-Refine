@@ -119,17 +119,17 @@ def get_alignment_registry():
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.OFB import (
         OFBAlgorithm,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
-        FarnebackFlowCPU,
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow import (
+        FarnebackFlow,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_cpu import (
-        LucasKanadeCPU,
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade import (
+        LucasKanade,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
-        LucasKanadeGPU,
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching import (
+        BlockMatching,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching_gpu import (
-        BlockMatchingGPU,
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_flow import (
+        BlockFlow,
     )
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.raft_flow import (
         RAFTFlow,
@@ -140,13 +140,28 @@ def get_alignment_registry():
         OFBAlgorithm(),
         AKAZEAlgorithm(),
         LightGlueAlgorithm(),
-        FarnebackFlowCPU(),
-        LucasKanadeCPU(),
-        LucasKanadeGPU(),
-        BlockMatchingGPU(),
+        FarnebackFlow(),
+        LucasKanade(),
+        BlockMatching(),
+        BlockFlow(),
         RAFTFlow(),
     ]
-    return {algo.NAME: algo for algo in algorithms}
+    registry = {algo.NAME: algo for algo in algorithms}
+    # Backward compatibility aliases for UI/batch selectors
+    registry["Lucas Kanade"] = registry.get("Lucas Kanade Optical Flow")
+    registry["Lucas Kanade GPU"] = registry.get("Lucas Kanade Optical Flow")
+    registry["Lucas Kanade GPU Optical Flow"] = registry.get("Lucas Kanade Optical Flow")
+    registry["Lucas Kanade CPU"] = registry.get("Lucas Kanade Optical Flow")
+    registry["Block Matching"] = registry.get("Block Matching Optical Flow")
+    registry["Block Matching GPU"] = registry.get("Block Matching Optical Flow")
+    registry["Block Matching GPU Optical Flow"] = registry.get("Block Matching Optical Flow")
+    registry["Block Flow"] = registry.get("Block Flow")
+    registry["Dense Optical Flow"] = registry.get("Block Flow")
+    registry["compute_flow"] = registry.get("Block Flow")
+    registry["FlowNet"] = registry.get("Block Flow")
+    registry["Farneback"] = registry.get("Farneback Optical Flow")
+    registry["Farneback Flow CPU"] = registry.get("Farneback Optical Flow")
+    return registry
 
 
 def get_denoising_registry():
@@ -159,7 +174,6 @@ def get_denoising_registry():
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
         FusionNetDenoisingAlgorithm,
     )
-
     algorithms = [
         NoDenoisingAlgorithm(),
         AverageDenoisingAlgorithm(),
@@ -259,6 +273,9 @@ class PipelineContext:
     batch_plan: list = field(default_factory=list)
     params: dict = field(default_factory=dict)
     is_linear_mode: bool = False
+    processing_format: str = "RGB Linear"
+    is_raw_native: bool = False
+    raw_native_result: object = None
     update_progress: object = None
     stop_requested: object = None
     single_process: bool = True
@@ -418,13 +435,18 @@ class MFDenoiserAlgorithm:
 
         print(f"[MFDenoiser][Config] params={params}")
 
+        params["enable_linear_mode"] = False
+        params["processing_format"] = "RGB Linear"
         try:
             if os.path.exists(GENERAL_SETTINGS_FILE):
                 with open(GENERAL_SETTINGS_FILE, "r") as f:
                     general = json.load(f)
                 params["enable_linear_mode"] = general.get("enable_linear_mode", False)
+                params["processing_format"] = general.get(
+                    "processing_format", "RGB Linear"
+                )
         except (OSError, json.JSONDecodeError):
-            params["enable_linear_mode"] = False
+            pass
 
         return params
 
@@ -448,9 +470,22 @@ class MFDenoiserAlgorithm:
 
         is_linear = ctx.params.get("enable_linear_mode", False)
         _, ext = os.path.splitext(ctx.image_paths[0])
-        ctx.is_linear_mode = bool(
-            is_linear and ext.lower() in (".dng", ".cr2", ".cr3", ".nef", ".arw")
+        ctx.processing_format = (
+            str(ctx.params.get("processing_format", "RGB Linear")).strip()
+            or "RGB Linear"
         )
+        all_dng = all(
+            os.path.splitext(path)[1].lower() == ".dng" for path in ctx.image_paths
+        )
+        ctx.is_raw_native = ctx.processing_format.lower() == "raw native" and all_dng
+        if ctx.processing_format.lower() == "raw native" and not all_dng:
+            raise ValueError("RAW Native requires every frame in the burst to be a DNG")
+        ctx.is_linear_mode = bool(
+            (is_linear or ctx.is_raw_native)
+            and ext.lower() in (".dng", ".cr2", ".cr3", ".nef", ".arw")
+        )
+        if ctx.is_raw_native:
+            print("[MFDenoiser][RAW Native] enabled: CFA accumulation route selected")
         return ctx
 
     def build_batch_plan(self, ctx):
@@ -529,6 +564,24 @@ class MFDenoiserAlgorithm:
 
     def save_process(self, ctx):
         """Save the current pipeline result."""
+        raw_native_result = getattr(ctx, "raw_native_result", None)
+        if raw_native_result is not None:
+            output_folder = "database/stack"
+            os.makedirs(output_folder, exist_ok=True)
+            safe_name = (
+                "".join(
+                    c for c in ctx.output_name_base if c.isalnum() or c in ("_", "-")
+                ).rstrip()
+                or "stack"
+            )
+            output_suffix = ctx.params.get("output_suffix", "mf_denoiser")
+            output_path = os.path.join(output_folder, f"{safe_name}_{output_suffix}.dng")
+            print(f"[MFDenoiser][Save] RAW Native DNG output_path={output_path}")
+            saved_path = raw_native_result.save_dng(output_path)
+            ctx.raw_native_result = None
+            del raw_native_result
+            return saved_path
+
         if ctx.result_image is None:
             print("[MFDenoiser][Save] No result image to save.")
             return None
@@ -548,8 +601,10 @@ class MFDenoiserAlgorithm:
         )
 
         if ctx.is_linear_mode:
+            result_to_save = ctx.result_image
+            ctx.result_image = None
             return save_linear_dng(
-                ctx.result_image,
+                result_to_save,
                 os.path.splitext(output_path)[0] + ".dng",
                 reference_image_path=ctx.image_paths[0] if ctx.image_paths else None,
             )
@@ -564,12 +619,16 @@ class MFDenoiserAlgorithm:
                 ".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2", ".pef", ".raf"
             )
 
+        result_to_save = ctx.result_image
+        ctx.result_image = None
+
         save_image(
-            ctx.result_image,
+            result_to_save,
             output_path,
             reference_image_path=ctx.image_paths[0] if ctx.image_paths else None,
             apply_tonemapping=is_raw_input,
         )
+        del result_to_save
         return output_path
 
     def run_pipeline(
@@ -663,6 +722,16 @@ class MFDenoiserAlgorithm:
             print("[MFDenoiser][Pipeline] Execution aborted (cancelled or no output).")
             return None
 
+        # Free input and aligned frames immediately after merge is complete;
+        # they are never needed during the save stage.
+        try:
+            ctx.frames = None
+            ctx.aligned_frames = None
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+
         # Stage 5: save the merged result. We move the bar to the
         # ``PROGRESS_SAVE`` slot (96%) and let ``save_process`` complete
         # before the final 100% announcement below.
@@ -675,6 +744,18 @@ class MFDenoiserAlgorithm:
         output_path = self.save_process(ctx)
         self._report_compute_runtime(ctx)
         print(f"[MFDenoiser][Pipeline] finished output_path={output_path}")
+
+        # Proactively release large frame buffers from context
+        try:
+            ctx.frames = None
+            ctx.aligned_frames = None
+            ctx.result_image = None
+            ctx.raw_native_result = None
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+
         _progress(
             update_progress,
             PROGRESS_DONE,

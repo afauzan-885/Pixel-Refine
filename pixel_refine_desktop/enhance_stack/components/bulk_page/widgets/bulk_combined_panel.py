@@ -1,4 +1,4 @@
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow import (
     running_farneback_flow,
 )
 from resources.GenericUILibrary.skeleton import SkeletonLoader
@@ -41,12 +41,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
-    running_similarity as running_mf_similarity,
     running_mf_denoiser,
-)
-
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
-    running_fusionnet,
 )
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.Interpolation import (
@@ -1325,27 +1320,35 @@ class CombinedPanel(QWidget):
                     progress_callback=progress_callback,
                     stop_callback=stop_callback,
                 ),
-                "Similarity": lambda: running_mf_similarity(
+                "Similarity": lambda: running_mf_denoiser(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
                     stop_callback=stop_callback,
+                    merging_mode="Similarity",
+                    output_suffix="similarity",
                     alignment_backend=align_algo,
                 ),
-                "Spatial AI": lambda: running_fusionnet(
+                "Spatial AI": lambda: running_mf_denoiser(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
                     stop_callback=stop_callback,
+                    merging_mode="FusionNet",
+                    output_suffix="fusionet",
+                    alignment_backend=align_algo,
                 ),
-                "FusionNet": lambda: running_fusionnet(
+                "FusionNet": lambda: running_mf_denoiser(
                     self,
                     single_process=False,
                     batch_id=self.batch_id,
                     progress_callback=progress_callback,
                     stop_callback=stop_callback,
+                    merging_mode="FusionNet",
+                    output_suffix="fusionet",
+                    alignment_backend=align_algo,
                 ),
                 "No Denoising": lambda: None,
                 "None": lambda: None,
@@ -1358,6 +1361,7 @@ class CombinedPanel(QWidget):
             "Average",
             "Similarity",
             "Spatial AI",
+            "FusionNet",
         )
 
         if denoising_owns_alignment:

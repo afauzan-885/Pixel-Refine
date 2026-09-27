@@ -18,6 +18,7 @@ if AOT_MODE == "0":
 # --- Core Imports ---
 from . import common
 from . import aot_wrapper
+from .buffer_session import BufferSession
 
 if AOT_MODE == "1":
     from .aot_wrapper import *
@@ -206,6 +207,8 @@ if AOT_MODE == "1":
         ncc_alignment as _aot_ncc_alignment,
         align_mtb as _aot_align_mtb,
         farneback_flow as _aot_farneback_flow,
+        bgr2gray as _aot_bgr2gray,
+        remap_with_flow as _aot_remap_with_flow,
         sfm_match_l2_aot as _aot_match_l2,
         vsac_fundamental_aot as _aot_vsac_fundamental,
         sfm_cheirality_minimal_aot as _aot_cheirality_minimal,
@@ -1394,6 +1397,7 @@ def calcOpticalFlowFarneback(
     return_diagnostics=False,
     reference_pyramid=None,
     return_gpu=False,
+    dst=None,
 ):
     """OpenCV-style dense Farneback optical flow backed by taichi_aot."""
     from taichi_vision import taichi_aot
@@ -1413,6 +1417,7 @@ def calcOpticalFlowFarneback(
         flow_init=flow,
         reference_pyramid=reference_pyramid,
         return_gpu=return_gpu,
+        dst=dst,
     )
 
 
@@ -1435,6 +1440,7 @@ def calcOpticalFlowPyrLK(
     dense_mode="smooth",
     max_flow_px=0.0,
     return_gpu=False,
+    dst=None,
     return_diagnostics=False,
     reference_pyramid=None,
 ):
@@ -1458,6 +1464,7 @@ def calcOpticalFlowPyrLK(
         dense_mode=dense_mode,
         max_flow_px=max_flow_px,
         return_gpu=return_gpu,
+        dst=dst,
         return_diagnostics=return_diagnostics,
         reference_pyramid=reference_pyramid,
     )
@@ -1610,9 +1617,14 @@ if AOT_MODE == "1":
     def ransac(flow, threshold=3.0):
         return _aot_ransac_flow_cleanup(flow, threshold=float(threshold), return_gpu=False)
 
-    def cvtColor(src, code, dst=None):
-        result = _aot_cvtColor(src, code)
+    def cvtColor(src, code, dst=None, return_gpu=False, session=None):
+        result = _aot_cvtColor(src, code, dst=dst, return_gpu=return_gpu, session=session)
+        if return_gpu or session is not None or hasattr(result, "handle"):
+            return result
         return _aot_store_destination(result, dst)
+
+    bgr2gray = _aot_bgr2gray
+    remap_with_flow = _aot_remap_with_flow
 
     def absdiff(src1, src2, dst=None):
         result = _aot_absdiff(src1, src2)
@@ -1865,4 +1877,7 @@ __all__ = [
     "argsort",
     "unique",
     "meshgrid",
+    "bgr2gray",
+    "remap_with_flow",
+    "BufferSession",
 ]

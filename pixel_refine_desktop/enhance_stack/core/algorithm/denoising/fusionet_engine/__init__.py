@@ -14,7 +14,7 @@ from .flownet_inference import (
     load_compute_flow_module,
     align_support_frame,
 )
-from ..resident_pipeline import (
+from ..pipeline_process.resident_pipeline import (
     run_resident_pipeline,
     run_gpu_resident_pipeline,
     load_frame_to_gpu,

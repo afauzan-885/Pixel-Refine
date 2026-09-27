@@ -8,6 +8,7 @@ Only provides config load/save functions - UI is handled by MFDenoiser_parameter
 
 import os
 import json
+import math
 from config import CONFIG_DIR, ALGORITHM_PARAMETER_SETTINGS_FILE
 
 
@@ -17,8 +18,10 @@ SIMILARITY_DEFAULTS = {
     "similarity_spatial_tile_size": 24,
     "similarity_spatial_motion_sensitivity": 150.0,
     "similarity_spatial_noise_mad_offset_factor": 0.15,
+    "similarity_spatial_noise_sigma": 0.0,
     "similarity_spatial_overlap_percent": 0.35,
     "similarity_spatial_num_workers": -1,
+    "similarity_spatial_work_resolution": 1.0,
     "similarity_smart_noise_alpha": 1.8,
     "similarity_smart_noise_aware_enable": True,
     "similarity_smart_noise_strength": 100.0,
@@ -41,6 +44,10 @@ SIMILARITY_DEFAULTS = {
 # accepted spellings at the boundary so a batch cannot silently run with the
 # kernel defaults.
 _SPATIAL_PARAM_ALIASES = {
+    "similarity_spatial_work_resolution": (
+        "similarity_spatial_work_resolution",
+        "spatial_work_resolution",
+    ),
     "similarity_spatial_tile_size": (
         "similarity_spatial_tile_size",
         "spatial_tile_size",
@@ -56,6 +63,11 @@ _SPATIAL_PARAM_ALIASES = {
         "noise_offset_factor",
         "noise_mad_offset_factor",
         "noise_offset",
+    ),
+    "similarity_spatial_noise_sigma": (
+        "similarity_spatial_noise_sigma",
+        "noise_sigma",
+        "spatial_noise_sigma",
     ),
     "similarity_spatial_overlap_percent": (
         "similarity_spatial_overlap_percent",
@@ -106,10 +118,30 @@ def normalize_similarity_spatial_config(config):
                 if value is not None:
                     normalized[canonical] = value
                     break
+    try:
+        scale = float(
+            normalized.get("similarity_spatial_work_resolution", 1.0)
+        )
+        if not math.isfinite(scale):
+            raise ValueError("work resolution must be finite")
+        normalized["similarity_spatial_work_resolution"] = max(
+            0.05, min(1.0, scale)
+        )
+    except (TypeError, ValueError):
+        normalized["similarity_spatial_work_resolution"] = 1.0
     return normalized
 
 
 PARAMETER_SCHEMA = [
+    {
+        "key": "similarity_spatial_work_resolution",
+        "label": "Work Resolution",
+        "type": "dropdown",
+        "default": 1.0,
+        "options": [1.0, 0.75, 0.5, 0.33, 0.25],
+        "value_type": "float",
+        "tooltip": "Resolution for alignment and spatial weights; the output remains full resolution.",
+    },
     {
         "key": "similarity_spatial_tile_size",
         "label": "Tile Size",
@@ -146,6 +178,16 @@ PARAMETER_SCHEMA = [
         "min": 0,
         "max": 100,
         "scale": 0.01,
+        "value_type": "float",
+    },
+    {
+        "key": "similarity_spatial_noise_sigma",
+        "label": "Noise Sigma (0=Auto)",
+        "type": "slider",
+        "default": 0.0,
+        "min": 0,
+        "max": 100,
+        "scale": 0.001,
         "value_type": "float",
     },
     {
@@ -268,9 +310,11 @@ def save_similarity_v1_config(config_to_save):
 
     spatial_keys = [
         "similarity_backend",
+        "similarity_spatial_work_resolution",
         "similarity_spatial_tile_size",
         "similarity_spatial_motion_sensitivity",
         "similarity_spatial_noise_mad_offset_factor",
+        "similarity_spatial_noise_sigma",
         "similarity_spatial_overlap_percent",
         "similarity_spatial_num_workers",
         "tile_based_alignment_backend",

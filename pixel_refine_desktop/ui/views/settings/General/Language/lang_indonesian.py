@@ -187,6 +187,8 @@ NO_DATA_BATCH_ALL_DELETE_BUTTON = "Tidak ada data batch yang tersimpan."
 PARAMETER_BATCH_CROP_EDGE = "Potong Tepi"
 PARAMETER_BATCH_KEEP_EDGE = "Pertahankan Tepi"
 PARAMETER_BATCH_DENOISING = "Denoising"
+PARAMETER_BATCH_MULTI_FRAME_DENOISING = "Multi-Frame Denoising"
+PARAMETER_BATCH_HDR = "HDR"
 PARAMETER_BATCH_SUPER_RESOLUTION = "Super Resolusi"
 PARAMETER_BATCH_ALIGNMENT = "Selaraskan Gambar"
 PARAMETER_BATCH_ALIGNMENT_TO_FOLDER = "Simpan Hasil Penyelarasan ke dalam Folder"
@@ -748,7 +750,8 @@ MSG_NO_BATCHES_YET_DESC = "Buat batch baru atau impor gambar untuk memulai."
 MSG_NO_BATCH_SELECTED = "Tidak ada batch yang dipilih"
 LBL_BATCH_IMAGE_COUNT_FORMAT = "Batch {}   -   ({} gambar)"
 DESC_SUPER_RESOLUTION_CARD = "Tingkatkan detail dan perbesar resolusi gambar."
-DESC_DENOISING_CARD = "Kurangi noise gambar dan selaraskan lapisan piksel."
+DESC_DENOISING_CARD = "Gabungkan beberapa frame untuk mengurangi noise dan menjaga detail."
+DESC_HDR_CARD = "Gabungkan frame yang sudah disejajarkan dengan sampel ber-eksposur baik dan SNR tinggi. Pilih Weighted HDR atau SPDE-MR."
 
 
 # --- New UI & Bulk Core Keys ---

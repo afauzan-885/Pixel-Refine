@@ -90,11 +90,17 @@ if __name__ == "__main__":
     _ensure_llvm20_interpreter()
 
 
+# Set when a saved GPU preference could not be reached during startup.  The
+# runtime cannot change backend after the first bridge load, so a background
+# watch keeps looking for the device instead of leaving the session on CPU.
+_STARTUP_GPU_UNAVAILABLE = False
+
+
 def _bootstrap_aot_backend_from_settings():
     """Apply saved AOT backend before any module can import taichi_aot."""
+    global _STARTUP_GPU_UNAVAILABLE
     if os.environ.get("AOT_DEVICE") is not None:
         return
-
     settings_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "database",
@@ -139,6 +145,7 @@ def _bootstrap_aot_backend_from_settings():
             devices = scan_vulkan_device_records()
             resolved_id = resolve_device_selector(selector, devices, device_id)
             if resolved_id is None:
+                _STARTUP_GPU_UNAVAILABLE = True
                 print(
                     "[PixelRefine Backend] Saved GPU is unavailable; selecting CPU safely."
                 )
@@ -151,6 +158,7 @@ def _bootstrap_aot_backend_from_settings():
         except Exception as exc:
             # A failed scan must never reinterpret a stale ordinal as another
             # GPU. Keep startup available using CPU until a later rescan.
+            _STARTUP_GPU_UNAVAILABLE = True
             print(
                 f"[PixelRefine Backend] GPU fingerprint scan failed; selecting CPU: {exc}"
             )
@@ -381,6 +389,11 @@ def _cleanup_aot_backend(reason="app-shutdown"):
             stop_silent_aot_warmup()
         except Exception:
             pass
+        try:
+            from pixel_refine_desktop.app_core.gpu_watch import stop_gpu_watch
+            stop_gpu_watch()
+        except Exception:
+            pass
         import gc
         import taichi_vision.taichi_aot as taichi_aot
 
@@ -532,20 +545,6 @@ class PixelRefineMain(QMainWindow):
                 event.acceptProposedAction()
                 return True
         return super().eventFilter(watched, event)
-
-    def setup_ui_and_logic(self, splash: SplashScreen):
-        """Setup UI and application logic with friendly progress updates."""
-        # Initialize core components
-        self._initialize_core_components(splash)
-
-        # Configure window properties
-        self._configure_window(splash)
-
-        # Load UI based on architecture
-        self._load_ui_components(splash)
-
-        # Assemble final layout
-        self._assemble_layout(splash)
 
     def setup_ui_and_logic(self, splash: SplashScreen):
         """Setup UI and application logic with friendly progress updates."""
@@ -759,6 +758,37 @@ class PixelRefineMain(QMainWindow):
             94,
         )
         self.setCentralWidget(container)
+
+    def changeEvent(self, event):
+        """Keep the backend worker warm while the window is in use.
+
+        The worker subprocess used to be terminated 30 s after every task, so
+        starting the next batch had to respawn it and reload the TCM/ONNX
+        artifacts first.  The idle policy is now tied to the window state.
+        """
+        super().changeEvent(event)
+        if event.type() != QEvent.Type.WindowStateChange:
+            return
+        try:
+            from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_manager import (
+                BackendWorkerManager,
+            )
+
+            minimised = bool(
+                self.windowState() & Qt.WindowState.WindowMinimized
+            )
+            manager = BackendWorkerManager.instance()
+            manager.set_window_active(not minimised)
+            if not minimised and not manager.is_worker_alive():
+                # Warm the worker back up in the background so the next batch
+                # does not pay the respawn cost on the Start click.
+                threading.Thread(
+                    target=manager.ensure_worker_ready,
+                    daemon=True,
+                    name="WarmupBackendWorkerRestore",
+                ).start()
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         """Handle application close event."""
@@ -1032,25 +1062,52 @@ def main():
     window.show()
     splash.finish(window)
 
-    # Silent background AOT & TCM warm-up (Host RAM, Zero VRAM bloat)
+    # Silent background AOT & TCM warm-up (Host RAM, Zero VRAM bloat).
+    # Opening a project loads its first batch immediately, and the warm-up holds
+    # the Taichi lock for its whole module-loading session while also saturating
+    # the CPU alongside the thumbnail decoders - measured effect: the first
+    # switch after a project open took ~43 s instead of ~60 ms.  Let that first
+    # load finish before the warm-up starts.
     try:
         from pixel_refine_desktop.app_core.aot_warmup import start_silent_aot_warmup
 
-        start_silent_aot_warmup(delay_ms=200, parent=window)
+        start_silent_aot_warmup(
+            delay_ms=4000 if project_argument else 200, parent=window
+        )
     except Exception as exc:
         print(f"[AOT Warmup] Launch skipped: {exc}", flush=True)
 
-    # Silent background warmup for isolated backend worker process
+    # A startup scan that could not reach the saved GPU leaves the session on
+    # CPU (the runtime cannot swap backend after its bridge is loaded).  Watch
+    # in the background so the device is picked up as soon as it enumerates,
+    # instead of making the user re-select it by hand.
+    if _STARTUP_GPU_UNAVAILABLE:
+        try:
+            from pixel_refine_desktop.app_core.gpu_watch import start_gpu_watch
+
+            start_gpu_watch(delay_ms=4000 if project_argument else 1500, parent=window)
+        except Exception as exc:
+            print(f"[GPU Watch] Launch skipped: {exc}", flush=True)
+
+    # Silent background warmup for isolated backend worker process.  Deferred
+    # alongside the TCM warm-up when a project is opened, for the same reason:
+    # spawning the worker (TCM + ONNX load) competes with the first batch load.
     try:
         from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_manager import (
             BackendWorkerManager,
         )
 
-        threading.Thread(
-            target=BackendWorkerManager.instance().ensure_worker_ready,
-            daemon=True,
-            name="WarmupBackendWorker",
-        ).start()
+        def _warm_backend_worker():
+            threading.Thread(
+                target=BackendWorkerManager.instance().ensure_worker_ready,
+                daemon=True,
+                name="WarmupBackendWorker",
+            ).start()
+
+        if project_argument:
+            QTimer.singleShot(4000, _warm_backend_worker)
+        else:
+            _warm_backend_worker()
     except Exception as exc:
         print(f"[BackendWorker] Warmup skipped: {exc}", flush=True)
 

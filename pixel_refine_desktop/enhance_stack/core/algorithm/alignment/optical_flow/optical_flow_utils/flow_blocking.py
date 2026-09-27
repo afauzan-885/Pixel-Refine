@@ -81,7 +81,9 @@ def _bounded_ordered_map(executor, function, items, max_in_flight):
 
     iterator = iter(items)
     pending = deque()
-    for _ in range(max(1, int(max_in_flight))):
+    # Bound in-flight tasks strictly (maximum 2) to prevent excessive peak RAM from concurrently queued tiles:
+    flight_limit = max(1, min(int(max_in_flight), 2))
+    for _ in range(flight_limit):
         try:
             pending.append(executor.submit(function, next(iterator)))
         except StopIteration:
@@ -98,20 +100,51 @@ def _bounded_ordered_map(executor, function, items, max_in_flight):
 def to_flow_gray_u8(image):
     if image is None:
         return None
+    if image.ndim == 2:
+        if image.dtype == np.uint8:
+            return image
+        if image.dtype == np.uint16:
+            return (image >> 8).astype(np.uint8, copy=False)
+        return np.clip(image, 0, 255).astype(np.uint8, copy=False)
+
     if image.ndim == 3:
-        if image.shape[2] >= 3:
-            image = (
-                0.2126 * image[:, :, 0]
-                + 0.7152 * image[:, :, 1]
-                + 0.0722 * image[:, :, 2]
-            )
+        if image.shape[2] < 3:
+            gray = image[:, :, 0]
+            if gray.dtype == np.uint8:
+                return gray
+            if gray.dtype == np.uint16:
+                return (gray >> 8).astype(np.uint8, copy=False)
+            return np.clip(gray, 0, 255).astype(np.uint8, copy=False)
+
+        # 3 or more channels: optimized RGB to grayscale
+        try:
+            import cv2
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            if gray.dtype == np.uint8:
+                return gray
+            if gray.dtype == np.uint16:
+                return (gray >> 8).astype(np.uint8, copy=False)
+            return np.clip(gray, 0, 255).astype(np.uint8, copy=False)
+        except Exception:
+            pass
+
+        if image.dtype == np.uint8:
+            r = image[:, :, 0].astype(np.uint32)
+            g = image[:, :, 1].astype(np.uint32)
+            b = image[:, :, 2].astype(np.uint32)
+            gray = ((np.uint32(54) * r + np.uint32(183) * g + np.uint32(19) * b) >> 8).astype(np.uint8)
+            del r, g, b
+            return gray
         else:
-            image = image[:, :, 0]
-    if image.dtype == np.uint8:
-        return image
-    if image.dtype == np.uint16:
-        return (image >> 8).astype(np.uint8, copy=False)
-    return np.clip(image, 0, 255).astype(np.uint8, copy=False)
+            r = image[:, :, 0].astype(np.float32, copy=False)
+            g = image[:, :, 1].astype(np.float32, copy=False)
+            b = image[:, :, 2].astype(np.float32, copy=False)
+            gray = np.empty((image.shape[0], image.shape[1]), dtype=np.float32)
+            np.multiply(r, np.float32(0.2126), out=gray)
+            gray += np.float32(0.7152) * g
+            gray += np.float32(0.0722) * b
+            del r, g, b
+            return np.clip(gray, 0, 255).astype(np.uint8)
 
 
 def iter_flow_tiles(width, height, cols=4, rows=3, overlap=0.20):
@@ -330,23 +363,19 @@ def align_with_tiled_flow(
     valid = weights > 0
     if not np.any(valid):
         return None
+
+    # In-place 2D channel normalization avoids creating (H, W, 1) broadcast temporary arrays
+    # and eliminates fancy indexing memory peaks:
     if target.ndim == 3:
-        # ``accumulator[valid] / weights[valid, None]`` creates two large
-        # advanced-indexing temporaries.  A masked ufunc keeps the full-frame
-        # result resident in-place and only retains the existing validity mask.
-        np.divide(
-            accumulator,
-            weights[..., None],
-            out=accumulator,
-            where=valid[..., None],
-        )
+        for c in range(target.shape[2]):
+            ch = accumulator[:, :, c]
+            np.divide(ch, weights, out=ch, where=valid)
+            np.copyto(ch, target[:, :, c], where=~valid)
     else:
         np.divide(accumulator, weights, out=accumulator, where=valid)
-    if not np.all(valid):
-        # NumPy casts directly into the float32 accumulator.  Avoid creating
-        # a full-resolution float32 copy of the target just for uncovered
-        # pixels (which are uncommon but costly on large frames).
-        accumulator[~valid] = target[~valid]
+        np.copyto(accumulator, target, where=~valid)
+
+    del weights, valid
     return _restore_dtype(accumulator, target.dtype)
 
 
@@ -392,6 +421,18 @@ def align_with_block_flow(
         ) * ((int(width) + int(block_w) - 1) // int(block_w))
     else:
         block_count = 1
+
+    if block_count == 1:
+        if stop_requested and stop_requested():
+            return None
+        source = target_for_warping if target_for_warping is not None else target
+        flow = flow_func(reference_gray, target_gray)
+        if flow is None:
+            return None
+        warped = warp_tile_with_flow(source, flow)
+        del reference_gray, target_gray, flow
+        return _restore_dtype(warped, target.dtype)
+
     blocks = iter_runtime_flow_blocks(width, height, halo=halo)
     output_shape = target.shape
     accumulator = np.zeros(output_shape, dtype=np.float32)
@@ -433,6 +474,7 @@ def align_with_block_flow(
                 accumulator, warped, weight, x, y
             )
             weights[y:y + h_block, x:x + w_block] += weight
+            del warped, weight, item
     finally:
         if pool is not None:
             pool.shutdown(wait=True)
@@ -440,15 +482,17 @@ def align_with_block_flow(
     valid = weights > 0
     if not np.any(valid):
         return None
+
+    # In-place 2D channel normalization avoids creating (H, W, 1) broadcast temporary arrays
+    # and eliminates fancy indexing memory peaks:
     if target.ndim == 3:
-        np.divide(
-            accumulator,
-            weights[..., None],
-            out=accumulator,
-            where=valid[..., None],
-        )
+        for c in range(target.shape[2]):
+            ch = accumulator[:, :, c]
+            np.divide(ch, weights, out=ch, where=valid)
+            np.copyto(ch, target[:, :, c], where=~valid)
     else:
         np.divide(accumulator, weights, out=accumulator, where=valid)
-    if not np.all(valid):
-        accumulator[~valid] = target[~valid]
+        np.copyto(accumulator, target, where=~valid)
+
+    del weights, valid
     return _restore_dtype(accumulator, target.dtype)

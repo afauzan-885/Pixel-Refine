@@ -6,26 +6,24 @@ import gc
 import numpy as np
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
-
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_cpu import (
-    LucasKanadeCPU,
-)
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.optical_flow_utils.flow_blocking import (
     align_with_block_flow,
     to_flow_gray_u8,
 )
 
 
-DEFAULT_LUCAS_KANADE_GPU_CONFIG = {
+DEFAULT_LUCAS_KANADE_CONFIG = {
+    "backend": "auto",
     "mode": "high",
     "conservative_vram": True,
 }
 
-LUCAS_KANADE_GPU_PRESETS = {
+LUCAS_KANADE_PRESETS = {
     "fast": {
         # 32x32 grid step for high responsiveness and low memory footprint.
         "grid_step": 32,
         "border_margin": 8,
+        "point_workers": 2,
         "win_size": 13,
         "max_level": 1,
         "iterations": 8,
@@ -44,6 +42,7 @@ LUCAS_KANADE_GPU_PRESETS = {
         # 16x16 grid step for optimal quality-performance balance.
         "grid_step": 16,
         "border_margin": 8,
+        "point_workers": 2,
         "win_size": 17,
         "max_level": 2,
         "iterations": 16,
@@ -62,6 +61,7 @@ LUCAS_KANADE_GPU_PRESETS = {
         # 2x2 ultra-dense micro-grid for highest spatial accuracy, capturing fine details.
         "grid_step": 2,
         "border_margin": 8,
+        "point_workers": 4,
         "win_size": 25,
         "max_level": 3,
         "iterations": 32,
@@ -78,9 +78,10 @@ LUCAS_KANADE_GPU_PRESETS = {
     },
 }
 
-# ``medium`` remains accepted as a compatibility alias, but balance is the
-# canonical label exposed by the settings panel.
-LUCAS_KANADE_GPU_PRESETS["medium"] = LUCAS_KANADE_GPU_PRESETS["balance"]
+LUCAS_KANADE_PRESETS["medium"] = LUCAS_KANADE_PRESETS["balance"]
+# Backward compatibility mapping
+LUCAS_KANADE_GPU_PRESETS = LUCAS_KANADE_PRESETS
+LUCAS_KANADE_CPU_PRESETS = LUCAS_KANADE_PRESETS
 
 
 def _allocate_float_buffer_like(taichi_aot, image, host_accessible=False):
@@ -94,62 +95,16 @@ def _allocate_float_buffer_like(taichi_aot, image, host_accessible=False):
     )
 
 
-class LucasKanadeGPU(LucasKanadeCPU):
-    NAME = "Lucas Kanade GPU Optical Flow"
+class LucasKanade:
+    NAME = "Lucas Kanade Optical Flow"
     KIND = "alignment"
-    DESCRIPTION = "Native AOT Lucas-Kanade optical flow for CPU, Vulkan, and OpenGL."
+    DESCRIPTION = "Unified Taichi AOT Lucas-Kanade optical flow alignment for all backends."
     GPU_MODULES = ("common", "lucas_kanade", "pyramid", "remap")
     DEVICE_RESERVATION = "lucas_kanade_frame"
     _gpu_remap_disabled = False
-
-    def _calculate_flow_host_native(self, reference_gray, target_gray, config):
-        from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
-        # Intel OpenGL drivers reject the large SSBO binding set used by the
-        # high-iteration/auto diagnostic path. Keep the native graph, but use
-        # the validated bounded configuration so the call is deterministic.
-        params = self._build_lk_params(config)
-        params["criteria"] = (
-            3,
-            min(2, int(params["criteria"][1])),
-            float(params["criteria"][2]),
-        )
-        params["maxLevel"] = min(1, int(params["maxLevel"]))
-        params["motion_mode"] = "fast"
-        if max(reference_gray.shape[:2]) > 768:
-            # Intel OpenGL limits the combined pyramid SSBO footprint at
-            # larger frames. Level-zero remains fully native and avoids the
-            # driver binding failure without switching to another backend.
-            params["maxLevel"] = 0
-            params["grid_step"] = max(64, int(params["grid_step"]))
-        flow = calcOpticalFlowPyrLK(
-            np.ascontiguousarray(reference_gray, dtype=np.float32),
-            np.ascontiguousarray(target_gray, dtype=np.float32),
-            **params, return_gpu=False,
-        )
-        if isinstance(flow, tuple):
-            flow = flow[0]
-        return np.ascontiguousarray(flow, dtype=np.float32)
-
-    def _align_frame_opengl_native(self, reference, target, config,
-                                   matching_reference=None, matching_target=None):
-        from taichi_vision import taichi_aot
-        matching_reference = reference if matching_reference is None else matching_reference
-        matching_target = target if matching_target is None else matching_target
-        reference_gray = to_flow_gray_u8(matching_reference).astype(np.float32, copy=False)
-        target_gray = to_flow_gray_u8(matching_target).astype(np.float32, copy=False)
-        flow = self._calculate_flow_host_native(reference_gray, target_gray, config)
-        expected = (*reference.shape[:2], 2)
-        if flow.shape != expected or not np.isfinite(flow).all():
-            raise RuntimeError(f"OpenGL native flow returned {flow.shape}, expected {expected}")
-        return taichi_aot.remap_with_flow(
-            np.ascontiguousarray(target), flow,
-            int(reference.shape[0]), int(reference.shape[1]), return_gpu=False,
-        )
-
     _reported_gpu_remap_disabled = False
 
     def __init__(self):
-        super().__init__()
         self._tile_buffers = None
         self._current_ref_id = None
         self._download_float_buffer = None
@@ -159,6 +114,75 @@ class LucasKanadeGPU(LucasKanadeCPU):
             self._cleanup_tile_buffers()
         except Exception:
             pass
+
+    @staticmethod
+    def _normalize_mode(mode):
+        value = str(mode or "fast").strip().lower()
+        if value in ("balanced", "balance mode", "balance", "normal", "medium"):
+            return "balance"
+        if value == "auto":
+            return "high"
+        if value not in LUCAS_KANADE_PRESETS:
+            return "high"
+        return value
+
+    @staticmethod
+    def _resolve_mode_config(config):
+        mode = LucasKanade._normalize_mode(config.get("mode", "high"))
+        resolved = LUCAS_KANADE_PRESETS[mode].copy()
+        for key, value in config.items():
+            if key != "mode":
+                resolved[key] = value
+        resolved["mode"] = mode
+        return resolved
+
+    @staticmethod
+    def load_config(batch_id=None, config_filename=None):
+        config = DEFAULT_LUCAS_KANADE_CONFIG.copy()
+        config_filename = config_filename or ALGORITHM_PARAMETER_SETTINGS_FILE
+        try:
+            if os.path.exists(config_filename):
+                with open(config_filename, "r") as config_file:
+                    params = json.load(config_file)
+                # Check modern and legacy section keys
+                config.update(params.get("LucasKanade", {}))
+                config.update(params.get("LucasKanadeGPU", {}))
+                config.update(params.get("LucasKanade_BATCH", {}))
+        except Exception as exc:
+            print(f"[LucasKanade] Failed to load config: {exc}")
+        if batch_id is not None:
+            try:
+                from pixel_refine_desktop.enhance_stack.core.logic import (
+                    batch_parameter_manager,
+                )
+
+                batch_params = batch_parameter_manager.load_json_state().get(
+                    str(batch_id), {}
+                )
+                section = batch_params.get("lucas_kanade_params", {})
+                if not section:
+                    section = batch_params.get("lucas_kanade_gpu_params", {})
+                if isinstance(section, dict):
+                    config.update(section)
+            except Exception as exc:
+                print(f"[LucasKanade] Failed to load batch config: {exc}")
+        return LucasKanade._resolve_mode_config(config)
+
+    @staticmethod
+    def load_lucas_kanade_config(config_filename=None):
+        return LucasKanade.load_config(config_filename=config_filename)
+
+    @staticmethod
+    def load_lucas_kanade_config_for_batch(config_filename=None):
+        return LucasKanade.load_config(config_filename=config_filename)
+
+    @staticmethod
+    def load_lucas_kanade_gpu_config(config_filename=None):
+        return LucasKanade.load_config(config_filename=config_filename)
+
+    @staticmethod
+    def load_lucas_kanade_gpu_config_for_batch(config_filename=None):
+        return LucasKanade.load_config(config_filename=config_filename)
 
     def _cleanup_tile_buffers(self, *, keep_reference=False):
         if not self._tile_buffers:
@@ -197,6 +221,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         if callable(destroy):
             try:
                 destroy()
+                return
             except Exception:
                 pass
 
@@ -227,7 +252,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 if clear_pool and hasattr(engine, "buffer_pool") and engine.buffer_pool:
                     engine.buffer_pool.clear()
         except Exception as exc:
-            print(f"[LucasKanadeGPU] VRAM cleanup skipped ({reason}): {exc}")
+            print(f"[LucasKanade] VRAM cleanup skipped ({reason}): {exc}")
         if clear_pool:
             gc.collect()
 
@@ -284,10 +309,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         oy1, ox1 = vy1 - ry0, vx1 - rx0
         mask_cpu = np.zeros((roi_h, roi_w), dtype=np.float32)
         mask_cpu[oy0:oy1, ox0:ox1] = 1.0
-        # A full-frame tile can keep the invariant reference pyramid resident
-        # across support frames.  On conservative/low-VRAM mode this remains
-        # disabled by default; callers may opt in explicitly with
-        # ``cache_reference_pyramid=True``.
+
         cache_reference_pyramid = bool(
             (config or {}).get(
                 "cache_reference_pyramid",
@@ -303,10 +325,10 @@ class LucasKanadeGPU(LucasKanadeCPU):
             reference_pyramid is None
             and cache_reference_pyramid
             and (rx0, ry0, rx1, ry1) == (
-            0,
-            0,
-            int(reference.shape[1]),
-            int(reference.shape[0]),
+                0,
+                0,
+                int(reference.shape[1]),
+                int(reference.shape[0]),
             )
         ):
             candidate_pyramid = None
@@ -322,8 +344,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 )
                 reference_pyramid = candidate_pyramid
             except Exception:
-                # Pyramid caching is an optimization only.  The established
-                # per-call construction remains the same-backend recovery.
                 try:
                     for level in candidate_pyramid[1:]:
                         self._release_tile_value(level)
@@ -345,65 +365,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
             ),
         }
         return buffers
-
-    @staticmethod
-    def load_config(batch_id=None, config_filename=None):
-        visible_config = DEFAULT_LUCAS_KANADE_GPU_CONFIG.copy()
-        config_filename = config_filename or ALGORITHM_PARAMETER_SETTINGS_FILE
-        try:
-            if os.path.exists(config_filename):
-                with open(config_filename, "r") as config_file:
-                    params = json.load(config_file)
-                section = params.get("LucasKanadeGPU", {})
-                if isinstance(section, dict):
-                    visible_config.update(section)
-        except Exception as exc:
-            print(f"[LucasKanadeGPU] Failed to load config: {exc}")
-        if batch_id is not None:
-            try:
-                from pixel_refine_desktop.enhance_stack.core.logic import (
-                    batch_parameter_manager,
-                )
-
-                batch_params = batch_parameter_manager.load_json_state().get(
-                    str(batch_id),
-                    {},
-                )
-                section = batch_params.get("lucas_kanade_gpu_params", {})
-                if isinstance(section, dict):
-                    visible_config.update(section)
-            except Exception as exc:
-                print(f"[LucasKanadeGPU] Failed to load batch config: {exc}")
-        return LucasKanadeGPU._resolve_mode_config(visible_config)
-
-    @staticmethod
-    def _normalize_mode(mode):
-        value = str(mode or "fast").strip().lower()
-        if value in ("balanced", "balance mode", "balance", "normal", "medium"):
-            return "balance"
-        if value == "auto":
-            return "high"
-        if value not in LUCAS_KANADE_GPU_PRESETS:
-            return "high"
-        return value
-
-    @staticmethod
-    def _resolve_mode_config(config):
-        mode = LucasKanadeGPU._normalize_mode(config.get("mode", "high"))
-        resolved = LUCAS_KANADE_GPU_PRESETS[mode].copy()
-        for key, value in config.items():
-            if key != "mode":
-                resolved[key] = value
-        resolved["mode"] = mode
-        return resolved
-
-    @staticmethod
-    def load_lucas_kanade_gpu_config(config_filename=None):
-        return LucasKanadeGPU.load_config(config_filename=config_filename)
-
-    @staticmethod
-    def load_lucas_kanade_gpu_config_for_batch(config_filename=None):
-        return LucasKanadeGPU.load_config(config_filename=config_filename)
 
     def _build_lk_params(self, config):
         win_size = max(5, int(config.get("win_size", 13)))
@@ -437,25 +398,38 @@ class LucasKanadeGPU(LucasKanadeCPU):
             "dense_mode": dense_mode,
             "max_flow_px": float(config.get("max_flow_px", 64.0)),
         }
+    def calculate_flow(
+        self,
+        reference_gray,
+        target_gray,
+        config,
+        point_executor=None,
+        return_gpu=False,
+    ):
+        """Run the full-frame Taichi AOT Lucas-Kanade implementation."""
+        if return_gpu:
+            return self._calculate_flow_gpu_buffer(reference_gray, target_gray, config)
 
-    def calculate_flow(self, reference_gray, target_gray, config, point_executor=None):
         from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
 
         lk_params = self._build_lk_params(config)
 
         try:
             flow = calcOpticalFlowPyrLK(
-                reference_gray,
-                target_gray,
+                np.ascontiguousarray(reference_gray, dtype=np.float32),
+                np.ascontiguousarray(target_gray, dtype=np.float32),
                 **lk_params,
             )
             if isinstance(flow, tuple):
                 flow = flow[0]
             if flow is not None:
-                return np.ascontiguousarray(flow, dtype=np.float32)
+                flow_arr = np.asarray(flow, dtype=np.float32)
+                expected = (*reference_gray.shape[:2], 2)
+                if flow_arr.shape == expected and np.isfinite(flow_arr).all():
+                    return np.ascontiguousarray(flow_arr)
         except Exception as exc:
             print(
-                f"[LucasKanadeGPU] Dense AOT flow failed, falling back to grid flow: {exc}"
+                f"[LucasKanade] Dense AOT flow failed, falling back to grid flow: {exc}"
             )
 
         return self._calculate_flow_grid_fallback(
@@ -470,9 +444,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
     ):
         from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
 
-        # Forward the optional resident reference pyramid.  The public LK
-        # wrapper validates its shape/layout and reuses the caller-owned
-        # levels, avoiding a full pyramid rebuild for every support frame.
         flow_kwargs = self._build_lk_params(config)
         flow_kwargs["return_gpu"] = True
         if reference_pyramid is not None:
@@ -483,6 +454,44 @@ class LucasKanadeGPU(LucasKanadeCPU):
         if flow is None or not hasattr(flow, "shape"):
             raise RuntimeError("Lucas Kanade AOT did not return a GPU flow buffer")
         return flow
+
+    def _calculate_flow_host_native(self, reference_gray, target_gray, config):
+        from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
+        params = self._build_lk_params(config)
+        params["criteria"] = (
+            3,
+            min(2, int(params["criteria"][1])),
+            float(params["criteria"][2]),
+        )
+        params["maxLevel"] = min(1, int(params["maxLevel"]))
+        params["motion_mode"] = "fast"
+        if max(reference_gray.shape[:2]) > 768:
+            params["maxLevel"] = 0
+            params["grid_step"] = max(64, int(params["grid_step"]))
+        flow = calcOpticalFlowPyrLK(
+            np.ascontiguousarray(reference_gray, dtype=np.float32),
+            np.ascontiguousarray(target_gray, dtype=np.float32),
+            **params, return_gpu=False,
+        )
+        if isinstance(flow, tuple):
+            flow = flow[0]
+        return np.ascontiguousarray(flow, dtype=np.float32)
+
+    def _align_frame_opengl_native(self, reference, target, config,
+                                   matching_reference=None, matching_target=None):
+        from taichi_vision import taichi_aot
+        matching_reference = reference if matching_reference is None else matching_reference
+        matching_target = target if matching_target is None else matching_target
+        reference_gray = to_flow_gray_u8(matching_reference).astype(np.float32, copy=False)
+        target_gray = to_flow_gray_u8(matching_target).astype(np.float32, copy=False)
+        flow = self._calculate_flow_host_native(reference_gray, target_gray, config)
+        expected = (*reference.shape[:2], 2)
+        if flow.shape != expected or not np.isfinite(flow).all():
+            raise RuntimeError(f"OpenGL native flow returned {flow.shape}, expected {expected}")
+        return taichi_aot.remap_with_flow(
+            np.ascontiguousarray(target), flow,
+            int(reference.shape[0]), int(reference.shape[1]), return_gpu=False,
+        )
 
     def align_frame(
         self,
@@ -495,6 +504,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         matching_reference=None,
         matching_target=None,
         return_gpu=False,
+        target_for_warping=None,
     ):
         config = config or self.load_config()
         if reference is None or target is None:
@@ -502,9 +512,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
         matching_reference = reference if matching_reference is None else matching_reference
         matching_target = target if matching_target is None else matching_target
 
-        # OpenGL uses the host-output native graph path.  The regular GPU
-        # buffer/remap pipeline relies on Vulkan-style storage bindings and
-        # triggers GL_INVALID_OPERATION on Intel drivers.
         try:
             from taichi_vision import taichi_aot
             if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
@@ -516,33 +523,30 @@ class LucasKanadeGPU(LucasKanadeCPU):
         except Exception:
             raise
 
-        if LucasKanadeGPU._gpu_remap_disabled:
-            if not LucasKanadeGPU._reported_gpu_remap_disabled:
+        if LucasKanade._gpu_remap_disabled:
+            if not LucasKanade._reported_gpu_remap_disabled:
                 print(
-                    "[LucasKanadeGPU] GPU remap path disabled after previous failure; "
+                    "[LucasKanade] GPU remap path disabled after previous failure; "
                     "using the Taichi Vision host/remap compatibility path."
                 )
-                LucasKanadeGPU._reported_gpu_remap_disabled = True
-            return self._align_frame_cpu_fallback(
+                LucasKanade._reported_gpu_remap_disabled = True
+            return self._align_frame_host_fallback(
                 reference,
                 target,
                 config=config,
                 stop_requested=stop_requested,
                 tile_executor=tile_executor,
                 point_executor=point_executor,
+                target_for_warping=target_for_warping,
             )
 
         try:
             from taichi_vision import taichi_aot
 
             with taichi_aot.engine.reserve_device_execution(self.DEVICE_RESERVATION):
-                # Load graph modules before image buffers claim the device budget.
                 for module_name in self.GPU_MODULES:
                     taichi_aot._mod(module_name)
                 taichi_aot.engine.sync()
-                # Block Matching can opt into allocator reuse.  The old
-                # unconditional clear forced every pyramid/grid temporary to
-                # be freshly allocated for the next support frame.
                 if not bool(config.get("retain_native_pool", False)):
                     taichi_aot.engine.buffer_pool.clear()
                 res = self._align_frame_gpu_flow_remap(
@@ -567,20 +571,21 @@ class LucasKanadeGPU(LucasKanadeCPU):
             self._cleanup_tile_buffers()
             self._vram_cleanup("frame-error", clear_pool=True)
 
-            LucasKanadeGPU._gpu_remap_disabled = True
+            LucasKanade._gpu_remap_disabled = True
             print(
-                f"[LucasKanadeGPU] GPU remap path failed, falling back to Taichi host remap: {exc}"
+                f"[LucasKanade] GPU remap path failed, falling back to Taichi host remap: {exc}"
             )
-            return self._align_frame_cpu_fallback(
+            return self._align_frame_host_fallback(
                 reference,
                 target,
                 config=config,
                 stop_requested=stop_requested,
                 tile_executor=tile_executor,
                 point_executor=point_executor,
+                target_for_warping=target_for_warping,
             )
 
-    def _align_frame_cpu_fallback(
+    def _align_frame_host_fallback(
         self,
         reference,
         target,
@@ -588,6 +593,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         stop_requested=None,
         tile_executor=None,
         point_executor=None,
+        target_for_warping=None,
     ):
         fallback_config = dict(config)
         fallback_config["use_multi_core"] = True
@@ -597,8 +603,7 @@ class LucasKanadeGPU(LucasKanadeCPU):
         )
 
         def flow_func(reference_gray, target_gray):
-            return LucasKanadeCPU.calculate_flow(
-                self,
+            return self.calculate_flow(
                 reference_gray,
                 target_gray,
                 fallback_config,
@@ -616,22 +621,11 @@ class LucasKanadeGPU(LucasKanadeCPU):
             use_multi_core=True,
             stop_requested=stop_requested,
             executor=tile_executor,
+            target_for_warping=target_for_warping,
         )
 
-    def build_flow_alignment(self, ctx, reference, target_dims, orchestrator, config):
-        fallback_config = dict(config)
-        fallback_config["use_multi_core"] = False
-        fallback_config["point_workers"] = max(
-            2,
-            int(fallback_config.get("point_workers", 2)),
-        )
-        return super().build_flow_alignment(
-            ctx,
-            reference,
-            target_dims,
-            orchestrator,
-            fallback_config,
-        )
+    # Legacy alias
+    _align_frame_cpu_fallback = _align_frame_host_fallback
 
     def _align_frame_gpu_flow_remap(
         self,
@@ -661,13 +655,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
             "dtype_restore": 0.0,
             "division_download": 0.0,
         }
-        print(
-            "[LucasKanadeGPU Config] "
-            f"mode={config.get('mode')} grid_step={config.get('grid_step')} "
-            f"max_level={config.get('max_level')} iterations={config.get('iterations')} "
-            f"win_size={config.get('win_size')} motion_mode={config.get('motion_mode')} "
-            f"block_runtime={'native' if taichi_aot.get_block_config().enabled else 'full_frame'}"
-        )
 
         matching_reference = reference if matching_reference is None else matching_reference
         matching_target = target if matching_target is None else matching_target
@@ -680,14 +667,9 @@ class LucasKanadeGPU(LucasKanadeCPU):
         )
         conservative_vram = bool(config.get("conservative_vram", True))
 
-        # Initialize/re-initialize tile buffers once per batch/reference change
-        # A caller may regenerate an analysis/tone-mapped NumPy view for each
-        # frame while the actual reference image remains unchanged.  Let the
-        # specialized aligner provide a stable cache key in that case.
         ref_id = config.get("_reference_cache_key", id(matching_reference))
         if self._tile_buffers is None or self._current_ref_id != ref_id:
             self._cleanup_tile_buffers()
-            # Keep only the active tile resident on low-VRAM devices.
             self._tile_buffers = (
                 {} if conservative_vram
                 else self._init_tile_buffers(matching_reference, tiles, config)
@@ -750,7 +732,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
                         reuse_reference=retained_reference,
                     )
 
-
                 warped_gpu = self._warp_tile_gpu(
                     tile,
                     reference,
@@ -765,33 +746,12 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
                 if single_full_frame_tile:
                     if return_gpu:
-                        elapsed = time.perf_counter() - t_total
-                        print(
-                            f"[LucasKanadeGPU Profile] Align completed (GPU-Resident) in {elapsed*1000:.1f}ms | "
-                            f"Prepare: {profile['prepare']*1000:.1f}ms | "
-                            f"Flow Calc: {profile['flow_calc']*1000:.1f}ms | "
-                            f"Warp: {profile['warp']*1000:.1f}ms"
-                        )
                         return warped_gpu
 
                     result = self._download_restore_dtype(
                         warped_gpu,
                         target.dtype,
                         profile,
-                    )
-                    elapsed = time.perf_counter() - t_total
-                    print(
-                        f"[LucasKanadeGPU Profile] Align completed in {elapsed*1000:.1f}ms | "
-                        f"Prepare: {profile['prepare']*1000:.1f}ms | "
-                        f"CPU Gray: {profile['cpu_gray']*1000:.1f}ms | "
-                        f"Upload: {profile['gpu_upload']*1000:.1f}ms "
-                        f"(Color: {profile['upload_color']*1000:.1f}ms, Gray: {profile['upload_gray']*1000:.1f}ms) | "
-                        f"Flow Calc: {profile['flow_calc']*1000:.1f}ms | "
-                        f"Warp: {profile['warp']*1000:.1f}ms | "
-                        f"Stitch: 0.0ms | "
-                        f"Division: 0.0ms | "
-                        f"Download: {profile['download']*1000:.1f}ms "
-                        f"(Readback: {profile['readback']*1000:.1f}ms, Cast: {profile['dtype_restore']*1000:.1f}ms)"
                     )
                     return result
 
@@ -826,21 +786,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 profile,
             )
             profile["division_download"] = profile["division"] + profile["download"]
-
-            elapsed = time.perf_counter() - t_total
-            print(
-                f"[LucasKanadeGPU Profile] Align completed in {elapsed*1000:.1f}ms | "
-                f"Prepare: {profile['prepare']*1000:.1f}ms | "
-                f"CPU Gray: {profile['cpu_gray']*1000:.1f}ms | "
-                f"Upload: {profile['gpu_upload']*1000:.1f}ms "
-                f"(Color: {profile['upload_color']*1000:.1f}ms, Gray: {profile['upload_gray']*1000:.1f}ms) | "
-                f"Flow Calc: {profile['flow_calc']*1000:.1f}ms | "
-                f"Warp: {profile['warp']*1000:.1f}ms | "
-                f"Stitch: {profile['stitch']*1000:.1f}ms | "
-                f"Division: {profile['division']*1000:.1f}ms | "
-                f"Download: {profile['download']*1000:.1f}ms "
-                f"(Readback: {profile['readback']*1000:.1f}ms, Cast: {profile['dtype_restore']*1000:.1f}ms)"
-            )
             return result
         finally:
             taichi_aot.engine.sync()
@@ -944,7 +889,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
         ref_roi = reference[ry0:ry1, rx0:rx1]
         target_roi_original = target[ry0:ry1, rx0:rx1]
 
-        # Use pre-allocated buffers if tile_idx is provided
         if tile_idx is not None and self._tile_buffers is not None:
             bufs = self._tile_buffers[tile_idx]
             target_gpu = bufs["target_gpu"]
@@ -956,7 +900,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
 
             from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
 
-            # 1. CPU preprocess (target gray only - ref is static and pre-uploaded)
             t0 = time.perf_counter()
             target_gray_view = (
                 target_gray_full[ry0:ry1, rx0:rx1]
@@ -966,7 +909,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
             if profile is not None and target_gray_view is not None:
                 profile["cpu_gray"] += time.perf_counter() - t0
 
-            # 2. Upload BGR target buffer directly to existing VRAM allocations (or reuse if already on GPU)
             t0 = time.perf_counter()
             if hasattr(target_roi_original, "handle"):
                 target_gpu = target_roi_original
@@ -981,7 +923,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 )
                 color_elapsed = time.perf_counter() - t0
 
-            # 2b. Compute grayscale: use native GPU cvtColor when target_gray_view is omitted (zero CPU overhead)
             t0 = time.perf_counter()
             if target_gray_view is not None:
                 np.copyto(target_gray_host, target_gray_view, casting="unsafe")
@@ -1001,7 +942,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
                 profile["upload_gray"] += gray_elapsed
                 profile["gpu_upload"] += color_elapsed + gray_elapsed
 
-            # 3. Flow Calc
             t0 = time.perf_counter()
             flow_gpu = self._calculate_flow_gpu_buffer(
                 ref_gray_gpu,
@@ -1011,12 +951,10 @@ class LucasKanadeGPU(LucasKanadeCPU):
             )
             taichi_aot.engine.sync()
             if bool(config.get("conservative_vram", True)):
-                # Pyramid intermediates are no longer live after the flow fence.
                 taichi_aot.engine.buffer_pool.clear()
             if profile is not None:
                 profile["flow_calc"] += time.perf_counter() - t0
 
-            # 4. Warp directly into pre-allocated warped_gpu
             t0 = time.perf_counter()
             roi_h, roi_w = ref_gray_gpu.shape[:2]
             taichi_aot.remap_with_flow(
@@ -1055,17 +993,14 @@ class LucasKanadeGPU(LucasKanadeCPU):
             ref_gray_gpu = taichi_aot.upload(ref_gray_cpu, is_vector=False)
             target_gray_gpu = taichi_aot.upload(target_gray_cpu, is_vector=False)
 
-            # 1D LUT for 50% contrast S-curve
             indices = np.linspace(0.0, 1.0, 256, dtype=np.float32)
             s_curve = 0.5 - 0.5 * np.cos(np.pi * indices)
             lut_cpu = (1.0 - 0.50) * indices + 0.50 * s_curve
             lut_gpu = taichi_aot.upload(lut_cpu, is_vector=False)
 
-            # Local details blur (5x5 box filter)
             ref_blur_gpu = taichi_aot.box_filter(ref_gray_gpu, kernel_size=5, return_gpu=True)
             target_blur_gpu = taichi_aot.box_filter(target_gray_gpu, kernel_size=5, return_gpu=True)
 
-            # Enhance contrast (50%) and clarity/microcontrast (30%) on the GPU
             ref_gray_enhanced = taichi_aot.enhance_grayscale(
                 ref_gray_gpu,
                 ref_blur_gpu,
@@ -1167,8 +1102,6 @@ class LucasKanadeGPU(LucasKanadeCPU):
         if not np.any(valid):
             return np.zeros((height, width, 2), dtype=np.float32)
 
-        # CPU-like but fast: repair invalid grid cells on the compact grid, not
-        # on the full tile. This avoids the old 64-pass full-resolution blur.
         valid_f = valid.astype(np.float32)
 
         def box_blur(array):
@@ -1207,3 +1140,12 @@ class LucasKanadeGPU(LucasKanadeCPU):
         finally:
             compact_gpu.destroy()
         return np.ascontiguousarray(flow, dtype=np.float32)
+
+    def run(self, ctx, frames, batch_plan=None):
+        return list(frames)
+
+
+# Canonical Aliases
+LucasKanadeFlow = LucasKanade
+LucasKanadeGPU = LucasKanade
+LucasKanadeCPU = LucasKanade

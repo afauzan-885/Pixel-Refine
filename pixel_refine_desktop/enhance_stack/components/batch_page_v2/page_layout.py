@@ -172,6 +172,14 @@ def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
         layout_instance.workspace_panel.clear_display
     )
 
+    # Sync execution settings immediately, before the store's delayed writes.
+    layout_instance.batch_panel.algorithm_settings_changed.connect(
+        layout_instance.workspace_panel.algorithm_panel.update_settings
+    )
+    layout_instance.batch_panel.process_command_changed.connect(
+        layout_instance.workspace_panel.algorithm_panel.set_process_command
+    )
+
     # Keep display controls (including Start) synchronized directly from the
     # in-memory settings signal.  JSON persistence remains asynchronous in
     # RightPanel and must not block this UI path.
@@ -207,7 +215,8 @@ def setup_main_layout(layout_instance: Any, database_manager: DatabaseManager):
 
     # Initial Sync: Pastikan AlgorithmPanel sesuai dengan pilihan default di RightPanel
     initial_settings = layout_instance.batch_panel.get_current_settings()
-    layout_instance.workspace_panel.algorithm_panel.update_settings(initial_settings)
+    layout_instance.workspace_panel.algorithm_panel.update_settings_immediate(initial_settings)
+    layout_instance.workspace_panel.display_panel.apply_algorithm_settings_fast(initial_settings)
 
     # Connect Page Navigation (Sidebar -> Main Window)
     if hasattr(layout_instance, "page_changed"):
@@ -235,8 +244,9 @@ def _load_batch_content(layout_instance, batch_id):
     # We no longer cancel batch_import here to allow background completion
     # ProcessManager.instance().cancel_context("batch_import")
 
-    # ``BatchPageController.get_batch`` is LRU-cached (Edit 3) so a
-    # repeat visit costs a dict lookup, not a SQLite round-trip.
+    # ``BatchPageController.get_batch`` always re-reads SQLite: batches can be
+    # modified outside the controller (Bulk Mode writes the same database), so a
+    # cached model must not be served on the switch path.
     batch = layout_instance.controller.get_batch(batch_id)
     if batch:
         layout_instance.workspace_panel.load_batch(batch_id, batch.images, batch.name)

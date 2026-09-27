@@ -382,7 +382,7 @@ class BlockMatchingResidentAligner:
         from taichi_vision.taichi_algorithm.pyramid.pyramid import (
             build_image_pyramid_gpu,
         )
-        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching_gpu import (
+        from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching import (
             BLOCK_MATCHING_GPU_PRESETS,
         )
 

@@ -30,8 +30,8 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
     save_lucas_kanade_config_for_active_batch,
 )
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.block_matching_parameter_settings import (
-    load_block_matching_gpu_config,
-    save_block_matching_gpu_config_for_active_batch,
+    load_block_matching_config,
+    save_block_matching_config_for_active_batch,
 )
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.raft_parameter_settings import (
     load_raft_config,
@@ -73,7 +73,7 @@ class SwitchableParameterPanel(QWidget):
     - Vertical tabs on the right side: Red (Alignment) and Green (Denoising).
     - Border matches the active tab's color.
     - Alignment: Dropdown to select algorithm + dynamic parameters below.
-    - Denoising: Specifically displays Similarity parameters.
+    - Denoising: Displays the selected algorithm's own parameter provider.
     - Visibility logic: Denoising tab hidden if average/median selected.
     """
     settings_changed = Signal()
@@ -110,8 +110,9 @@ class SwitchableParameterPanel(QWidget):
     def _repopulate_alignment_combo(self):
         """Rebuild the alignment combo items based on current backend arch & denoising algorithm.
 
-        For FusionNet: Offers each native flow variant plus 'No Alignment'.
-        For others: Offers the full list of compatible algorithms.
+        All denoising algorithms use the same alignment registry.  The
+        selected denoiser owns execution, while this combo only selects the
+        algorithm contract passed through MFDenoiser.
         """
         from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import get_backend_arch
         if not hasattr(self, "align_dropdown"):
@@ -127,33 +128,15 @@ class SwitchableParameterPanel(QWidget):
         combo.blockSignals(True)
         combo.clear()
 
-        if getattr(self, "current_denoising_algo", "") == "FusionNet":
-            fusionet_options = [
-                "Block Flow",
-                "Block Matching GPU",
-                "Lucas Kanade",
-                "Farneback",
-                "No Alignment",
-            ]
-            for name in fusionet_options:
-                if name not in self.alignment_algorithm_names:
-                    # Dynamically add page if not yet present
-                    if hasattr(self, "alignment_pages") and name not in self.alignment_pages:
-                        page = get_alignment_settings_page(name)
-                        self.alignment_pages[name] = page
-                        self.align_param_stack.addWidget(page)
-                combo.addItem(name)
-            fallback_default = "Block Flow"
-        else:
-            for name in self.alignment_algorithm_names:
-                if name in self._HIDDEN_ALIGNMENT:
-                    continue
-                if backend_arch == "opengl" and name in self._VULKAN_ONLY_ALIGNMENT:
-                    continue
-                if backend_arch == "cpu" and name in self._CPU_HIDDEN_ALIGNMENT:
-                    continue
-                combo.addItem(name)
-            fallback_default = "No Alignment"
+        for name in self.alignment_algorithm_names:
+            if name in self._HIDDEN_ALIGNMENT:
+                continue
+            if backend_arch == "opengl" and name in self._VULKAN_ONLY_ALIGNMENT:
+                continue
+            if backend_arch == "cpu" and name in self._CPU_HIDDEN_ALIGNMENT:
+                continue
+            combo.addItem(name)
+        fallback_default = "No Alignment"
 
         # Restore selection if still available, else fall back
         idx = combo.findText(current_text)
@@ -193,7 +176,7 @@ class SwitchableParameterPanel(QWidget):
         elif selected_text == "Lucas Kanade":
             save_lucas_kanade_config_for_active_batch(load_lucas_kanade_config())
         elif selected_text == "Block Matching GPU":
-            save_block_matching_gpu_config_for_active_batch(load_block_matching_gpu_config())
+            save_block_matching_config_for_active_batch(load_block_matching_config())
         elif selected_text == "RAFT":
             save_raft_config_for_active_batch(load_raft_config())
 
@@ -248,17 +231,26 @@ class SwitchableParameterPanel(QWidget):
             if hasattr(right_panel, "sr_card")
             else "No Super Resolution"
         )
+        hdr_algo = (
+            right_panel.hdr_card.get_value()
+            if hasattr(right_panel, "hdr_card")
+            else "No HDR"
+        )
         bulk_data = {
             f"{str_id}.{config.KEY_ALIGNMENT_ALGO}": algorithm_name,
             f"{str_id}.{config.KEY_SUPER_RESOLUTION_ALGO}": super_resolution_algo or "No Super Resolution",
             f"{str_id}.{config.KEY_DENOISING_ALGO}": denoising_algo or "No Denoising",
+            f"{str_id}.{config.KEY_HDR_ALGO}": hdr_algo or "No HDR",
             f"{str_id}.{config.KEY_CHECKBOX_ALIGN}": algorithm_name not in ("", "None", "No Alignment"),
             f"{str_id}.{config.KEY_CHECKBOX_SUPER_RES}": bool(getattr(right_panel.sr_card, "is_checked", False))
             if hasattr(right_panel, "sr_card")
             else False,
-                    f"{str_id}.{config.KEY_CHECKBOX_DENOISING}": bool(getattr(right_panel.denoise_card, "is_checked", False))
+            f"{str_id}.{config.KEY_CHECKBOX_DENOISING}": bool(getattr(right_panel.denoise_card, "is_checked", False))
             if hasattr(right_panel, "denoise_card")
             else denoising_algo not in ("", "None", "No Denoising"),
+            f"{str_id}.{config.KEY_CHECKBOX_HDR}": bool(getattr(right_panel.hdr_card, "is_checked", False))
+            if hasattr(right_panel, "hdr_card")
+            else hdr_algo not in ("", "None", "No HDR"),
             f"{str_id}.{params_key}": params,
         }
         if hasattr(right_panel, "_store") and right_panel._store:
@@ -276,6 +268,7 @@ class SwitchableParameterPanel(QWidget):
                     config.KEY_ALIGNMENT: algorithm_name,
                     config.KEY_SUPER_RESOLUTION: super_resolution_algo,
                     config.KEY_DENOISING: denoising_algo,
+                    config.KEY_HDR: hdr_algo,
                 }
             )
         print(f"[{algorithm_name}Settings] Saved params for batch_id={batch_id}")
@@ -539,8 +532,23 @@ class SwitchableParameterPanel(QWidget):
         self.content_stack.addWidget(self.align_page)
 
     def _setup_denoising_page(self):
-        self.denoise_page_container = get_denoising_settings_page("Similarity")
-        self.content_stack.addWidget(self.denoise_page_container)
+        self._denoising_pages = {}
+        self.denoise_page_container = self._get_denoising_page("Similarity")
+
+    def _get_denoising_page(self, algorithm_name):
+        """Return the parameter page for the selected denoiser.
+
+        Similarity and FusionNet intentionally have separate providers.  The
+        page is cached so switching the dropdown does not discard unsaved UI
+        state or recreate Qt controls on every visibility update.
+        """
+        normalized = "FusionNet" if algorithm_name == "Spatial AI" else algorithm_name
+        page = self._denoising_pages.get(normalized)
+        if page is None:
+            page = get_denoising_settings_page(normalized)
+            self._denoising_pages[normalized] = page
+            self.content_stack.addWidget(page)
+        return page
 
     def set_active_tab(self, tab_name):
         if tab_name == "denoising" and self.current_denoising_algo in ["Average", "Median"]:
@@ -778,6 +786,14 @@ class SwitchableParameterPanel(QWidget):
 
         # 2. Handle visibility logic for denoising
         denoising_algo = str(settings.get(config.KEY_DENOISING, "No Denoising")).strip()
+
+        # Keep the D tab bound to the selected algorithm's provider.  FusionNet
+        # must not reuse Similarity's spatial controls.
+        selected_page = self._get_denoising_page(denoising_algo)
+        if selected_page is not self.denoise_page_container:
+            self.denoise_page_container = selected_page
+            if self.active_tab == "denoising":
+                self.content_stack.setCurrentWidget(selected_page)
         
         # If denoising algo changed or is newly loaded, keep parameter panel closed by default
         if denoising_algo != self.current_denoising_algo:
@@ -803,11 +819,11 @@ class SwitchableParameterPanel(QWidget):
                 overlay.show()
                 overlay.raise_()
 
-            if denoising_algo in ["Average", "Median", "FusionNet"]:
+            if denoising_algo in ["Average", "Median"]:
                 self.btn_align_tab.setVisible(True)
                 self.btn_denoise_tab.setVisible(False)
                 self.btn_denoise_tab.setEnabled(False)
-            elif denoising_algo in ["Similarity", "Spatial AI"]:
+            elif denoising_algo in ["Similarity", "Spatial AI", "FusionNet"]:
                 self.btn_align_tab.setVisible(True)
                 self.btn_denoise_tab.setVisible(True)
                 self.btn_denoise_tab.setEnabled(True)
@@ -840,7 +856,7 @@ class SwitchableParameterPanel(QWidget):
             return False
 
         self.btn_align_tab.setVisible(True)
-        show_denoise = denoising_algo in ("Similarity", "Spatial AI")
+        show_denoise = denoising_algo in ("Similarity", "Spatial AI", "FusionNet")
         self.btn_denoise_tab.setVisible(show_denoise)
         self.btn_denoise_tab.setEnabled(show_denoise)
         if self.active_tab is None:

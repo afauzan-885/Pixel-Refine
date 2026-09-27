@@ -5,8 +5,11 @@ Manages background GPU runtime wake-up and pre-loading/pre-compiling of
 Taichi AOT TCM modules into Host RAM.
 
 Focused Pack Architecture:
-- Pack 1 (Startup Background): Only the 3 essential preview and playback modules
+- Pack 1 (preview catalog): the 3 preview/demosaic modules remain registered
   ("bilinear_demosaice", "hamilton", "common").
+- Startup hot set: only the two modules needed for the first preview/RAW
+  interaction are loaded on the critical warm-up path. ``common`` remains
+  lazy and is loaded through the normal AOT API when a caller needs it.
 - Pack 2 (On-Demand): Heavy multi-frame alignment and fusion modules
   ("auto_enhance", "spatial_fusion", etc.) loaded when processing begins.
 - Zero VRAM Bloat: Host RAM holds module definitions and bytecode. No heavy image
@@ -83,6 +86,14 @@ PACK_1_PREVIEW_MODULES = (
     "common",
 )
 
+# Keep ``PACK_1_PREVIEW_MODULES``/``TIER_1_MODULES`` as the complete public
+# catalog, but keep the first startup pass bounded to the two hot paths. The
+# normal ``_mod`` loader remains the source of truth for deferred modules.
+PACK_1_STARTUP_MODULES = (
+    "bilinear_demosaice",
+    "hamilton",
+)
+
 # Pack 2: Heavy multi-frame burst alignment, enhancement, and spatial fusion (on-demand)
 PACK_2_ENHANCE_MODULES = (
     "auto_enhance",
@@ -132,7 +143,7 @@ class AOTSilentWarmupWorker(QThread):
 
     def __init__(self, modules=None, parent=None):
         super().__init__(parent)
-        self._modules = modules or PACK_1_PREVIEW_MODULES
+        self._modules = modules or PACK_1_STARTUP_MODULES
         self._stop_requested = False
 
     def request_stop(self):
@@ -148,16 +159,20 @@ class AOTSilentWarmupWorker(QThread):
             return
 
         try:
-            # 1. Wake up discrete GPU & Vulkan context under taichi_lock
+            # Wake the runtime and load the preview pack in one serialized
+            # session. The batch helper resolves target/root once and keeps
+            # native module loading serial, while avoiding one lock round-trip
+            # and one target-resolution pass per module.
             with taichi_lock:
                 if self._stop_requested:
                     return
+                taichi_engine = None
                 try:
                     import taichi_vision.taichi_aot as taichi_aot
                     if hasattr(taichi_aot, "get_engine"):
-                        _ = taichi_aot.get_engine()
+                        taichi_engine = taichi_aot.get_engine()
                     elif hasattr(taichi_aot, "engine"):
-                        _ = taichi_aot.engine
+                        taichi_engine = taichi_aot.engine
                 except Exception as exc:
                     _warmup_log(
                         "Komponen awal akan dimuat saat diperlukan.",
@@ -167,24 +182,24 @@ class AOTSilentWarmupWorker(QThread):
                         detail=True,
                     )
 
-            if self._stop_requested:
-                return
-
-            # 2. Warm up Pack 1 modules (Demosaic, preview, canvas)
-            from taichi_vision.taichi_algorithm.aot_api import _mod
-
-            for mod_name in self._modules:
                 if self._stop_requested:
                     return
-                with taichi_lock:
-                    try:
-                        _mod(mod_name)
-                        stats["loaded_modules"] += 1
-                    except Exception as exc:
-                        _warmup_log(
-                            f"Warmup module deferred: {mod_name}: {type(exc).__name__}: {exc}",
-                            detail=True,
-                        )
+
+                if taichi_engine is None:
+                    from taichi_vision.taichi_aot import get_engine
+
+                    taichi_engine = get_engine()
+                from taichi_vision.taichi_aot.aot_module_loader import (
+                    AOTModuleLoader,
+                )
+
+                batch_stats = AOTModuleLoader(taichi_engine).warmup(self._modules)
+                stats["loaded_modules"] = batch_stats["loaded_modules"]
+                for mod_name, exc in batch_stats.get("deferred_modules", ()):
+                    _warmup_log(
+                        f"Warmup module deferred: {mod_name}: {type(exc).__name__}: {exc}",
+                        detail=True,
+                    )
 
         except Exception as exc:
             _warmup_log("Komponen awal akan dimuat saat diperlukan.")
@@ -206,6 +221,24 @@ class AOTSilentWarmupWorker(QThread):
                 detail=True,
             )
             self.warmup_finished.emit(stats)
+
+
+def is_silent_aot_warmup_running() -> bool:
+    """True while the silent Pack 1 warm-up is still loading TCM modules.
+
+    The warm-up holds the Taichi lock for its whole module-loading session, so
+    any engine operation issued meanwhile (``sync``, pool drain) blocks until it
+    finishes.  Callers that would otherwise stall the GUI thread should check
+    this first and postpone their work.
+    """
+    worker = _GLOBAL_WARMUP_WORKER
+    if worker is None:
+        return False
+    try:
+        return bool(worker.isRunning())
+    except RuntimeError:
+        # The underlying C++ object can already be gone during shutdown.
+        return False
 
 
 def start_silent_aot_warmup(delay_ms: int = 200, parent: QObject | None = None) -> None:
@@ -239,9 +272,20 @@ def start_silent_aot_warmup(delay_ms: int = 200, parent: QObject | None = None) 
         with _GLOBAL_LOCK:
             if _GLOBAL_WARMUP_WORKER is not None and _GLOBAL_WARMUP_WORKER.isRunning():
                 return
-            worker = AOTSilentWarmupWorker(modules=PACK_1_PREVIEW_MODULES, parent=parent)
+            worker = AOTSilentWarmupWorker(
+                modules=PACK_1_STARTUP_MODULES,
+                parent=parent,
+            )
             _GLOBAL_WARMUP_WORKER = worker
-            worker.start(QThread.Priority.LowestPriority)
+            # Keep warm-up below normal UI work, but avoid starving native
+            # module loading indefinitely on busy systems.  The old
+            # LowestPriority behavior remains an opt-in compatibility mode.
+            priority = (
+                QThread.Priority.LowestPriority
+                if os.environ.get("PIXEL_REFINE_AOT_WARMUP_LOWEST", "0") == "1"
+                else QThread.Priority.LowPriority
+            )
+            worker.start(priority)
 
     if delay_ms > 0:
         QTimer.singleShot(delay_ms, _launch)

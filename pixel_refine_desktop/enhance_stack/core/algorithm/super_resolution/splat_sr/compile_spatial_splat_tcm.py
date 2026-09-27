@@ -1,0 +1,108 @@
+"""Compile the production ``robust_splat`` graph for one Taichi backend.
+
+Examples (run from the project venv):
+    python compile_spatial_splat_tcm.py vulkan
+    python compile_spatial_splat_tcm.py cuda
+    python compile_spatial_splat_tcm.py opengl
+
+Compilation is intentionally one backend per process because Taichi owns a
+single active runtime context.  The resulting TCM is only considered usable
+after the corresponding native-device parity test passes.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import importlib.util
+
+
+# This script is the explicit compile entry point.  ``setdefault`` is unsafe
+# here because a parent process may export the production value ``AOT_MODE=1``;
+# in that case ``splat_sr`` hides its JIT graph builder and compilation fails
+# with a misleading missing-attribute error.
+os.environ["AOT_MODE"] = "0"
+
+import taichi as ti
+
+try:
+    from . import splat_sr
+except ImportError:  # direct script invocation from this directory
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location(
+        "splat_sr_compile", os.path.join(os.path.dirname(__file__), "splat_sr.py")
+    )
+    splat_sr = importlib.util.module_from_spec(_spec)
+    assert _spec.loader is not None
+    _spec.loader.exec_module(splat_sr)
+
+
+_ARCHES = {
+    "vulkan": ti.vulkan,
+    "opengl": ti.opengl,
+    "cuda": ti.cuda,
+    "cpu": ti.cpu,
+}
+
+
+def compile_spatial_splat(
+    backend: str, output_dir: str | None = None, *, tiled_only: bool = False
+) -> str:
+    name = str(backend).strip().lower()
+    if name not in _ARCHES:
+        raise ValueError(f"unsupported backend {backend!r}; choose {sorted(_ARCHES)}")
+    output_dir = output_dir or os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../../../../../ui/data/aot_assets")
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    try:
+        ti.init(arch=_ARCHES[name], offline_cache=False)
+        module = ti.aot.Module(_ARCHES[name])
+        if tiled_only:
+            splat_sr._build_tiled_splat_graph(module)
+        else:
+            splat_sr._build_splat_graph(module, include_vector=False)
+        # The packed tile ABI is versioned separately so existing TCMs remain
+        # available to older checkouts and any still-running workers.
+        prefix = "spatial_splat_tiled_packed" if tiled_only else "spatial_splat"
+        out_path = os.path.join(output_dir, f"{prefix}_{name}.tcm")
+        # ``Module.archive`` is the ABI-compatible path used by the existing
+        # production TCM builders.  Packing ``module.save`` ourselves can add
+        # auxiliary metadata that older native bridges reject at load time.
+        module.archive(out_path)
+        # Import after ``ti.init``.  Importing the taichi_vision package before
+        # backend initialization can eagerly create the production bridge and
+        # make Taichi's OpenGL compiler context fall back to CPU.
+        artifact_source = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "../../../../../../taichi_vision/taichi_algorithm/aot_py/aot_artifact.py",
+            )
+        )
+        artifact_spec = importlib.util.spec_from_file_location(
+            "_pixel_refine_aot_artifact", artifact_source
+        )
+        if artifact_spec is None or artifact_spec.loader is None:
+            raise ImportError(f"Unable to load TCM normalizer: {artifact_source}")
+        artifact_module = importlib.util.module_from_spec(artifact_spec)
+        artifact_spec.loader.exec_module(artifact_module)
+        artifact_module.normalize_tcm(out_path)
+        print(f"[AOT] compiled backend={name} artifact={out_path}")
+        return out_path
+    finally:
+        try:
+            ti.reset()
+        finally:
+            pass
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("backend", choices=sorted(_ARCHES))
+    parser.add_argument("--output-dir")
+    parser.add_argument("--tiled", action="store_true")
+    args = parser.parse_args()
+    compile_spatial_splat(args.backend, args.output_dir, tiled_only=args.tiled)

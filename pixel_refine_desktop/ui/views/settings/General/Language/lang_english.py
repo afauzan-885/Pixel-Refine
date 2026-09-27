@@ -177,6 +177,8 @@ NO_DATA_BATCH_ALL_DELETE_BUTTON = "No saved batch data."
 PARAMETER_BATCH_CROP_EDGE = "Crop Edge"
 PARAMETER_BATCH_KEEP_EDGE = "Keep Edge"
 PARAMETER_BATCH_DENOISING = "Denoising"
+PARAMETER_BATCH_MULTI_FRAME_DENOISING = "Multi-Frame Denoising"
+PARAMETER_BATCH_HDR = "HDR"
 PARAMETER_BATCH_SUPER_RESOLUTION = "Super Resolution"
 PARAMETER_BATCH_ALIGNMENT = "Align Images"
 PARAMETER_BATCH_ALIGNMENT_TO_FOLDER = "Save Alignment Result to Folder"
@@ -725,7 +727,8 @@ MSG_NO_BATCHES_YET_DESC = "Create a new batch or import images to get started."
 MSG_NO_BATCH_SELECTED = "No batch selected"
 LBL_BATCH_IMAGE_COUNT_FORMAT = "Batch {}   -   ({} images)"
 DESC_SUPER_RESOLUTION_CARD = "Enhance details and scale image resolution."
-DESC_DENOISING_CARD = "Reduce image noise and align pixel layers."
+DESC_DENOISING_CARD = "Combine multiple frames to reduce noise and preserve detail."
+DESC_HDR_CARD = "Fuse aligned frames using well-exposed, high-SNR samples. Choose Weighted HDR or SPDE-MR."
 
 
 # --- New UI & Bulk Core Keys ---

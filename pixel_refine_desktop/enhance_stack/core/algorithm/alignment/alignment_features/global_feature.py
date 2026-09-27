@@ -10,6 +10,7 @@ import traceback
 import cv2
 import json
 import os
+import sys
 import sqlite3
 import subprocess
 import exifread
@@ -845,9 +846,11 @@ def save_image(
         # Convert to RGB if input is BGR
         if is_bgr and len(image_to_save.shape) == 3 and image_to_save.shape[2] >= 3:
             image_to_save = np.ascontiguousarray(image_to_save[..., ::-1])
+
         # Apply end-to-end Natural Tone Mapping (AutoEnhance v2)
         if apply_tonemapping:
             try:
+                import gc
                 from taichi_vision import taichi_aot
 
                 is_u8 = image_to_save.dtype == np.uint8
@@ -859,22 +862,26 @@ def save_image(
                     img_f32 = image_to_save.astype(np.float32, copy=False)
                     max_v = float(np.max(img_f32)) if img_f32.size > 0 else 1.0
                     if max_v > 1.5:
-                        img_f32 = img_f32 / (65535.0 if max_v > 255.0 else 255.0)
+                        scale = 65535.0 if max_v > 255.0 else 255.0
+                        np.divide(img_f32, scale, out=img_f32)
 
                 del image_to_save
                 del image
+                gc.collect()
 
                 auto_params = taichi_aot.analyze_auto_enhance_params(
                     img_f32, mode="natural"
                 )
                 img_tm = taichi_aot.AutoEnhance(img_f32, params=auto_params)
                 del img_f32
+                gc.collect()
 
                 if is_u8:
                     image_to_save = taichi_aot.cast(img_tm, np.uint8)
                 else:
                     image_to_save = taichi_aot.cast(img_tm, np.uint16)
                 del img_tm
+                gc.collect()
 
                 try:
                     engine = taichi_aot.get_engine()
@@ -885,7 +892,6 @@ def save_image(
                         engine.get_device_block_cache().clear()
                 except Exception:
                     pass
-                import gc
                 gc.collect()
             except Exception as e_tm:
                 print(f"[save_image] AutoEnhance v2 tone mapping warning: {e_tm}")
@@ -902,6 +908,12 @@ def save_image(
                 del image_to_save
                 import gc
                 gc.collect()
+                if sys.platform == "win32":
+                    try:
+                        import ctypes
+                        ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1)
+                    except Exception:
+                        pass
                 success = True
             except Exception as e:
                 print(f"Error: Failed to save TIFF to '{output_path}': {e}")
@@ -930,6 +942,12 @@ def save_image(
                 del pil_img
                 import gc
                 gc.collect()
+                if sys.platform == "win32":
+                    try:
+                        import ctypes
+                        ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1)
+                    except Exception:
+                        pass
                 success = True
             except Exception as e_pil_save:
                 print(f"Error: Failed to save image to '{output_path}': {e_pil_save}")

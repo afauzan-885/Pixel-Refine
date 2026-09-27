@@ -164,8 +164,18 @@ def build_image_pyramid(
 ) -> list:
     """CPU interface: Build image pyramid and return list of NumPy arrays."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_vision import taichi_aot
-        return [lvl.to_numpy() for lvl in taichi_aot.image_pyramid(image, levels=n_levels, return_gpu=True)]
+        from taichi_vision.taichi_aot import get_engine
+        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        engine = get_engine()
+        is_gpu = isinstance(image, TaichiGPUBuffer)
+        img_gpu = image if is_gpu else engine.upload(image)
+        pyr_gpu = build_image_pyramid_gpu(img_gpu, n_levels=n_levels, min_size=min_size)
+        res = [lvl.to_numpy() for lvl in pyr_gpu]
+        for lvl in pyr_gpu[1:]:
+            lvl.release()
+        if not is_gpu:
+            img_gpu.release()
+        return res
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -187,6 +197,8 @@ def build_image_pyramid_gpu(
     min_size: int = MIN_PYRAMID_SIZE,
     downscale_factor: float = 2.0,
     buffer_provider="pool",
+    session=None,
+    buffer_tag_prefix=None,
 ) -> list:
     """
     GPU native interface: Build image pyramid with dynamic downsampling.
@@ -220,7 +232,7 @@ def build_image_pyramid_gpu(
         vector_dim = int(image_gpu.shape[2]) if is_3d else 1
         dispatches = []
 
-        for _ in range(max(0, int(n_levels) - 1)):
+        for level_index in range(max(0, int(n_levels) - 1)):
             prev = pyramid[-1]
             h_prev, w_prev = prev.shape[:2]
             h_next, w_next = h_prev // 2, w_prev // 2
@@ -230,12 +242,26 @@ def build_image_pyramid_gpu(
             dst_shape = (
                 (h_next, w_next, vector_dim) if is_3d else (h_next, w_next)
             )
-            dst = engine.allocate(
-                dst_shape,
-                dtype=prev.dtype,
-                is_vector=is_3d,
-                vector_dim=vector_dim,
-            )
+            if session is not None:
+                buffer_tag = (
+                    f"{buffer_tag_prefix}:level:{level_index + 1}"
+                    if buffer_tag_prefix is not None
+                    else None
+                )
+                dst = session.acquire_buffer(
+                    dst_shape,
+                    dtype=prev.dtype,
+                    is_vector=is_3d,
+                    vector_dim=vector_dim,
+                    tag=buffer_tag,
+                )
+            else:
+                dst = engine.allocate(
+                    dst_shape,
+                    dtype=prev.dtype,
+                    is_vector=is_3d,
+                    vector_dim=vector_dim,
+                )
             prev_view = (
                 prev.view_as_vector(False)
                 if is_3d and getattr(prev, "is_vector", False)
@@ -403,23 +429,47 @@ def build_image_pyramid_gpu_4x(
 
 @ti_thread
 def upsample_flow(
-    flow: np.ndarray,
+    flow,
     target_h: int,
     target_w: int,
     scale: float = 2.0,
     buffer_provider="pool",
+    return_gpu: bool = False,
+    dst=None,
+    session=None,
 ) -> np.ndarray:
-    """CPU interface: Upsample flow using NumPy input/output."""
+    """Upsample flow using NumPy or GPU buffer with zero-allocation pooling."""
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi_vision.taichi_aot import get_engine
+        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
         engine = get_engine()
-        src_gpu = engine.upload(flow)
-        dst_gpu = engine.allocate((target_h, target_w, 2), dtype=np.float32)
+        if session is not None:
+            src_gpu, _ = session.upload_if_needed(flow)
+            if dst is not None and isinstance(dst, TaichiGPUBuffer):
+                dst_gpu = dst
+            else:
+                dst_gpu = session.acquire_buffer((target_h, target_w, 2), dtype=np.float32)
+            upsample_flow_gpu(src_gpu, dst_gpu, scale)
+            return dst_gpu
+        is_gpu = isinstance(flow, TaichiGPUBuffer)
+        src_gpu = flow if is_gpu else engine.upload(flow)
+        if dst is not None and isinstance(dst, TaichiGPUBuffer):
+            dst_gpu = dst
+        else:
+            dst_gpu = engine.allocate((target_h, target_w, 2), dtype=np.float32)
         upsample_flow_gpu(src_gpu, dst_gpu, scale)
-        res = dst_gpu.to_numpy()
-        src_gpu.destroy()
-        dst_gpu.destroy()
-        return res
+        if not is_gpu:
+            src_gpu.release()
+        if return_gpu:
+            return dst_gpu
+        else:
+            res = dst_gpu.to_numpy()
+            if dst is not None and not isinstance(dst, TaichiGPUBuffer):
+                dst[...] = res
+                dst_gpu.release()
+                return dst
+            dst_gpu.release()
+            return res
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -453,7 +503,9 @@ def upsample_flow_gpu(
             sx = scale[0]
         else:
             sx = scale
-        pyramid_mod.run("upsample_flow_f32", src=src_gpu, dst=dst_gpu, scale=float(sx))
+        src_v = src_gpu.view_as_vector(False) if getattr(src_gpu, "is_vector", False) else src_gpu
+        dst_v = dst_gpu.view_as_vector(False) if getattr(dst_gpu, "is_vector", False) else dst_gpu
+        pyramid_mod.run("upsample_flow_f32", src=src_v, dst=dst_v, scale=float(sx))
         return
 
     if not TAICHI_AVAILABLE:

@@ -13,6 +13,13 @@ Communication protocol:
 import sys
 import os
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True, write_through=True)
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True, write_through=True)
+    except Exception:
+        pass
+
 # Guarantee workspace root is in sys.path regardless of how the subprocess is invoked
 workspace_root = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
@@ -24,6 +31,23 @@ import json
 import threading
 import queue
 import traceback
+
+# Preload numpy before anything imports taichi_vision.
+#
+# ``taichi_vision.taichi_aot`` runs ``engine.py`` through a file-location loader
+# during its own package init, and ``engine.py`` imports numpy.  When numpy's
+# native extension was first loaded inside that nested import context, the
+# Windows loader deadlocked: the spawned worker never printed anything, never
+# sent its ready handshake, and the application looked hung ("worker did not
+# send ready in time").  Loading numpy here first keeps that DLL load in a clean
+# loader state; the later import inside the package init becomes a sys.modules
+# hit.  Verified by stack dump: before this, the worker was stuck in
+# ``create_module`` for a numpy extension; after it, the worker reaches ready and
+# idles in its command queue.
+try:
+    import numpy as _numpy_preload  # noqa: F401
+except Exception:
+    pass
 
 
 def send_ipc(msg: dict):
@@ -74,15 +98,6 @@ class WorkerRunner:
         device = os.environ.get("AOT_DEVICE", "0")
         vendor = os.environ.get("TARGET_VENDOR", "")
 
-        # Announce immediate readiness so parent handshake completes instantly (<0.2s)
-        send_ipc({
-            "type": "ready",
-            "pid": os.getpid(),
-            "arch": arch,
-            "device": device,
-            "vendor": vendor,
-        })
-
         # Pre-initialize Taichi Vision engine in worker background so backend DLLs load immediately
         try:
             import taichi_vision.taichi_aot as ta_aot
@@ -94,10 +109,6 @@ class WorkerRunner:
         try:
             from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
                 running_mf_denoiser,
-                running_similarity as running_mf_similarity,
-            )
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
-                running_fusionnet,
             )
             from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
                 running_median,
@@ -110,6 +121,15 @@ class WorkerRunner:
         except Exception as e:
             send_ipc({"type": "log", "level": "error", "message": f"Pre-import error: {e}"})
             self._algorithms_ready = False
+
+        # Announce readiness after engine and algorithm modules are loaded
+        send_ipc({
+            "type": "ready",
+            "pid": os.getpid(),
+            "arch": arch,
+            "device": device,
+            "vendor": vendor,
+        })
 
 
 
@@ -194,10 +214,11 @@ class WorkerRunner:
         try:
             from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
                 running_mf_denoiser,
-                running_similarity as running_mf_similarity,
             )
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
-                running_fusionnet,
+            from pixel_refine_desktop.enhance_stack.core.algorithm.HDR import (
+                SPDEMRAlgorithm,
+                WeightedHDRAlgorithm,
+                running_hdr_fusion,
             )
             from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
                 running_median,
@@ -210,6 +231,7 @@ class WorkerRunner:
             is_align_checked = settings.get(config.KEY_CHECKBOX_ALIGN, True)
             is_sr_checked = settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
             is_denoise_checked = settings.get(config.KEY_CHECKBOX_DENOISING, False)
+            is_hdr_checked = settings.get(config.KEY_CHECKBOX_HDR, False)
 
             raw_align = settings.get(config.KEY_ALIGNMENT) or settings.get(
                 config.KEY_ALIGNMENT_ALGO, "No Alignment"
@@ -237,6 +259,14 @@ class WorkerRunner:
                 if (is_denoise_checked and raw_denoise not in ("", "None"))
                 else "No Denoising"
             )
+            raw_hdr = settings.get(config.KEY_HDR) or settings.get(
+                config.KEY_HDR_ALGO, "No HDR"
+            )
+            hdr_choice = (
+                raw_hdr
+                if (is_hdr_checked and raw_hdr not in ("", "None"))
+                else "No HDR"
+            )
 
             denoising_owns_alignment = denoising_choice in (
                 "Average",
@@ -245,6 +275,11 @@ class WorkerRunner:
                 "FusionNet",
             )
             super_resolution_owns_alignment = super_resolution_choice == "splattingSR"
+            hdr_owns_alignment = hdr_choice in (
+                WeightedHDRAlgorithm.NAME,
+                WeightedHDRAlgorithm.LEGACY_NAME,
+                SPDEMRAlgorithm.NAME,
+            )
 
             actions = {
                 "alignment": {
@@ -289,6 +324,34 @@ class WorkerRunner:
                     "No Super Resolution": lambda: None,
                     "None": lambda: None,
                 },
+                "hdr": {
+                    WeightedHDRAlgorithm.NAME: lambda: running_hdr_fusion(
+                        single_process=single_process,
+                        batch_id=batch_id,
+                        algorithm_name=WeightedHDRAlgorithm.NAME,
+                        progress_callback=progress_callback,
+                        stop_callback=stop_callback,
+                        db_path=db_path,
+                    ),
+                    WeightedHDRAlgorithm.LEGACY_NAME: lambda: running_hdr_fusion(
+                        single_process=single_process,
+                        batch_id=batch_id,
+                        algorithm_name=WeightedHDRAlgorithm.NAME,
+                        progress_callback=progress_callback,
+                        stop_callback=stop_callback,
+                        db_path=db_path,
+                    ),
+                    SPDEMRAlgorithm.NAME: lambda: running_hdr_fusion(
+                        single_process=single_process,
+                        batch_id=batch_id,
+                        algorithm_name=SPDEMRAlgorithm.NAME,
+                        progress_callback=progress_callback,
+                        stop_callback=stop_callback,
+                        db_path=db_path,
+                    ),
+                    "No HDR": lambda: None,
+                    "None": lambda: None,
+                },
                 "denoising": {
                     "Average": lambda: running_mf_denoiser(
                         single_process=single_process,
@@ -306,27 +369,33 @@ class WorkerRunner:
                         progress_callback=progress_callback,
                         stop_callback=stop_callback,
                     ),
-                    "Similarity": lambda: running_mf_similarity(
+                    "Similarity": lambda: running_mf_denoiser(
                         single_process=single_process,
                         batch_id=batch_id,
                         progress_callback=progress_callback,
                         stop_callback=stop_callback,
+                        merging_mode="Similarity",
+                        output_suffix="similarity",
                         alignment_backend=alignment_choice,
                         db_path=db_path,
                     ),
-                    "Spatial AI": lambda: running_fusionnet(
+                    "Spatial AI": lambda: running_mf_denoiser(
                         single_process=single_process,
                         batch_id=batch_id,
                         progress_callback=progress_callback,
                         stop_callback=stop_callback,
+                        merging_mode="FusionNet",
+                        output_suffix="fusionet",
                         alignment_backend=alignment_choice,
                         db_path=db_path,
                     ),
-                    "FusionNet": lambda: running_fusionnet(
+                    "FusionNet": lambda: running_mf_denoiser(
                         single_process=single_process,
                         batch_id=batch_id,
                         progress_callback=progress_callback,
                         stop_callback=stop_callback,
+                        merging_mode="FusionNet",
+                        output_suffix="fusionet",
                         alignment_backend=alignment_choice,
                         db_path=db_path,
                     ),
@@ -346,6 +415,7 @@ class WorkerRunner:
                     "No Alignment",
                     "No Super Resolution",
                     "No Denoising",
+                    "No HDR",
                 ]:
                     return
                 if category in actions and selected_algo_name in actions[category]:
@@ -363,14 +433,20 @@ class WorkerRunner:
                         "message": f"Algorithm '{selected_algo_name}' in category '{category}' not recognized.",
                     })
 
-            if denoising_owns_alignment or super_resolution_owns_alignment:
+            if (
+                denoising_owns_alignment
+                or super_resolution_owns_alignment
+                or hdr_owns_alignment
+            ):
                 if denoising_owns_alignment:
                     execute("denoising", denoising_choice)
                 execute("super_resolution", super_resolution_choice)
+                execute("hdr", hdr_choice)
             else:
                 execute("alignment", alignment_choice)
-                execute("denoising", denoising_choice)
                 execute("super_resolution", super_resolution_choice)
+                execute("hdr", hdr_choice)
+                execute("denoising", denoising_choice)
 
             if stop_callback():
                 send_ipc({
@@ -399,6 +475,51 @@ class WorkerRunner:
             })
         finally:
             self.current_task_id = None
+            # --- Universal Post-Task Memory Cleanup ---
+            try:
+                import taichi_vision.taichi_aot as ta_aot
+                engine = ta_aot.get_engine()
+                if hasattr(engine, "buffer_pool") and hasattr(engine.buffer_pool, "clear"):
+                    engine.buffer_pool.clear()
+                if hasattr(engine, "_drain_retired"):
+                    engine._drain_retired(wait=True)
+                if hasattr(engine, "sync"):
+                    engine.sync()
+            except Exception:
+                pass
+
+            try:
+                from taichi_vision.taichi_algorithm.aot_api import clear_farneback_cache
+                clear_farneback_cache()
+            except Exception:
+                pass
+
+            try:
+                from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_pipeline import (
+                    clear_spatial_cache,
+                )
+                clear_spatial_cache()
+            except Exception:
+                pass
+
+            try:
+                actions = None
+                settings = None
+                msg = None
+            except Exception:
+                pass
+
+            import gc
+            gc.collect()
+
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    ctypes.windll.kernel32.SetProcessWorkingSetSize(
+                        ctypes.windll.kernel32.GetCurrentProcess(), -1, -1
+                    )
+                except Exception:
+                    pass
 
 
 def main():

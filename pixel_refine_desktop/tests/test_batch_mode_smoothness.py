@@ -6,7 +6,7 @@ from PIL import Image
 
 import pytest
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThreadPool
 
 from pixel_refine_desktop.enhance_stack.views.single_page_view import SinglePageView
 from pixel_refine_desktop.enhance_stack.core.logic.database_manager import DatabaseManager
@@ -119,6 +119,11 @@ def test_grid_cache_invalidation_on_project_load(qapp):
         display_panel.invalidate_grid_cache(None)
         assert len(display_panel._grid_cache) == 0
 
+        # Let background thumbnail decodes finish before the temporary directory
+        # is removed: the cleanup otherwise races with a worker that still holds
+        # a source file open (Windows: PermissionError WinError 32).
+        QThreadPool.globalInstance().waitForDone(10000)
+
 
 def test_external_import_sync_to_batch_mode(qapp):
     """Verify that if images are added to a batch externally (e.g. Bulk Mode drag & drop),
@@ -165,3 +170,8 @@ def test_external_import_sync_to_batch_mode(qapp):
         from resources.GenericUILibrary import ImageCard
         card_windows = [w for w in qapp.topLevelWidgets() if isinstance(w, ImageCard)]
         assert len(card_windows) == 0
+
+        # Let background thumbnail decodes finish before the temporary directory
+        # is removed: the cleanup otherwise races with a worker that still holds
+        # a source file open (Windows: PermissionError WinError 32).
+        QThreadPool.globalInstance().waitForDone(10000)

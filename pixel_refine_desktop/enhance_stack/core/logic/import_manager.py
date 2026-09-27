@@ -136,7 +136,7 @@ class ImportManager(QObject):
         )
 
         self.panel.grid_container.add_item(card)
-        self.panel.all_cards[str(img.id)] = card
+        self.panel.add_card(img.id, card, img.path)
         self.panel.logic.register_grid_item(str(img.id), {"path": img.path})
         self.panel._load_thumbnail_async(img.path, card)
 

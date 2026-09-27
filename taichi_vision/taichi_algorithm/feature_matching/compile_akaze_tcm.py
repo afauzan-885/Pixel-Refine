@@ -15,6 +15,9 @@ from taichi_vision.taichi_algorithm.feature_matching.akaze import (
     compute_hessian_determinant,
     compute_scale_normalized_hessian,
     extract_grid_keypoints,
+    canonicalize_keypoints_kernel,
+    compact_matches_to_points_kernel,
+    pack_compacted_points_kernel,
     extract_scale_space_keypoints,
     compute_descriptors_kernel,
     hamming_matcher_kernel,
@@ -88,6 +91,68 @@ def compile_akaze_tcm(arch=ti.vulkan, save_path="akaze_vulkan.tcm"):
     thresh_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "threshold", ti.f32)
     g_detect.dispatch(extract_grid_keypoints, hess_det, kps_arg, counter_arg, h_detect, w_detect, grid_arg, thresh_arg)
     module.add_graph("detect_keypoints", g_detect.compile())
+
+    g_canonicalize = ti.graph.GraphBuilder()
+    ck_source = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source_keypoints", ti.f32, ndim=2)
+    ck_destination = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "destination_keypoints", ti.f32, ndim=2)
+    ck_counter = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=1)
+    ck_keep_limit = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "keep_limit", ti.i32)
+    g_canonicalize.dispatch(
+        canonicalize_keypoints_kernel,
+        ck_source,
+        ck_destination,
+        ck_counter,
+        ck_keep_limit,
+    )
+    module.add_graph("canonicalize_keypoints", g_canonicalize.compile())
+
+    g_compact = ti.graph.GraphBuilder()
+    cm_results = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "results", ti.f32, ndim=2)
+    cm_offset = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "result_offset", ti.i32)
+    cm_length = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "segment_length", ti.i32)
+    cm_scale = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "coordinate_scale", ti.f32)
+    cm_output_offset = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "output_offset", ti.i32)
+    cm_segment_index = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "segment_index", ti.i32)
+    cm_segment_counts = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "segment_counts", ti.i32, ndim=1)
+    cm_points_ref = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "points_ref", ti.f32, ndim=2)
+    cm_points_supp = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "points_supp", ti.f32, ndim=2)
+    cm_counter = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=1)
+    g_compact.dispatch(
+        compact_matches_to_points_kernel,
+        cm_results,
+        cm_offset,
+        cm_length,
+        cm_scale,
+        cm_output_offset,
+        cm_segment_index,
+        cm_segment_counts,
+        cm_points_ref,
+        cm_points_supp,
+        cm_counter,
+    )
+    module.add_graph("compact_matches_to_points", g_compact.compile())
+
+    g_pack_points = ti.graph.GraphBuilder()
+    pp_segmented_ref = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "segmented_ref", ti.f32, ndim=2)
+    pp_segmented_supp = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "segmented_supp", ti.f32, ndim=2)
+    pp_offsets = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "segment_offsets", ti.i32, ndim=1)
+    pp_counts = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "segment_counts", ti.i32, ndim=1)
+    pp_segment_count = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "segment_count", ti.i32)
+    pp_points_ref = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "points_ref", ti.f32, ndim=2)
+    pp_points_supp = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "points_supp", ti.f32, ndim=2)
+    pp_counter = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=1)
+    g_pack_points.dispatch(
+        pack_compacted_points_kernel,
+        pp_segmented_ref,
+        pp_segmented_supp,
+        pp_offsets,
+        pp_counts,
+        pp_segment_count,
+        pp_points_ref,
+        pp_points_supp,
+        pp_counter,
+    )
+    module.add_graph("pack_compacted_points", g_pack_points.compile())
 
     # 3x3x3 scale-space extrema detector.  The public API still returns the
     # same (x, y) match coordinates; scale remains internal to the detector.

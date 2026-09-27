@@ -19,6 +19,22 @@ from PIL import Image, ImageOps
 DEFAULT_WEIGHTNET_ONNX = Path(
     "database/Learning_Model/weightNet/weightnet_master.bundle"
 )
+def _validate_weightnet_input_channels(session, expected_channels: int):
+    active_session = (
+        session.encoder_session
+        if isinstance(session, DecoupledWeightNetSession)
+        else session
+    )
+    try:
+        shape = active_session.get_inputs()[0].shape
+    except Exception:
+        return session
+    if len(shape) >= 2 and isinstance(shape[1], int) and shape[1] != expected_channels:
+        raise RuntimeError(
+            f"WeightNet model input channel mismatch: requested {expected_channels}, "
+            f"artifact expects {shape[1]} (shape={shape})"
+        )
+    return session
 
 # DirectML feature outputs are device-resident OrtValues.  Keep only a small
 # bounded working set on the DML device; uncached reference features remain
@@ -261,6 +277,7 @@ def load_weightnet_onnx(
     model_path: str | Path,
     runtime: str = "auto",
     patch_size: int = 512,
+    input_channels: int | None = 1,
 ):
     try:
         import onnxruntime as ort
@@ -269,6 +286,9 @@ def load_weightnet_onnx(
 
     model_path = Path(model_path)
     runtime = str(runtime).strip().lower()
+    input_channels = 1 if input_channels is None else int(input_channels)
+    if input_channels != 1:
+        raise ValueError(f"FusionNet WeightNet baseline requires 1 input channel, got {input_channels}")
     available = set(ort.get_available_providers())
     if runtime == "auto":
         runtime = "dml" if "DmlExecutionProvider" in available else "cpu"
@@ -335,7 +355,6 @@ def load_weightnet_onnx(
             with zipfile.ZipFile(bundle_file, "r") as zf:
                 candidate_names = [
                     f"weightnet_{patch_size}_{dev_suffix}_1c_fp32.onnx",
-                    f"weightnet_{patch_size}_{dev_suffix}_3c_fp32.onnx",
                     f"weightnet_{patch_size}_{dev_suffix}_fp32.onnx",
                 ]
                 namelist = set(zf.namelist())
@@ -349,9 +368,11 @@ def load_weightnet_onnx(
                     session = ort.InferenceSession(
                         model_bytes, sess_options=options, providers=providers
                     )
+                    _validate_weightnet_input_channels(session, input_channels)
                     print(
                         f"[WeightNet ONNX Bundle] runtime={runtime} bundle={bundle_file.name} "
-                        f"model={target_model} providers={session.get_providers()} patch={patch_size}"
+                        f"model={target_model} providers={session.get_providers()} "
+                        f"patch={patch_size} channels={input_channels or 'auto'}"
                     )
                     return session
         except Exception as e:
@@ -397,12 +418,15 @@ def load_weightnet_onnx(
             f"[WeightNet ONNX Decoupled] runtime={runtime} patch={patch_size} "
             f"encoder={enc_file.name} attention={att_file.name}"
         )
-        return DecoupledWeightNetSession(
+        session = DecoupledWeightNetSession(
             enc_sess, att_sess, patch_size, runtime=runtime
         )
+        return _validate_weightnet_input_channels(session, input_channels)
 
     # 2. Fallback to Coupled Model if decoupled pair is not found
     coupled_names = [
+        f"weightnet_{patch_size}_{dev_suffix}_1c_fp32.onnx",
+        f"weightnet_{patch_size}_{dev_suffix}_1c.onnx",
         f"weightnet_{patch_size}_{dev_suffix}_fp32.onnx",
         f"weightnet_{patch_size}_{dev_suffix}.onnx",
         model_path.name,
@@ -425,10 +449,12 @@ def load_weightnet_onnx(
     session = ort.InferenceSession(
         str(found_coupled), sess_options=options, providers=providers
     )
+    _validate_weightnet_input_channels(session, input_channels)
 
     print(
         f"[WeightNet ONNX Coupled] runtime={runtime} model={found_coupled.name} "
-        f"providers={session.get_providers()} patch={patch_size}"
+        f"providers={session.get_providers()} patch={patch_size} "
+        f"channels={input_channels or 'auto'}"
     )
     return session
 
@@ -447,12 +473,16 @@ def infer_single_support_weight_map(
     progress: Optional[Callable[[int, str], None]] = None,
 ) -> tuple[np.ndarray, float]:
     """
-    Computes 3-channel fusion weight map for a single (ref, support) pair at work resolution
-    using Hybrid Luma-Anchor AI Inference + Vectorized Chroma Modulation for maximum speed and color fidelity.
-    Inputs: ref_work [3, work_h, work_w], supp_work [3, work_h, work_w]
+    Computes a 3-channel fusion weight map for one reference/support pair.
+    Inputs may be RGB CHW or already converted luminance [1, H, W].
     Output: weight_map_work [3, work_h, work_w], mean_alpha
     """
     channels, work_h, work_w = ref_work.shape
+    if channels not in (1, 3) or tuple(supp_work.shape) != tuple(ref_work.shape):
+        raise ValueError(
+            "WeightNet inputs must have matching [1|3, H, W] shapes; "
+            f"got ref={ref_work.shape}, support={supp_work.shape}"
+        )
     is_decoupled = isinstance(session, DecoupledWeightNetSession)
 
     if is_decoupled:
@@ -469,23 +499,21 @@ def infer_single_support_weight_map(
         except Exception:
             pass
 
-    # Check if model accepts native 3-channel RGB input [1, 3, H, W]
+    # The selected production-quality model consumes luminance. RGB callers
+    # retain compatibility, but their input is reduced to one channel below.
     is_rgb_model = False
-    try:
-        active_sess = session.encoder_session if is_decoupled else session
-        in_shape = active_sess.get_inputs()[0].shape
-        if len(in_shape) >= 2 and in_shape[1] == 3:
-            is_rgb_model = True
-    except Exception:
-        is_rgb_model = False
 
     # 1. Compute Luma (Y) for fallback 1-channel models
-    ref_luma = (0.299 * ref_work[0] + 0.587 * ref_work[1] + 0.114 * ref_work[2]).astype(
-        np.float32
-    )
-    supp_luma = (
-        0.299 * supp_work[0] + 0.587 * supp_work[1] + 0.114 * supp_work[2]
-    ).astype(np.float32)
+    if channels == 1:
+        ref_luma = ref_work[0]
+        supp_luma = supp_work[0]
+    else:
+        ref_luma = (0.299 * ref_work[0] + 0.587 * ref_work[1] + 0.114 * ref_work[2]).astype(
+            np.float32
+        )
+        supp_luma = (
+            0.299 * supp_work[0] + 0.587 * supp_work[1] + 0.114 * supp_work[2]
+        ).astype(np.float32)
 
     overlap_size = int(tile_size * float(overlap))
     stride = max(1, tile_size - overlap_size)

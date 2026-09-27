@@ -79,11 +79,13 @@ if TAICHI_AVAILABLE:
         grad_sensitivity = 202.5
         # Adaptive Vision Boost: increase sensitivity dynamically on low-contrast tiles
         adaptive_grad_sensitivity = grad_sensitivity * (1.0 + 3.0 * flat_weight)
-        structure_min_threshold_sq = 150.0
+        # Normalized structure threshold squared for [0, 1] float images (150.0 / 255^2)
+        structure_min_threshold_sq = 0.002307
         # These values are constant for the complete tile.  Hoisting them
         # avoids repeating the same max/multiply and branch predicate for
         # every sampled pixel while preserving the original arithmetic.
         adaptive_diff_threshold = ti.max(0.005, noise_level * 0.2)
+        base_structure_thr_sq = ti.max(structure_min_threshold_sq, 4.0 * noise_level * noise_level) * (1.0 + flat_weight)
         noise_enabled = noise_level > stab_epsilon
 
         # 1-pixel border skip to prevent out of bounds and match C++
@@ -96,11 +98,28 @@ if TAICHI_AVAILABLE:
                 p2_val = reference_img[img_y, img_x]
                 pixel_diff = ti.abs(p1_val - p2_val)
 
-                # --- Read Precomputed Gradients directly ---
-                gx1 = curr_grad_x[img_y, img_x]
-                gy1 = curr_grad_y[img_y, img_x]
-                gx2 = ref_grad_x[img_y, img_x]
-                gy2 = ref_grad_y[img_y, img_x]
+                # Compute the Sobel-like gradients at the sampled pixel. The
+                # old route materialized four full-resolution gradient planes
+                # before visiting the tiles. Inlining these few samples keeps
+                # gradient scratch bounded to registers while preserving the
+                # same stencil and arithmetic order as precompute_gradients.
+                gx1_center = current_img[img_y, img_x + 1] - current_img[img_y, img_x - 1]
+                gx1_top = current_img[img_y - 1, img_x + 1] - current_img[img_y - 1, img_x - 1]
+                gx1_bottom = current_img[img_y + 1, img_x + 1] - current_img[img_y + 1, img_x - 1]
+                gx1 = (gx1_center + gx1_top + gx1_bottom) * 0.33333333
+                gy1_center = current_img[img_y + 1, img_x] - current_img[img_y - 1, img_x]
+                gy1_left = current_img[img_y + 1, img_x - 1] - current_img[img_y - 1, img_x - 1]
+                gy1_right = current_img[img_y + 1, img_x + 1] - current_img[img_y - 1, img_x + 1]
+                gy1 = (gy1_center + gy1_left + gy1_right) * 0.33333333
+
+                gx2_center = reference_img[img_y, img_x + 1] - reference_img[img_y, img_x - 1]
+                gx2_top = reference_img[img_y - 1, img_x + 1] - reference_img[img_y - 1, img_x - 1]
+                gx2_bottom = reference_img[img_y + 1, img_x + 1] - reference_img[img_y + 1, img_x - 1]
+                gx2 = (gx2_center + gx2_top + gx2_bottom) * 0.33333333
+                gy2_center = reference_img[img_y + 1, img_x] - reference_img[img_y - 1, img_x]
+                gy2_left = reference_img[img_y + 1, img_x - 1] - reference_img[img_y - 1, img_x - 1]
+                gy2_right = reference_img[img_y + 1, img_x + 1] - reference_img[img_y - 1, img_x + 1]
+                gy2 = (gy2_center + gy2_left + gy2_right) * 0.33333333
 
                 mag1_sq = gx1 * gx1 + gy1 * gy1
                 mag2_sq = gx2 * gx2 + gy2 * gy2
@@ -110,11 +129,12 @@ if TAICHI_AVAILABLE:
                 # Linear scaling maps p2_val=0 to scale=3.0 and p2_val=1.0 to scale=1.0. Extremely cheap on GPU.
                 tolerance_scale = ti.max(1.0, ti.min(3.0, 3.0 - 2.0 * p2_val))
                 local_adaptive_diff_threshold = adaptive_diff_threshold * tolerance_scale
+                local_structure_min_threshold_sq = base_structure_thr_sq * (tolerance_scale * tolerance_scale)
 
                 # --- continuous noise weight ---
                 noise_weight = 1.0
                 if noise_enabled:
-                    if min_mag_sq < structure_min_threshold_sq:
+                    if min_mag_sq < local_structure_min_threshold_sq:
                         # Flat area
                         local_thr = local_adaptive_diff_threshold * 1.5
                         if pixel_diff < local_thr:
@@ -140,7 +160,7 @@ if TAICHI_AVAILABLE:
                     dot = gx1 * gx2 + gy1 * gy2
                     cos_sim = dot / ti.sqrt(mag1_sq * mag2_sq)
 
-                    if min_mag_sq > structure_min_threshold_sq and cos_sim < 0.2:
+                    if min_mag_sq > local_structure_min_threshold_sq and cos_sim < 0.2:
                         # Mismatched structure orientations: scale up pixel_diff to penalize mismatch and prevent ghosting
                         pixel_diff = pixel_diff * (1.5 - cos_sim)
                     else:

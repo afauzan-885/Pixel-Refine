@@ -1,35 +1,39 @@
+"""FusionNet denoising adapter.
+
+The adapter owns only algorithm configuration and result conversion.  All
+execution details (RGB resident, RAW Native, alignment, and WeightNet
+lifecycle) are delegated to ``resident_pipeline`` so MFDenoiser and the UI
+use the same contract as Similarity.
+"""
+
 import gc
-import os
 from pathlib import Path
 import numpy as np
 
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.flownet_inference import (
-    AOTOpticalFlowAligner,
-)
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
-    DEFAULT_WEIGHTNET_ONNX,
     RAW_EXTENSIONS,
-    fuse_support_frame_inplace,
-    infer_single_support_weight_map,
-    load_rgb_linear_image,
     load_weightnet_onnx,
+    DEFAULT_WEIGHTNET_ONNX,
 )
 
 
 class FusionNetDenoisingAlgorithm:
-    """FusionNet deep multi-frame burst fusion denoising adapter with compute_flow.tcm AOT alignment."""
+    """FusionNet adapter using resident alignment plus WeightNet inference."""
 
     NAME = "FusionNet"
     KIND = "denoising"
-    DESCRIPTION = "Deep learning multi-frame burst fusion with compute_flow.tcm AOT alignment and FusionNet."
+    DESCRIPTION = (
+        "Deep burst fusion with resident alignment and 1-channel WeightNet inference."
+    )
 
     # Default Config Parameters (Configurable default parameters)
     DEFAULT_CONFIG = {
-        "work_scale": 0.50,  # Scaling factor for alignment and ONNX analysis
-        "tile_size": 1024,  # ONNX patch size (256, 512, 1024)
+        "work_scale": 0.50,  # Scaling factor for resident alignment and analysis
+        "tile_size": 512,  # WeightNet model block (256, 512, 1024)
+        "input_channels": 1,
         "tile_overlap": 0.20,  # Tile overlap ratio (20% optimal for speed & seamless blend)
-        "ghost_penalty": 0.85,  # Maximum ghost penalty for clean/low-noise regions
-        "ghost_penalty_min": 0.65,  # Minimum ghost penalty for high-noise regions
+        "ghost_penalty": 5.0,  # Maximum ghost penalty for clean/low-noise regions
+        "ghost_penalty_min": 0.85,  # Minimum ghost penalty for high-noise regions
     }
 
     def _load_inputs(self, ctx, frames):
@@ -46,63 +50,194 @@ class FusionNetDenoisingAlgorithm:
             return list(frames), "memory"
         return [], "none"
 
+    def _resolve_config(self, ctx):
+        """Normalize FusionNet settings once, like the SpatialFusion adapter."""
+        # Start from the provider defaults/global settings so direct callers
+        # that construct a context without MFDenoiser still honor the FusionNet
+        # panel.  Batch values carried in ``fusionnet_params`` are applied last
+        # and therefore remain authoritative over generic Similarity aliases.
+        try:
+            from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.fusionnet_parameter_settings import (
+                load_fusionnet_config_for_batch,
+            )
+
+            params = load_fusionnet_config_for_batch(getattr(ctx, "batch_id", None))
+        except Exception:
+            params = dict(self.DEFAULT_CONFIG)
+        context_params = dict(getattr(ctx, "params", {}) or {})
+        params.update(context_params)
+        nested = context_params.get("fusionnet_params")
+        if isinstance(nested, dict):
+            params.update(nested)
+
+        work_scale = float(
+            params.get(
+                "fusionnet_work_resolution",
+                params.get(
+                    "work_scale",
+                    params.get(
+                        "flownet_work_scale",
+                        params.get(
+                            "weightnet_work_scale",
+                            params.get(
+                                "work_resolution_scale",
+                                params.get(
+                                    "proxy_scale", self.DEFAULT_CONFIG["work_scale"]
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        )
+        work_scale = max(0.05, min(1.0, work_scale))
+        requested_tile = int(
+            params.get(
+                "fusionnet_tile_size",
+                params.get(
+                    "tile_size",
+                    params.get(
+                        "weightnet_tile_size",
+                        params.get("ai_tile_size", self.DEFAULT_CONFIG["tile_size"]),
+                    ),
+                ),
+            )
+        )
+        tile_size = min(
+            (256, 512, 1024), key=lambda candidate: abs(candidate - requested_tile)
+        )
+        overlap = params.get(
+            "tile_overlap",
+            params.get(
+                "overlap",
+                params.get("ai_overlap_percent", self.DEFAULT_CONFIG["tile_overlap"]),
+            ),
+        )
+        # Similarity's AI overlap field already stores a normalized ratio;
+        # accept percentage-style values from older batch snapshots too.
+        overlap = float(overlap)
+        if overlap > 1.0:
+            overlap /= 100.0
+        return {
+            "work_scale": work_scale,
+            "tile_size": tile_size,
+            # Keep the model feed on the quality-validated luminance baseline.
+            "input_channels": 1,
+            "overlap": max(0.0, min(0.95, overlap)),
+            "ghost_penalty": float(
+                params.get("ghost_penalty", self.DEFAULT_CONFIG["ghost_penalty"])
+            ),
+            "ghost_penalty_min": float(
+                params.get(
+                    "ghost_penalty_min", self.DEFAULT_CONFIG["ghost_penalty_min"]
+                )
+            ),
+            "chroma_sensitivity": float(params.get("chroma_sensitivity", 1.0)),
+            "alignment_plan": getattr(ctx, "alignment_selection_name", None)
+            or params.get("alignment_plan", "No Alignment"),
+            "alignment_config": dict(params.get("alignment_params", {}) or {}),
+            "batch_queue": max(
+                1, min(2, int(params.get("batch_queue", params.get("batch_size", 2))))
+            ),
+        }
+
+    @staticmethod
+    def _is_raw(ctx, inputs):
+        if bool(getattr(ctx, "is_linear_mode", False)):
+            return True
+        paths = getattr(ctx, "image_paths", None)
+        return bool(paths) and any(
+            Path(p).suffix.lower() in RAW_EXTENSIONS for p in paths
+        )
+
+    def _run_resident_paths(self, ctx, inputs, config, batch_plan, is_raw):
+        """Run the single resident execution lane for path-based bursts."""
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.resident_pipeline import (
+            run_resident_pipeline,
+        )
+
+        print(
+            f"[FusionNet] Resident route: frames={len(inputs)} is_raw={is_raw} "
+            f"tile={config['tile_size']} work_scale={config['work_scale']:.2f}"
+        )
+        session = load_weightnet_onnx(
+            DEFAULT_WEIGHTNET_ONNX,
+            runtime="dml",
+            patch_size=config["tile_size"],
+            input_channels=config["input_channels"],
+        )
+        config["alignment_config"].setdefault("work_scale", config["work_scale"])
+        result, mean_alpha = run_resident_pipeline(
+            inputs,
+            session,
+            weight_engine="fusionet",
+            alignment_plan=config["alignment_plan"],
+            alignment_config=config["alignment_config"],
+            work_scale=config["work_scale"],
+            flownet_work_scale=config["work_scale"],
+            weightnet_work_scale=config["work_scale"],
+            # The UI work-resolution value is authoritative.  Without this,
+            # the resident safety cap turns 1.0 into 0.5 on 4096-wide input.
+            max_work_dimension=None,
+            weightnet_input_channels=config["input_channels"],
+            tile_size=config["tile_size"],
+            overlap=config["overlap"],
+            ghost_penalty=config["ghost_penalty"],
+            ghost_penalty_min=config["ghost_penalty_min"],
+            ghost_cutoff=0.0,
+            chroma_sensitivity=config["chroma_sensitivity"],
+            is_raw=is_raw,
+            storage_mode="direct",
+            batch_queue=config["batch_queue"],
+            batch_plan=batch_plan,
+            stop_event=getattr(ctx, "stop_requested", None),
+            progress_callback=getattr(ctx, "update_progress", None),
+            raw_native=bool(getattr(ctx, "is_raw_native", False)),
+        )
+        if result is None:
+            return None
+        if bool(getattr(ctx, "is_raw_native", False)):
+            ctx.raw_native_result = result
+            preview = result.preview_rgb
+            print(
+                f"[FusionNet][RAW Native] preview shape={preview.shape} "
+                f"dtype={preview.dtype}; DNG carrier retained for save"
+            )
+            return preview
+        from taichi_vision import taichi_aot
+
+        output = taichi_aot.cast(result, np.uint16)
+        del result
+        try:
+            taichi_aot.get_engine().buffer_pool.clear()
+        except Exception:
+            pass
+        gc.collect()
+        print(
+            f"[FusionNet] Resident complete: shape={output.shape} "
+            f"dtype={output.dtype} mean_alpha={mean_alpha:.4f}"
+        )
+        return output
+
     def run(self, ctx, frames, batch_plan=None):
         """
-        Execute FlowNet streaming alignment followed by FusionNet ONNX fusion.
+        Execute resident alignment followed by FusionNet WeightNet fusion.
         """
         inputs, source = self._load_inputs(ctx, frames)
         if not inputs:
             print("[FusionNet] No input images/frames available.")
             return None
 
-        # Resolve parameters with DEFAULT_CONFIG fallbacks
-        params_cfg = getattr(ctx, "params", {}) or {}
-        work_scale = float(
-            params_cfg.get(
-                "work_scale",
-                params_cfg.get(
-                    "flownet_work_scale",
-                    params_cfg.get(
-                        "weightnet_work_scale", self.DEFAULT_CONFIG["work_scale"]
-                    ),
-                ),
-            )
-        )
-        tile_size = int(
-            params_cfg.get(
-                "fusionnet_tile_size",
-                params_cfg.get(
-                    "tile_size",
-                    params_cfg.get(
-                        "weightnet_tile_size", self.DEFAULT_CONFIG["tile_size"]
-                    ),
-                ),
-            )
-        )
-        if tile_size < 256:
-            tile_size = 256
-        overlap = float(
-            params_cfg.get(
-                "tile_overlap",
-                params_cfg.get("overlap", self.DEFAULT_CONFIG["tile_overlap"]),
-            )
-        )
-        ghost_pen = float(
-            params_cfg.get("ghost_penalty", self.DEFAULT_CONFIG["ghost_penalty"])
-        )
-        ghost_pen_min = float(
-            params_cfg.get(
-                "ghost_penalty_min", self.DEFAULT_CONFIG["ghost_penalty_min"]
-            )
-        )
-        is_raw = bool(getattr(ctx, "is_linear_mode", False))
-        if not is_raw and getattr(ctx, "image_paths", None):
-            is_raw = any(
-                Path(p).suffix.lower() in RAW_EXTENSIONS for p in ctx.image_paths
-            )
+        config = self._resolve_config(ctx)
+        work_scale = config["work_scale"]
+        tile_size = config["tile_size"]
+        overlap = config["overlap"]
+        ghost_pen = config["ghost_penalty"]
+        ghost_pen_min = config["ghost_penalty_min"]
+        is_raw = self._is_raw(ctx, inputs)
 
         print(
-            f"[FusionNet] Starting FlowNet + FusionNet pipeline: "
+            f"[FusionNet] Starting resident alignment + WeightNet pipeline: "
             f"source={source} frames={len(inputs)} is_raw={is_raw} "
             f"tile_size={tile_size} work_scale={work_scale} "
             f"ghost_penalty_range=[{ghost_pen_min:.2f}, {ghost_pen:.2f}]"
@@ -120,75 +255,19 @@ class FusionNetDenoisingAlgorithm:
 
         # ── GPU-Resident Pipeline (zero-copy path for file-based bursts) ──
         if source == "paths":
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.resident_pipeline import (
-                run_resident_pipeline,
-            )
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
-                load_weightnet_onnx as _load_wn_onnx,
-            )
+            return self._run_resident_paths(ctx, inputs, config, batch_plan, is_raw)
+        # Compatibility fallback for callers that still provide in-memory or
+        # HDF5 frames.  File-based MFDenoiser execution never enters this
+        # legacy lane; it uses resident_pipeline's alignment registry above.
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.flownet_inference import (
+            AOTOpticalFlowAligner,
+        )
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
+            fuse_support_frame_inplace,
+            infer_single_support_weight_map,
+            load_rgb_linear_image,
+        )
 
-            print("[FusionNet] Routing to GPU-resident zero-copy pipeline...")
-            session = _load_wn_onnx(
-                DEFAULT_WEIGHTNET_ONNX, runtime="dml", patch_size=tile_size
-            )
-
-            alignment_plan = getattr(ctx, "alignment_selection_name", None) or getattr(
-                ctx, "params", {}
-            ).get("alignment_plan", "FlowNet")
-            alignment_config = dict(
-                getattr(ctx, "params", {}).get("alignment_params", {}) or {}
-            )
-            alignment_config.setdefault("work_scale", work_scale)
-            batch_queue = int(
-                getattr(ctx, "params", {}).get(
-                    "batch_queue", getattr(ctx, "params", {}).get("batch_size", 4)
-                )
-            )
-
-            result_fp32, mean_alpha = run_resident_pipeline(
-                inputs,
-                session,
-                weight_engine="fusionet",
-                alignment_plan=alignment_plan,
-                alignment_config=alignment_config,
-                work_scale=work_scale,
-                flownet_work_scale=work_scale,
-                weightnet_work_scale=work_scale,
-                tile_size=tile_size,
-                overlap=overlap,
-                ghost_penalty=ghost_pen,
-                ghost_penalty_min=ghost_pen_min,
-                ghost_cutoff=0.0,
-                chroma_sensitivity=1.0,
-                is_raw=is_raw,
-                storage_mode="direct",
-                batch_queue=batch_queue,
-                batch_plan=batch_plan,
-                stop_event=stop_req,
-                progress_callback=update_prog,
-            )
-
-            if result_fp32 is None:
-                return None
-
-            # Always convert float32 to high-precision 16-bit uint16 TIFF [0, 65535] via native SIMD cast
-            from taichi_vision import taichi_aot
-
-            result = taichi_aot.cast(result_fp32, np.uint16)
-            del result_fp32
-            try:
-                taichi_aot.get_engine().buffer_pool.clear()
-            except Exception:
-                pass
-            gc.collect()
-
-            print(
-                f"[FusionNet] GPU-resident pipeline complete: "
-                f"shape={result.shape} dtype={result.dtype} mean_alpha={mean_alpha:.4f}"
-            )
-            return result
-
-        # Fallback for memory/HDF5 inputs
         def _to_f32(img):
             img_arr = np.asarray(img)
             if np.issubdtype(img_arr.dtype, np.integer):
@@ -266,7 +345,10 @@ class FusionNetDenoisingAlgorithm:
                 )
 
             session = load_weightnet_onnx(
-                DEFAULT_WEIGHTNET_ONNX, runtime="dml", patch_size=tile_size
+                DEFAULT_WEIGHTNET_ONNX,
+                runtime="dml",
+                patch_size=tile_size,
+                input_channels=config["input_channels"],
             )
 
             with AOTOpticalFlowAligner(

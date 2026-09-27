@@ -222,53 +222,77 @@ if TAICHI_AVAILABLE:
                 residual = 0.0
                 det_last = 0.0
 
-                for _it in range(iterations):
-                    if active == 1:
-                        gxx = 0.0
-                        gxy = 0.0
-                        gyy = 0.0
-                        bx = 0.0
-                        by = 0.0
-                        err_abs = 0.0
+                # Bouguet (1999) Pre-computed Spatial Gradient Matrix G
+                gxx = 0.0
+                gxy = 0.0
+                gyy = 0.0
+                for oy, ox in ti.ndrange(
+                    (-win_radius, win_radius + 1), (-win_radius, win_radius + 1)
+                ):
+                    yy_i = border_margin + gy * grid_step + oy
+                    xx_i = border_margin + gx * grid_step + ox
+                    ix = (
+                        _lk_read_i32(prev, yy_i, xx_i + 1, h, w)
+                        - _lk_read_i32(prev, yy_i, xx_i - 1, h, w)
+                    ) * 0.5
+                    iy = (
+                        _lk_read_i32(prev, yy_i + 1, xx_i, h, w)
+                        - _lk_read_i32(prev, yy_i - 1, xx_i, h, w)
+                    ) * 0.5
+                    gxx += ix * ix
+                    gxy += ix * iy
+                    gyy += iy * iy
 
-                        for oy, ox in ti.ndrange(
-                            (-win_radius, win_radius + 1), (-win_radius, win_radius + 1)
-                        ):
-                            yy_i = border_margin + gy * grid_step + oy
-                            xx_i = border_margin + gx * grid_step + ox
-                            yy = ti.cast(yy_i, ti.f32)
-                            xx = ti.cast(xx_i, ti.f32)
-                            nx = xx + dx
-                            ny = yy + dy
-                            ix = (
-                                _lk_read_i32(prev, yy_i, xx_i + 1, h, w)
-                                - _lk_read_i32(prev, yy_i, xx_i - 1, h, w)
-                            ) * 0.5
-                            iy = (
-                                _lk_read_i32(prev, yy_i + 1, xx_i, h, w)
-                                - _lk_read_i32(prev, yy_i - 1, xx_i, h, w)
-                            ) * 0.5
-                            err = _lk_sample(next, ny, nx, h, w) - _lk_read_i32(
-                                prev, yy_i, xx_i, h, w
-                            )
-                            gxx += ix * ix
-                            gxy += ix * iy
-                            gyy += iy * iy
-                            bx += ix * err
-                            by += iy * err
-                            err_abs += ti.abs(err)
+                det = gxx * gyy - gxy * gxy
+                det_last = ti.abs(det)
+                patch_area = ti.cast(
+                    (win_radius * 2 + 1) * (win_radius * 2 + 1), ti.f32
+                )
 
-                        det = gxx * gyy - gxy * gxy
-                        det_last = ti.abs(det)
-                        patch_area = ti.cast(
-                            (win_radius * 2 + 1) * (win_radius * 2 + 1), ti.f32
-                        )
-                        residual = err_abs / patch_area
-                        if ti.abs(det) < 1e-4:
-                            valid = 0
-                            active = 0
-                        else:
-                            inv_det = 1.0 / det
+                # Bouguet Minimum Eigenvalue Criterion (check aperture problem)
+                tr = gxx + gyy
+                diff = gxx - gyy
+                disc = ti.sqrt(ti.max(0.0, diff * diff + 4.0 * gxy * gxy))
+                lambda_min = (tr - disc) * 0.5
+
+                if lambda_min < 1e-4 or ti.abs(det) < 1e-4:
+                    valid = 0
+                    active = 0
+                else:
+                    inv_det = 1.0 / det
+
+                    # Fast Iterative Sub-Pixel Taylor Expansion (Bouguet algorithm)
+                    for _it in range(iterations):
+                        if active == 1:
+                            bx = 0.0
+                            by = 0.0
+                            err_abs = 0.0
+
+                            for oy, ox in ti.ndrange(
+                                (-win_radius, win_radius + 1), (-win_radius, win_radius + 1)
+                            ):
+                                yy_i = border_margin + gy * grid_step + oy
+                                xx_i = border_margin + gx * grid_step + ox
+                                yy = ti.cast(yy_i, ti.f32)
+                                xx = ti.cast(xx_i, ti.f32)
+                                nx = xx + dx
+                                ny = yy + dy
+                                ix = (
+                                    _lk_read_i32(prev, yy_i, xx_i + 1, h, w)
+                                    - _lk_read_i32(prev, yy_i, xx_i - 1, h, w)
+                                ) * 0.5
+                                iy = (
+                                    _lk_read_i32(prev, yy_i + 1, xx_i, h, w)
+                                    - _lk_read_i32(prev, yy_i - 1, xx_i, h, w)
+                                ) * 0.5
+                                err = _lk_sample(next, ny, nx, h, w) - _lk_read_i32(
+                                    prev, yy_i, xx_i, h, w
+                                )
+                                bx += ix * err
+                                by += iy * err
+                                err_abs += ti.abs(err)
+
+                            residual = err_abs / patch_area
                             step_x = (-gyy * bx + gxy * by) * inv_det
                             step_y = (gxy * bx - gxx * by) * inv_det
                             step_x = ti.max(-max_step, ti.min(max_step, step_x))
@@ -327,53 +351,76 @@ if TAICHI_AVAILABLE:
                 residual = grid_meta[gy, gx, 0]
                 det_last = grid_meta[gy, gx, 1]
 
-                for _it in range(iterations):
-                    if active == 1:
-                        gxx = 0.0
-                        gxy = 0.0
-                        gyy = 0.0
-                        bx = 0.0
-                        by = 0.0
-                        err_abs = 0.0
+                # Bouguet (1999) Pre-computed Spatial Gradient Matrix G
+                gxx = 0.0
+                gxy = 0.0
+                gyy = 0.0
+                for oy, ox in ti.ndrange(
+                    (-win_radius, win_radius + 1), (-win_radius, win_radius + 1)
+                ):
+                    yy_i = border_margin + gy * grid_step + oy
+                    xx_i = border_margin + gx * grid_step + ox
+                    ix = (
+                        _lk_read_i32(prev, yy_i, xx_i + 1, h, w)
+                        - _lk_read_i32(prev, yy_i, xx_i - 1, h, w)
+                    ) * 0.5
+                    iy = (
+                        _lk_read_i32(prev, yy_i + 1, xx_i, h, w)
+                        - _lk_read_i32(prev, yy_i - 1, xx_i, h, w)
+                    ) * 0.5
+                    gxx += ix * ix
+                    gxy += ix * iy
+                    gyy += iy * iy
 
-                        for oy, ox in ti.ndrange(
-                            (-win_radius, win_radius + 1), (-win_radius, win_radius + 1)
-                        ):
-                            yy_i = border_margin + gy * grid_step + oy
-                            xx_i = border_margin + gx * grid_step + ox
-                            yy = ti.cast(yy_i, ti.f32)
-                            xx = ti.cast(xx_i, ti.f32)
-                            nx = xx + dx
-                            ny = yy + dy
-                            ix = (
-                                _lk_read_i32(prev, yy_i, xx_i + 1, h, w)
-                                - _lk_read_i32(prev, yy_i, xx_i - 1, h, w)
-                            ) * 0.5
-                            iy = (
-                                _lk_read_i32(prev, yy_i + 1, xx_i, h, w)
-                                - _lk_read_i32(prev, yy_i - 1, xx_i, h, w)
-                            ) * 0.5
-                            err = _lk_sample(next, ny, nx, h, w) - _lk_read_i32(
-                                prev, yy_i, xx_i, h, w
-                            )
-                            gxx += ix * ix
-                            gxy += ix * iy
-                            gyy += iy * iy
-                            bx += ix * err
-                            by += iy * err
-                            err_abs += ti.abs(err)
+                det = gxx * gyy - gxy * gxy
+                det_last = ti.abs(det)
+                patch_area = ti.cast(
+                    (win_radius * 2 + 1) * (win_radius * 2 + 1), ti.f32
+                )
 
-                        det = gxx * gyy - gxy * gxy
-                        det_last = ti.abs(det)
-                        patch_area = ti.cast(
-                            (win_radius * 2 + 1) * (win_radius * 2 + 1), ti.f32
-                        )
-                        residual = err_abs / patch_area
-                        if ti.abs(det) < 1e-4:
-                            valid = 0
-                            active = 0
-                        else:
-                            inv_det = 1.0 / det
+                # Bouguet Minimum Eigenvalue Criterion
+                tr = gxx + gyy
+                diff = gxx - gyy
+                disc = ti.sqrt(ti.max(0.0, diff * diff + 4.0 * gxy * gxy))
+                lambda_min = (tr - disc) * 0.5
+
+                if lambda_min < 1e-4 or ti.abs(det) < 1e-4:
+                    valid = 0
+                    active = 0
+                else:
+                    inv_det = 1.0 / det
+
+                    for _it in range(iterations):
+                        if active == 1:
+                            bx = 0.0
+                            by = 0.0
+                            err_abs = 0.0
+
+                            for oy, ox in ti.ndrange(
+                                (-win_radius, win_radius + 1), (-win_radius, win_radius + 1)
+                            ):
+                                yy_i = border_margin + gy * grid_step + oy
+                                xx_i = border_margin + gx * grid_step + ox
+                                yy = ti.cast(yy_i, ti.f32)
+                                xx = ti.cast(xx_i, ti.f32)
+                                nx = xx + dx
+                                ny = yy + dy
+                                ix = (
+                                    _lk_read_i32(prev, yy_i, xx_i + 1, h, w)
+                                    - _lk_read_i32(prev, yy_i, xx_i - 1, h, w)
+                                ) * 0.5
+                                iy = (
+                                    _lk_read_i32(prev, yy_i + 1, xx_i, h, w)
+                                    - _lk_read_i32(prev, yy_i - 1, xx_i, h, w)
+                                ) * 0.5
+                                err = _lk_sample(next, ny, nx, h, w) - _lk_read_i32(
+                                    prev, yy_i, xx_i, h, w
+                                )
+                                bx += ix * err
+                                by += iy * err
+                                err_abs += ti.abs(err)
+
+                            residual = err_abs / patch_area
                             step_x = (-gyy * bx + gxy * by) * inv_det
                             step_y = (gxy * bx - gxx * by) * inv_det
                             step_x = ti.max(-max_step, ti.min(max_step, step_x))

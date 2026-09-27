@@ -5,8 +5,8 @@ import cv2
 import numpy as np
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
-    LucasKanadeGPU,
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade import (
+    LucasKanade,
 )
 
 
@@ -38,7 +38,7 @@ RAFT_PRESETS = {
 }
 
 
-class RAFTFlow(LucasKanadeGPU):
+class RAFTFlow(LucasKanade):
     NAME = "RAFT Optical Flow"
     KIND = "alignment"
     DESCRIPTION = "ONNX RAFT optical flow alignment with dynamic 360x480 model tiles."

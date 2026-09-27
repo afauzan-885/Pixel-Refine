@@ -116,82 +116,94 @@ def _gbtf_green_interpolation_kernel(
     c11: ti.i32,
 ):
     """Pass 1: GBTF (Gradient-Based Threshold-Free) Green Channel Interpolation."""
-    for r, c in ti.ndrange(h, w):
-        color_idx = 1
-        r_mod = r % 2
-        c_mod = c % 2
-        if r_mod == 0:
-            color_idx = c00 if c_mod == 0 else c01
-        else:
-            color_idx = c10 if c_mod == 0 else c11
+    for r2, c2 in ti.ndrange((h + 1) // 2, (w + 1) // 2):
+        for i in ti.static(range(2)):
+            for j in ti.static(range(2)):
+                r = r2 * 2 + i
+                c = c2 * 2 + j
+                if r < h and c < w:
+                    # Compile-time CFA phase: the parity tests below used to be
+                    # re-evaluated for every pixel.
+                    colour_self = c00
+                    if ti.static(i == 0):
+                        if ti.static(j == 0):
+                            colour_self = c00
+                        else:
+                            colour_self = c01
+                    else:
+                        if ti.static(j == 0):
+                            colour_self = c10
+                        else:
+                            colour_self = c11
 
-        is_green = (color_idx == 1) or (color_idx == 3)
+                    is_green = (colour_self == 1) or (colour_self == 3)
 
-        if is_green:
-            green[r, c] = wb_bayer[r, c]
-        else:
-            # Clamp indices
-            r_u3 = ti.math.clamp(r - 3, 0, h - 1)
-            r_u2 = ti.math.clamp(r - 2, 0, h - 1)
-            r_u1 = ti.math.clamp(r - 1, 0, h - 1)
-            r_d1 = ti.math.clamp(r + 1, 0, h - 1)
-            r_d2 = ti.math.clamp(r + 2, 0, h - 1)
-            r_d3 = ti.math.clamp(r + 3, 0, h - 1)
+                    if is_green:
+                        green[r, c] = wb_bayer[r, c]
+                    else:
+                        # Clamp indices
+                        r_u3 = ti.math.clamp(r - 3, 0, h - 1)
+                        r_u2 = ti.math.clamp(r - 2, 0, h - 1)
+                        r_u1 = ti.math.clamp(r - 1, 0, h - 1)
+                        r_d1 = ti.math.clamp(r + 1, 0, h - 1)
+                        r_d2 = ti.math.clamp(r + 2, 0, h - 1)
+                        r_d3 = ti.math.clamp(r + 3, 0, h - 1)
 
-            c_l3 = ti.math.clamp(c - 3, 0, w - 1)
-            c_l2 = ti.math.clamp(c - 2, 0, w - 1)
-            c_l1 = ti.math.clamp(c - 1, 0, w - 1)
-            c_r1 = ti.math.clamp(c + 1, 0, w - 1)
-            c_r2 = ti.math.clamp(c + 2, 0, w - 1)
-            c_r3 = ti.math.clamp(c + 3, 0, w - 1)
+                        c_l3 = ti.math.clamp(c - 3, 0, w - 1)
+                        c_l2 = ti.math.clamp(c - 2, 0, w - 1)
+                        c_l1 = ti.math.clamp(c - 1, 0, w - 1)
+                        c_r1 = ti.math.clamp(c + 1, 0, w - 1)
+                        c_r2 = ti.math.clamp(c + 2, 0, w - 1)
+                        c_r3 = ti.math.clamp(c + 3, 0, w - 1)
 
-            # GBTF interpolation at Red/Blue sites using N, S, E, W gradients
-            g_E = ti.abs(wb_bayer[r, c_r1] - wb_bayer[r, c_r3]) + ti.abs(wb_bayer[r, c] - wb_bayer[r, c_r2])
-            g_W = ti.abs(wb_bayer[r, c_l1] - wb_bayer[r, c_l3]) + ti.abs(wb_bayer[r, c] - wb_bayer[r, c_l2])
-            g_N = ti.abs(wb_bayer[r_u1, c] - wb_bayer[r_u3, c]) + ti.abs(wb_bayer[r, c] - wb_bayer[r_u2, c])
-            g_S = ti.abs(wb_bayer[r_d1, c] - wb_bayer[r_d3, c]) + ti.abs(wb_bayer[r, c] - wb_bayer[r_d2, c])
+                        # GBTF interpolation at Red/Blue sites using N, S, E, W gradients
+                        g_E = ti.abs(wb_bayer[r, c_r1] - wb_bayer[r, c_r3]) + ti.abs(wb_bayer[r, c] - wb_bayer[r, c_r2])
+                        g_W = ti.abs(wb_bayer[r, c_l1] - wb_bayer[r, c_l3]) + ti.abs(wb_bayer[r, c] - wb_bayer[r, c_l2])
+                        g_N = ti.abs(wb_bayer[r_u1, c] - wb_bayer[r_u3, c]) + ti.abs(wb_bayer[r, c] - wb_bayer[r_u2, c])
+                        g_S = ti.abs(wb_bayer[r_d1, c] - wb_bayer[r_d3, c]) + ti.abs(wb_bayer[r, c] - wb_bayer[r_d2, c])
 
-            w_E = 1.0 / ti.max(1e-5, (1.0 + g_E) * (1.0 + g_E))
-            w_W = 1.0 / ti.max(1e-5, (1.0 + g_W) * (1.0 + g_W))
-            w_N = 1.0 / ti.max(1e-5, (1.0 + g_N) * (1.0 + g_N))
-            w_S = 1.0 / ti.max(1e-5, (1.0 + g_S) * (1.0 + g_S))
+                        w_E = 1.0 / ti.max(1e-5, (1.0 + g_E) * (1.0 + g_E))
+                        w_W = 1.0 / ti.max(1e-5, (1.0 + g_W) * (1.0 + g_W))
+                        w_N = 1.0 / ti.max(1e-5, (1.0 + g_N) * (1.0 + g_N))
+                        w_S = 1.0 / ti.max(1e-5, (1.0 + g_S) * (1.0 + g_S))
 
-            val_E = wb_bayer[r, c_r1] + (wb_bayer[r, c] - wb_bayer[r, c_r2]) * 0.5
-            val_W = wb_bayer[r, c_l1] + (wb_bayer[r, c] - wb_bayer[r, c_l2]) * 0.5
-            val_N = wb_bayer[r_u1, c] + (wb_bayer[r, c] - wb_bayer[r_u2, c]) * 0.5
-            val_S = wb_bayer[r_d1, c] + (wb_bayer[r, c] - wb_bayer[r_d2, c]) * 0.5
+                        val_E = wb_bayer[r, c_r1] + (wb_bayer[r, c] - wb_bayer[r, c_r2]) * 0.5
+                        val_W = wb_bayer[r, c_l1] + (wb_bayer[r, c] - wb_bayer[r, c_l2]) * 0.5
+                        val_N = wb_bayer[r_u1, c] + (wb_bayer[r, c] - wb_bayer[r_u2, c]) * 0.5
+                        val_S = wb_bayer[r_d1, c] + (wb_bayer[r, c] - wb_bayer[r_d2, c]) * 0.5
 
-            horizontal = (w_E * val_E + w_W * val_W) / (w_E + w_W)
-            vertical = (w_N * val_N + w_S * val_S) / (w_N + w_S)
-            horizontal_bounded = ti.math.clamp(
-                horizontal,
-                ti.min(wb_bayer[r, c_l1], wb_bayer[r, c_r1]),
-                ti.max(wb_bayer[r, c_l1], wb_bayer[r, c_r1]),
-            )
-            vertical_bounded = ti.math.clamp(
-                vertical,
-                ti.min(wb_bayer[r_u1, c], wb_bayer[r_d1, c]),
-                ti.max(wb_bayer[r_u1, c], wb_bayer[r_d1, c]),
-            )
-            grad_h = g_E + g_W
-            grad_v = g_N + g_S
-            hard = ti.select(
-                grad_h < grad_v,
-                horizontal_bounded,
-                ti.select(
-                    grad_v < grad_h,
-                    vertical_bounded,
-                    (horizontal_bounded + vertical_bounded) * 0.5,
-                ),
-            )
-            weight_h = 1.0 / (0.01 + grad_h)
-            weight_v = 1.0 / (0.01 + grad_v)
-            soft = (weight_h * horizontal + weight_v * vertical) / (
-                weight_h + weight_v
-            )
-            texture = ti.math.clamp((ti.min(grad_h, grad_v) - 1.5) / 2.0, 0.0, 1.0)
-            texture = texture * texture * (3.0 - 2.0 * texture)
-            green[r, c] = hard * (1.0 - texture) + soft * texture
+                        horizontal = (w_E * val_E + w_W * val_W) / (w_E + w_W)
+                        vertical = (w_N * val_N + w_S * val_S) / (w_N + w_S)
+                        horizontal_bounded = ti.math.clamp(
+                            horizontal,
+                            ti.min(wb_bayer[r, c_l1], wb_bayer[r, c_r1]),
+                            ti.max(wb_bayer[r, c_l1], wb_bayer[r, c_r1]),
+                        )
+                        vertical_bounded = ti.math.clamp(
+                            vertical,
+                            ti.min(wb_bayer[r_u1, c], wb_bayer[r_d1, c]),
+                            ti.max(wb_bayer[r_u1, c], wb_bayer[r_d1, c]),
+                        )
+                        grad_h = g_E + g_W
+                        grad_v = g_N + g_S
+                        hard = ti.select(
+                            grad_h < grad_v,
+                            horizontal_bounded,
+                            ti.select(
+                                grad_v < grad_h,
+                                vertical_bounded,
+                                (horizontal_bounded + vertical_bounded) * 0.5,
+                            ),
+                        )
+                        # (w_h*horizontal + w_v*vertical)/(w_h + w_v) with w = 1/(0.01 + g)
+                        # collapses to one division, removing both reciprocals.  Algebraically
+                        # identical; division dominates this kernel.
+                        soft = (horizontal * (0.01 + grad_v) + vertical * (0.01 + grad_h)) / (
+                            0.02 + grad_h + grad_v
+                        )
+                        texture = ti.math.clamp((ti.min(grad_h, grad_v) - 1.5) / 2.0, 0.0, 1.0)
+                        texture = texture * texture * (3.0 - 2.0 * texture)
+                        green[r, c] = hard * (1.0 - texture) + soft * texture
 
 @ti.kernel
 def _initial_color_difference_kernel(

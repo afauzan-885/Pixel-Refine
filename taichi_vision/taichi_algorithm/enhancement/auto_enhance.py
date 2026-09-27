@@ -43,39 +43,12 @@ DEFAULT_AUTO_ENHANCE_PARAMS = {
 }
 
 
-def analyze_auto_enhance_params(
-    src: Any,
-    mode: str = "natural",
+def _auto_enhance_params_from_luma(
+    lum_sample: np.ndarray,
+    mode: str,
 ) -> Dict[str, Any]:
-    """
-    Analyzes luminance histogram of the input image and returns optimal adaptive parameters.
-
-    Modes:
-    - 'analysis' (Tier 1): Maximizes dynamic range & boosts deep shadow textures so even
-      extremely dark frames become bright and highly contrasted for FlowNet & WeightNet.
-    - 'natural' (Tier 2): Natural perceptual tone mapping, filmic knee, and balanced contrast
-      for the final merged image.
-    """
-    if hasattr(src, "to_numpy"):
-        img = src.to_numpy()
-    else:
-        img = np.asarray(src)
-
-    img = np.ascontiguousarray(img, dtype=np.float32)
-    if img.ndim != 3 or img.shape[2] != 3:
-        raise ValueError(f"Expected RGB image [H, W, 3], got shape {img.shape}")
-
-    # ITU-R BT.709 Luminance
-    lum = 0.2126 * img[:, :, 0] + 0.7152 * img[:, :, 1] + 0.0722 * img[:, :, 2]
-    lum_flat = lum.ravel()
-
-    # Fast sampling for very large images
-    if lum_flat.size > 500000:
-        step = int(np.ceil(lum_flat.size / 500000))
-        lum_sample = lum_flat[::step]
-    else:
-        lum_sample = lum_flat
-
+    """Build AutoEnhance parameters from the canonical sampled luminance."""
+    lum_sample = np.asarray(lum_sample, dtype=np.float32).reshape(-1)
     lum_sample = lum_sample[np.isfinite(lum_sample)]
     if lum_sample.size == 0:
         lum_sample = np.array([0.5], dtype=np.float32)
@@ -149,10 +122,6 @@ def analyze_auto_enhance_params(
 
     # -------------------------------------------------------------------------
     # TIER 2: Natural Perceptual Tone Mapping (Final Master Output)
-    # Adaptive Key & Low-Key / Night-Scene Awareness
-    # -------------------------------------------------------------------------
-    # -------------------------------------------------------------------------
-    # TIER 2: Natural Perceptual Tone Mapping (Final Master Output)
     # Adaptive Key & Low-Key / Night-Scene Awareness with Highlight Protection
     # -------------------------------------------------------------------------
     base_target_key = 0.108  # -20% global brightness reduction
@@ -200,9 +169,103 @@ def analyze_auto_enhance_params(
     return params
 
 
+def analyze_auto_enhance_params(
+    src: Any,
+    mode: str = "natural",
+) -> Dict[str, Any]:
+    """
+    Analyze luminance and return adaptive tone-mapping parameters.
+
+    GPU buffers use the compact resident sampler below, so this public API no
+    longer needs to materialize the complete RGB frame on the host merely to
+    calculate statistics. NumPy callers retain the historical behavior.
+    """
+    if hasattr(src, "to_numpy"):
+        return analyze_auto_enhance_params_gpu(src, mode=mode)
+
+    img = np.ascontiguousarray(np.asarray(src), dtype=np.float32)
+    if img.ndim != 3 or img.shape[2] != 3:
+        raise ValueError(f"Expected RGB image [H, W, 3], got shape {img.shape}")
+
+    # ITU-R BT.709 luminance. Keep the existing 500k strided sampling contract
+    # so CPU and resident GPU analysis use the same statistic population.
+    lum = 0.2126 * img[:, :, 0] + 0.7152 * img[:, :, 1] + 0.0722 * img[:, :, 2]
+    lum_flat = lum.ravel()
+    step = max(1, int(np.ceil(lum_flat.size / 500000)))
+    return _auto_enhance_params_from_luma(lum_flat[::step], mode)
+
+
 # =========================================================================
 # 2. VECTORIZED NUMPY TRANSFORM (100% BIT-EXACT PARITY)
 # =========================================================================
+
+
+def _apply_auto_enhance_np_chunk(
+    img_chunk: np.ndarray,
+    gain: float,
+    white_level: float,
+    shadow_lift: float,
+    gamma: float,
+    contrast_s_curve: float,
+    global_contrast: float,
+    saturation: float,
+    use_adaptive_knee: bool,
+) -> np.ndarray:
+    w2 = white_level * white_level
+    k = float(3.5 + (global_contrast - 1.0) * 3.0)
+    x0 = 0.38
+    s_0 = 1.0 / (1.0 + np.exp(-k * (0.0 - x0)))
+    s_1 = 1.0 / (1.0 + np.exp(-k * (1.0 - x0)))
+    inv_s_range = 1.0 / (s_1 - s_0)
+
+    # 1. Luminance
+    lum = 0.2126 * img_chunk[:, :, 0] + 0.7152 * img_chunk[:, :, 1] + 0.0722 * img_chunk[:, :, 2]
+
+    # 2. Exposure scaling & shadow pedestal lift
+    lum_scaled = (lum + shadow_lift) * gain
+
+    # 3. Filmic Extended Reinhard Tone Compression
+    if use_adaptive_knee:
+        lum_toned = (lum_scaled * (1.0 + (lum_scaled / w2))) / (1.0 + lum_scaled)
+    else:
+        lum_toned = lum_scaled / (1.0 + lum_scaled)
+
+    # 4. Perceptual Gamma
+    lum_gamma = np.power(np.maximum(0.0, lum_toned), 1.0 / gamma)
+
+    # 5. Normalized Sigmoid Contrast Curve with Hermite Highlight Protection
+    s_x = 1.0 / (1.0 + np.exp(-k * (lum_gamma - x0)))
+    s_tone = np.clip((s_x - s_0) * inv_s_range, 0.0, 1.0)
+
+    # Highlight protection shoulder
+    hl_weight = np.clip((lum_gamma - 0.35) / 0.65, 0.0, 1.0)
+    hl_smooth = hl_weight * hl_weight * (3.0 - 2.0 * hl_weight)
+    lum_final = np.clip(s_tone * (1.0 - hl_smooth) + lum_gamma * hl_smooth, 0.0, 1.0)
+
+    # 7. Hue-Preserving Chromaticity Ratio Transfer
+    ratio = (lum_final / (lum + 1e-6))[:, :, np.newaxis]
+    rgb_out = img_chunk * ratio
+
+    # 8. Soft Highlight Desaturation with Whiteness/Chroma Gating
+    min_c = np.min(img_chunk, axis=2)
+    whiteness = np.clip((min_c - 0.10) / 0.40, 0.0, 1.0)
+
+    t_hl = np.clip((lum_final - 0.78) / 0.22, 0.0, 1.0)
+    desat_smooth = 0.5 * (1.0 - np.cos(np.pi * t_hl)) * whiteness
+    eff_sat = (
+        (1.0 + (saturation - 1.0) * (1.0 - desat_smooth)) * (1.0 - desat_smooth)
+    )[:, :, np.newaxis]
+
+    lum_3d = lum_final[:, :, np.newaxis]
+    rgb_out = lum_3d + (rgb_out - lum_3d) * eff_sat
+
+    # 9. Filmic Soft Knee Highlight Rolloff
+    T = 0.85
+    diff = np.maximum(0.0, rgb_out - T)
+    scale = 1.0 - T
+    rgb_soft = np.where(rgb_out <= T, rgb_out, T + diff * scale / (scale + diff))
+
+    return np.clip(rgb_soft, 0.0, 1.0)
 
 
 def apply_auto_enhance_np(
@@ -212,6 +275,7 @@ def apply_auto_enhance_np(
 ) -> np.ndarray:
     """
     Vectorized NumPy implementation of AutoEnhance for 100% parity verification.
+    Uses chunked processing for large arrays to prevent memory spikes.
     """
     p = dict(DEFAULT_AUTO_ENHANCE_PARAMS)
     if params:
@@ -230,73 +294,61 @@ def apply_auto_enhance_np(
     img = np.ascontiguousarray(src_np, dtype=np.float32)
     img = np.maximum(0.0, img)
 
-    # 1. Luminance
-    lum = 0.2126 * img[:, :, 0] + 0.7152 * img[:, :, 1] + 0.0722 * img[:, :, 2]
-
-    # 2. Exposure scaling & shadow pedestal lift
-    lum_scaled = (lum + shadow_lift) * gain
-
-    # 3. Filmic Extended Reinhard Tone Compression
-    w2 = white_level * white_level
-    if use_adaptive_knee:
-        lum_toned = (lum_scaled * (1.0 + (lum_scaled / w2))) / (1.0 + lum_scaled)
+    h = img.shape[0]
+    chunk_size = 512
+    if h <= chunk_size:
+        res = _apply_auto_enhance_np_chunk(
+            img,
+            gain,
+            white_level,
+            shadow_lift,
+            gamma,
+            contrast_s_curve,
+            global_contrast,
+            saturation,
+            use_adaptive_knee,
+        )
     else:
-        lum_toned = lum_scaled / (1.0 + lum_scaled)
+        res = np.empty_like(img, dtype=np.float32)
+        for r0 in range(0, h, chunk_size):
+            r1 = min(h, r0 + chunk_size)
+            res[r0:r1] = _apply_auto_enhance_np_chunk(
+                img[r0:r1],
+                gain,
+                white_level,
+                shadow_lift,
+                gamma,
+                contrast_s_curve,
+                global_contrast,
+                saturation,
+                use_adaptive_knee,
+            )
 
-    # 4. Perceptual Gamma
-    lum_gamma = np.power(np.maximum(0.0, lum_toned), 1.0 / gamma)
-
-    # 5. Normalized Sigmoid Contrast Curve with Hermite Highlight Protection
-    # k controls the contrast slope, x0 is the perceptual midtone anchor (0.38 for +15% deeper blacks)
-    # AutoEnhance v1 owns the contrast range; do not impose an external clamp.
-    k = float(3.5 + (global_contrast - 1.0) * 3.0)
-    x0 = 0.38
-
-    s_x = 1.0 / (1.0 + np.exp(-k * (lum_gamma - x0)))
-    s_0 = 1.0 / (1.0 + np.exp(-k * (0.0 - x0)))
-    s_1 = 1.0 / (1.0 + np.exp(-k * (1.0 - x0)))
-    s_tone = np.clip((s_x - s_0) / (s_1 - s_0), 0.0, 1.0)
-
-    # Highlight protection shoulder: Smoothly blend from contrast curve to soft filmic shoulder
-    hl_weight = np.clip((lum_gamma - 0.35) / 0.65, 0.0, 1.0)
-    hl_smooth = hl_weight * hl_weight * (3.0 - 2.0 * hl_weight)  # Hermite smoothstep
-    lum_final = np.clip(s_tone * (1.0 - hl_smooth) + lum_gamma * hl_smooth, 0.0, 1.0)
-
-    # 7. Hue-Preserving Chromaticity Ratio Transfer
-    ratio = (lum_final / (lum + 1e-6))[:, :, np.newaxis]
-    rgb_out = img * ratio
-
-    # 8. Soft Highlight Desaturation with Whiteness/Chroma Gating
-    # Only desaturate peak blown/specular highlights (where min channel is high),
-    # preserving rich saturation in colored light sources (e.g. red car taillights).
-    min_c = np.min(img, axis=2)
-    whiteness = np.clip((min_c - 0.10) / 0.40, 0.0, 1.0)
-
-    # Smooth raised-cosine (Hann) taper for peak highlights (> 0.78)
-    t_hl = np.clip((lum_final - 0.78) / 0.22, 0.0, 1.0)
-    desat_smooth = 0.5 * (1.0 - np.cos(np.pi * t_hl)) * whiteness
-    eff_sat = (
-        (1.0 + (saturation - 1.0) * (1.0 - desat_smooth)) * (1.0 - desat_smooth)
-    )[:, :, np.newaxis]
-
-    lum_3d = lum_final[:, :, np.newaxis]
-    rgb_out = lum_3d + (rgb_out - lum_3d) * eff_sat
-
-    # 9. Filmic Soft Knee Highlight Rolloff (replaces hard clipping)
-    # Provides smooth photographic falloff towards 1.0 with no flat clipping plateaus or hard borders.
-    T = 0.85
-    diff = np.maximum(0.0, rgb_out - T)
-    scale = 1.0 - T
-    rgb_soft = np.where(rgb_out <= T, rgb_out, T + diff * scale / (scale + diff))
-
-    return np.ascontiguousarray(np.clip(rgb_soft, 0.0, 1.0), dtype=np.float32)
-
-
-# =========================================================================
-# 3. TAICHI GPU KERNEL DEFINITIONS
-# =========================================================================
+    return np.ascontiguousarray(res, dtype=np.float32)
 
 if TAICHI_AVAILABLE:
+
+    @ti.kernel
+    def auto_enhance_sample_luma_kernel(
+        src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+        samples: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        h: ti.i32,
+        w: ti.i32,
+        step: ti.i32,
+        sample_count: ti.i32,
+    ):
+        """Extract the canonical strided luminance sample on the device."""
+        for index in range(sample_count):
+            flat_index = index * step
+            y = flat_index // w
+            x = flat_index - y * w
+            if y < h:
+                value = src[y, x]
+                samples[index] = (
+                    0.2126 * value[0]
+                    + 0.7152 * value[1]
+                    + 0.0722 * value[2]
+                )
 
     @ti.kernel
     def auto_enhance_kernel(
@@ -396,6 +448,59 @@ if TAICHI_AVAILABLE:
 # =========================================================================
 
 
+def sample_auto_enhance_luma_gpu(src_gpu: Any, max_samples: int = 500000) -> np.ndarray:
+    """Read only the canonical luminance sample required by AutoEnhance.
+
+    The previous resident path downloaded the complete RGB carrier before
+    calculating statistics. This graph writes the same strided population to
+    a compact float32 buffer, preserving percentile semantics while reducing
+    the host transfer to at most ``max_samples * 4`` bytes.
+    """
+    from taichi_vision.taichi_aot import get_engine
+    from taichi_vision.taichi_algorithm.aot_api import _mod
+
+    shape = tuple(int(value) for value in getattr(src_gpu, "shape", ()))
+    if len(shape) != 3 or shape[2] != 3:
+        raise ValueError(f"Expected resident RGB image [H, W, 3], got shape {shape}")
+    h, w = shape[:2]
+    total = int(h * w)
+    sample_limit = max(1, int(max_samples))
+    step = max(1, int(np.ceil(total / sample_limit)))
+    sample_count = max(1, (total + step - 1) // step)
+
+    engine = get_engine()
+    samples_gpu = engine.allocate((sample_count,), dtype=np.float32)
+    host_samples = np.empty((sample_count,), dtype=np.float32)
+    src_view = src_gpu
+    if not getattr(src_gpu, "is_vector", False):
+        src_view = src_gpu.view_as_vector(True, 3)
+    try:
+        _mod("auto_enhance").run(
+            "auto_enhance_sample_luma",
+            src=src_view,
+            samples=samples_gpu,
+            h=int(h),
+            w=int(w),
+            step=int(step),
+            sample_count=int(sample_count),
+        )
+        samples_gpu.to_numpy(out=host_samples)
+        return host_samples
+    finally:
+        samples_gpu.destroy()
+
+
+def analyze_auto_enhance_params_gpu(
+    src_gpu: Any,
+    mode: str = "natural",
+) -> Dict[str, Any]:
+    """Analyze a resident RGB carrier with one compact host readback."""
+    return _auto_enhance_params_from_luma(
+        sample_auto_enhance_luma_gpu(src_gpu),
+        mode,
+    )
+
+
 def apply_auto_enhance_gpu(
     src_gpu: Any,
     params: Dict[str, Any],
@@ -470,7 +575,8 @@ def AutoEnhance(
     High-level AutoEnhance API.
     - If `params` is None, analyzes histogram on `src` first.
     - If `params` is provided, applies tone mapping directly using pre-computed parameters.
-    - If `src` is in VRAM (TaichiGPUBuffer) or `return_gpu=True`, executes directly on GPU TCM.
+    - If `src` is in VRAM (TaichiGPUBuffer) or `return_gpu=True` or GPU backend is active,
+      executes directly on GPU TCM.
     """
     if params is None:
         computed_params = analyze_auto_enhance_params(src)
@@ -482,7 +588,18 @@ def AutoEnhance(
 
     is_gpu_in = hasattr(src, "to_numpy")
 
-    if is_gpu_in or return_gpu:
+    use_gpu = is_gpu_in or return_gpu
+    if not use_gpu:
+        try:
+            from taichi_vision.taichi_aot import get_engine
+            engine = get_engine()
+            backend_name = getattr(engine, "backend_name", "").lower()
+            if backend_name in ("vulkan", "cuda", "opengl"):
+                use_gpu = True
+        except Exception:
+            pass
+
+    if use_gpu:
         from taichi_vision.taichi_aot import upload, TaichiGPUBuffer
 
         src_gpu = (

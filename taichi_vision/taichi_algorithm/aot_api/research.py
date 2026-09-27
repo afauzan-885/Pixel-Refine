@@ -501,6 +501,93 @@ def hdr_add_aot(dst, src):
     return _pyramid_add_aot("hdr", dst, src)
 
 
+def hdr_spde_mr_score_maps_aot(
+    reference_gray,
+    frame_gray,
+    *,
+    valid_mask=None,
+    patch_size=8,
+    stride=4,
+    exposure_center=0.5,
+    exposure_sigma=0.2,
+    structure_threshold=0.8,
+):
+    """Compute the SPDE-MR E×C×S and local-stability maps with Taichi AOT."""
+    reference = _as_f32(reference_gray, ndim=2)
+    frame = _as_f32(frame_gray, ndim=2)
+    if reference.shape != frame.shape:
+        raise ValueError("SPDE-MR grayscale inputs must have matching HxW dimensions")
+    height, width = reference.shape
+    if patch_size != 8 or stride != 4:
+        raise ValueError("the initial SPDE-MR AOT contract uses 8x8 patches at stride 4")
+    if height < patch_size or width < patch_size:
+        raise ValueError("SPDE-MR needs frames at least 8x8 pixels")
+    if not np.isfinite(float(exposure_center)):
+        raise ValueError("exposure_center must be finite")
+    if not np.isfinite(float(exposure_sigma)) or float(exposure_sigma) <= 0.0:
+        raise ValueError("exposure_sigma must be finite and greater than zero")
+    if not np.isfinite(float(structure_threshold)):
+        raise ValueError("structure_threshold must be finite")
+
+    valid = (
+        np.ones((height, width), dtype=np.int32)
+        if valid_mask is None
+        else _as_i32(valid_mask, ndim=2)
+    )
+    if valid.shape != (height, width):
+        raise ValueError("alignment validity mask must match the grayscale inputs")
+    patch_rows = (height - patch_size) // stride + 1
+    patch_cols = (width - patch_size) // stride + 1
+    patch_buffers = _dispatch(
+        "hdr_spde_mr",
+        "hdr_spde_mr_patch_score_f32",
+        inputs={"reference_gray": reference, "frame_gray": frame},
+        outputs={
+            "patch_quality": ((patch_rows, patch_cols), np.float32),
+            "patch_stable": ((patch_rows, patch_cols), np.int32),
+        },
+        scalars={
+            "patch_rows": int(patch_rows),
+            "patch_cols": int(patch_cols),
+            "patch_size": int(patch_size),
+            "stride": int(stride),
+            "exposure_center": float(exposure_center),
+            "exposure_sigma": float(exposure_sigma),
+            "structure_threshold": float(structure_threshold),
+        },
+        return_gpu=True,
+    )
+    try:
+        maps = _dispatch(
+            "hdr_spde_mr",
+            "hdr_spde_mr_patch_expand_f32",
+            inputs={
+                "patch_quality": patch_buffers["patch_quality"],
+                "patch_stable": patch_buffers["patch_stable"],
+                "valid_mask": valid,
+            },
+            outputs={
+                "quality": ((height, width), np.float32),
+                "stable": ((height, width), np.int32),
+                "policy_weight": ((height, width), np.float32),
+            },
+            scalars={
+                "height": int(height),
+                "width": int(width),
+                "patch_rows": int(patch_rows),
+                "patch_cols": int(patch_cols),
+            },
+        )
+    finally:
+        _destroy_owned(patch_buffers.values())
+
+    return (
+        maps["quality"],
+        maps["stable"].astype(bool, copy=False),
+        maps["policy_weight"],
+    )
+
+
 def hdr_deghost_residual_aot(reference, target, *, scale=1.0, offset=0.0, edge_weight=0.25):
     """Run the target-qualified HDR deghost residual graph.
 
@@ -1663,6 +1750,10 @@ RESEARCH_AOT_GRAPHS = {
         "hdr_merge_linear_f32",
         "hdr_merge_log_f32",
     ),
+    "hdr_spde_mr": (
+        "hdr_spde_mr_patch_score_f32",
+        "hdr_spde_mr_patch_expand_f32",
+    ),
     "tone_mapping": (
         "tone_luminance_f32",
         "tone_reinhard_f32",
@@ -1761,6 +1852,7 @@ __all__ = [
     "hdr_subtract_aot",
     "hdr_add_weighted_laplacian_aot",
     "hdr_add_aot",
+    "hdr_spde_mr_score_maps_aot",
     "hdr_deghost_residual_aot",
     "hdr_response_quantise_aot",
     "hdr_merge_linear_aot",

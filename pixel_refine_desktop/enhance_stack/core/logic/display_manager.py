@@ -8,9 +8,7 @@ Mirrored dari panorama/working_left_panel.py untuk consistency.
 """
 
 import os
-from PySide6.QtWidgets import QGraphicsScene
 from PySide6.QtCore import Qt, QObject, QMutex, QMutexLocker, QThread
-from PySide6.QtGui import QPixmap
 
 # Generic UI Library
 from resources.GenericUILibrary import ImageCompareItem
@@ -160,6 +158,10 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
         print(f"[DisplayManager] Error: Result file not found at {image_path}")
         return
 
+    from pixel_refine_desktop.app_core import perf_probe
+
+    _mark = perf_probe.perf_mark("display_processed_result")
+
     # Initialize zoom states dict if not exists
     if not hasattr(display_panel, "zoom_states"):
         display_panel.zoom_states = {}
@@ -181,6 +183,7 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
     # 1. Clear Preview Scene and release memory before loading new pixmaps
     display_panel.preview_scene.clear()
     import gc
+
     gc.collect()
 
     # 2. Determine Original Image - Use helper that supports RAW files
@@ -325,5 +328,15 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
         del original_pixmap, processed_pixmap
     except Exception:
         pass
-    import gc
-    gc.collect()
+    try:
+        del scaled_orig
+    except Exception:
+        pass
+
+    # NOTE: this path used to clear the global QPixmapCache and trim the process
+    # working set on every result display.  Both forced a re-rasterise of every
+    # live pixmap and paged the process back out, which showed up as a
+    # multi-hundred-millisecond hitch each time the user opened a preview or
+    # switched result.  Releasing memory belongs to an explicit idle action, not
+    # to the display path; the reference drops above are enough here.
+    _mark.end()

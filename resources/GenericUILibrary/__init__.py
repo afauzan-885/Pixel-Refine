@@ -75,7 +75,7 @@ from .forms import FormGroup, Input, Select, Checkbox, Radio, RadioGroup, FormRo
 from .containers import Container, Row, Col, Stack, ScrollContainer, GridLayout, Spacer
 
 # Cards
-from .cards import Card, CardHeader, CardBody, CardFooter, CardGroup, FeatureCard
+from .cards import Card, CardHeader, CardBody, CardFooter, CardGroup, FeatureCard, FeatureCardGroup
 
 # List Groups and Data Display
 from .list_group import ListGroup
@@ -176,6 +176,7 @@ __all__ = [
     "CardFooter",
     "CardGroup",
     "FeatureCard",
+    "FeatureCardGroup",
     # List Groups and Data Display
     "ListGroup",
     "ImageCard",

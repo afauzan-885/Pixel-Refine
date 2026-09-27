@@ -46,6 +46,12 @@ from .similarity_parameter_settings import (
     save_similarity_config_for_active_batch,
     save_similarity_v1_config,
 )
+from .fusionnet_parameter_settings import (
+    PARAMETER_SCHEMA as FUSIONNET_PARAMETER_SCHEMA,
+    load_fusionnet_config,
+    save_fusionnet_config,
+    save_fusionnet_config_for_active_batch,
+)
 from ..parameter_alignment.akaze_parameter_settings import (
     PARAMETER_SCHEMA as AKAZE_PARAMETER_SCHEMA,
     load_akaze_config,
@@ -78,9 +84,9 @@ from ..parameter_alignment.lucas_kanade_parameter_settings import (
 )
 from ..parameter_alignment.block_matching_parameter_settings import (
     GPU_PARAMETER_SCHEMA as BLOCK_MATCHING_GPU_PARAMETER_SCHEMA,
-    load_block_matching_gpu_config,
-    save_block_matching_gpu_config,
-    save_block_matching_gpu_config_for_active_batch,
+    load_block_matching_config,
+    save_block_matching_config,
+    save_block_matching_config_for_active_batch,
 )
 from ..parameter_alignment.raft_parameter_settings import (
     PARAMETER_SCHEMA as RAFT_PARAMETER_SCHEMA,
@@ -412,9 +418,9 @@ ALIGNMENT_PARAMETER_PROVIDERS = {
     },
     "Block Matching GPU": {
         "schema": BLOCK_MATCHING_GPU_PARAMETER_SCHEMA,
-        "load": load_block_matching_gpu_config,
-        "save": save_block_matching_gpu_config,
-        "save_batch": save_block_matching_gpu_config_for_active_batch,
+        "load": load_block_matching_config,
+        "save": save_block_matching_config,
+        "save_batch": save_block_matching_config_for_active_batch,
     },
     "RAFT": {
         "schema": RAFT_PARAMETER_SCHEMA,
@@ -431,6 +437,12 @@ DENOISING_PARAMETER_PROVIDERS = {
         "load": load_similarity_config,
         "save": save_similarity_config,
         "save_batch": save_similarity_config_for_active_batch,
+    },
+    "FusionNet": {
+        "schema": FUSIONNET_PARAMETER_SCHEMA,
+        "load": load_fusionnet_config,
+        "save": save_fusionnet_config,
+        "save_batch": save_fusionnet_config_for_active_batch,
     },
 }
 # ═══════════════════════════════════════════════════════════════════════
@@ -908,7 +920,9 @@ def get_denoising_settings_page(algorithm_name):
         scroll.setStyleSheet(SCROLL_AREA)
         return scroll
 
-    page = DenoisingParameterPage(algorithm_name)
+    page = DenoisingParameterPage(
+        "FusionNet" if algorithm_name == "Spatial AI" else algorithm_name
+    )
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1001,6 +1015,15 @@ class MFDenoiserParameterPage(QWidget):
         layout.setSpacing(12)
         layout.setContentsMargins(12, 12, 12, 12)
 
+        # Spatial analysis resolution
+        self.similarity_widgets["similarity_spatial_work_resolution"] = dropdown(
+            "Work Resolution:",
+            [1.0, 0.75, 0.5, 0.33, 0.25],
+            default=1.0,
+            tooltip="Resolusi analisis alignment dan bobot; hasil akhir tetap resolusi penuh",
+        )
+        layout.addWidget(self.similarity_widgets["similarity_spatial_work_resolution"])
+
         # Tile Size
         self.similarity_widgets["similarity_spatial_tile_size"] = dropdown(
             "Tile Size:",
@@ -1060,6 +1083,19 @@ class MFDenoiserParameterPage(QWidget):
         )
         self._responsive_slider_rows.append(noise_layout)
         layout.addWidget(noise_layout)
+
+        # Noise Sigma
+        noise_sigma_layout, self._noise_sigma_slider, _ = slider(
+            "Noise Sigma (0=Auto):",
+            0,
+            100,
+            0,
+            format_func=lambda v: "Auto" if v == 0 else f"{v/1000.0:.3f}",
+            tooltip="Level noise citra (0 = Estimasi Otomatis via GPU Wavelet)",
+        )
+        self.similarity_widgets["similarity_spatial_noise_sigma"] = noise_sigma_layout
+        self._responsive_slider_rows.append(noise_sigma_layout)
+        layout.addWidget(noise_sigma_layout)
 
         # Reset Button
         reset_btn = QPushButton("Reset to Defaults")
@@ -1239,6 +1275,11 @@ class MFDenoiserParameterPage(QWidget):
         )
         self._noise_slider.setValue(noise_val)
 
+        noise_sigma_val = int(
+            round(config.get("similarity_spatial_noise_sigma", 0.0) * 1000)
+        )
+        self._noise_sigma_slider.setValue(noise_sigma_val)
+
     def _load_akaze(self):
         """Load AKAZE config from backend."""
         config = load_akaze_config()
@@ -1278,11 +1319,15 @@ class MFDenoiserParameterPage(QWidget):
             "similarity_spatial_tile_size"
         ].input.currentIndexChanged.connect(self._save_similarity)
         self.similarity_widgets[
+            "similarity_spatial_work_resolution"
+        ].input.currentIndexChanged.connect(self._save_similarity)
+        self.similarity_widgets[
             "similarity_spatial_num_workers"
         ].input.currentIndexChanged.connect(self._save_similarity)
         self._overlap_slider.sliderReleased.connect(self._save_similarity)
         self._motion_slider.sliderReleased.connect(self._save_similarity)
         self._noise_slider.sliderReleased.connect(self._save_similarity)
+        self._noise_sigma_slider.sliderReleased.connect(self._save_similarity)
 
         # AKAZE
         self.akaze_widgets["akaze_threshold"].input.editingFinished.connect(
@@ -1319,6 +1364,9 @@ class MFDenoiserParameterPage(QWidget):
         """Save Similarity config to backend (realtime)."""
         values = collect(self.similarity_widgets)
         config = {
+            "similarity_spatial_work_resolution": float(
+                values.get("similarity_spatial_work_resolution", 1.0)
+            ),
             "similarity_spatial_tile_size": int(
                 values.get("similarity_spatial_tile_size", 16)
             ),
@@ -1331,6 +1379,7 @@ class MFDenoiserParameterPage(QWidget):
             "similarity_spatial_motion_sensitivity": self._motion_slider.value() / 10.0,
             "similarity_spatial_noise_mad_offset_factor": self._noise_slider.value()
             / 100.0,
+            "similarity_spatial_noise_sigma": self._noise_sigma_slider.value() / 1000.0,
         }
         save_similarity_v1_config(config)
         save_similarity_config_for_active_batch(config)

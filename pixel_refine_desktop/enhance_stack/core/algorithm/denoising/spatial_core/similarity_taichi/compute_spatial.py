@@ -20,20 +20,30 @@ if os.environ.get("AOT_MODE", "1") == "0":
         pass
 
 calculate_hybrid_gradient_optimized = None
+calculate_hybrid_gradient_optimized_rgb = None
 calculate_match_confidence = None
 
 if TAICHI_AVAILABLE:
     # Support running directly or as a module
     if __name__ == "__main__" or __package__ is None:
-        from block_matching import calculate_hybrid_gradient_optimized, calculate_match_confidence
+        from block_matching import (
+            calculate_hybrid_gradient_optimized,
+            calculate_hybrid_gradient_optimized_rgb,
+            calculate_match_confidence,
+        )
     else:
-        from .block_matching import calculate_hybrid_gradient_optimized, calculate_match_confidence
+        from .block_matching import (
+            calculate_hybrid_gradient_optimized,
+            calculate_hybrid_gradient_optimized_rgb,
+            calculate_match_confidence,
+        )
 else:
     class DummyTi:
         i32 = "int"
         f32 = "float"
         def kernel(self, f): return f
         def func(self, f): return f
+        def template(self): return object
         class Types:
             def ndarray(self, *args, **kwargs): return "ndarray"
         types = Types()
@@ -53,9 +63,12 @@ def precompute_gradients_kernel(
             gx_center = img[y, x + 1] - img[y, x - 1]
             gx_top = img[y - 1, x + 1] - img[y - 1, x - 1]
             gx_bottom = img[y + 1, x + 1] - img[y + 1, x - 1]
-            grad_x[y, x] = (gx_center + gx_top + gx_bottom) * 0.333
+            grad_x[y, x] = (gx_center + gx_top + gx_bottom) * 0.33333333
             
-            grad_y[y, x] = img[y + 1, x] - img[y - 1, x]
+            gy_center = img[y + 1, x] - img[y - 1, x]
+            gy_left = img[y + 1, x - 1] - img[y - 1, x - 1]
+            gy_right = img[y + 1, x + 1] - img[y - 1, x + 1]
+            grad_y[y, x] = (gy_center + gy_left + gy_right) * 0.33333333
         else:
             grad_x[y, x] = 0.0
             grad_y[y, x] = 0.0
@@ -70,6 +83,49 @@ def clear_f32_2d_kernel(
     """Clear a resident f32 plane without a host staging/upload round-trip."""
     for y, x in ti.ndrange(h, w):
         dst[y, x] = 0.0
+
+
+@ti.kernel
+def precompute_gradients_pair_kernel(
+    img_a: ti.types.ndarray(),
+    img_b: ti.types.ndarray(),
+    grad_a_x: ti.types.ndarray(),
+    grad_a_y: ti.types.ndarray(),
+    grad_b_x: ti.types.ndarray(),
+    grad_b_y: ti.types.ndarray(),
+    h: ti.i32,
+    w: ti.i32,
+):
+    """Compute two independent Sobel-like gradient planes in one dispatch.
+
+    Mirrors ``precompute_gradients_kernel`` (and the canonical family kernel of
+    the same name) so this is a launch fusion only: the per-image arithmetic is
+    identical and the caller keeps the single-image graph as the fallback.
+    """
+    for y, x in ti.ndrange(h, w):
+        if 0 < y < h - 1 and 0 < x < w - 1:
+            a_gx_center = img_a[y, x + 1] - img_a[y, x - 1]
+            a_gx_top = img_a[y - 1, x + 1] - img_a[y - 1, x - 1]
+            a_gx_bottom = img_a[y + 1, x + 1] - img_a[y + 1, x - 1]
+            grad_a_x[y, x] = (a_gx_center + a_gx_top + a_gx_bottom) * 0.33333333
+            a_gy_center = img_a[y + 1, x] - img_a[y - 1, x]
+            a_gy_left = img_a[y + 1, x - 1] - img_a[y - 1, x - 1]
+            a_gy_right = img_a[y + 1, x + 1] - img_a[y - 1, x + 1]
+            grad_a_y[y, x] = (a_gy_center + a_gy_left + a_gy_right) * 0.33333333
+
+            b_gx_center = img_b[y, x + 1] - img_b[y, x - 1]
+            b_gx_top = img_b[y - 1, x + 1] - img_b[y - 1, x - 1]
+            b_gx_bottom = img_b[y + 1, x + 1] - img_b[y + 1, x - 1]
+            grad_b_x[y, x] = (b_gx_center + b_gx_top + b_gx_bottom) * 0.33333333
+            b_gy_center = img_b[y + 1, x] - img_b[y - 1, x]
+            b_gy_left = img_b[y + 1, x - 1] - img_b[y - 1, x - 1]
+            b_gy_right = img_b[y + 1, x + 1] - img_b[y - 1, x + 1]
+            grad_b_y[y, x] = (b_gy_center + b_gy_left + b_gy_right) * 0.33333333
+        else:
+            grad_a_x[y, x] = 0.0
+            grad_a_y[y, x] = 0.0
+            grad_b_x[y, x] = 0.0
+            grad_b_y[y, x] = 0.0
 
 @ti.kernel
 def equalize_brightness_kernel(
@@ -252,14 +308,333 @@ def phase2_fine_analysis_kernel(
                 final_conf = confidence_fine * guidance_val * stab_val
                 
                 if final_conf >= 1e-6:
-                    for y, x in ti.ndrange(curr_h, curr_w):
+                    for y in range(curr_h):
                         wy = 0.5 * (1.0 - ti.cos(two_pi * float(y) * inv_tile_h)) if tile_h > 1 else 1.0
-                        wx = 0.5 * (1.0 - ti.cos(two_pi * float(x) * inv_tile_w)) if tile_w > 1 else 1.0
-                        wy = ti.max(wy, 1e-4)
+                        wy_conf = ti.max(wy, 1e-4) * final_conf
+                        for x in range(curr_w):
+                            wx = 0.5 * (1.0 - ti.cos(two_pi * float(x) * inv_tile_w)) if tile_w > 1 else 1.0
+                            wx = ti.max(wx, 1e-4)
+                            weight_map_sum[r + y, c + x] += wy_conf * wx
+
+
+@ti.func
+def _spatial_image_value(
+    image: ti.template(),
+    y: ti.i32,
+    x: ti.i32,
+    channel: ti.i32,
+    is_rgb: ti.template(),
+) -> ti.f32:
+    value = 0.0
+    if ti.static(is_rgb):
+        value = image[y, x, channel]
+    else:
+        value = image[y, x]
+    return value
+
+
+@ti.func
+def _fine_tile_confidence(
+    current: ti.template(),
+    reference: ti.template(),
+    guidance_map: ti.template(),
+    stability_map: ti.template(),
+    row: ti.i32,
+    col: ti.i32,
+    curr_h: ti.i32,
+    curr_w: ti.i32,
+    h: ti.i32,
+    w: ti.i32,
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    noise_sigma: ti.f32,
+    motion_sensitivity: ti.f32,
+    noise_offset_factor: ti.f32,
+    use_stability: ti.i32,
+    use_guidance: ti.i32,
+    early_exit_threshold: ti.f32,
+    channel: ti.i32,
+    is_rgb: ti.template(),
+) -> ti.f32:
+    """Compute one fine-tile confidence without materializing image gradients."""
+    center_x = ti.min(col + curr_w // 2, w - 1)
+    center_y = ti.min(row + curr_h // 2, h - 1)
+
+    guidance_val = 1.0
+    if use_guidance == 1:
+        guidance_val = guidance_map[center_y, center_x]
+    stability_val = 1.0
+    if use_stability == 1:
+        stability_val = stability_map[center_y, center_x]
+
+    final_conf = 0.0
+    if guidance_val >= early_exit_threshold and stability_val >= early_exit_threshold:
+        center_local_y = curr_h // 2
+        center_local_x = curr_w // 2
+        v0 = _spatial_image_value(
+            reference, row + center_local_y, col + center_local_x, channel, is_rgb
+        )
+        v1 = _spatial_image_value(reference, row, col, channel, is_rgb)
+        v2 = _spatial_image_value(reference, row, col + curr_w - 1, channel, is_rgb)
+        v3 = _spatial_image_value(reference, row + curr_h - 1, col, channel, is_rgb)
+        v4 = _spatial_image_value(
+            reference, row + curr_h - 1, col + curr_w - 1, channel, is_rgb
+        )
+
+        ref_min = ti.min(v0, ti.min(v1, ti.min(v2, ti.min(v3, v4))))
+        ref_max = ti.max(v0, ti.max(v1, ti.max(v2, ti.max(v3, v4))))
+        contrast = ref_max - ref_min
+        mean_luma = (v0 + v1 + v2 + v3 + v4) * 0.2
+        contrast_limit = 0.12 * ti.max(0.05, mean_luma)
+        contrast_range = 0.08 * ti.max(0.05, mean_luma)
+        flat_weight = ti.max(
+            0.0, ti.min(1.0, (contrast_limit - contrast) / contrast_range)
+        )
+
+        mad_score = 0.0
+        if ti.static(is_rgb):
+            mad_score = calculate_hybrid_gradient_optimized_rgb(
+                current, reference, row, col, curr_h, curr_w, h, w,
+                noise_sigma, 1.0, 1e-6, flat_weight, channel,
+            )
+        else:
+            mad_score = calculate_hybrid_gradient_optimized(
+                current, reference, current, current, reference, reference,
+                row, col, curr_h, curr_w, h, w, noise_sigma, 1.0, 1e-6,
+                flat_weight,
+            )
+        confidence = calculate_match_confidence(
+            mad_score, noise_sigma, motion_sensitivity, noise_offset_factor
+        )
+        final_conf = confidence * guidance_val * stability_val
+        if final_conf < 1e-6:
+            final_conf = 0.0
+    return final_conf
+
+
+@ti.kernel
+def compute_fine_tile_confidence_kernel(
+    current: ti.types.ndarray(),
+    reference: ti.types.ndarray(),
+    guidance_map: ti.types.ndarray(),
+    stability_map: ti.types.ndarray(),
+    tile_confidence: ti.types.ndarray(),
+    row_starts: ti.types.ndarray(),
+    col_starts: ti.types.ndarray(),
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    h: ti.i32,
+    w: ti.i32,
+    noise_sigma: ti.f32,
+    motion_sensitivity: ti.f32,
+    noise_offset_factor: ti.f32,
+    use_stability: ti.i32,
+    use_guidance: ti.i32,
+    early_exit_threshold: ti.f32,
+):
+    """Evaluate each fine tile once; output is only tile-grid sized."""
+    for tile_row, tile_col in ti.ndrange(
+        tile_confidence.shape[0], tile_confidence.shape[1]
+    ):
+        row = row_starts[tile_row]
+        col = col_starts[tile_col]
+        curr_h = ti.min(tile_h, h - row)
+        curr_w = ti.min(tile_w, w - col)
+        value = 0.0
+        if curr_h > 0 and curr_w > 0:
+            value = _fine_tile_confidence(
+                current,
+                reference,
+                guidance_map,
+                stability_map,
+                row,
+                col,
+                curr_h,
+                curr_w,
+                h,
+                w,
+                tile_h,
+                tile_w,
+                noise_sigma,
+                motion_sensitivity,
+                noise_offset_factor,
+                use_stability,
+                use_guidance,
+                early_exit_threshold,
+                0,
+                False,
+            )
+        tile_confidence[tile_row, tile_col] = value
+
+
+@ti.kernel
+def compute_fine_tile_confidence_rgb_kernel(
+    current: ti.types.ndarray(),
+    reference: ti.types.ndarray(),
+    guidance_map: ti.types.ndarray(),
+    stability_map: ti.types.ndarray(),
+    tile_confidence: ti.types.ndarray(),
+    row_starts: ti.types.ndarray(),
+    col_starts: ti.types.ndarray(),
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    h: ti.i32,
+    w: ti.i32,
+    noise_sigma: ti.f32,
+    motion_sensitivity: ti.f32,
+    noise_offset_factor: ti.f32,
+    use_stability: ti.i32,
+    use_guidance: ti.i32,
+    early_exit_threshold: ti.f32,
+):
+    """Score RGB channels independently into tile-grid-sized scratch."""
+    for tile_row, tile_col in ti.ndrange(
+        tile_confidence.shape[0], tile_confidence.shape[1]
+    ):
+        row = row_starts[tile_row]
+        col = col_starts[tile_col]
+        curr_h = ti.min(tile_h, h - row)
+        curr_w = ti.min(tile_w, w - col)
+        for channel in ti.static(range(3)):
+            value = 0.0
+            if curr_h > 0 and curr_w > 0:
+                value = _fine_tile_confidence(
+                    current, reference, guidance_map, stability_map,
+                    row, col, curr_h, curr_w, h, w, tile_h, tile_w,
+                    noise_sigma, motion_sensitivity, noise_offset_factor,
+                    use_stability, use_guidance, early_exit_threshold,
+                    channel, True,
+                )
+            tile_confidence[tile_row, tile_col, channel] = value
+
+
+@ti.kernel
+def compose_spatial_weights_regular_tiles_kernel(
+    tile_confidence: ti.types.ndarray(),
+    row_starts: ti.types.ndarray(),
+    col_starts: ti.types.ndarray(),
+    weight_map: ti.types.ndarray(),
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    stride_h: ti.i32,
+    stride_w: ti.i32,
+    h: ti.i32,
+    w: ti.i32,
+    exponent: ti.f32,
+    cutoff: ti.f32,
+):
+    """Gather overlapping regular tiles per pixel and apply ghost shaping."""
+    inv_tile_h = 1.0 / float(tile_h - 1) if tile_h > 1 else 0.0
+    inv_tile_w = 1.0 / float(tile_w - 1) if tile_w > 1 else 0.0
+    two_pi = 2.0 * 3.1415926535
+    num_tile_rows = row_starts.shape[0]
+    num_tile_cols = col_starts.shape[0]
+
+    for y, x in ti.ndrange(h, w):
+        min_row_start = ti.max(0, y - tile_h + 1)
+        first_row = (min_row_start + stride_h - 1) // stride_h
+        last_row = ti.min(num_tile_rows - 1, y // stride_h)
+        min_col_start = ti.max(0, x - tile_w + 1)
+        first_col = (min_col_start + stride_w - 1) // stride_w
+        last_col = ti.min(num_tile_cols - 1, x // stride_w)
+
+        value = 0.0
+        for tile_row in range(first_row, last_row + 1):
+            row = row_starts[tile_row]
+            local_y = y - row
+            if 0 <= local_y < ti.min(tile_h, h - row):
+                wy = (
+                    0.5 * (1.0 - ti.cos(two_pi * float(local_y) * inv_tile_h))
+                    if tile_h > 1
+                    else 1.0
+                )
+                wy = ti.max(wy, 1e-4)
+                for tile_col in range(first_col, last_col + 1):
+                    col = col_starts[tile_col]
+                    local_x = x - col
+                    if 0 <= local_x < ti.min(tile_w, w - col):
+                        wx = (
+                            0.5 * (1.0 - ti.cos(two_pi * float(local_x) * inv_tile_w))
+                            if tile_w > 1
+                            else 1.0
+                        )
                         wx = ti.max(wx, 1e-4)
-                        w_val = wy * wx
-                        
-                        weight_map_sum[r + y, c + x] += w_val * final_conf
+                        value += wy * wx * tile_confidence[tile_row, tile_col]
+
+        if exponent != 1.0:
+            value = ti.pow(ti.max(value, 0.0), exponent)
+        if cutoff > 0.0:
+            denom = ti.max(1.0e-5, 1.0 - cutoff)
+            value = (value - cutoff) / denom
+            value = ti.max(0.0, ti.min(1.0, value))
+        weight_map[y, x] = value
+
+
+@ti.kernel
+def compose_spatial_weights_rgb_mean_kernel(
+    tile_confidence: ti.types.ndarray(),
+    row_starts: ti.types.ndarray(),
+    col_starts: ti.types.ndarray(),
+    weight_map: ti.types.ndarray(),
+    tile_h: ti.i32,
+    tile_w: ti.i32,
+    stride_h: ti.i32,
+    stride_w: ti.i32,
+    h: ti.i32,
+    w: ti.i32,
+    exponent: ti.f32,
+    cutoff: ti.f32,
+):
+    """Compose three legacy channel maps and write only their scalar mean."""
+    inv_tile_h = 1.0 / float(tile_h - 1) if tile_h > 1 else 0.0
+    inv_tile_w = 1.0 / float(tile_w - 1) if tile_w > 1 else 0.0
+    two_pi = 2.0 * 3.1415926535
+    num_tile_rows = row_starts.shape[0]
+    num_tile_cols = col_starts.shape[0]
+
+    for y, x in ti.ndrange(h, w):
+        min_row_start = ti.max(0, y - tile_h + 1)
+        first_row = (min_row_start + stride_h - 1) // stride_h
+        last_row = ti.min(num_tile_rows - 1, y // stride_h)
+        min_col_start = ti.max(0, x - tile_w + 1)
+        first_col = (min_col_start + stride_w - 1) // stride_w
+        last_col = ti.min(num_tile_cols - 1, x // stride_w)
+
+        values = ti.Vector([0.0, 0.0, 0.0])
+        for tile_row in range(first_row, last_row + 1):
+            row = row_starts[tile_row]
+            local_y = y - row
+            if 0 <= local_y < ti.min(tile_h, h - row):
+                wy = (
+                    0.5 * (1.0 - ti.cos(two_pi * float(local_y) * inv_tile_h))
+                    if tile_h > 1
+                    else 1.0
+                )
+                wy = ti.max(wy, 1e-4)
+                for tile_col in range(first_col, last_col + 1):
+                    col = col_starts[tile_col]
+                    local_x = x - col
+                    if 0 <= local_x < ti.min(tile_w, w - col):
+                        wx = (
+                            0.5 * (1.0 - ti.cos(two_pi * float(local_x) * inv_tile_w))
+                            if tile_w > 1
+                            else 1.0
+                        )
+                        contribution = wy * ti.max(wx, 1e-4)
+                        for channel in ti.static(range(3)):
+                            values[channel] += (
+                                contribution
+                                * tile_confidence[tile_row, tile_col, channel]
+                            )
+
+        for channel in ti.static(range(3)):
+            if exponent != 1.0:
+                values[channel] = ti.pow(ti.max(values[channel], 0.0), exponent)
+            if cutoff > 0.0:
+                denom = ti.max(1.0e-5, 1.0 - cutoff)
+                values[channel] = (values[channel] - cutoff) / denom
+                values[channel] = ti.max(0.0, ti.min(1.0, values[channel]))
+        weight_map[y, x] = (values[0] + values[1] + values[2]) / 3.0
 
 @ti.kernel
 def postprocess_spatial_weight_kernel(
@@ -341,12 +716,37 @@ def compile_spatial_tcm(arch=None, suffix="vulkan"):
     g_grad.dispatch(precompute_gradients_kernel, sym_img, sym_grad_x, sym_grad_y, sym_h_grad, sym_w_grad)
     module.add_graph("precompute_gradients", g_grad.compile())
 
+    # Paired launch fusion for the reference plus the first support frame.
+    # Arg names match the canonical family graph so the runtime call is uniform
+    # across artifacts.
+    sym_img_b = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "img_b", dtype=ti.f32, ndim=2)
+    sym_grad_b_x = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "grad_b_x", dtype=ti.f32, ndim=2)
+    sym_grad_b_y = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "grad_b_y", dtype=ti.f32, ndim=2)
+    g_grad_pair = ti.graph.GraphBuilder()
+    g_grad_pair.dispatch(
+        precompute_gradients_pair_kernel,
+        sym_img,
+        sym_img_b,
+        sym_grad_x,
+        sym_grad_y,
+        sym_grad_b_x,
+        sym_grad_b_y,
+        sym_h_grad,
+        sym_w_grad,
+    )
+    module.add_graph("precompute_gradients_pair", g_grad_pair.compile())
+
     sym_clear_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", dtype=ti.f32, ndim=2)
     sym_clear_h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", dtype=ti.i32)
     sym_clear_w = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", dtype=ti.i32)
     g_clear = ti.graph.GraphBuilder()
     g_clear.dispatch(clear_f32_2d_kernel, sym_clear_dst, sym_clear_h, sym_clear_w)
     module.add_graph("clear_f32_2d", g_clear.compile())
+    g_streaming_marker = ti.graph.GraphBuilder()
+    g_streaming_marker.dispatch(
+        clear_f32_2d_kernel, sym_clear_dst, sym_clear_h, sym_clear_w
+    )
+    module.add_graph("spatial_streaming_gradient_v1", g_streaming_marker.compile())
 
     # Gradient symbols for reuse
     sym_curr_grad_x = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "curr_grad_x", dtype=ti.f32, ndim=2)
@@ -562,6 +962,112 @@ def compile_spatial_tcm(arch=None, suffix="vulkan"):
     )
     module.add_graph("generate_fine_weights_4passes", g_4passes.compile())
 
+    # Compact graph variant: tile confidence scratch is small, while every
+    # work-resolution output pixel is written exactly once and ghost shaping
+    # is fused into the composition pass.
+    sym_compact_guidance = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "guidance_map", dtype=ti.f32, ndim=2)
+    sym_compact_stability = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "stability_map", dtype=ti.f32, ndim=2)
+    sym_tile_confidence = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tile_confidence", dtype=ti.f32, ndim=2)
+    sym_compact_weight = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "weight_map", dtype=ti.f32, ndim=2)
+    sym_compact_rows = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "row_starts", dtype=ti.i32, ndim=1)
+    sym_compact_cols = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "col_starts", dtype=ti.i32, ndim=1)
+    sym_compact_tile_h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "tile_h", dtype=ti.i32)
+    sym_compact_tile_w = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "tile_w", dtype=ti.i32)
+    sym_compact_stride_h = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "stride_h", dtype=ti.i32)
+    sym_compact_stride_w = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "stride_w", dtype=ti.i32)
+    sym_compact_exponent = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "exponent", dtype=ti.f32)
+    sym_compact_cutoff = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "cutoff", dtype=ti.f32)
+    g_compact = ti.graph.GraphBuilder()
+    g_compact.dispatch(
+        compute_fine_tile_confidence_kernel,
+        sym_current,
+        sym_reference,
+        sym_compact_guidance,
+        sym_compact_stability,
+        sym_tile_confidence,
+        sym_row_starts,
+        sym_col_starts,
+        sym_tile_h,
+        sym_tile_w,
+        sym_h_fine,
+        sym_w_fine,
+        sym_noise_sigma,
+        sym_motion_sens,
+        sym_noise_offset,
+        sym_use_stability,
+        sym_use_guidance,
+        sym_early_exit_threshold,
+    )
+    g_compact.dispatch(
+        compose_spatial_weights_regular_tiles_kernel,
+        sym_tile_confidence,
+        sym_compact_rows,
+        sym_compact_cols,
+        sym_compact_weight,
+        sym_compact_tile_h,
+        sym_compact_tile_w,
+        sym_compact_stride_h,
+        sym_compact_stride_w,
+        sym_h_fine,
+        sym_w_fine,
+        sym_compact_exponent,
+        sym_compact_cutoff,
+    )
+    module.add_graph("generate_spatial_weights_compact_v1", g_compact.compile())
+
+    # RGB scoring shares geometry and tile windows, but keeps one scalar output
+    # map.  Per-channel tile confidence stays tile-grid-sized; final RGB maps
+    # are composed and averaged directly into the scalar destination.
+    sym_current_rgb = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "current_rgb", dtype=ti.f32, ndim=3
+    )
+    sym_reference_rgb = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "reference_rgb", dtype=ti.f32, ndim=3
+    )
+    sym_tile_confidence_rgb = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "tile_confidence_rgb", dtype=ti.f32, ndim=3
+    )
+    g_compact_rgb_mean = ti.graph.GraphBuilder()
+    g_compact_rgb_mean.dispatch(
+        compute_fine_tile_confidence_rgb_kernel,
+        sym_current_rgb,
+        sym_reference_rgb,
+        sym_compact_guidance,
+        sym_compact_stability,
+        sym_tile_confidence_rgb,
+        sym_compact_rows,
+        sym_compact_cols,
+        sym_compact_tile_h,
+        sym_compact_tile_w,
+        sym_h_fine,
+        sym_w_fine,
+        sym_noise_sigma,
+        sym_motion_sens,
+        sym_noise_offset,
+        sym_use_stability,
+        sym_use_guidance,
+        sym_early_exit_threshold,
+    )
+    g_compact_rgb_mean.dispatch(
+        compose_spatial_weights_rgb_mean_kernel,
+        sym_tile_confidence_rgb,
+        sym_compact_rows,
+        sym_compact_cols,
+        sym_compact_weight,
+        sym_compact_tile_h,
+        sym_compact_tile_w,
+        sym_compact_stride_h,
+        sym_compact_stride_w,
+        sym_h_fine,
+        sym_w_fine,
+        sym_compact_exponent,
+        sym_compact_cutoff,
+    )
+    module.add_graph(
+        "generate_spatial_weights_compact_rgb_mean_v1",
+        g_compact_rgb_mean.compile(),
+    )
+
     # Postprocess Spatial Weight Graph
     sym_post_src = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", dtype=ti.f32, ndim=2)
     sym_post_dst = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", dtype=ti.f32, ndim=2)
@@ -682,6 +1188,8 @@ class SpatialScratchCache:
     def __init__(self):
         self._slots = {}
         self.reference_token = None
+        self.hits = 0
+        self.misses = 0
 
     def acquire(self, engine, name, shape, dtype=np.float32, **kwargs):
         shape = tuple(int(v) for v in shape)
@@ -695,7 +1203,9 @@ class SpatialScratchCache:
             and tuple(buf.shape) == shape
             and np.dtype(getattr(buf, "dtype", dtype)) == np.dtype(dtype)
         ):
+            self.hits += 1
             return buf
+        self.misses += 1
         if buf is not None:
             try:
                 buf.destroy()
@@ -715,73 +1225,225 @@ class SpatialScratchCache:
         self.reference_token = None
 
 
+def _log_resolved_spatial_tcm(path, source):
+    """Announce once per artifact which TCM the similarity wrapper will load."""
+    seen = getattr(_log_resolved_spatial_tcm, "_seen", None)
+    if seen is None:
+        seen = set()
+        _log_resolved_spatial_tcm._seen = seen
+    key = (os.path.normcase(os.fspath(path)), str(source))
+    if key in seen:
+        return
+    seen.add(key)
+    print(f"[SpatialFusion] spatial TCM source={source} path={os.fspath(path)}")
+
+
 def _resolve_spatial_tcm(engine):
     """Resolve the spatial AOT TCM for the active target.
 
-    Rebuilt LLVM20 artifacts live in the canonical target-qualified tree
-    (``spatial_<backend>_<arch>_<os>[_<vendor>].tcm``).  Resolve that identity
-    first so a fresh target artifact is never shadowed by a stale flat archive.
-    The historical ``ui/data/aot_assets`` layout remains an explicit fallback
-    for existing application bundles during migration.
+    The application bundle (``ui/data/aot_assets/spatial_<arch>.tcm``) is the
+    authoritative source for the similarity wrapper: it ships with the app and
+    carries the complete graph set for this family.  The canonical
+    target-qualified tree under ``taichi_vision`` is kept as a fallback and can
+    be made primary again with ``PIXEL_REFINE_SPATIAL_TCM_SOURCE=target``.
+    ``PIXEL_REFINE_AOT_TCM_ROOT`` still overrides both, for build/test
+    automation.
     """
     arch = str(getattr(engine, "arch", "cpu")).lower()
-    try:
-        from taichi_vision.taichi_aot.artifact_targets import (
-            detect_target,
-            resolve_artifact,
-        )
-        from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
+    target_cache = {}
 
-        target = detect_target(
-            backend=arch,
-            device=getattr(engine, "gpu_name", ""),
+    def _assets_dir():
+        file_dir = os.path.dirname(os.path.abspath(__file__))
+        cur = os.path.abspath(file_dir)
+        while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
+            cur = os.path.dirname(cur)
+        return os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
+
+    def _detect_target():
+        from taichi_vision.taichi_aot.artifact_targets import detect_target
+
+        if "target" not in target_cache:
+            target_cache["target"] = detect_target(
+                backend=arch,
+                device=getattr(engine, "gpu_name", ""),
+            )
+        return target_cache["target"]
+
+    def _resolve_in_root(root):
+        from taichi_vision.taichi_aot.artifact_targets import resolve_artifact
+
+        resolved = resolve_artifact(
+            root,
+            "spatial",
+            _detect_target(),
+            allow_legacy=False,
         )
-        roots = []
-        override = os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT", "").strip()
-        if override:
-            roots.append(os.path.abspath(override))
-        else:
-            staged = staged_tcm_root(target.target_id)
+        return os.path.abspath(str(resolved)) if resolved is not None else None
+
+    def _resolve_target_tree():
+        try:
+            from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
+
+            roots = []
+            staged = staged_tcm_root(_detect_target().target_id)
             if staged is not None:
                 roots.append(os.path.abspath(str(staged)))
             # Project-local canonical target tree (works even when no runtime
-            # bundle is staged yet).
+            # bundle is staged yet).  Seven levels up from this file reach the
+            # repository root.
             roots.append(
                 os.path.abspath(
                     os.path.join(
                         os.path.dirname(__file__),
-                        "../../../../../../taichi_vision/taichi_algorithm/aot_tcm",
+                        "../../../../../../../taichi_vision/taichi_algorithm/aot_tcm",
                     )
                 )
             )
-        seen_roots = set()
-        for root in roots:
-            root = os.path.normcase(os.path.realpath(root))
-            if root in seen_roots or not os.path.isdir(root):
-                continue
-            seen_roots.add(root)
-            resolved = resolve_artifact(
-                root,
-                "spatial",
-                target,
-                allow_legacy=False,
-            )
-            if resolved is not None:
-                return os.path.abspath(str(resolved))
-    except (ImportError, OSError, RuntimeError, ValueError):
-        # Keep migration/frozen builds usable if the registry is omitted.
-        pass
+            seen_roots = set()
+            for root in roots:
+                root = os.path.normcase(os.path.realpath(root))
+                if root in seen_roots or not os.path.isdir(root):
+                    continue
+                seen_roots.add(root)
+                resolved = _resolve_in_root(root)
+                if resolved is not None:
+                    return resolved
+        except (ImportError, OSError, RuntimeError, ValueError):
+            # Keep migration/frozen builds usable if the registry is omitted.
+            pass
+        return None
 
-    file_dir = os.path.dirname(os.path.abspath(__file__))
-    cur = os.path.abspath(file_dir)
-    while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
-        cur = os.path.dirname(cur)
-    assets = os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
-    for cand in (arch, "vulkan", "cpu"):
-        candidate = os.path.join(assets, f"spatial_{cand}.tcm")
-        if os.path.exists(candidate):
-            return os.path.abspath(candidate)
-    return os.path.abspath(os.path.join(assets, "spatial_vulkan.tcm"))
+    def _resolve_from_assets(candidates):
+        assets = _assets_dir()
+        for candidate_arch in candidates:
+            candidate = os.path.join(assets, f"spatial_{candidate_arch}.tcm")
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+        return None
+
+    def _resolve_streaming_asset():
+        # Keep experimental graph generations versioned beside the legacy app
+        # bundle so an in-progress build never overwrites user-owned TCMs.
+        for generation in (
+            "spatial_rgb_mean_v1",
+            "spatial_compact_v1",
+            "spatial_streaming",
+        ):
+            candidate = os.path.join(
+                _assets_dir(), generation, f"spatial_{arch}.tcm"
+            )
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+        return None
+
+    override = os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT", "").strip()
+    if override:
+        try:
+            resolved = _resolve_in_root(os.path.abspath(override))
+        except (ImportError, OSError, RuntimeError, ValueError):
+            resolved = None
+        if resolved is not None:
+            _log_resolved_spatial_tcm(resolved, "override")
+            return resolved
+
+    prefer_target = (
+        os.environ.get("PIXEL_REFINE_SPATIAL_TCM_SOURCE", "app").strip().lower()
+        == "target"
+    )
+
+    def _from_assets():
+        resolved = _resolve_streaming_asset()
+        if resolved is not None:
+            generation = os.path.basename(os.path.dirname(resolved))
+            source_by_generation = {
+                "spatial_rgb_mean_v1": "app-asset-rgb-mean",
+                "spatial_compact_v1": "app-asset-compact",
+                "spatial_streaming": "app-asset-streaming",
+            }
+            source = source_by_generation.get(generation, "app-asset-versioned")
+            _log_resolved_spatial_tcm(resolved, source)
+            return resolved
+        resolved = _resolve_from_assets((arch,))
+        if resolved is not None:
+            _log_resolved_spatial_tcm(resolved, "app-asset")
+            return resolved
+        return None
+
+    def _from_target_tree():
+        resolved = _resolve_target_tree()
+        if resolved is not None:
+            _log_resolved_spatial_tcm(resolved, "target-tree")
+        return resolved
+
+    resolvers = (_from_target_tree, _from_assets) if prefer_target else (_from_assets, _from_target_tree)
+    for resolver in resolvers:
+        resolved = resolver()
+        if resolved is not None:
+            return resolved
+
+    # Last resort for partial bundles: the shared desktop asset, then the CPU
+    # one, mirroring the historical migration chain.
+    resolved = _resolve_from_assets((arch, "vulkan", "cpu"))
+    if resolved is not None:
+        _log_resolved_spatial_tcm(resolved, "app-asset-fallback")
+        return resolved
+    fallback = os.path.abspath(os.path.join(_assets_dir(), "spatial_vulkan.tcm"))
+    _log_resolved_spatial_tcm(fallback, "app-asset-default")
+    return fallback
+
+
+def _resolve_spatial_tcm_cached(engine):
+    """Memoized :func:`_resolve_spatial_tcm` keyed by the runtime target.
+
+    Resolving the artifact walks the target and artifact directories, which
+    costs ~10 ms per call on CPU and is repeated for every frame.  The result
+    depends only on the active runtime target, so it is cached as a function
+    attribute (no extra module-level state) with an escape hatch
+    (``PIXEL_REFINE_SPATIAL_TCM_NO_CACHE=1``) for picking up a freshly compiled
+    artifact without restarting the process.
+    """
+    if os.environ.get("PIXEL_REFINE_SPATIAL_TCM_NO_CACHE") == "1":
+        return _resolve_spatial_tcm(engine)
+    cache_key = (
+        str(getattr(engine, "arch", "")),
+        int(getattr(engine, "device_id", 0) or 0),
+        os.environ.get("PIXEL_REFINE_AOT_ARCH", ""),
+        os.environ.get("PIXEL_REFINE_TARGET_VENDOR", ""),
+    )
+    cache = getattr(_resolve_spatial_tcm, "_resolved_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            _resolve_spatial_tcm._resolved_cache = cache
+        except Exception:
+            cache = None
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    tcm_path = _resolve_spatial_tcm(engine)
+    if cache is not None:
+        cache[cache_key] = tcm_path
+    return tcm_path
+
+
+def _log_gradient_pair_fallback(tcm_path):
+    """Announce once per artifact that the paired-gradient graph is missing.
+
+    Stale artifacts stay usable (the wrapper keeps the two single-image
+    launches), but a silent fallback hides the reason a rebuilt artifact would
+    not be picked up, so the downgrade is printed once per path.
+    """
+    seen = getattr(_log_gradient_pair_fallback, "_seen", None)
+    if seen is None:
+        seen = set()
+        _log_gradient_pair_fallback._seen = seen
+    key = os.fspath(tcm_path)
+    if key in seen:
+        return
+    seen.add(key)
+    print(
+        "[SpatialFusion] Artifact lacks 'precompute_gradients_pair'; "
+        f"using single-image gradient launches: {key}"
+    )
 
 
 def _tcm_graph_available(tcm_path, graph_name):
@@ -844,6 +1506,59 @@ def _compute_tile_starts(length, tile, overlap=0.3):
     return starts
 
 
+def _regular_tile_stride(starts, explicit_stride=None):
+    """Return a verified regular stride, without reading a device array back."""
+    if hasattr(starts, "handle"):
+        return int(explicit_stride) if explicit_stride is not None and int(explicit_stride) > 0 else None
+    try:
+        values = tuple(int(value) for value in starts)
+    except (TypeError, ValueError):
+        return None
+    if not values or values[0] != 0:
+        return None
+    if explicit_stride is None:
+        stride = values[1] - values[0] if len(values) > 1 else 1
+    else:
+        stride = int(explicit_stride)
+    if stride <= 0 or any(value != index * stride for index, value in enumerate(values)):
+        return None
+    return stride
+
+
+def _coarse_texture_boost_into(src, dst, texture_amount, radius, blur_buf, tmp_buf=None):
+    """Coarse texture boost that reuses caller-owned work buffers.
+
+    Mirrors ``aot_api.coarse_texture_boost_gpu`` exactly — same Gaussian sigma,
+    the same identity LUT, and the same micro-contrast parameters — while
+    replacing its per-call blur allocation/destroy with a scratch slot and
+    handing the separable intermediate plane to the caller as well.  The call
+    chain is dispatch-stream ordered, so the boost runs without an engine sync
+    (``sync=False``); later readbacks sync as usual.  Bit-identical output is
+    part of the optimisation contract.
+    """
+    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm.aot_api import _COARSE_TEXTURE_IDENTITY_LUT
+
+    taichi_aot.gaussian_blur(
+        src,
+        sigma=float(radius),
+        return_gpu=True,
+        dst=blur_buf,
+        tmp=tmp_buf,
+        sync=False,
+    )
+    return taichi_aot.enhance_grayscale(
+        src,
+        blur_buf,
+        _COARSE_TEXTURE_IDENTITY_LUT,
+        micro_contrast=float(texture_amount),
+        clarity=0.0,
+        noise_coring=0.0,
+        return_gpu=True,
+        dst=dst,
+    )
+
+
 def generate_spatial_weights_taichi(
     current_image,
     reference_image,
@@ -878,35 +1593,92 @@ def generate_spatial_weights_taichi(
             buf.destroy()
 
     # Load Module (backend-aware)
-    tcm_path = _resolve_spatial_tcm(engine)
+    # Resolving the artifact walks the target and artifact directories, which
+    # costs ~10 ms per call on CPU and is repeated for every frame.  The result
+    # depends only on the runtime target, so memoize it and keep an escape hatch
+    # for picking up a freshly compiled artifact without restarting.
+    tcm_path = _resolve_spatial_tcm_cached(engine)
     mod = engine.load(tcm_path)
+    # Artifacts built before the paired-gradient graph was added keep the two
+    # single-image launches; the decision is metadata, not a try/except.
+    _grad_pair_available = _tcm_graph_available(tcm_path, "precompute_gradients_pair")
+    if not _grad_pair_available:
+        _log_gradient_pair_fallback(tcm_path)
+    streaming_gradients = _tcm_graph_available(
+        tcm_path, "spatial_streaming_gradient_v1"
+    )
+    compact_graph_available = _tcm_graph_available(
+        tcm_path, "generate_spatial_weights_compact_v1"
+    )
+    rgb_graph_name = "generate_spatial_weights_compact_rgb_mean_v1"
+    rgb_graph_available = _tcm_graph_available(tcm_path, rgb_graph_name)
+    rgb_current_image = kwargs.get("rgb_current_image")
+    rgb_reference_image = kwargs.get("rgb_reference_image")
+    rgb_mean_enabled = rgb_current_image is not None or rgb_reference_image is not None
+    h, w = int(current_image.shape[0]), int(current_image.shape[1])
+    if rgb_mean_enabled:
+        if rgb_current_image is None or rgb_reference_image is None:
+            raise ValueError(
+                "RGB mean weighting requires both rgb_current_image and rgb_reference_image"
+            )
+        if not rgb_graph_available:
+            raise RuntimeError(
+                f"{rgb_graph_name} requested but the resolved spatial TCM lacks "
+                f"the graph: {tcm_path}. Recompile the spatial TCM for the active backend."
+            )
+        expected_rgb_shape = (h, w, 3)
+        for name, image in (
+            ("rgb_current_image", rgb_current_image),
+            ("rgb_reference_image", rgb_reference_image),
+        ):
+            if tuple(int(value) for value in image.shape) != expected_rgb_shape:
+                raise ValueError(
+                    f"{name} must have shape {expected_rgb_shape}, got {tuple(image.shape)}"
+                )
+    compact_stride_h = _regular_tile_stride(
+        row_starts, kwargs.get("spatial_stride_h")
+    )
+    compact_stride_w = _regular_tile_stride(
+        col_starts, kwargs.get("spatial_stride_w")
+    )
+    compact_enabled = bool(
+        compact_graph_available
+        and compact_stride_h is not None
+        and compact_stride_w is not None
+    )
+    if rgb_mean_enabled and not compact_enabled:
+        raise RuntimeError(
+            "RGB mean weighting requires the compact regular-tile graph and "
+            "regular tile starts on the active backend."
+        )
 
     import time
     profile_hotspots = kwargs.get("profile_hotspots", False) or os.environ.get("PROFILE_SPATIAL", "0") == "1"
     hotspots = {}
+    per_frame_counters = {"tile_start_uploads": 0}
 
     t_start = time.perf_counter()
 
-    # 1. Reset weight map sum to 0. New spatial TCMs clear the resident
-    # buffer in-place on the active backend, avoiding a full-frame host
-    # allocation and upload for every input frame. Older artifacts retain
-    # the compatible host reset path until they are rebuilt.
-    if _tcm_graph_available(tcm_path, "clear_f32_2d"):
-        mod.run(
-            "clear_f32_2d",
-            dst=weight_map_sum,
-            h=int(weight_map_sum.shape[0]),
-            w=int(weight_map_sum.shape[1]),
-        )
-    else:
-        zeros = np.zeros(weight_map_sum.shape, dtype=np.float32)
-        from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
-        _LIB.write_to_gpu_buffer(
-            _RUNTIME,
-            weight_map_sum.handle,
-            zeros.ctypes.data,
-            weight_map_sum.size_bytes,
-        )
+    # The compact graph overwrites every output pixel, so it needs neither a
+    # separate clear launch nor a host zero array. Legacy graphs still reset
+    # the destination exactly as before.
+    if not compact_enabled:
+        if _tcm_graph_available(tcm_path, "clear_f32_2d"):
+            mod.run(
+                "clear_f32_2d",
+                dst=weight_map_sum,
+                h=int(weight_map_sum.shape[0]),
+                w=int(weight_map_sum.shape[1]),
+            )
+        else:
+            zeros = np.zeros(weight_map_sum.shape, dtype=np.float32)
+            from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
+            _LIB.write_to_gpu_buffer(
+                _RUNTIME,
+                weight_map_sum.handle,
+                zeros.ctypes.data,
+                weight_map_sum.size_bytes,
+            )
 
     if profile_hotspots:
         engine.sync()
@@ -915,7 +1687,6 @@ def generate_spatial_weights_taichi(
     else:
         t_prev = 0.0
 
-    h, w = current_image.shape[0], current_image.shape[1]
     coarse_texture_boost = float(kwargs.get("coarse_texture_boost", 0.30))
     coarse_texture_radius = float(kwargs.get("coarse_texture_radius", 10.0))
     reference_token = (
@@ -925,7 +1696,7 @@ def generate_spatial_weights_taichi(
         round(coarse_texture_boost, 6),
         round(coarse_texture_radius, 6),
     )
-    reference_cache_names = ["ref_l1", "ref_l2"]
+    reference_cache_names = ["ref_l2"]
     if coarse_texture_boost > 1e-6:
         reference_cache_names.append("ref_texture_boost")
     reuse_reference = (
@@ -939,24 +1710,37 @@ def generate_spatial_weights_taichi(
     # used by the weight-map kernels.  The invariant reference result is
     # cached for the complete batch.
     curr_texture_boost = None
+    boost_scratch = None
+    boost_scratch_y = None
     if coarse_texture_boost > 1e-6:
         curr_texture_boost = _alloc("curr_texture_boost", (h, w), dtype=np.float32)
-        taichi_aot.coarse_texture_boost_gpu(
+        # The Gaussian blur scratch reuses the current-frame gradient planes:
+        # the boost finishes before the fine gradients are computed, so the
+        # full-resolution buffers never need to be resident at the same time.
+        # `boost_scratch` is the separable output, `boost_scratch_y` its
+        # intermediate pass.
+        boost_scratch = _alloc("curr_grad_x", (h, w), dtype=np.float32)
+        boost_scratch_y = _alloc("curr_grad_y", (h, w), dtype=np.float32)
+        _coarse_texture_boost_into(
             current_image,
-            texture_amount=coarse_texture_boost,
-            radius=coarse_texture_radius,
-            dst=curr_texture_boost,
+            curr_texture_boost,
+            coarse_texture_boost,
+            coarse_texture_radius,
+            boost_scratch,
+            boost_scratch_y,
         )
 
         if reuse_reference:
             ref_texture_boost = scratch._slots["ref_texture_boost"]
         else:
             ref_texture_boost = _alloc("ref_texture_boost", (h, w), dtype=np.float32)
-            taichi_aot.coarse_texture_boost_gpu(
+            _coarse_texture_boost_into(
                 reference_image,
-                texture_amount=coarse_texture_boost,
-                radius=coarse_texture_radius,
-                dst=ref_texture_boost,
+                ref_texture_boost,
+                coarse_texture_boost,
+                coarse_texture_radius,
+                boost_scratch,
+                boost_scratch_y,
             )
     else:
         curr_texture_boost = current_image
@@ -973,26 +1757,37 @@ def generate_spatial_weights_taichi(
 
     if profile_hotspots:
         engine.sync()
-        hotspots["2. Brightness Equalization"] = (time.perf_counter() - t_prev) * 1000
+        hotspots[
+            "2. Brightness Equalization"
+            if equalize_brightness
+            else "2. Coarse Texture Boost"
+        ] = (time.perf_counter() - t_prev) * 1000
         t_prev = time.perf_counter()
 
-    # 4. Phase 1: Coarse Analysis for Guidance Map (Level 2: 1/4 Resolution)
-    # Downscale in two steps (L0 -> L1 -> L2) to prevent aliasing
+    # 4. Phase 1: Coarse Analysis for Guidance Map (Level 1: 1/2 Resolution)
+    # Direct single-step downscale (L0 -> L1) to 1/2 resolution
     curr_l0 = analysis_input
-    curr_l1 = taichi_aot.resize(curr_l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True,
-                                 dst=_alloc("curr_l1", (h // 2, w // 2)))
-    curr_l2 = taichi_aot.resize(curr_l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True,
-                                 dst=_alloc("curr_l2", (h // 4, w // 4)))
+    curr_l1 = engine.allocate((h // 2, w // 2), dtype=np.float32)
+    taichi_aot.resize(
+        curr_l0,
+        (w // 2, h // 2),
+        interpolation=taichi_aot.INTER_LINEAR,
+        return_gpu=True,
+        dst=curr_l1,
+    )
 
     if reuse_reference:
         ref_l1 = scratch._slots["ref_l1"]
-        ref_l2 = scratch._slots["ref_l2"]
     else:
         ref_l0 = analysis_reference
-        ref_l1 = taichi_aot.resize(ref_l0, (w // 2, h // 2), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True,
-                                   dst=_alloc("ref_l1", (h // 2, w // 2)))
-        ref_l2 = taichi_aot.resize(ref_l1, (w // 4, h // 4), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True,
-                                   dst=_alloc("ref_l2", (h // 4, w // 4)))
+        ref_l1 = _alloc("ref_l1", (h // 2, w // 2))
+        taichi_aot.resize(
+            ref_l0,
+            (w // 2, h // 2),
+            interpolation=taichi_aot.INTER_LINEAR,
+            return_gpu=True,
+            dst=ref_l1,
+        )
 
     if profile_hotspots:
         engine.sync()
@@ -1007,22 +1802,47 @@ def generate_spatial_weights_taichi(
     ref_coarse_grad_y = None
 
     try:
-        # Run coarse analysis ONLY at the coarsest level (Level 2) to match C++
-        curr_level = curr_l2
-        ref_level = ref_l2
+        # Run coarse analysis at Level 1 (1/2 Resolution)
+        curr_level = curr_l1
+        ref_level = ref_l1
 
         h_level, w_level = curr_level.shape[0], curr_level.shape[1]
 
-        # Allocate coarse gradients
-        curr_coarse_grad_x = _alloc("curr_coarse_grad_x", (h_level, w_level))
-        curr_coarse_grad_y = _alloc("curr_coarse_grad_y", (h_level, w_level))
-        ref_coarse_grad_x = _alloc("ref_coarse_grad_x", (h_level, w_level))
-        ref_coarse_grad_y = _alloc("ref_coarse_grad_y", (h_level, w_level))
+        # Allocate coarse gradients as transient buffers to avoid retaining resident VRAM
+        if streaming_gradients:
+            # The streaming TCM computes each sampled gradient in registers.
+            # Keep graph ABI arguments valid by aliasing the source images.
+            curr_coarse_grad_x = curr_level
+            curr_coarse_grad_y = curr_level
+            ref_coarse_grad_x = ref_level
+            ref_coarse_grad_y = ref_level
+        else:
+            curr_coarse_grad_x = engine.allocate((h_level, w_level), dtype=np.float32)
+            curr_coarse_grad_y = engine.allocate((h_level, w_level), dtype=np.float32)
+            if reuse_reference and "ref_coarse_grad_x" in scratch._slots and "ref_coarse_grad_y" in scratch._slots:
+                ref_coarse_grad_x = scratch._slots["ref_coarse_grad_x"]
+                ref_coarse_grad_y = scratch._slots["ref_coarse_grad_y"]
+            else:
+                ref_coarse_grad_x = _alloc("ref_coarse_grad_x", (h_level, w_level))
+                ref_coarse_grad_y = _alloc("ref_coarse_grad_y", (h_level, w_level))
 
-        # Run precompute_gradients on coarse level
-        mod.run("precompute_gradients", img=curr_level, grad_x=curr_coarse_grad_x, grad_y=curr_coarse_grad_y, h=int(h_level), w=int(w_level))
-        if not reuse_reference:
-            mod.run("precompute_gradients", img=ref_level, grad_x=ref_coarse_grad_x, grad_y=ref_coarse_grad_y, h=int(h_level), w=int(w_level))
+            # Run precompute_gradients on coarse level for legacy TCMs.
+            if _grad_pair_available and not reuse_reference:
+                mod.run(
+                    "precompute_gradients_pair",
+                    img=curr_level,
+                    img_b=ref_level,
+                    grad_x=curr_coarse_grad_x,
+                    grad_y=curr_coarse_grad_y,
+                    grad_b_x=ref_coarse_grad_x,
+                    grad_b_y=ref_coarse_grad_y,
+                    h=int(h_level),
+                    w=int(w_level),
+                )
+            else:
+                mod.run("precompute_gradients", img=curr_level, grad_x=curr_coarse_grad_x, grad_y=curr_coarse_grad_y, h=int(h_level), w=int(w_level))
+                if not reuse_reference:
+                    mod.run("precompute_gradients", img=ref_level, grad_x=ref_coarse_grad_x, grad_y=ref_coarse_grad_y, h=int(h_level), w=int(w_level))
 
         if profile_hotspots:
             engine.sync()
@@ -1039,7 +1859,7 @@ def generate_spatial_weights_taichi(
         num_tiles_h = max(1, h_level // level_tile_h)
         num_tiles_w = max(1, w_level // level_tile_w)
 
-        level_conf_gpu = _alloc("level_conf", (num_tiles_h, num_tiles_w))
+        level_conf_gpu = engine.allocate((num_tiles_h, num_tiles_w), dtype=np.float32)
 
         mod.run(
             "phase1_coarse_analysis",
@@ -1064,25 +1884,18 @@ def generate_spatial_weights_taichi(
             hotspots["3c. Phase 1 Coarse Analysis Kernel"] = (time.perf_counter() - t_prev) * 1000
             t_prev = time.perf_counter()
 
-        # Upsample coarse tile grid to Level 2 resolution
+        # Direct upsample from Level 1 coarse tile grid to full resolution (1-step bicubic)
         guidance_gpu = taichi_aot.resize(
             level_conf_gpu,
-            (w_level, h_level),
+            (w, h),
             interpolation=taichi_aot.INTER_CUBIC,
             return_gpu=True,
-            dst=_alloc("guidance_level", (h_level, w_level)),
+            dst=(
+                boost_scratch
+                if streaming_gradients and boost_scratch is not None
+                else _alloc("guidance_full", (h, w))
+            ),
         )
-
-        # Final upsample from Level 2 resolution to full resolution
-        if guidance_gpu is not None and (
-            guidance_gpu.shape[0] != h or guidance_gpu.shape[1] != w
-        ):
-            final_guidance = taichi_aot.resize(
-                guidance_gpu, (w, h), interpolation=taichi_aot.INTER_CUBIC, return_gpu=True
-                , dst=_alloc("guidance_full", (h, w))
-            )
-            _destroy(guidance_gpu)
-            guidance_gpu = final_guidance
 
         if profile_hotspots:
             engine.sync()
@@ -1090,21 +1903,17 @@ def generate_spatial_weights_taichi(
             t_prev = time.perf_counter()
 
     finally:
-        # Cleanup pyramids and temp buffers
-        _destroy(curr_l1)
-        _destroy(curr_l2)
-        _destroy(ref_l1)
-        _destroy(ref_l2)
-        if curr_coarse_grad_x is not None:
-            _destroy(curr_coarse_grad_x)
-        if curr_coarse_grad_y is not None:
-            _destroy(curr_coarse_grad_y)
-        if ref_coarse_grad_x is not None:
-            _destroy(ref_coarse_grad_x)
-        if ref_coarse_grad_y is not None:
-            _destroy(ref_coarse_grad_y)
+        # Cleanup transient pyramids and coarse gradient buffers eagerly to reclaim VRAM before Phase 2
+        if curr_l1 is not None:
+            curr_l1.destroy()
+        if curr_coarse_grad_x is not None and curr_coarse_grad_x is not curr_l1:
+            curr_coarse_grad_x.destroy()
+        if curr_coarse_grad_y is not None and curr_coarse_grad_y is not curr_l1:
+            curr_coarse_grad_y.destroy()
         if level_conf_gpu is not None:
-            _destroy(level_conf_gpu)
+            level_conf_gpu.destroy()
+        if scratch is None and ref_l1 is not None:
+            ref_l1.destroy()
 
         if profile_hotspots:
             engine.sync()
@@ -1124,20 +1933,42 @@ def generate_spatial_weights_taichi(
     ref_grad_y = None
 
     try:
-        # Allocate fine gradients
-        curr_grad_x = _alloc("curr_grad_x", (h, w))
-        curr_grad_y = _alloc("curr_grad_y", (h, w))
-        ref_grad_x = _alloc("ref_grad_x", (h, w))
-        ref_grad_y = _alloc("ref_grad_y", (h, w))
+        if streaming_gradients or compact_enabled:
+            curr_grad_x = analysis_input
+            curr_grad_y = analysis_input
+            ref_grad_x = analysis_reference
+            ref_grad_y = analysis_reference
+        else:
+            # Legacy artifacts precompute full-resolution gradient fields.
+            curr_grad_x = boost_scratch if boost_scratch is not None else _alloc("curr_grad_x", (h, w))
+            curr_grad_y = boost_scratch_y if boost_scratch_y is not None else _alloc("curr_grad_y", (h, w))
+            ref_grad_x = _alloc("ref_grad_x", (h, w))
+            ref_grad_y = _alloc("ref_grad_y", (h, w))
 
-        # Run precompute_gradients on fine level
-        mod.run("precompute_gradients", img=analysis_input, grad_x=curr_grad_x, grad_y=curr_grad_y, h=int(h), w=int(w))
-        if not reuse_reference:
-            mod.run("precompute_gradients", img=analysis_reference, grad_x=ref_grad_x, grad_y=ref_grad_y, h=int(h), w=int(w))
+            if _grad_pair_available and not reuse_reference:
+                mod.run(
+                    "precompute_gradients_pair",
+                    img=analysis_input,
+                    img_b=analysis_reference,
+                    grad_x=curr_grad_x,
+                    grad_y=curr_grad_y,
+                    grad_b_x=ref_grad_x,
+                    grad_b_y=ref_grad_y,
+                    h=int(h),
+                    w=int(w),
+                )
+            else:
+                mod.run("precompute_gradients", img=analysis_input, grad_x=curr_grad_x, grad_y=curr_grad_y, h=int(h), w=int(w))
+                if not reuse_reference:
+                    mod.run("precompute_gradients", img=analysis_reference, grad_x=ref_grad_x, grad_y=ref_grad_y, h=int(h), w=int(w))
 
         if profile_hotspots:
             engine.sync()
-            hotspots["4a. Fine Gradients Precompute"] = (time.perf_counter() - t_prev) * 1000
+            hotspots[
+                "4a. Inline Gradients"
+                if streaming_gradients
+                else "4a. Fine Gradients Precompute"
+            ] = (time.perf_counter() - t_prev) * 1000
             t_prev = time.perf_counter()
 
         # Extract early_exit_threshold from kwargs
@@ -1145,64 +1976,168 @@ def generate_spatial_weights_taichi(
 
         allocated_row_starts = None
         allocated_col_starts = None
-        if not hasattr(row_starts, "handle"):
+        # Callers upload the tile-start arrays once per burst and pass them as
+        # row_starts_gpu / col_starts_gpu.  Reusing those resident buffers avoids
+        # a fresh allocation and transfer on every single frame.
+        row_starts_gpu = kwargs.get("row_starts_gpu")
+        col_starts_gpu = kwargs.get("col_starts_gpu")
+        if row_starts_gpu is not None:
+            row_starts_buf = row_starts_gpu
+        elif not hasattr(row_starts, "handle"):
             allocated_row_starts = taichi_aot.upload(np.asarray(row_starts, dtype=np.int32))
+            per_frame_counters["tile_start_uploads"] += 1
             row_starts_buf = allocated_row_starts
         else:
             row_starts_buf = row_starts
 
-        if not hasattr(col_starts, "handle"):
+        if col_starts_gpu is not None:
+            col_starts_buf = col_starts_gpu
+        elif not hasattr(col_starts, "handle"):
             allocated_col_starts = taichi_aot.upload(np.asarray(col_starts, dtype=np.int32))
+            per_frame_counters["tile_start_uploads"] += 1
             col_starts_buf = allocated_col_starts
         else:
             col_starts_buf = col_starts
 
-        mod.run(
-            "generate_fine_weights_4passes",
-            current=analysis_input,
-            reference=analysis_reference,
-            curr_grad_x=curr_grad_x,
-            curr_grad_y=curr_grad_y,
-            ref_grad_x=ref_grad_x,
-            ref_grad_y=ref_grad_y,
-            guidance_map=guidance_gpu,
-            stability_map=stability_map,
-            weight_map_sum=weight_map_sum,
-            base_window=0,
-            row_starts=row_starts_buf,
-            col_starts=col_starts_buf,
-            pass_idx_0=0,
-            pass_idx_1=1,
-            pass_idx_2=2,
-            pass_idx_3=3,
-            tile_h=int(tile_h),
-            tile_w=int(tile_w),
-            h=int(h),
-            w=int(w),
-            noise_sigma=float(noise_sigma),
-            motion_sensitivity=float(motion_sensitivity),
-            noise_offset_factor=float(noise_offset_factor),
-            use_stability=int(use_stability),
-            use_guidance=1,
-            early_exit_threshold=early_exit_threshold,
-        )
+        tile_confidence_gpu = None
+        if compact_enabled:
+            confidence_shape = (
+                (int(row_starts_buf.shape[0]), int(col_starts_buf.shape[0]), 3)
+                if rgb_mean_enabled
+                else (int(row_starts_buf.shape[0]), int(col_starts_buf.shape[0]))
+            )
+            tile_confidence_gpu = _alloc(
+                "fine_tile_confidence_rgb" if rgb_mean_enabled else "fine_tile_confidence",
+                confidence_shape,
+                dtype=np.float32,
+                host_accessible=False,
+                is_vector=False,
+            )
+            if rgb_mean_enabled:
+                def _as_ndarray(buffer):
+                    if getattr(buffer, "is_vector", False):
+                        return buffer.view_as_vector(False)
+                    return buffer
+
+                mod.run(
+                    rgb_graph_name,
+                    current_rgb=_as_ndarray(rgb_current_image),
+                    reference_rgb=_as_ndarray(rgb_reference_image),
+                    guidance_map=guidance_gpu,
+                    stability_map=stability_map,
+                    tile_confidence_rgb=_as_ndarray(tile_confidence_gpu),
+                    row_starts=row_starts_buf,
+                    col_starts=col_starts_buf,
+                    weight_map=weight_map_sum,
+                    tile_h=int(tile_h),
+                    tile_w=int(tile_w),
+                    stride_h=int(compact_stride_h),
+                    stride_w=int(compact_stride_w),
+                    h=int(h),
+                    w=int(w),
+                    noise_sigma=float(noise_sigma),
+                    motion_sensitivity=float(motion_sensitivity),
+                    noise_offset_factor=float(noise_offset_factor),
+                    use_stability=int(use_stability),
+                    use_guidance=1,
+                    early_exit_threshold=early_exit_threshold,
+                    exponent=float(kwargs.get("ghost_penalty", 1.0)),
+                    cutoff=float(kwargs.get("ghost_cutoff", 0.0)),
+                )
+            else:
+                mod.run(
+                    "generate_spatial_weights_compact_v1",
+                    current=analysis_input,
+                    reference=analysis_reference,
+                    guidance_map=guidance_gpu,
+                    stability_map=stability_map,
+                    tile_confidence=tile_confidence_gpu,
+                    row_starts=row_starts_buf,
+                    col_starts=col_starts_buf,
+                    weight_map=weight_map_sum,
+                    tile_h=int(tile_h),
+                    tile_w=int(tile_w),
+                    stride_h=int(compact_stride_h),
+                    stride_w=int(compact_stride_w),
+                    h=int(h),
+                    w=int(w),
+                    noise_sigma=float(noise_sigma),
+                    motion_sensitivity=float(motion_sensitivity),
+                    noise_offset_factor=float(noise_offset_factor),
+                    use_stability=int(use_stability),
+                    use_guidance=1,
+                    early_exit_threshold=early_exit_threshold,
+                    exponent=float(kwargs.get("ghost_penalty", 1.0)),
+                    cutoff=float(kwargs.get("ghost_cutoff", 0.0)),
+                )
+        else:
+            mod.run(
+                "generate_fine_weights_4passes",
+                current=analysis_input,
+                reference=analysis_reference,
+                curr_grad_x=curr_grad_x,
+                curr_grad_y=curr_grad_y,
+                ref_grad_x=ref_grad_x,
+                ref_grad_y=ref_grad_y,
+                guidance_map=guidance_gpu,
+                stability_map=stability_map,
+                weight_map_sum=weight_map_sum,
+                base_window=0,
+                row_starts=row_starts_buf,
+                col_starts=col_starts_buf,
+                pass_idx_0=0,
+                pass_idx_1=1,
+                pass_idx_2=2,
+                pass_idx_3=3,
+                tile_h=int(tile_h),
+                tile_w=int(tile_w),
+                h=int(h),
+                w=int(w),
+                noise_sigma=float(noise_sigma),
+                motion_sensitivity=float(motion_sensitivity),
+                noise_offset_factor=float(noise_offset_factor),
+                use_stability=int(use_stability),
+                use_guidance=1,
+                early_exit_threshold=early_exit_threshold,
+            )
+            if kwargs.get("postprocess_in_place", False):
+                if not _tcm_graph_available(tcm_path, "postprocess_spatial_weight"):
+                    raise RuntimeError(
+                        "The active SpatialFusion TCM lacks the in-place-capable "
+                        "postprocess_spatial_weight graph. Rebuild the active backend artifact."
+                    )
+                mod.run(
+                    "postprocess_spatial_weight",
+                    src=weight_map_sum,
+                    dst=weight_map_sum,
+                    exponent=float(kwargs.get("ghost_penalty", 1.0)),
+                    cutoff=float(kwargs.get("ghost_cutoff", 0.0)),
+                    h=int(h),
+                    w=int(w),
+                )
 
         if profile_hotspots:
             engine.sync()
-            hotspots["4b. Phase 2 Fine Analysis (4-Pass Kernel)"] = (time.perf_counter() - t_prev) * 1000
+            hotspots[
+                "4b. Phase 2 Fine Analysis (Compact Graph)"
+                if compact_enabled
+                else "4b. Phase 2 Fine Analysis (4-Pass Kernel)"
+            ] = (time.perf_counter() - t_prev) * 1000
             t_prev = time.perf_counter()
     finally:
+        if 'tile_confidence_gpu' in locals() and tile_confidence_gpu is not None:
+            _destroy(tile_confidence_gpu)
         if allocated_row_starts is not None:
             _destroy(allocated_row_starts)
         if allocated_col_starts is not None:
             _destroy(allocated_col_starts)
-        if curr_grad_x is not None:
+        if curr_grad_x is not None and curr_grad_x is not analysis_input:
             _destroy(curr_grad_x)
-        if curr_grad_y is not None:
+        if curr_grad_y is not None and curr_grad_y is not analysis_input:
             _destroy(curr_grad_y)
-        if ref_grad_x is not None:
+        if ref_grad_x is not None and ref_grad_x is not analysis_reference:
             _destroy(ref_grad_x)
-        if ref_grad_y is not None:
+        if ref_grad_y is not None and ref_grad_y is not analysis_reference:
             _destroy(ref_grad_y)
         if dummy_gpu is not None:
             _destroy(dummy_gpu)
@@ -1214,6 +2149,8 @@ def generate_spatial_weights_taichi(
             _destroy(curr_texture_boost)
             if not reuse_reference:
                 _destroy(ref_texture_boost)
+        if scratch is None and streaming_gradients and boost_scratch_y is not None:
+            _destroy(boost_scratch_y)
 
         if profile_hotspots:
             engine.sync()
@@ -1226,6 +2163,9 @@ def generate_spatial_weights_taichi(
                 print(f" {k:<45} : {v:>8.2f} ms ({v/total_t*100.0:>5.1f}%)")
             print("-"*60)
             print(f" {'Total GPU Wrapper Time':<45} : {total_t:>8.2f} ms")
+            if scratch is not None:
+                print(f" {'scratch cache (hits/misses)':<45} : {scratch.hits:>8d} / {scratch.misses:<8d}")
+            print(f" {'tile-start uploads':<45} : {per_frame_counters['tile_start_uploads']:>8d}")
             print("="*60 + "\n")
 
 
@@ -1260,7 +2200,7 @@ def postprocess_spatial_weight_taichi(
     import taichi_vision.taichi_aot as taichi_aot
 
     engine = taichi_aot.engine
-    tcm_path = _resolve_spatial_tcm(engine)
+    tcm_path = _resolve_spatial_tcm_cached(engine)
     mod = engine.load(tcm_path)
     if dst is None:
         dst = engine.allocate(
@@ -1293,7 +2233,7 @@ def mean_division_vec3_weight_taichi(
     import taichi_vision.taichi_aot as taichi_aot
     engine = taichi_aot.engine
 
-    tcm_path = _resolve_spatial_tcm(engine)
+    tcm_path = _resolve_spatial_tcm_cached(engine)
     mod = engine.load(tcm_path)
 
     h, w = sum_img.shape[0], sum_img.shape[1]

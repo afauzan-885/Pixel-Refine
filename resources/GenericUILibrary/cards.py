@@ -7,17 +7,26 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QFrame,
     QComboBox,
+    QMenu,
+    QStackedWidget,
     QSizePolicy,
+    QStyle,
+    QStylePainter,
+    QStyleOptionComboBox,
 )
-from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QPainter, QColor, QBrush
+from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QPoint
+from PySide6.QtGui import QPainter, QColor, QBrush, QFont, QFontMetrics, QTextLayout, QTextOption, QPalette
 from .mixins import RealtimeMixin
+from .buttons import Button
 from .theme import create_checkbox_style, create_select_style
 from resources.animations.animation_manager import (
     HeightAnimator,
+    StackedWidgetAnimator,
+    AnimationType,
 )
 
 
@@ -345,12 +354,216 @@ class CardGroup(QWidget):
 from .buttons import ToggleSwitch
 
 
+class FeatureCardGroup(QWidget):
+    """Arrange ordered feature cards in columns, filling the final partial row.
+
+    With three cards and two columns, the first two share the top row and
+    the last card spans the bottom row. Callers only supply the card order.
+    """
+
+    def __init__(self, columns=2, spacing=10, parent=None):
+        super().__init__(parent)
+        if columns < 1:
+            raise ValueError("columns must be positive")
+        self.columns = columns
+        self._cards = []
+        self._geometry_timer = QTimer(self)
+        self._geometry_timer.setSingleShot(True)
+        self._geometry_timer.setInterval(0)
+        self._geometry_timer.timeout.connect(self._refresh_geometry)
+        self.grid_layout = QGridLayout(self)
+        self.grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.grid_layout.setSpacing(spacing)
+        group_policy = QSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        group_policy.setHeightForWidth(True)
+        self.setSizePolicy(group_policy)
+        for column in range(columns):
+            self.grid_layout.setColumnStretch(column, 1)
+
+    def add_card(self, card):
+        """Append a card and automatically distribute the final row."""
+        self._cards.append(card)
+        card._feature_card_header_layout = card.main_layout.itemAt(0).layout()
+        card._feature_card_show_toggle = False
+        card._configure_group_content()
+        card.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        card.installEventFilter(self)
+        for label in (card.title_lbl, card.desc_lbl, card.algorithm_lbl):
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            label.installEventFilter(self)
+        card.value_changed.connect(lambda *_: self._geometry_timer.start())
+        card_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        card_policy.setHeightForWidth(True)
+        card.setSizePolicy(card_policy)
+        card.setMinimumWidth(0)
+        card.title_lbl.setWordWrap(True)
+        card.title_lbl.setMinimumWidth(0)
+        title_policy = QSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        title_policy.setHeightForWidth(True)
+        card.title_lbl.setSizePolicy(title_policy)
+        card.combo.setMinimumWidth(0)
+        card.combo.setMinimumContentsLength(0)
+        card.combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+
+        while self.grid_layout.count():
+            self.grid_layout.takeAt(0)
+        for index, widget in enumerate(self._cards):
+            row, column = divmod(index, self.columns)
+            span = self.columns - column if index == len(self._cards) - 1 else 1
+            self.grid_layout.addWidget(widget, row, column, 1, span)
+            # Rows follow the tallest card's content. Surplus viewport space
+            # belongs to the scroll area, not inside the cards.
+            self.grid_layout.setRowStretch(row, 0)
+        self._geometry_timer.start()
+
+    def sizeHint(self):
+        """Keep wrapped text visible without stretching the card rows."""
+        hint = super().sizeHint()
+        height = self.heightForWidth(self.width())
+        if height >= 0:
+            hint.setHeight(height)
+        return hint
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setHeight(self.heightForWidth(self.width()))
+        return hint
+
+    def heightForWidth(self, width):
+        spacing = self.grid_layout.spacing()
+        cell_width = max(0, (width - spacing * (self.columns - 1)) // self.columns)
+        heights = {}
+        for index, card in enumerate(self._cards):
+            row, column = divmod(index, self.columns)
+            card_width = (
+                width - column * (cell_width + spacing)
+                if index == len(self._cards) - 1
+                else cell_width
+            )
+            height = card.heightForWidth(max(0, card_width))
+            heights[row] = max(heights.get(row, 0), height)
+        return sum(heights.values()) + spacing * max(0, len(heights) - 1)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.size().width() != event.oldSize().width():
+            self._geometry_timer.start()
+
+    def _refresh_geometry(self):
+        row_heights = {}
+        changed = False
+        for card in self._cards:
+            changed = card._refresh_group_text_geometry() or changed
+        for index, card in enumerate(self._cards):
+            row = index // self.columns
+            height = card.heightForWidth(card.width())
+            row_heights[row] = max(row_heights.get(row, 0), height)
+        for row, height in row_heights.items():
+            height = max(0, height)
+            if self.grid_layout.rowMinimumHeight(row) != height:
+                self.grid_layout.setRowMinimumHeight(row, height)
+                changed = True
+        if changed:
+            self.updateGeometry()
+
+    def eventFilter(self, watched, event):
+        if event.type() in (
+            QEvent.Type.Resize, QEvent.Type.FontChange,
+            QEvent.Type.StyleChange, QEvent.Type.LayoutRequest,
+        ):
+            self._geometry_timer.start()
+        return super().eventFilter(watched, event)
+
+
+class FeatureCardSelect(QComboBox):
+    """Keep the selected name readable within the card using up to two lines."""
+
+    def __init__(self, parent=None, minimum_font_px=8, maximum_font_px=12):
+        super().__init__(parent)
+        self.set_font_size_range(minimum_font_px, maximum_font_px)
+        self.currentTextChanged.connect(self.setToolTip)
+
+    def set_font_size_range(self, minimum_px, maximum_px):
+        if not 0 < minimum_px <= maximum_px:
+            raise ValueError("Font sizes must satisfy 0 < minimum <= maximum")
+        self.minimum_font_px = int(minimum_px)
+        self.maximum_font_px = int(maximum_px)
+        font = QFont(self.font())
+        font.setPixelSize(self.maximum_font_px)
+        self.setMinimumHeight(2 * QFontMetrics(font).lineSpacing() + 8)
+        self.view().setStyleSheet(f"font-size: {self.maximum_font_px}px;")
+        self.updateGeometry()
+        self.update()
+
+    def _selected_lines(self, width):
+        text = self.currentText()
+        for size in range(self.maximum_font_px, self.minimum_font_px - 1, -1):
+            font = QFont(self.font())
+            font.setPixelSize(size)
+            layout = QTextLayout(text, font)
+            option = QTextOption()
+            option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            layout.setTextOption(option)
+            layout.beginLayout()
+            lines = []
+            starts = []
+            for _ in range(3):
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(max(1, width))
+                starts.append(line.textStart())
+                lines.append(text[line.textStart():line.textStart() + line.textLength()].strip())
+            layout.endLayout()
+            if len(lines) <= 2:
+                return font, lines
+        lines[1] = QFontMetrics(font).elidedText(
+            text[starts[1]:], Qt.TextElideMode.ElideRight, max(1, width)
+        )
+        return font, lines[:2]
+
+    def paintEvent(self, event):
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        painter = QStylePainter(self)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, option,
+            QStyle.SubControl.SC_ComboBoxEditField, self
+        ).adjusted(2, 0, -2, 0)
+        font, lines = self._selected_lines(rect.width())
+        painter.setFont(font)
+        group = QPalette.ColorGroup.Active if self.isEnabled() else QPalette.ColorGroup.Disabled
+        painter.setPen(option.palette.color(group, QPalette.ColorRole.Text))
+        painter.setClipRect(rect)
+        metrics = QFontMetrics(font)
+        top = rect.top() + (rect.height() - len(lines) * metrics.lineSpacing()) // 2
+        for index, line in enumerate(lines):
+            painter.drawText(rect.left(), top + metrics.ascent() + index * metrics.lineSpacing(), line)
+
+    def showPopup(self):
+        font = QFont(self.font())
+        font.setPixelSize(self.maximum_font_px)
+        metrics = QFontMetrics(font)
+        width = max((metrics.horizontalAdvance(self.itemText(i)) for i in range(self.count())), default=0)
+        self.view().setMinimumWidth(max(self.width(), width + 28))
+        super().showPopup()
+
+
 class FeatureCard(QFrame, RealtimeMixin):
     """
     A premium toggleable card component for algorithms.
     """
 
     value_changed = Signal(str)
+    checked_changed = Signal(bool)
 
     def __init__(
         self,
@@ -360,6 +573,8 @@ class FeatureCard(QFrame, RealtimeMixin):
         fallback_val,
         parent=None,
         adaptive_directions=None,
+        dropdown_font_min_px=8,
+        dropdown_font_max_px=12,
     ):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.StyledPanel)
@@ -431,7 +646,10 @@ class FeatureCard(QFrame, RealtimeMixin):
         option_layout.setSpacing(4)
 
         # Dropdown selection container (replacing option grid buttons)
-        self.combo = QComboBox()
+        self.combo = FeatureCardSelect(
+            minimum_font_px=dropdown_font_min_px,
+            maximum_font_px=dropdown_font_max_px,
+        )
         self.combo.addItems(self.options)
         self.combo.setStyleSheet(create_select_style())
         self.combo.currentTextChanged.connect(self._on_combo_changed)
@@ -491,17 +709,135 @@ class FeatureCard(QFrame, RealtimeMixin):
         self.desc_lbl.setStyleSheet(
             f"color: {theme.card_text_desc}; font-size: {desc_sz}pt; background: transparent;"
         )
+        if hasattr(self, "algorithm_lbl"):
+            self.algorithm_lbl.setStyleSheet(
+                f"color: {theme.card_text_title}; font-size: {desc_sz}pt; font-weight: 600; background: transparent;"
+            )
+        self._refresh_group_text_geometry()
+
+    def _group_text_heights(self, width):
+        """Measure plain wrapped text without stale fixed label heights."""
+        margins = self.main_layout.contentsMargins()
+        text_width = max(1, width - margins.left() - margins.right() - 2 * self.frameWidth())
+        heights = []
+        for label in (self.title_lbl, self.desc_lbl, self.algorithm_lbl):
+            label.ensurePolished()
+            metrics = QFontMetrics(label.font())
+            height = metrics.boundingRect(
+                0, 0, max(1, text_width - self.help_btn.width() - 5)
+                if label is self.title_lbl else text_width, 16777215,
+                int(Qt.TextFlag.TextWordWrap), label.text(),
+            ).height()
+            heights.append(max(metrics.height(), height))
+        return [max(heights[0], self.help_btn.height()), max(heights[1:])]
+
+    def _refresh_group_text_geometry(self):
+        if not hasattr(self, "body_stack"):
+            return False
+        changed = False
+        for label, height in zip(
+            (self.title_lbl, self.body_stack), self._group_text_heights(self.width())
+        ):
+            if label.minimumHeight() != height or label.maximumHeight() != height:
+                label.setFixedHeight(height)
+                changed = True
+        if changed:
+            self.updateGeometry()
+        self.help_btn.setToolTip(self.desc_lbl.text())
+        return changed
+
+    def _configure_group_content(self):
+        """Own title/help placement and a stable description/selection viewport."""
+        header = self._feature_card_header_layout
+        self.switch_indicator.hide()
+        header.removeWidget(self.switch_indicator)
+        if header.count() and header.itemAt(header.count() - 1).spacerItem():
+            header.takeAt(header.count() - 1)
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(5)
+        header.setStretch(0, 1)
+        self.help_btn = Button("?", variant="ghost", object_name="FeatureCardHelpButton", parent=self)
+        self.help_btn.setFixedSize(18, 18)
+        self.help_btn.setStyleSheet("""
+            QPushButton#FeatureCardHelpButton {
+                background-color: #E8F3F9; color: #0078D4;
+                border: 1px solid #B8D8EA; border-radius: 9px;
+                padding: 0px; font-size: 11px; font-weight: bold;
+            }
+            QPushButton#FeatureCardHelpButton:hover {
+                background-color: #D5ECF8; border-color: #0078D4;
+            }
+            QPushButton#FeatureCardHelpButton:pressed { background-color: #B8D8EA; }
+        """)
+        self.help_btn.clicked.connect(lambda: self._set_group_body(True))
+        header.addWidget(self.help_btn, 0, Qt.AlignmentFlag.AlignTop)
+        self.main_layout.removeWidget(self.desc_lbl)
+        self.algorithm_lbl = QLabel(self.combo.currentText(), self)
+        self.algorithm_lbl.setWordWrap(True)
+        self.algorithm_lbl.setMinimumWidth(0)
+        self.algorithm_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.body_stack = QStackedWidget(self)
+        self.body_stack.addWidget(self.desc_lbl)
+        self.body_stack.addWidget(self.algorithm_lbl)
+        self.body_animator = StackedWidgetAnimator(self)
+        self.main_layout.insertWidget(1, self.body_stack)
+        self.main_layout.setAlignment(Qt.AlignmentFlag(0))
+        self.main_layout.addStretch(1)
+        self.option_widget.setFixedHeight(0)
+        self.option_widget.hide()
+        self._showing_description = not self.is_checked
+        self.body_stack.setCurrentWidget(self.desc_lbl if self._showing_description else self.algorithm_lbl)
+        self.resizeEvent(None)
+
+    def _set_group_body(self, show_description, animate=True):
+        if not hasattr(self, "body_stack"):
+            return
+        self._refresh_group_text_geometry()
+        self._showing_description = bool(show_description or not self.is_checked)
+        target = self.desc_lbl if self._showing_description else self.algorithm_lbl
+        if animate:
+            self.body_animator.transition_in(
+                self.body_stack, target,
+                AnimationType.SLIDE_LEFT if self._showing_description else AnimationType.SLIDE_RIGHT,
+                duration_out=100, duration_in=160,
+            )
+        else:
+            self.body_animator.stop_all()
+            self.body_stack.setCurrentWidget(target)
+            target.move(0, 0)
+
+    def _activate_group_card(self):
+        if self.is_checked and self._showing_description:
+            self._set_group_body(False)
+        else:
+            self._show_group_options()
+
+    def heightForWidth(self, width):
+        if not hasattr(self, "_feature_card_header_layout"):
+            return super().heightForWidth(width)
+        margins = self.main_layout.contentsMargins()
+        return (
+            sum(self._group_text_heights(width)) + margins.top() + margins.bottom()
+            + self.main_layout.spacing() + 2 * self.frameWidth()
+        )
 
     def _emit_debounced_value(self):
         self.value_changed.emit(self.get_value())
 
     def setChecked(self, checked, animate=True):
+        # Grouped cards share row heights; keep their content compact and
+        # update options synchronously instead of resizing the parent grid.
+        if hasattr(self, "_feature_card_header_layout"):
+            animate = False
         if self.is_checked != checked:
             self.is_checked = checked
             self.switch_indicator.setChecked(checked)
 
             # Smoothly animate options expansion using HeightAnimator if animate=True
-            if checked:
+            if hasattr(self, "_feature_card_header_layout"):
+                self.option_widget.setFixedHeight(0)
+                self.option_widget.hide()
+            elif checked:
                 self.option_widget.show()
                 target_h = self.option_widget.sizeHint().height()
                 if animate:
@@ -516,6 +852,8 @@ class FeatureCard(QFrame, RealtimeMixin):
                     self.option_widget.hide()
 
             self.update_styles()
+            self._set_group_body(not checked, animate=False)
+            self.checked_changed.emit(checked)
             if animate:
                 self._debounce_timer.start()
             else:
@@ -563,10 +901,51 @@ class FeatureCard(QFrame, RealtimeMixin):
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
-            self.setChecked(not self.is_checked)
+            if hasattr(self, "_feature_card_header_layout"):
+                self._activate_group_card()
+            else:
+                self.setChecked(not self.is_checked)
         super().mousePressEvent(event)
 
+    def _show_group_options(self):
+        """Use the card as the selector instead of reserving an inline dropdown."""
+        if not self.is_checked:
+            self.setChecked(True)
+        menu = QMenu(self)
+        for index in range(self.combo.count()):
+            action = menu.addAction(self.combo.itemText(index))
+            action.setCheckable(True)
+            action.setChecked(index == self.combo.currentIndex())
+            action.triggered.connect(
+                lambda _checked=False, selected=index: self.combo.setCurrentIndex(selected)
+            )
+        menu.addSeparator()
+        off_action = menu.addAction(self.fallback_val)
+        off_action.triggered.connect(lambda: self.setChecked(False))
+        def release_menu():
+            if getattr(self, "_options_menu", None) is menu:
+                self._options_menu = None
+            menu.deleteLater()
+
+        menu.aboutToHide.connect(release_menu)
+        self._options_menu = menu
+        menu.popup(self.mapToGlobal(QPoint(0, self.height())))
+
+    def keyPressEvent(self, event):
+        if hasattr(self, "_feature_card_header_layout") and event.key() in (
+            Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter,
+        ):
+            self._activate_group_card()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _on_combo_changed(self, text):
+        if hasattr(self, "algorithm_lbl"):
+            self.algorithm_lbl.setText(text)
+            self._refresh_group_text_geometry()
+            if self.is_checked:
+                self._set_group_body(False)
         if self.is_checked:
             self._debounce_timer.start()
 

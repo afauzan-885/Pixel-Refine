@@ -888,7 +888,11 @@ def split(img):
                     res_list.append(aot.extract_channel(img_v, i))
             
             if is_gpu: return tuple(res_list)
-            return tuple([r.to_numpy() for r in res_list])
+            res_np = tuple([r.to_numpy() for r in res_list])
+            for r in res_list:
+                r.release()
+            img_v.release()
+            return res_np
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -959,7 +963,18 @@ def merge(channels):
                     aot.insert_channel(ch_v, dst_buf, i)
             
             if is_gpu: return dst_buf
-            return dst_buf.to_numpy()
+            res_np = dst_buf.to_numpy()
+            dst_buf.release()
+            if not is_gpu:
+                if c == 3:
+                    c0.release()
+                    c1.release()
+                    c2.release()
+                else:
+                    for ch in channels:
+                        if hasattr(ch, "release"):
+                            ch.release()
+            return res_np
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -1022,6 +1037,8 @@ def extract_channel(img, ch):
             res_gpu = aot.extract_channel(img_v, ch)
             if is_gpu: return res_gpu
             res_np = res_gpu.to_numpy()
+            res_gpu.release()
+            img_v.release()
             return res_np
 
     if not TAICHI_AVAILABLE:
@@ -1159,20 +1176,16 @@ COLOR_GRAY2RGB = 8  # Gray to BGR/RGB is identical for grayscale
 
 
 @ti_thread
-def cvtColor(src, code, dst=None):
+def cvtColor(src, code, dst=None, return_gpu=False, session=None):
     """
     Convert image color space.
-    AOT-Aware: Dispatches to AOT module if AOT_MODE=1
+    AOT-Aware: Dispatches to AOT module if AOT_MODE=1.
+    Supports GPU residency chaining when return_gpu=True or session is provided.
     """
     if AOT_MODE:
         aot = _get_aot()
-        if aot and code in [COLOR_BGR2GRAY, COLOR_RGB2GRAY]:
-            from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
-            is_gpu = isinstance(src, TaichiGPUBuffer)
-            src_v = src if is_gpu else aot.upload(src)
-            res_gpu = aot.rgb2gray(src_v)
-            if is_gpu: return res_gpu
-            return res_gpu.to_numpy()
+        if aot and hasattr(aot, "cvtColor"):
+            return aot.cvtColor(src, code, dst=dst, return_gpu=return_gpu, session=session)
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")

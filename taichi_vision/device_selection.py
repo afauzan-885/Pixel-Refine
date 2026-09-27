@@ -6,6 +6,7 @@ fingerprint and use the ordinal only as a cache for the next launch.
 """
 from __future__ import annotations
 
+import os
 import re
 import ctypes
 import subprocess
@@ -13,6 +14,67 @@ import time
 from pathlib import Path
 
 from taichi_vision.cuda_arch_matrix import architecture_name, normalize_compute_capability
+
+# Pause between ``vulkaninfo`` enumeration attempts.  Enumeration transiently
+# fails while the display driver is still initialising or while the machine is
+# busy, so a short settle time is enough for the retry to succeed.
+VULKAN_SCAN_RETRY_DELAY_S = 1.5
+
+# ``vulkaninfo --summary`` is slow (measured 9.3-12.9 s idle on a hybrid
+# Intel/NVIDIA laptop) and every independent run is another chance to time out.
+# A launch used to enumerate several times (startup bootstrap, backend
+# resolution, the settings page), which is also what ``engine.py`` warns about:
+# the bridge and the runtime must share one enumeration source.  Successful
+# enumerations are therefore reused for a short window; failures are never
+# cached so recovery stays possible.  Short TTL keeps a partial result from
+# being pinned for the whole session.
+VULKAN_DEVICE_CACHE_TTL_S = 60.0
+
+_vulkan_device_cache = {"records": None, "timestamp": 0.0}
+
+
+def _vulkan_device_cache_ttl_s() -> float:
+    raw = os.environ.get("PIXEL_REFINE_AOT_DEVICE_CACHE_TTL_S", "").strip()
+    if not raw:
+        return VULKAN_DEVICE_CACHE_TTL_S
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return VULKAN_DEVICE_CACHE_TTL_S
+
+
+def invalidate_vulkan_device_cache() -> None:
+    """Drop the cached enumeration.
+
+    Used by recovery paths (a device became available) and by tests, so a
+    consumer never has to live with a stale view of the adapters.
+    """
+    _vulkan_device_cache["records"] = None
+    _vulkan_device_cache["timestamp"] = 0.0
+
+
+def _cached_vulkan_device_records():
+    records = _vulkan_device_cache["records"]
+    if not records:
+        return None
+    ttl = _vulkan_device_cache_ttl_s()
+    if ttl <= 0.0:
+        # A zero/negative TTL disables caching outright.  Windows monotonic
+        # time only advances every ~15.6 ms, so an "age > 0" test would still
+        # look fresh on the same tick.
+        return None
+    age = time.monotonic() - float(_vulkan_device_cache["timestamp"] or 0.0)
+    if age > ttl:
+        return None
+    return [dict(record) for record in records]
+
+
+def _store_vulkan_device_records(records) -> None:
+    # Only successful, non-empty enumerations are cacheable.
+    if not records:
+        return
+    _vulkan_device_cache["records"] = [dict(record) for record in records]
+    _vulkan_device_cache["timestamp"] = time.monotonic()
 
 
 def normalize_device_name(value: str) -> str:
@@ -196,27 +258,60 @@ def parse_nvidia_smi_summary(output: str) -> list[dict]:
     return records
 
 
-def scan_vulkan_device_records(timeout=15.0) -> list[dict]:
-    """Enumerate Vulkan adapters with stable identity and driver metadata."""
+def scan_vulkan_device_records(timeout=20.0, attempts=2, fresh=False) -> list[dict]:
+    """Enumerate Vulkan adapters with stable identity and driver metadata.
+
+    ``vulkaninfo --summary`` is slow on hybrid systems with several ICDs
+    (measured: 9.3-12.9 s idle on an Intel UHD 620 + NVIDIA MX150 laptop) and
+    exceeds its budget whenever the machine is briefly busy.  A single timed-out
+    attempt therefore reports "no GPU" for a machine that has one, which is what
+    made the persisted backend preference fall back to CPU at random.  Enumeration
+    is retried before it raises; a missing ``vulkaninfo`` binary is not retried
+    because that cannot succeed on a later attempt.
+
+    A successful enumeration is reused for ``VULKAN_DEVICE_CACHE_TTL_S`` so the
+    several consumers in one launch (startup bootstrap, backend resolution, the
+    settings page) share one source instead of racing each other.  Failures are
+    never cached and ``fresh=True`` always re-enumerates, so recovery and
+    re-detection remain possible.
+    """
+    if not fresh:
+        cached = _cached_vulkan_device_records()
+        if cached is not None:
+            return cached
+
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    result = subprocess.run(
-        ["vulkaninfo", "--summary"],
-        capture_output=True,
-        text=True,
-        timeout=float(timeout),
-        creationflags=flags,
-        check=False,
-    )
-    # Loader warnings are normally on stderr while the device summary is on
-    # stdout. Include both so unusual loader builds remain parseable.
-    records = parse_vulkaninfo_summary(
-        "\n".join(part for part in (result.stdout, result.stderr) if part)
-    )
-    if not records:
-        raise RuntimeError(
+    total_attempts = max(1, int(attempts))
+    last_error: Exception | None = None
+    for attempt in range(total_attempts):
+        if attempt:
+            time.sleep(VULKAN_SCAN_RETRY_DELAY_S)
+        try:
+            result = subprocess.run(
+                ["vulkaninfo", "--summary"],
+                capture_output=True,
+                text=True,
+                timeout=float(timeout),
+                creationflags=flags,
+                check=False,
+            )
+        except FileNotFoundError:
+            raise
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            last_error = exc
+            continue
+        # Loader warnings are normally on stderr while the device summary is on
+        # stdout. Include both so unusual loader builds remain parseable.
+        records = parse_vulkaninfo_summary(
+            "\n".join(part for part in (result.stdout, result.stderr) if part)
+        )
+        if records:
+            _store_vulkan_device_records(records)
+            return records
+        last_error = RuntimeError(
             f"vulkaninfo did not report any devices (exit={result.returncode})"
         )
-    return records
+    raise last_error or RuntimeError("vulkaninfo enumeration produced no result")
 
 
 def scan_cuda_device_records() -> list[dict]:

@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import threading
 import numpy as np
@@ -10,6 +11,32 @@ import rawpy
 from config import SUPPORTED_FORMATS
 
 taichi_lock = threading.Lock()
+
+
+def _cleanup_taichi_memory():
+    """Universal memory cleanup for Taichi buffers and OS working set."""
+    try:
+        from taichi_vision import taichi_aot
+        engine = taichi_aot.get_engine()
+        if hasattr(engine, "buffer_pool"):
+            engine.buffer_pool.clear()
+        if hasattr(engine, "_drain_retired"):
+            engine._drain_retired(wait=True)
+        if hasattr(engine, "sync"):
+            engine.sync()
+    except Exception:
+        pass
+    import gc
+    gc.collect()
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetProcessWorkingSetSize(
+                ctypes.windll.kernel32.GetCurrentProcess(), -1, -1
+            )
+        except Exception:
+            pass
+
 
 
 class BaseMultiThreading(QThread):
@@ -91,7 +118,9 @@ def _process_image_part(img_part_data):
         raise RuntimeError(f"Failed to process image part: {e}")
 
 
-def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
+def load_raw_as_8bit_rgb(
+    image_path: str, presentation: str = None, **kwargs
+) -> np.ndarray:
     """Loads a RAW/DNG image and returns it as an 8-bit RGB numpy array using Hamilton Demosaic with rawpy fallback."""
     filename = os.path.basename(image_path)
     try:
@@ -103,10 +132,7 @@ def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
             rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
             u8_res = taichi_aot.cast(rgb_f32, np.uint8)
             del rgb_f32
-            try:
-                taichi_aot.get_engine().buffer_pool.clear()
-            except Exception:
-                pass
+            _cleanup_taichi_memory()
             return u8_res
         else:
             raise RuntimeError("Hamilton demosaic returned None")
@@ -135,7 +161,9 @@ def load_raw_as_8bit_rgb(image_path: str) -> np.ndarray:
         raise RuntimeError(f"Unexpected DNG error for {filename}: {e}")
 
 
-def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
+def load_raw_as_8bit_rgb_half_res(
+    image_path: str, presentation: str = None, **kwargs
+) -> np.ndarray:
     """Loads a RAW/DNG image and returns it as an 8-bit half-resolution RGB numpy array using Hamilton Demosaic with rawpy fallback."""
     filename = os.path.basename(image_path)
     try:
@@ -147,10 +175,7 @@ def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
             rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
             u8_res = taichi_aot.cast(rgb_f32, np.uint8)
             del rgb_f32
-            try:
-                taichi_aot.get_engine().buffer_pool.clear()
-            except Exception:
-                pass
+            _cleanup_taichi_memory()
             return u8_res
         else:
             raise RuntimeError("Hamilton demosaic half res returned None")
@@ -158,12 +183,7 @@ def load_raw_as_8bit_rgb_half_res(image_path: str) -> np.ndarray:
         print(
             f"[Fallback] Taichi Hamilton half res demosaic failed ({e_ta}), falling back to rawpy half-res."
         )
-        try:
-            from taichi_vision import taichi_aot
-
-            taichi_aot.engine.buffer_pool.clear()
-        except Exception:
-            pass
+        _cleanup_taichi_memory()
         try:
             with rawpy.imread(image_path) as raw:
                 gamma_setting = (2.222, 4.5)

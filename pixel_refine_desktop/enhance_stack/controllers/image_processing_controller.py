@@ -283,19 +283,15 @@ class ImageProcessingController(QObject):
             running_median,
         )
         from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
-            running_similarity as running_mf_similarity,
             running_mf_denoiser,
-        )
-        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
-            running_fusionnet,
         )
 
         algorithm_map = {
             "Average": running_mf_denoiser,
             "Median": running_median,
-            "Similarity": running_mf_similarity,
-            "FusionNet": running_fusionnet,
-            "Spatial AI": running_fusionnet,
+            "Similarity": running_mf_denoiser,
+            "FusionNet": running_mf_denoiser,
+            "Spatial AI": running_mf_denoiser,
         }
 
         algorithm_func = algorithm_map.get(algorithm_name)

@@ -36,7 +36,7 @@ from pixel_refine_desktop.enhance_stack.core.logic.ImagePreviewHandler import (
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.AKAZE import (
     running_akaze,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow import (
     running_farneback_flow,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
@@ -47,11 +47,6 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
     running_mf_denoiser,
-    running_similarity as running_mf_similarity,
-)
-
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
-    running_fusionnet,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
@@ -545,16 +540,21 @@ class BatchPageV2Layout(QWidget):
                 running_median(self, single_process=True)
                 denoising_executed = True
             elif denoising_choice == "Similarity":
-                running_mf_similarity(
+                running_mf_denoiser(
                     self,
                     single_process=True,
+                    merging_mode="Similarity",
+                    output_suffix="similarity",
                     alignment_backend=alignment_choice,
                 )
                 denoising_executed = True
             elif denoising_choice in ("Spatial AI", "FusionNet"):
-                running_fusionnet(
+                running_mf_denoiser(
                     self,
                     single_process=True,
+                    merging_mode="FusionNet",
+                    output_suffix="fusionet",
+                    alignment_backend=alignment_choice,
                 )
                 denoising_executed = True
             elif denoising_choice == "No Denoising":

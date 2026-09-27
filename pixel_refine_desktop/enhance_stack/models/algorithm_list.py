@@ -11,6 +11,10 @@ def init_algorithm_data():
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
         get_algorithm_options as get_mfdenoiser_algorithm_options,
     )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.HDR.card_content import (
+        CARD_CONTENT as HDR_CARD_CONTENT,
+        SPDE_MR_NAME,
+    )
 
     ALGORITHM_DATA.update(
         {
@@ -28,6 +32,17 @@ def init_algorithm_data():
                     (
                         "splattingSR",
                         "Confidence-guided subpixel splatting super-resolution",
+                    ),
+                ],
+            },
+            "hdr": {
+                "name": language_config.PARAMETER_BATCH_HDR,
+                "options": [
+                    (HDR_CARD_CONTENT["name"], HDR_CARD_CONTENT["description"]),
+                    (
+                        SPDE_MR_NAME,
+                        "Patch-based fusion using 8x8 blocks, stride 4, and "
+                        "structure-aware single-frame priority.",
                     ),
                 ],
             },

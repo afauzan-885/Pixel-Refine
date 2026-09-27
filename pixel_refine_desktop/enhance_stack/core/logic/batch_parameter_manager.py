@@ -98,11 +98,13 @@ def update_batch_settings(store: Any, batch_id: int, settings: Dict[str, Any]) -
         f"{str_id}.{config.KEY_ALIGNMENT_ALGO}": settings.get(config.KEY_ALIGNMENT_ALGO),
         f"{str_id}.{config.KEY_SUPER_RESOLUTION_ALGO}": settings.get(config.KEY_SUPER_RESOLUTION_ALGO),
         f"{str_id}.{config.KEY_DENOISING_ALGO}": settings.get(config.KEY_DENOISING_ALGO),
+        f"{str_id}.{config.KEY_HDR_ALGO}": settings.get(config.KEY_HDR_ALGO),
         f"{str_id}.{config.KEY_CHECKBOX_ALIGN}": settings.get(config.KEY_CHECKBOX_ALIGN),
         f"{str_id}.{config.KEY_CHECKBOX_SUPER_RES}": settings.get(
             config.KEY_CHECKBOX_SUPER_RES
         ),
         f"{str_id}.{config.KEY_CHECKBOX_DENOISING}": settings.get(config.KEY_CHECKBOX_DENOISING),
+        f"{str_id}.{config.KEY_CHECKBOX_HDR}": settings.get(config.KEY_CHECKBOX_HDR),
     }
 
     # Filter out None values to avoid overwriting with nulls if some keys are missing
@@ -147,6 +149,11 @@ def get_batch_algorithm_summary(batch_id: int) -> str:
         if algo not in ["None", "No Denoising"]:
             active_algos.append(algo)
 
+    if batch_params.get(config.KEY_CHECKBOX_HDR, False):
+        algo = batch_params.get(config.KEY_HDR_ALGO, "None")
+        if algo not in ["None", "No HDR"]:
+            active_algos.append(algo)
+
     return (
         ", ".join(active_algos)
         if active_algos
@@ -154,7 +161,7 @@ def get_batch_algorithm_summary(batch_id: int) -> str:
     )
 
 
-def get_batch_algorithm_settings(batch_id: int) -> Dict[str, str]:
+def get_batch_algorithm_settings(batch_id: int) -> Dict[str, Any]:
     """
     Get algorithm settings for a batch in the format expected by AlgorithmProcessorThread.
 
@@ -162,7 +169,7 @@ def get_batch_algorithm_settings(batch_id: int) -> Dict[str, str]:
         batch_id: Batch ID
 
     Returns:
-        Dictionary with keys: alignment, super_resolution, denoising
+        Dictionary with algorithm selections and their enabled state
     """
     all_params = load_json_state()
     batch_params = all_params.get(str(batch_id), {})
@@ -171,6 +178,19 @@ def get_batch_algorithm_settings(batch_id: int) -> Dict[str, str]:
         config.KEY_ALIGNMENT: "No Alignment",
         config.KEY_SUPER_RESOLUTION: "No Super Resolution",
         config.KEY_DENOISING: "No Denoising",
+        config.KEY_HDR: "No HDR",
+        config.KEY_CHECKBOX_ALIGN: bool(
+            batch_params.get(config.KEY_CHECKBOX_ALIGN, False)
+        ),
+        config.KEY_CHECKBOX_SUPER_RES: bool(
+            batch_params.get(config.KEY_CHECKBOX_SUPER_RES, False)
+        ),
+        config.KEY_CHECKBOX_DENOISING: bool(
+            batch_params.get(config.KEY_CHECKBOX_DENOISING, False)
+        ),
+        config.KEY_CHECKBOX_HDR: bool(
+            batch_params.get(config.KEY_CHECKBOX_HDR, False)
+        ),
     }
 
     # Check alignment
@@ -190,6 +210,11 @@ def get_batch_algorithm_settings(batch_id: int) -> Dict[str, str]:
         algo = batch_params.get(config.KEY_DENOISING_ALGO, "No Denoising")
         if algo and algo not in ["None"]:
             settings[config.KEY_DENOISING] = algo
+
+    if batch_params.get(config.KEY_CHECKBOX_HDR, False):
+        algo = batch_params.get(config.KEY_HDR_ALGO, "No HDR")
+        if algo and algo not in ["None"]:
+            settings[config.KEY_HDR] = algo
 
     return settings
 
@@ -229,6 +254,7 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
         "Light Glue": "light_glue_params",
         "Farneback": "farneback_params",
         "Lucas Kanade": "lucas_kanade_params",
+        "Block Matching": "block_matching_params",
         "Block Matching GPU": "block_matching_gpu_params",
         "Block Flow": "block_flow_params",
         "RAFT": "raft_params",
@@ -245,6 +271,11 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
             **dict(params),
             "gpu_params": dict(gpu_params),
         }
+    elif alignment_algo in ("Block Matching", "Block Matching GPU"):
+        if not params:
+            params = batch_entry.get("block_matching_params") or batch_entry.get("block_matching_gpu_params", {})
+            if not isinstance(params, dict):
+                params = {}
 
     reference_path = str(batch_entry.get("reference_image_path", "") or "")
     return {

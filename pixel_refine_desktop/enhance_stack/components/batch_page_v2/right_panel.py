@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QMenu,
 )
-from PySide6.QtCore import Signal, Qt, QTimer
+from PySide6.QtCore import Signal, Qt, QTimer, QEvent
 from resources.animations.animation_manager import (
     StackedWidgetAnimator,
 )
@@ -26,6 +26,7 @@ from resources.GenericUILibrary import (
     Button,
     FormGroup,
     FeatureCard,
+    FeatureCardGroup,
 )
 from resources.GenericUILibrary.mixins import SyncMixin
 
@@ -33,9 +34,19 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_d
     BatchProcessDialog,
 )
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_logic import AlgorithmLogic
+from pixel_refine_desktop.enhance_stack.core.logic.card_process_command import build_start_command
 from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 from pixel_refine_desktop.enhance_stack.core.logic.batch_selection_handler import (
     BatchSelectionHandler,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.card_content_sr import (
+    get_card_content as get_sr_card_content,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.card_content import (
+    get_card_content as get_denoising_card_content,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.HDR.card_content import (
+    get_card_content as get_hdr_card_content,
 )
 from resources.animations.animation_manager import (
     HeightAnimator,
@@ -56,6 +67,7 @@ class RightPanel(QWidget, SyncMixin):
     batch_selected = Signal(int)  # Emits batch_id
     batch_selection_cleared = Signal()  # Emits when no batch selected
     algorithm_settings_changed = Signal(dict)  # Emits new settings
+    process_command_changed = Signal(object)  # Card-supplied command, or None
 
     def __init__(self, controller=None, left_panel=None, store=None):
         super().__init__()
@@ -69,6 +81,10 @@ class RightPanel(QWidget, SyncMixin):
         self._is_syncing = False  # Flag to avoid recursion during sync
         self._last_emitted_settings = None
 
+        self._layout_balance_timer = QTimer(self)
+        self._layout_balance_timer.setSingleShot(True)
+        self._layout_balance_timer.timeout.connect(self._balance_splitter_sizes)
+
         # Debounce timer for store sync (1 second delay to avoid rapid file writes)
         self._sync_store_timer = QTimer(self)
         self._sync_store_timer.setSingleShot(True)
@@ -81,6 +97,16 @@ class RightPanel(QWidget, SyncMixin):
         self._selection_timer.timeout.connect(self._do_handle_selection)
         self._pending_selection = None
         self._move_mode = False  # Track if we are in reorder 'Keyboard Move' mode
+
+        # Coalesce bursty add/remove signals onto one event-loop tick: each run
+        # of ``_update_process_all_btn_visibility`` costs a full LEFT JOIN over
+        # every batch and image row, and a large import emits many signals.
+        self._process_all_btn_timer = QTimer(self)
+        self._process_all_btn_timer.setSingleShot(True)
+        self._process_all_btn_timer.setInterval(0)
+        self._process_all_btn_timer.timeout.connect(
+            self._update_process_all_btn_visibility
+        )
 
         # Real-time state binding
         if store:
@@ -96,10 +122,14 @@ class RightPanel(QWidget, SyncMixin):
         QTimer.singleShot(0, self._load_batches)
 
         if self.controller:
-            self.controller.batch_created.connect(self._update_process_all_btn_visibility)
-            self.controller.batch_deleted.connect(self._update_process_all_btn_visibility)
-            self.controller.images_added.connect(lambda bid, count: self._update_process_all_btn_visibility())
-            self.controller.images_removed.connect(lambda bid, count: self._update_process_all_btn_visibility())
+            self.controller.batch_created.connect(self._schedule_process_all_btn_update)
+            self.controller.batch_deleted.connect(self._schedule_process_all_btn_update)
+            self.controller.images_added.connect(
+                lambda bid, count: self._schedule_process_all_btn_update()
+            )
+            self.controller.images_removed.connect(
+                lambda bid, count: self._schedule_process_all_btn_update()
+            )
 
         self._update_process_all_btn_visibility()
 
@@ -116,7 +146,7 @@ class RightPanel(QWidget, SyncMixin):
             str_id = str(self.current_batch_id)
             if key is None or key == str_id:
                 # Refresh entire UI state from store
-                self.algorithm_settings_changed.emit(self.get_current_settings())
+                self._on_settings_changed(save_to_store=False)
 
     def _load_batch_settings(self, batch_id):
         """
@@ -162,10 +192,12 @@ class RightPanel(QWidget, SyncMixin):
             config.KEY_ALIGNMENT_ALGO: self.align_form.get_value(),
             config.KEY_SUPER_RESOLUTION_ALGO: self.sr_card.get_value(),
             config.KEY_DENOISING_ALGO: self.denoise_card.get_value(),
+            config.KEY_HDR_ALGO: self.hdr_card.get_value(),
             config.KEY_CHECKBOX_ALIGN: self.align_form.get_value()
             not in ["None", "No Alignment"],
             config.KEY_CHECKBOX_SUPER_RES: self.sr_card.is_checked,
             config.KEY_CHECKBOX_DENOISING: self.denoise_card.is_checked,
+            config.KEY_CHECKBOX_HDR: self.hdr_card.is_checked,
         }
 
         # Use logic module to update store
@@ -240,7 +272,7 @@ class RightPanel(QWidget, SyncMixin):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.scroll_area.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
 
         self.scroll_content = QWidget()
@@ -268,46 +300,66 @@ class RightPanel(QWidget, SyncMixin):
 
         # Super Resolution Feature Card
         sr_names = self.logic.get_algorithm_names("super_resolution")
+        sr_content = get_sr_card_content(language_config)
         self.sr_card = FeatureCard(
-            language_config.PARAMETER_BATCH_SUPER_RESOLUTION.upper(),
-            language_config.DESC_SUPER_RESOLUTION_CARD,
+            sr_content["name"],
+            sr_content["description"],
             sr_names,
             "No Super Resolution",
             self,
         )
         self.sr_card.value_changed.connect(self._on_settings_changed)
-        self.scroll_content_layout.addWidget(self.sr_card)
         self.add_binding(
             "super_resolution_algo", self.sr_card, fallback="No Super Resolution"
         )
 
-        # Denoising Feature Card
+        # HDR Feature Card
+        hdr_names = self.logic.get_algorithm_names("hdr")
+        hdr_content = get_hdr_card_content(language_config)
+        self.hdr_card = FeatureCard(
+            hdr_content["name"],
+            hdr_content["description"],
+            hdr_names,
+            "No HDR",
+            self,
+        )
+        self.hdr_card.value_changed.connect(self._on_settings_changed)
+        self.add_binding("hdr_algo", self.hdr_card, fallback="No HDR")
+
+        # Multi-frame denoising card
         denoise_names = self.logic.get_algorithm_names("denoising")
+        denoise_content = get_denoising_card_content(language_config)
         self.denoise_card = FeatureCard(
-            language_config.PARAMETER_BATCH_DENOISING.upper(),
-            language_config.DESC_DENOISING_CARD,
+            denoise_content["name"],
+            denoise_content["description"],
             denoise_names,
             "No Denoising",
             self,
         )
         self.denoise_card.value_changed.connect(self._on_settings_changed)
-        self.scroll_content_layout.addWidget(self.denoise_card)
         self.add_binding("denoising_algo", self.denoise_card, fallback="No Denoising")
 
-        self.sr_card.combo.setStyleSheet(self.sr_card.combo.styleSheet() + """
-            QComboBox {
-                padding: 3px 6px;
-                font-size: 9pt;
-            }
-        """)
-        self.denoise_card.combo.setStyleSheet(self.denoise_card.combo.styleSheet() + """
+        self.card_group = FeatureCardGroup(columns=2, spacing=10)
+        for card in (self.sr_card, self.hdr_card, self.denoise_card):
+            self.card_group.add_card(card)
+            card.checked_changed.connect(
+                lambda checked, selected=card: self._on_card_checked(selected, checked)
+            )
+        self.card_group.installEventFilter(self)
+        self.scroll_content.installEventFilter(self)
+        self.splitter.installEventFilter(self)
+        self.scroll_content_layout.addWidget(
+            self.card_group, 0, Qt.AlignmentFlag.AlignTop
+        )
+
+        for card in (self.sr_card, self.hdr_card, self.denoise_card):
+            card.combo.setStyleSheet(card.combo.styleSheet() + """
             QComboBox {
                 padding: 3px 6px;
                 font-size: 9pt;
             }
         """)
 
-        self.scroll_content_layout.addStretch()
         self.scroll_area.setWidget(self.scroll_content)
 
         # Add Scroll Area to Main Algo Layout
@@ -323,19 +375,17 @@ class RightPanel(QWidget, SyncMixin):
         # Set Collapsible false to keep min sizes
         self.splitter.setCollapsible(0, False)
         self.splitter.setCollapsible(1, False)
-        self.splitter.setStretchFactor(0, 70)
-        self.splitter.setStretchFactor(1, 30)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
         # Disable manual splitter dragging between panels
         handle = self.splitter.handle(1)
         if handle:
             handle.setEnabled(False)
             handle.setCursor(Qt.CursorShape.ArrowCursor)
 
-        # Re-balance splitter sizes whenever the list of batches changes
-        # or the panel is resized. The algorithm cards (sr_card +
-        # denoise_card) get a guaranteed minimum height; the batch
-        # list takes whatever space remains so the cards are pushed
-        # down as far as possible without ever being clipped.
+        # Keep the algorithm panel at its content height so the batch list
+        # receives the remaining space and the cards sit just above the
+        # Process All button. The algorithm area scrolls when space is short.
         list_widget = getattr(self.list_group, "_list_widget", None)
         if list_widget is not None:
             list_model = list_widget.model()
@@ -369,6 +419,11 @@ class RightPanel(QWidget, SyncMixin):
         """Handle resize to adjust splitter ratio based on screen state context."""
         super().resizeEvent(event)
         self.refresh_responsive_layout()
+        self._layout_balance_timer.start(0)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._layout_balance_timer.start(0)
 
     def refresh_responsive_layout(self):
         """
@@ -396,39 +451,30 @@ class RightPanel(QWidget, SyncMixin):
                 base_style + f" QPushButton {{ padding: 2px 4px; font-size: {font_size:.1f}pt; }}"
             )
 
-    def _update_cards_mutually_exclusive_state(self):
-        """Enforce mutual exclusivity between Super Resolution and Denoising using the disable state."""
-        self.sr_card.blockSignals(True)
-        self.denoise_card.blockSignals(True)
-        try:
-            if self.denoise_card.is_checked:
-                self.sr_card.setChecked(False)
-                self.sr_card.setEnabled(False)
-            else:
-                self.sr_card.setEnabled(True)
-
-            if self.sr_card.is_checked:
-                self.denoise_card.setChecked(False)
-                self.denoise_card.setEnabled(False)
-            else:
-                self.denoise_card.setEnabled(True)
-        finally:
-            self.sr_card.blockSignals(False)
-            self.denoise_card.blockSignals(False)
-
     def _on_settings_changed(self, save_to_store=True):
         """Emit current settings and optionally save to persistence."""
-        self._update_cards_mutually_exclusive_state()
+        checked_cards = [
+            card for card in (self.sr_card, self.hdr_card, self.denoise_card)
+            if card.is_checked
+        ]
+        if len(checked_cards) > 1:
+            # Repair older batch settings that enabled multiple operations.
+            self._on_card_checked(checked_cards[-1], True)
+            save_to_store = True
+        for card in (self.sr_card, self.hdr_card, self.denoise_card):
+            card.combo.setEnabled(card.is_checked)
         self._balance_splitter_sizes()
 
         settings = {
             config.KEY_ALIGNMENT: self.align_form.get_value() or "",
             config.KEY_SUPER_RESOLUTION: self.sr_card.get_value() or "",
             config.KEY_DENOISING: self.denoise_card.get_value() or "",
+            config.KEY_HDR: self.hdr_card.get_value() or "",
             config.KEY_CHECKBOX_ALIGN: self.align_form.get_value()
             not in ("", "None", "No Alignment"),
             config.KEY_CHECKBOX_SUPER_RES: bool(self.sr_card.is_checked),
             config.KEY_CHECKBOX_DENOISING: bool(self.denoise_card.is_checked),
+            config.KEY_CHECKBOX_HDR: bool(self.hdr_card.is_checked),
         }
 
         if settings == self._last_emitted_settings:
@@ -436,13 +482,12 @@ class RightPanel(QWidget, SyncMixin):
 
         self._last_emitted_settings = settings.copy()
 
+        # Publish a complete in-memory snapshot before notifying consumers.
+        self.logic.set_settings(settings)
+
         # 1. Emit realtime signal for UI adaptation
         self.algorithm_settings_changed.emit(settings)
-
-        # 2. Update local logic
-        # settings is Dict[str, str], which is compatible with Dict[str, Optional[str]]
-        self.logic.set_settings(settings)  # type: ignore
-        # Note: logic.set_settings returns bool, but we ignore it here
+        self.process_command_changed.emit(build_start_command(settings))
 
         # 3. Save to Store if triggered by user interaction (debounced 1s)
         if save_to_store and self.current_batch_id is not None:
@@ -589,7 +634,7 @@ class RightPanel(QWidget, SyncMixin):
             # Emit signal clearing selection if needed (handled by list group clearing usually)
 
     def _calculate_algo_target_h(self):
-        """Calculate target height for algorithm panel based on content ratio."""
+        """Return the natural algorithm content height, capped by list space."""
         handle_w = (
             max(0, self.splitter.handleWidth() or 0)
             if hasattr(self, "splitter") and self.splitter
@@ -602,21 +647,67 @@ class RightPanel(QWidget, SyncMixin):
         )
         available = max(0, total_h - handle_w)
 
-        content_hint = (
-            self.scroll_content.sizeHint().height()
-            if hasattr(self, "scroll_content") and self.scroll_content
+        desired_algo_h = self._algorithm_content_height()
+        min_top_h = min(80, available)
+        max_algo_h = max(0, available - min_top_h)
+        return min(max_algo_h, desired_algo_h)
+
+    def _algorithm_content_height(self):
+        """Measure the card group at the current viewport width plus 5px padding."""
+        if not hasattr(self, "scroll_content") or not hasattr(self, "card_group"):
+            return 0
+
+        content_hint = self.scroll_content.sizeHint().height()
+        viewport_width = (
+            self.scroll_area.viewport().width()
+            if hasattr(self, "scroll_area") and self.scroll_area
             else 0
         )
-        is_any_expanded = (
-            getattr(self.sr_card, "is_checked", False)
-            or getattr(self.denoise_card, "is_checked", False)
-        )
-        min_algo_h = max(215, content_hint + 5) if is_any_expanded else max(165, content_hint + 5)
+        if viewport_width <= 0 and hasattr(self, "scroll_area"):
+            viewport_width = self.scroll_area.width()
 
-        return max(min_algo_h, int(available * 0.30))
+        if viewport_width > 0:
+            group_height = max(
+                self.card_group.heightForWidth(viewport_width),
+                self.card_group.layout().heightForWidth(viewport_width),
+            )
+            margins = self.scroll_content_layout.contentsMargins()
+            measured_height = (
+                margins.top() + max(0, group_height) + margins.bottom()
+            )
+            if measured_height > 0:
+                content_hint = measured_height
+
+        return max(0, content_hint)
+
+    def _on_card_checked(self, selected, checked):
+        """Switch the active operation while keeping other card headers clickable."""
+        if checked:
+            for card in (self.sr_card, self.hdr_card, self.denoise_card):
+                if card is not selected and card.is_checked:
+                    card.blockSignals(True)
+                    try:
+                        card.setChecked(False, animate=False)
+                    finally:
+                        card.blockSignals(False)
+        for card in (self.sr_card, self.hdr_card, self.denoise_card):
+            card.combo.setEnabled(card.is_checked)
+        self._layout_balance_timer.start(0)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.LayoutRequest or (
+            watched is getattr(self, "splitter", None)
+            and event.type() == QEvent.Type.Resize
+        ):
+            if not getattr(self, "_balancing_layout", False):
+                self._layout_balance_timer.start(0)
+        return super().eventFilter(watched, event)
 
     def _balance_splitter_sizes(self):
         """Establish proportional ratio layout between batch container and algorithm panel."""
+        if getattr(self, "_balancing_layout", False):
+            return
+        self._balancing_layout = True
         try:
             if not hasattr(self, "splitter") or self.splitter is None:
                 return
@@ -651,33 +742,41 @@ class RightPanel(QWidget, SyncMixin):
             handle_w = max(0, self.splitter.handleWidth() or 0)
             available = max(0, total_h - handle_w)
 
-            # Maintain consistent ~70% : 30% percentage ratio between windowed and fullscreen
-            # with safe minimum height so cards are never clipped in windowed mode
-            content_hint = (
-                self.scroll_content.sizeHint().height()
-                if hasattr(self, "scroll_content") and self.scroll_content
-                else 0
-            )
-            is_any_expanded = (
-                getattr(self.sr_card, "is_checked", False)
-                or getattr(self.denoise_card, "is_checked", False)
-            )
-            min_algo_h = max(215, content_hint + 5) if is_any_expanded else max(165, content_hint + 5)
+            # The batch list receives every pixel beyond the natural card
+            # height. Keep a small top minimum, then let QScrollArea handle
+            # the algorithm content when the window is too short.
+            self.splitter.setStretchFactor(0, 1)
+            self.splitter.setStretchFactor(1, 0)
+            desired_algo_h = self._algorithm_content_height()
+            min_top_h = min(80, available)
+            max_algo_h = max(0, available - min_top_h)
+            min_algo_h = min(desired_algo_h, max_algo_h)
 
             try:
-                self.algo_container.setMinimumHeight(min_algo_h)
-                self.algo_container.setMaximumHeight(16777215)
+                # Do not let the card content's natural height become the
+                # panel's hard minimum; that would raise the main window's
+                # minimum size and prevent QScrollArea from scrolling.
+                scroll_min_h = self.scroll_area.minimumSizeHint().height()
+                self.algo_container.setMinimumHeight(
+                    min(max(0, scroll_min_h), max_algo_h)
+                )
+                self.algo_container.setMaximumHeight(min_algo_h)
             except Exception:
                 pass
 
-            bottom_h = max(min_algo_h, int(available * 0.30))
-            min_top_h = 80
+            bottom_h = min_algo_h
             top_h = max(min_top_h, available - bottom_h)
 
             self.splitter.setSizes([top_h, bottom_h])
         except Exception:
             # Layout rebalancing must never raise into the event loop.
             pass
+        finally:
+            self._balancing_layout = False
+
+    def _schedule_process_all_btn_update(self, *_args):
+        """Request a coalesced refresh of the Process All button state."""
+        self._process_all_btn_timer.start()
 
     def _update_process_all_btn_visibility(self):
         """Show or hide Process All Batch button depending on if any batch contains images."""
@@ -705,7 +804,10 @@ class RightPanel(QWidget, SyncMixin):
         """Update internal collapsed state and animate height."""
         self._is_collapsed = collapsed
         if collapsed:
+            self._layout_balance_timer.stop()
             self.height_animator.animate_height(self.algo_container, 0)
+        else:
+            self._layout_balance_timer.start(300)
 
     def _do_handle_selection(self):
         """Delegate handling to logical selection_handler."""
@@ -721,6 +823,11 @@ class RightPanel(QWidget, SyncMixin):
         """Open BatchProcessDialog for batch processing."""
         if not self.controller:
             return
+
+        # Flush the selected batch's card state before the dialog snapshots
+        # per-batch algorithm configuration for Process All Batch.
+        self._sync_store_timer.stop()
+        self._save_batch_settings()
 
         # # Import here to avoid circular imports
         # from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (
@@ -802,11 +909,17 @@ class RightPanel(QWidget, SyncMixin):
 
         # Feature Cards
         if hasattr(self, "sr_card"):
-            self.sr_card.title_lbl.setText(language_config.PARAMETER_BATCH_SUPER_RESOLUTION.upper())
-            self.sr_card.desc_lbl.setText(language_config.DESC_SUPER_RESOLUTION_CARD)
+            sr_content = get_sr_card_content(language_config)
+            self.sr_card.title_lbl.setText(sr_content["name"])
+            self.sr_card.desc_lbl.setText(sr_content["description"])
         if hasattr(self, "denoise_card"):
-            self.denoise_card.title_lbl.setText(language_config.PARAMETER_BATCH_DENOISING.upper())
-            self.denoise_card.desc_lbl.setText(language_config.DESC_DENOISING_CARD)
+            denoise_content = get_denoising_card_content(language_config)
+            self.denoise_card.title_lbl.setText(denoise_content["name"])
+            self.denoise_card.desc_lbl.setText(denoise_content["description"])
+        if hasattr(self, "hdr_card"):
+            hdr_content = get_hdr_card_content(language_config)
+            self.hdr_card.title_lbl.setText(hdr_content["name"])
+            self.hdr_card.desc_lbl.setText(hdr_content["description"])
 
         self.list_group.set_move_mode(self._move_mode)
         if not self._move_mode:
@@ -822,10 +935,13 @@ class RightPanel(QWidget, SyncMixin):
         if hasattr(self, "scroll_area"):
             self.scroll_area.setStyleSheet(SCROLL_AREA)
         # 2. Update Feature Cards
-        if hasattr(self, "sr_card") and hasattr(self.sr_card, "update_theme"):
-            self.sr_card.update_theme()
-        if hasattr(self, "denoise_card") and hasattr(self.denoise_card, "update_theme"):
-            self.denoise_card.update_theme()
+        for card in (
+            getattr(self, "sr_card", None),
+            getattr(self, "hdr_card", None),
+            getattr(self, "denoise_card", None),
+        ):
+            if card is not None and hasattr(card, "update_theme"):
+                card.update_theme()
         # 3. Update buttons
         from resources.GenericUILibrary.theme import get_theme, create_button_style
         theme = get_theme()

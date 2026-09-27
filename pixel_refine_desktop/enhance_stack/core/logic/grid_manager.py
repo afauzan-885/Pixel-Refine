@@ -39,8 +39,16 @@ class GridManager:
         """
         self.panel = parent_panel
         self._populate_queue = []
-        self._populate_timer = None
+        self._total_populating = 0
         self._real_paths_for_sync = []
+
+        # Incremental population timer. Created once and reused: the previous
+        # implementation replaced this QTimer on every populate call, leaving
+        # the old timer parented to the panel with its ``timeout`` still
+        # connected, so one dead timer accumulated per batch switch.
+        self.populate_timer = QTimer(self.panel)
+        self.populate_timer.timeout.connect(self._process_incremental_population)
+        ProcessManager.instance().register_timer("display_populate", self.populate_timer)
 
         # Set card_id yang saat ini memiliki gambar di RAM (windowed tracking)
         self._loaded_card_ids: set = set()
@@ -97,28 +105,25 @@ class GridManager:
         self._populate_queue = list(visual_images)
         self._total_populating = len(visual_images)
 
-        if self._populate_timer and self._populate_timer.isActive():
-            self._populate_timer.stop()
-
-        self._populate_timer = QTimer(self.panel)
-        self._populate_timer.timeout.connect(self._process_incremental_population)
-
-        ProcessManager.instance().register_timer(
-            "display_populate", self._populate_timer
-        )
+        if self.populate_timer.isActive():
+            self.populate_timer.stop()
 
         # Immediate first chunk for instant UI switch (up to 50 cards directly)
-        self._process_incremental_population(chunk_size=50)
+        from pixel_refine_desktop.app_core import perf_probe
+
+        with perf_probe.perf_mark("populate_first_chunk", total=len(visual_images)) as _mark:
+            self._process_incremental_population(chunk_size=50)
+            _mark.add(remaining=len(self._populate_queue))
 
         # If there are remaining cards beyond the initial chunk, stream them at 16ms (60fps)
         if self._populate_queue:
-            self._populate_timer.start(16)
+            self.populate_timer.start(16)
 
     def _process_incremental_population(self, chunk_size=25):
         """Tambah gambar ke grid dalam chunk untuk menghindari UI freeze."""
         if not self._populate_queue:
-            if self._populate_timer and self._populate_timer.isActive():
-                self._populate_timer.stop()
+            if self.populate_timer and self.populate_timer.isActive():
+                self.populate_timer.stop()
             self.panel.grid_container.set_batch_update(False)
 
             # Trigger window update pertama setelah semua card ada di grid
@@ -164,11 +169,11 @@ class GridManager:
                     )
                 )
 
-                self.panel.all_cards[str(img.id)] = card
+                self.panel.add_card(img.id, card, img.path)
                 self.panel.grid_container.add_item(card)
                 self.panel.logic.register_grid_item(str(img.id), {"path": img.path})
             else:
-                self.panel.all_cards[str(img.id)] = card
+                self.panel.add_card(img.id, card, img.path)
                 self.panel.grid_container.add_item(card)
                 self.panel.deletion_manager.queue_zombie_card(str(img.id), card)
 
@@ -179,8 +184,8 @@ class GridManager:
             self._update_window()
 
         if not self._populate_queue:
-            if self._populate_timer and self._populate_timer.isActive():
-                self._populate_timer.stop()
+            if self.populate_timer and self.populate_timer.isActive():
+                self.populate_timer.stop()
             self.panel.grid_container.set_batch_update(False)
             self._update_window()
             if self._real_paths_for_sync:
@@ -427,7 +432,9 @@ class GridManager:
     # =========================================================================
 
     def stop_staged_timer(self):
-        """Stop semua timer (staged, scroll debounce, dan recovery)."""
+        """Stop semua timer (populate, staged, scroll debounce, dan recovery)."""
+        self.populate_timer.stop()
+        self._populate_queue = []
         self.staged_load_timer.stop()
         self.scroll_debounce_timer.stop()
         self.recovery_timer.stop()

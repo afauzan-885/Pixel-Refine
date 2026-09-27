@@ -42,6 +42,27 @@ class BatchProcessingThread(QThread):
         """Request the thread to stop smoothly."""
         self._is_running = False
 
+    def _stack_snapshot(self):
+        """Map every stack-folder file to its mtime.
+
+        Snapshotting paths *and* timestamps makes the post-run diff robust: a
+        file that another writer rewrote in place shows up as changed, and the
+        selection below can pick the newest artifact instead of an arbitrary
+        member of a set.
+        """
+        try:
+            paths = self.batch_page_layout.get_files_in_stack_folder()
+        except Exception:
+            return {}
+
+        snapshot = {}
+        for path in paths:
+            try:
+                snapshot[path] = os.path.getmtime(path)
+            except OSError:
+                continue
+        return snapshot
+
     def run(self):
         failed_batches_summary = []
         total_batches_to_process = len(self.panels_to_process)
@@ -97,7 +118,7 @@ class BatchProcessingThread(QThread):
                 self.msleep(200)  # 200ms for UI to update
 
                 # CRITICAL: Snapshot files BEFORE algorithm execution to detect new output
-                files_before = set(self.batch_page_layout.get_files_in_stack_folder())
+                files_before = self._stack_snapshot()
 
                 # CRITICAL: Execute algorithm in MAIN THREAD to avoid nested worker thread issues
                 # Many algorithms (Average, Median, AKAZE, etc.) spawn their own ThreadWorker
@@ -124,11 +145,23 @@ class BatchProcessingThread(QThread):
                     )
 
                 # Snapshot files AFTER algorithm execution to detect new output
-                files_after = set(self.batch_page_layout.get_files_in_stack_folder())
-                new_files = list(files_after - files_before)
+                files_after = self._stack_snapshot()
+                new_files = [
+                    path
+                    for path, mtime in files_after.items()
+                    if path not in files_before or mtime > files_before[path]
+                ]
 
                 if new_files:
-                    output_file = new_files[0]
+                    if len(new_files) > 1:
+                        # Never guess silently: report and take the newest.
+                        print(
+                            f"[BatchProcessor] Batch {batch_id} produced "
+                            f"{len(new_files)} new stack files: {new_files}"
+                        )
+                    output_file = max(
+                        new_files, key=lambda p: files_after.get(p, 0.0)
+                    )
                     # Use layout helper to move file to target
                     move_success = self.batch_page_layout._move_single_batch_result(
                         output_file, self.target_folder

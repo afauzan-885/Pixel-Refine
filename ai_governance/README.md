@@ -24,7 +24,19 @@ Governance ini adalah sumber aturan portabel untuk Codex, DeepSeek, dan agent la
 - LIBRARY_KOTLIN_FIXES.md: laporan bug fixes dan test coverage LibraryKotlin.
 - LIBRARY_KOTLIN_FEATURES.md: laporan penambahan fitur LibraryKotlin (50+ komponen baru).
 - TAICHI_VISION_KOTLIN_MOBILE_INTEGRATION.md: Rencana detail arsitektur & roadmap integrasi Taichi Vision Native.
+- PIPELINE_MIGRATION_AND_SR_HANDOFF.md: Handoff lintas-sesi untuk migrasi resident pipeline (`pipeline_process/`), generic streaming runtime/prefetch denoising dan Splat SR, kontrak ownership `BufferSession`, splat SR reliability, routing parameter FusionNet, serta alur AutoEnhance-analysis-ke-grayscale FusionNet/SpatialFusion — termasuk batas bukti, izin, dan provenance artefak TCM.
+- BUFFER_SESSION_RUNTIME_HANDOFF_20260927.md: Rename native tanpa alias, migrasi ownership RAW/RGB, phase release, prefetch bounded-before-decode, penghentian worker sebelum cleanup, bukti CPU/CUDA/Vulkan/OpenGL, fault injection, serta batas klaim peak memori/performa.
+- SPLAT_SR_TILED_RECONSTRUCTION_HANDOFF_20260927.md: Rekonstruksi RGB tile HR 1024, overlap 25%, Hann, graph fused global-origin, backing disk tertransfer, parity per backend dan batas benchmark RAM/latensi.
+- SPLAT_SR_RAM_ACCUMULATOR_HANDOFF_20260927.md: Jalur aktif memakai satu akumulator RAM, normalisasi patch in-place, transfer output tanpa salinan HR, guard RAM/prefetch, perbandingan disk, dan batas refinement/readback.
+- FEATURE_MATCHING_RESIDENT_READBACK_HANDOFF_20260924.md: Bukti OFB resident canonicalization/compaction, readback RGB/RAW Vulkan, parity correspondence, artifact target, dan sisa gate AKAZE/peak memory.
+- OPTICAL_FLOW_RESIDENT_READBACK_HANDOFF_20260924.md: Bukti reuse destination flow, non-owning view, lifecycle fence, dan smoke RGB/RAW Vulkan untuk optical-flow resident.
+- BATCH_PERF_RAM_HANDOFF_20260924.md: Handoff optimasi app layer (bukan `core/algorithm`): kecepatan switch batch, perbaikan freeze 43 s saat membuka proyek, batas cache RAM, kebijakan worker idle adaptif, probe `perf_probe`, dan catatan test flaky.
+- WEIGHTNET_V2_RGB_OPTIMIZATION_HANDOFF_20260927.md: Kandidat V2 RGB FP32 pooling separable, perbandingan V3, serta reference reuse/graph compact dengan parity, lifecycle, latency dan process RAM/VRAM MX150. Cache lebih cepat tetapi dedicated VRAM lebih tinggi; belum dipromosikan.
+- WEIGHTNET_V3_REFERENCE_OPTIMIZATION_HANDOFF_20260927.md: Kandidat V3 cache reference, I/O binding dan scratch tetap; parity 256/512/1024 MX150, latency dan process memory 512, serta penolakan faktorisasi linear akibat cutoff. Belum diintegrasikan/dipromosikan.
+- WEIGHTNET_OPTIMIZED_BUNDLES_HANDOFF_20260927.md: Bundle V2 eksperimen dan promosi bundle aktif V3 grayscale CPU/DirectML patch 512/1024, backup terverifikasi, model unified 256 dipertahankan untuk kompatibilitas, serta parity loader produksi.
+- WEIGHTED_HDR_FOUNDATION_HANDOFF.md: streaming Weighted HDR dan SPDE-MR, histogram/reference fallback, MTB/AOT dispatch, output LDR/radiance relatif, perintah Start umum dari card, serta batas bukti runtime yang masih diperlukan.
 - skills/taichi-aot-dev/SKILL.md: workflow kompilasi dan validasi Taichi AOT.
+- RIGHT_PANEL_CARDS_HANDOFF_20260927.md: pembagian tinggi panel kanan, jarak kartu 5 px, isi kartu rapat, pemilihan SR/HDR/denoising eksklusif, serta bukti Qt offscreen dan batas validasi aplikasi.
 
 ## Aturan kerja singkat
 

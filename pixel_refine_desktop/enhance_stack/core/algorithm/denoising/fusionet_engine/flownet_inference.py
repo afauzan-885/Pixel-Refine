@@ -148,8 +148,11 @@ class AOTOpticalFlowAligner:
         self.grid_flow_l0 = None
         self.flow_l0_raw = None
         self._smooth_weights = None
+        self.smooth_flow_l0 = None
         self._remap_mod = None
         self.last_flow_gpu = None
+        self._retained_flow_owner = None
+        self._flow_view_in_flight = False
         try:
             from taichi_vision import taichi_aot
             from taichi_vision.taichi_algorithm.aot_api import (
@@ -283,27 +286,58 @@ class AOTOpticalFlowAligner:
         return self.flow_l0
 
     def _retain_flow(self, flow):
-        """Copy a transient or reusable flow into caller-owned GPU storage."""
+        """Expose the reusable flow through a non-owning resident view."""
         from taichi_vision.taichi_aot.engine import _LIB
 
         previous = getattr(self, "last_flow_gpu", None)
         if previous is not None and hasattr(previous, "destroy"):
             previous.destroy()
-        retained = self.engine.allocate(
-            (self.h0, self.w0, 2), dtype=np.float32, is_vector=False
-        )
-        try:
-            with self.engine._lock:
-                _LIB.copy_gpu_buffer(
-                    self.engine.runtime,
-                    flow.handle,
-                    retained.handle,
-                    retained.nbytes,
+        persistent_flow = flow is self.flow_l0 or flow is self.flow_l0_raw
+        if persistent_flow:
+            owner = flow
+        else:
+            owner = self._retained_flow_owner
+            if (
+                owner is None
+                or getattr(owner, "handle", None) is None
+                or tuple(int(value) for value in getattr(owner, "shape", ()))
+                != (self.h0, self.w0, 2)
+            ):
+                if owner is not None and hasattr(owner, "destroy"):
+                    owner.destroy()
+                owner = self.engine.allocate(
+                    (self.h0, self.w0, 2), dtype=np.float32, is_vector=False
                 )
-        except Exception:
-            retained.destroy()
-            raise
+                self._retained_flow_owner = owner
+            try:
+                with self.engine._lock:
+                    _LIB.copy_gpu_buffer(
+                        self.engine.runtime,
+                        flow.handle,
+                        owner.handle,
+                        owner.nbytes,
+                    )
+            except Exception:
+                raise
+
+        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+
+        retained = TaichiGPUBuffer(
+            owner.size_bytes,
+            owner.handle,
+            owner.shape,
+            dtype=owner.dtype,
+            is_vector=owner.is_vector,
+            engine=owner.engine,
+            is_owner=False,
+            host_accessible=owner.host_accessible,
+            vector_dim=owner.vector_dim,
+        )
+        retained._parent_ref = owner
         self.last_flow_gpu = retained
+        # RAW CFA accumulation consumes this view after align_frame returns.
+        # Fence before the next producer overwrites the reusable flow owner.
+        self._flow_view_in_flight = True
 
     def _remap_resident(self, src, flow, full_h, full_w):
         """Submit an f32 resident remap without the public host-sync boundary."""
@@ -399,6 +433,10 @@ class AOTOpticalFlowAligner:
         src_for_pyramid = (
             analysis_frame_gpu if analysis_frame_gpu is not None else supp_rgb_f32
         )
+
+        if self._flow_view_in_flight:
+            self.engine.sync()
+            self._flow_view_in_flight = False
 
         # Noise-Aware Analysis Pre-Filter for Optical Flow Computation (Reuses burst-wide analysis without per-frame CPU stall)
         src_denoised = None
@@ -528,8 +566,17 @@ class AOTOpticalFlowAligner:
                         )
             else:
                 flow_source = self.flow_l0
+                if self.smooth_flow_l0 is None or getattr(
+                    self.smooth_flow_l0, "handle", None
+                ) is None:
+                    self.smooth_flow_l0 = self.engine.allocate(
+                        (self.h0, self.w0, 2), dtype=np.float32, is_vector=False
+                    )
                 smooth_flow_gpu = taichi_aot.smooth_flow_gpu(
-                    flow_source, sigma=1.0, kernel_size=5
+                    flow_source,
+                    sigma=1.0,
+                    kernel_size=5,
+                    dst=self.smooth_flow_l0,
                 )
                 active_flow_gpu = smooth_flow_gpu
                 transient_flow_gpu = smooth_flow_gpu
@@ -562,8 +609,12 @@ class AOTOpticalFlowAligner:
             _ = stream_primary
             if keep_flow:
                 self._retain_flow(active_flow_gpu)
-            if transient_flow_gpu is not None and hasattr(
-                transient_flow_gpu, "destroy"
+            if (
+                transient_flow_gpu is not None
+                and transient_flow_gpu is not self.smooth_flow_l0
+                and hasattr(
+                    transient_flow_gpu, "destroy"
+                )
             ):
                 transient_flow_gpu.destroy()
 
@@ -607,6 +658,8 @@ class AOTOpticalFlowAligner:
             getattr(self, "grid_flow_l0", None),
             getattr(self, "flow_l0_raw", None),
             getattr(self, "_smooth_weights", None),
+            getattr(self, "smooth_flow_l0", None),
+            getattr(self, "_retained_flow_owner", None),
             getattr(self, "last_flow_gpu", None),
             getattr(self, "comp_l1_warped", None),
             getattr(self, "comp_l0_warped", None),

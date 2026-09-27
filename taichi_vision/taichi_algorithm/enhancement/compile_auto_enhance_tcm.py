@@ -46,9 +46,12 @@ def compile_auto_enhance(arch, save_path: str):
     module = ti.aot.Module(arch)
 
     src_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.types.vector(3, ti.f32), ndim=2)
+    samples_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "samples", ti.f32, ndim=1)
     dst_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.types.vector(3, ti.f32), ndim=2)
     h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
     w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
+    step_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "step", ti.i32)
+    sample_count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "sample_count", ti.i32)
     gain_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "gain", ti.f32)
     white_level_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "white_level", ti.f32)
     shadow_lift_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "shadow_lift", ti.f32)
@@ -57,6 +60,18 @@ def compile_auto_enhance(arch, save_path: str):
     global_contrast_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "global_contrast", ti.f32)
     saturation_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "saturation", ti.f32)
     use_adaptive_knee_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "use_adaptive_knee", ti.i32)
+
+    g = ti.graph.GraphBuilder()
+    g.dispatch(
+        auto_enhance_mod.auto_enhance_sample_luma_kernel,
+        src_arg,
+        samples_arg,
+        h_arg,
+        w_arg,
+        step_arg,
+        sample_count_arg,
+    )
+    module.add_graph("auto_enhance_sample_luma", g.compile())
 
     g = ti.graph.GraphBuilder()
     g.dispatch(

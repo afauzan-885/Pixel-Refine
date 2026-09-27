@@ -23,7 +23,12 @@ def cleanup_batch_thumbnail_cache(image_paths, cache_dir=CACHE_DIR):
             get_thumbnail_repo,
         )
 
-        get_thumbnail_repo().delete_thumbnails(image_paths)
+        repo = get_thumbnail_repo()
+        repo.delete_thumbnails(image_paths)
+        # Deleting batches is a natural point to drop leftover cache files from
+        # the older naming scheme and to enforce the cache size cap; nothing
+        # else ever pruned this directory, so it only ever grew.
+        repo.prune_cache()
     except Exception as exc:
         print(f"[BatchDeleteWorker] Hashed thumbnail cleanup warning: {exc}")
 

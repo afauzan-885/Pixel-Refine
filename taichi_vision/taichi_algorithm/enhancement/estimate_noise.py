@@ -97,7 +97,7 @@ if TAICHI_AVAILABLE:
 # 3. PURE GPU AOT / TCM EXECUTION
 # =========================================================================
 
-def _gpu_noise_scratch(engine, shape):
+def _gpu_noise_scratch(engine, shape, *, session=None):
     """Return one reusable block-statistics buffer for the live engine.
 
     Noise estimation is called repeatedly for reference/analysis frames.  A
@@ -107,6 +107,11 @@ def _gpu_noise_scratch(engine, shape):
     when the resolution changes, force-release the old one before replacing it.
     """
     expected = tuple(int(v) for v in shape)
+    if session is not None:
+        return (
+            session.acquire_buffer(expected, dtype=np.float32, tag="noise_block_mad"),
+            session.acquire_host(expected, dtype=np.float32, tag="noise_block_mad_host"),
+        )
     buf = getattr(engine, "_estimate_noise_block_mad", None)
     if buf is not None and tuple(getattr(buf, "shape", ())) == expected:
         if getattr(buf, "handle", None) is not None:
@@ -126,7 +131,7 @@ def _gpu_noise_scratch(engine, shape):
     setattr(engine, "_estimate_noise_block_mad_host", host)
     return buf, host
 
-def estimate_noise(src: Any) -> Tuple[float, float]:
+def estimate_noise(src: Any, *, session=None) -> Tuple[float, float]:
     """
     Unified public Noise Estimator API.
 
@@ -144,7 +149,7 @@ def estimate_noise(src: Any) -> Tuple[float, float]:
         num_bx = max(1, w // 8)
         num_by = max(1, h // 8)
         block_mad_buf, block_mad_host = _gpu_noise_scratch(
-            engine, (num_bx * num_by,)
+            engine, (num_bx * num_by,), session=session,
         )
 
         src_v = src

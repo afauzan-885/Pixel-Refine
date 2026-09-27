@@ -78,7 +78,7 @@ class MassAlgorithmEditDialog(ModalDialog):
                 "Average",
                 "Median",
                 "Similarity",
-                "Spatial AI",
+                "FusionNet",
                 "No Denoising",
             ],
         }

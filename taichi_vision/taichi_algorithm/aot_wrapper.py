@@ -47,6 +47,22 @@ def _register_opengl_flow_output(buffer):
     return buffer
 
 
+def _opengl_native_flow_output_supported():
+    """Return whether the active OpenGL renderer has a qualified GPU flow path.
+
+    The native dense-flow graphs are already qualified on the NVIDIA desktop
+    ICD. Intel/OpenGL keeps the established host-compatible route because its
+    transient SSBO exposure is driver-sensitive. Unknown renderers must remain
+    on the conservative path until a fresh backend-specific probe qualifies
+    them.
+    """
+    engine = _get_engine()
+    if str(getattr(engine, "arch", "")).lower() not in {"opengl", "gles"}:
+        return False
+    renderer = str(getattr(engine, "gpu_name", "") or "").lower()
+    return "nvidia" in renderer
+
+
 def _prepare_opengl_flow_family(family):
     """Reset the OpenGL AOT context when switching dense-flow graph families.
 
@@ -58,6 +74,12 @@ def _prepare_opengl_flow_family(family):
     global _OPENGL_FLOW_FAMILY
     engine = _get_engine()
     if str(getattr(engine, "arch", "")).lower() not in {"opengl", "gles"}:
+        return
+    if _opengl_native_flow_output_supported():
+        # NVIDIA's qualified native path does not need the family-boundary
+        # context reset. Avoid invalidating caller-owned resident buffers when
+        # LK, Block Matching, and Farneback are used in one session.
+        _OPENGL_FLOW_FAMILY = family
         return
     if _OPENGL_FLOW_FAMILY == family:
         return
@@ -360,6 +382,14 @@ def _vulkan_flow_host_accessible(function):
         engine = _get_engine()
         if str(getattr(engine, "arch", "")).lower() != "vulkan":
             return function(*args, **kwargs)
+        # Resident callers already consume a device buffer.  Forcing every
+        # temporary allocation to be host-accessible only helps NumPy-returning
+        # calls and can increase Vulkan memory pressure on the resident path.
+        return_gpu = kwargs.get("return_gpu", False)
+        if len(args) > 18:
+            return_gpu = args[18]
+        if return_gpu:
+            return function(*args, **kwargs)
         previous = getattr(engine, "_force_host_accessible", None)
         engine.set_force_host_accessible(True)
         try:
@@ -479,6 +509,25 @@ def _OutputArray(shape, dtype=np.float32):
     """Create output buffer for AOT kernel."""
     from taichi_vision.taichi_aot.engine import OutputArray
     return OutputArray(shape, dtype)
+
+
+def _validate_flow_output(dst, height, width):
+    """Validate an optional caller-owned resident dense-flow destination."""
+    if dst is None:
+        return
+    if not _is_gpu_buffer(dst):
+        raise TypeError("optical-flow dst must be a TaichiGPUBuffer")
+    if tuple(int(value) for value in getattr(dst, "shape", ())) != (
+        int(height),
+        int(width),
+        2,
+    ):
+        raise ValueError(
+            "optical-flow dst must have shape "
+            f"({int(height)}, {int(width)}, 2)"
+        )
+    if np.dtype(getattr(dst, "dtype", np.float32)) != np.dtype(np.float32):
+        raise TypeError("optical-flow dst must use float32")
 
 
 def _as_f32_array(src):
@@ -1668,6 +1717,7 @@ def calcOpticalFlowPyrLK(
     return_gpu=False,
     return_diagnostics=False,
     reference_pyramid=None,
+    dst=None,
 ):
     """Dense grid Lucas-Kanade optical flow with cv2-style function name.
 
@@ -1680,7 +1730,10 @@ def calcOpticalFlowPyrLK(
     # then upload the completed result as a stable public GPU buffer.
     if return_gpu:
         try:
-            if str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}:
+            if (
+                str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}
+                and not _opengl_native_flow_output_supported()
+            ):
                 host_result = calcOpticalFlowPyrLK(
                     prev, next, prevPts=prevPts, nextPts=nextPts,
                     winSize=winSize, maxLevel=maxLevel, criteria=criteria,
@@ -1706,6 +1759,7 @@ def calcOpticalFlowPyrLK(
         except Exception:
             raise
     h, w = prev.shape[:2]
+    _validate_flow_output(dst, h, w)
     is_prev_gpu = hasattr(prev, "handle")
     is_next_gpu = hasattr(next, "handle")
     prev_f = prev if is_prev_gpu else prev.astype(np.float32)
@@ -1722,6 +1776,7 @@ def calcOpticalFlowPyrLK(
         flow_half = None
         flow_full = None
         flow_keep = None
+        flow_full_owned = False
         ref_half_owned = False
         prev_dev_owned = False
         next_dev_owned = False
@@ -1772,7 +1827,8 @@ def calcOpticalFlowPyrLK(
                 return_diagnostics=False,
                 reference_pyramid=(cached_levels[1:] if cached_levels is not None else None),
             )
-            flow_full = _OutputArray((h, w, 2), np.float32)
+            flow_full = dst if dst is not None else _OutputArray((h, w, 2), np.float32)
+            flow_full_owned = dst is None
             pyramid_mod.run("upsample_flow_f32", src=flow_half, dst=flow_full, scale=2.0)
 
             if return_gpu:
@@ -1794,7 +1850,11 @@ def calcOpticalFlowPyrLK(
         finally:
             for buffer in (flow_half, flow_full, supp_half):
                 try:
-                    if buffer is not None and buffer is not flow_keep:
+                    if (
+                        buffer is not None
+                        and buffer is not flow_keep
+                        and (buffer is not dst or flow_full_owned)
+                    ):
                         buffer.destroy()
                 except Exception:
                     pass
@@ -1952,7 +2012,11 @@ def calcOpticalFlowPyrLK(
                 )
                 grid_flow = _own(_OutputArray((grid_h, grid_w, 3), np.float32))
                 grid_meta = _own(_OutputArray((grid_h, grid_w, 4), np.float32))
-                flow_out = _own(_OutputArray((lh, lw, 2), np.float32))
+                flow_out = (
+                    dst
+                    if level == 0 and dst is not None
+                    else _own(_OutputArray((lh, lw, 2), np.float32))
+                )
 
                 track_args = {
                     "prev": prev_levels[level],
@@ -2369,12 +2433,16 @@ def calcOpticalFlowBlockMatching(
     return_gpu=False,
     return_diagnostics=False,
     reference_pyramid=None,
+    dst=None,
 ):
     """Dense block matching with parabolic fit sub-pixel estimation."""
     _prepare_opengl_flow_family("block_matching")
     if return_gpu:
         try:
-            if str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}:
+            if (
+                str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}
+                and not _opengl_native_flow_output_supported()
+            ):
                 host_result = calcOpticalFlowBlockMatching(
                     prev, next, prevPts=prevPts, nextPts=nextPts,
                     winSize=winSize, maxLevel=maxLevel, criteria=criteria,
@@ -2401,6 +2469,7 @@ def calcOpticalFlowBlockMatching(
         except Exception:
             raise
     h, w = prev.shape[:2]
+    _validate_flow_output(dst, h, w)
     is_prev_gpu = hasattr(prev, "handle")
     is_next_gpu = hasattr(next, "handle")
     prev_f = prev if is_prev_gpu else prev.astype(np.float32)
@@ -2476,6 +2545,7 @@ def calcOpticalFlowBlockMatching(
             # spacing at the coarser domain for scale 4.
             flow_coarse = None
             flow_full = None
+            flow_full_owned = False
             try:
                 flow_coarse = calcOpticalFlowBlockMatching(
                     ref_coarse,
@@ -2504,7 +2574,8 @@ def calcOpticalFlowBlockMatching(
                         else None
                     ),
                 )
-                flow_full = _OutputArray((h, w, 2), np.float32)
+                flow_full = dst if dst is not None else _OutputArray((h, w, 2), np.float32)
+                flow_full_owned = dst is None
                 pyramid_mod.run(
                     "upsample_flow_f32",
                     src=flow_coarse,
@@ -2529,7 +2600,7 @@ def calcOpticalFlowBlockMatching(
                     return result, diagnostics
                 return result
             finally:
-                if flow_full is not None:
+                if flow_full is not None and (flow_full is not dst or flow_full_owned):
                     flow_full.destroy()
                 if flow_coarse is not None:
                     flow_coarse.destroy()
@@ -2667,7 +2738,11 @@ def calcOpticalFlowBlockMatching(
                 )
                 grid_flow = _own(_OutputArray((grid_h, grid_w, 3), np.float32))
                 grid_meta = _own(_OutputArray((grid_h, grid_w, 4), np.float32))
-                flow_out = _own(_OutputArray((lh, lw, 2), np.float32))
+                flow_out = (
+                    dst
+                    if level == 0 and dst is not None
+                    else _own(_OutputArray((lh, lw, 2), np.float32))
+                )
 
                 if coarse_grid_flow is None:
                     dummy_prev = _own(_OutputArray((1, 1, 3), np.float32))

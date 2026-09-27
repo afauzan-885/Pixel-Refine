@@ -119,17 +119,14 @@ def get_alignment_registry():
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.OFB import (
         OFBAlgorithm,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
-        FarnebackFlowCPU,
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow import (
+        FarnebackFlow,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_cpu import (
-        LucasKanadeCPU,
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade import (
+        LucasKanade,
     )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import (
-        LucasKanadeGPU,
-    )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching_gpu import (
-        BlockMatchingGPU,
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching import (
+        BlockMatching,
     )
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.raft_flow import (
         RAFTFlow,
@@ -140,13 +137,23 @@ def get_alignment_registry():
         OFBAlgorithm(),
         AKAZEAlgorithm(),
         LightGlueAlgorithm(),
-        FarnebackFlowCPU(),
-        LucasKanadeCPU(),
-        LucasKanadeGPU(),
-        BlockMatchingGPU(),
+        FarnebackFlow(),
+        LucasKanade(),
+        BlockMatching(),
         RAFTFlow(),
     ]
-    return {algo.NAME: algo for algo in algorithms}
+    registry = {algo.NAME: algo for algo in algorithms}
+    # Backward compatibility aliases for UI/batch selectors
+    registry["Lucas Kanade"] = registry.get("Lucas Kanade Optical Flow")
+    registry["Lucas Kanade GPU"] = registry.get("Lucas Kanade Optical Flow")
+    registry["Lucas Kanade GPU Optical Flow"] = registry.get("Lucas Kanade Optical Flow")
+    registry["Lucas Kanade CPU"] = registry.get("Lucas Kanade Optical Flow")
+    registry["Block Matching"] = registry.get("Block Matching Optical Flow")
+    registry["Block Matching GPU"] = registry.get("Block Matching Optical Flow")
+    registry["Block Matching GPU Optical Flow"] = registry.get("Block Matching Optical Flow")
+    registry["Farneback"] = registry.get("Farneback Optical Flow")
+    registry["Farneback Flow CPU"] = registry.get("Farneback Optical Flow")
+    return registry
 
 
 def get_denoising_registry():

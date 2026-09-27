@@ -67,3 +67,50 @@ Kontrak proyek lengkap tertera pada [`agen.md`](agen.md), dan tata kelola normat
     * **[Nama Metrik/Kategori]**:
       - Sebelum: `X ms` atau `X px`
       - Sesudah: **`Y ms`** atau **`Y px`** (keterangan peningkatan/status)
+
+---
+
+## 7. Entry Point Agent Command Code
+
+Agent Command Code **wajib mengaktifkan skill `pixel-refine-governance`** sebelum
+mengubah kode, mengompilasi TCM, menyentuh `taichi_vision/taichi_aot`, atau membuat
+klaim backend/akurasi/performa. Skill tersebut berisi ringkasan aturan, kontrak
+arsitektur, format bukti, dan indeks routing ke seluruh dokumen `ai_governance/`
+serta `taichi_vision/documentation/`.
+
+Ringkasan barrier yang selalu berlaku:
+
+- `taichi_vision/taichi_aot/engine.py` = runtime source of truth, dilarang diubah
+  tanpa persetujuan eksplisit pengguna.
+- Full-frame adalah correctness oracle. Path block/native yang belum tervalidasi
+  recovery pada backend yang sama atau error jelas; **tanpa** silent fallback GPU→CPU.
+- Compile sukses atau keberadaan artefak bukan bukti dukungan runtime. Setiap klaim
+  wajib menyebut backend, device, shape, dtype, command, dan hasil teramati.
+- Jangan campur TCM/bridge/C-API/OS/architecture/vendor/ABI dari profil build berbeda.
+- Jangan hapus source, TCM, DLL/SO, BC, atau artefak target sebelum referensi runtime
+  dan peran packaging-nya diverifikasi.
+- DILARANG `git add -A`; stage hanya path yang ditinjau dan jangan sentuh pekerjaan
+  pengguna yang tidak terkait.
+- Default single-agent; multi-agent hanya dengan izin eksplisit dan `user_agent_limit`.
+- Diskusi, penjelasan, dan dokumentasi dalam Bahasa Indonesia; komentar kode dan nama
+  variabel tetap Bahasa Inggris.
+- Klaim historis seperti "100% algorithm coverage" atau "universal bit-perfect parity"
+  tidak boleh diulang sebagai fakta kini; bukti runtime terbaru yang menang.
+
+---
+
+## 8. Kontinuitas Lintas Sesi
+
+- **Handoff wajib**: ketika sesi panjang berakhir atau pekerjaan meninggalkan working
+  tree yang belum di-commit, tulis dokumen handoff di `ai_governance/` lalu daftarkan
+  di `KNOWLEDGE_INDEX.md` dan `ai_governance/README.md`.
+- **Peta handoff aktif**: `ai_governance/PIPELINE_MIGRATION_AND_SR_HANDOFF.md`
+  (migrasi resident pipeline, splat SR reliability, routing parameter FusionNet).
+- **Baca dulu, jangan ukur ulang**: angka yang sudah tercatat di dokumen handoff atau
+  evidence bersifat otoritatif untuk sesi berikutnya. Mengulang probe mahal tanpa
+  alasan dianggap pemborosan, bukan ketelitian.
+- **Skill domain**: playbook pipeline/SR ada di
+  `.commandcode/skills/pixel-refine-pipeline-sr/SKILL.md`; aturan kerja umum tetap di
+  `.commandcode/skills/pixel-refine-governance/SKILL.md`.
+- **Working tree dapat berisi pekerjaan pengguna yang belum di-commit** — jangan
+  revert, stage, atau commit di luar scope yang diminta.

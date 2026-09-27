@@ -104,14 +104,17 @@ CALCULATION_TONE_MAPPING_PARAMS = {
 KEY_ALIGNMENT_ALGO = "alignment_algo"
 KEY_DENOISING_ALGO = "denoising_algo"
 KEY_SUPER_RESOLUTION_ALGO = "super_resolution_algo"
+KEY_HDR_ALGO = "hdr_algo"
 
 KEY_ALIGNMENT = "alignment"
 KEY_DENOISING = "denoising"
 KEY_SUPER_RESOLUTION = "super_resolution"
+KEY_HDR = "hdr"
 
 KEY_CHECKBOX_ALIGN = "checkbox_align_images"
 KEY_CHECKBOX_DENOISING = "checkbox_denoising"
 KEY_CHECKBOX_SUPER_RES = "checkbox_super_resolution"
+KEY_CHECKBOX_HDR = "checkbox_hdr"
 
 ALGORITHM_PARAMETER_SETTINGS_FILE = os.path.join(
     CONFIG_DIR, "Parameter_Stack_Enhance.json"

@@ -211,6 +211,13 @@ class BurstPreloadWorker(QThread):
     preload_progress = Signal(int, int)  # (loaded_count, total_count)
     preload_finished = Signal()
 
+    # A decimated preview frame only needs to exceed these bounds to be
+    # downsampled; the values are deliberately far above what any consumer
+    # camera produces after half-res demosaicing (a 100 MP source still fits),
+    # so only genuinely extreme frames are ever touched.
+    MAX_PREVIEW_SIDE = 6144
+    MAX_PREVIEW_PIXELS = 24_000_000
+
     def __init__(self, image_paths, parent=None, max_workers=4, batch_id=None):
         super().__init__(parent)
         self.image_paths = list(image_paths)
@@ -227,9 +234,43 @@ class BurstPreloadWorker(QThread):
             except Exception:
                 pass
 
+    def _cap_extreme_frame(self, img_array):
+        """Downsample a frame that is far larger than any display needs.
+
+        The half-res RAW path previously had no ceiling at all, so a
+        pathological source could keep tens of megabytes per cached frame for
+        up to 30 frames.  Frames inside the generous bounds pass through
+        untouched, so normal RAW and JPEG bursts are unaffected.
+        """
+        import numpy as np
+
+        try:
+            height, width = img_array.shape[:2]
+        except Exception:
+            return img_array
+
+        if max(height, width) <= self.MAX_PREVIEW_SIDE and (
+            width * height <= self.MAX_PREVIEW_PIXELS
+        ):
+            return img_array
+
+        stride = 1
+        while (
+            max(height, width) // stride > self.MAX_PREVIEW_SIDE
+            or (width // stride) * (height // stride) > self.MAX_PREVIEW_PIXELS
+        ):
+            stride += 1
+
+        capped = np.ascontiguousarray(img_array[::stride, ::stride])
+        print(
+            f"[BurstPreloadWorker] Downsampled extreme frame {width}x{height} -> "
+            f"{capped.shape[1]}x{capped.shape[0]} (stride {stride})"
+        )
+        return capped
+
     def _decode_frame(self, path: str):
         from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
-            load_raw_as_8bit_rgb,
+            load_raw_as_8bit_rgb_half_res,
         )
         from config import SUPPORTED_FORMATS
         from PIL import Image, ImageOps
@@ -244,7 +285,8 @@ class BurstPreloadWorker(QThread):
             img_array = None
 
             if ext in SUPPORTED_FORMATS.get("raw", []):
-                img_array = load_raw_as_8bit_rgb(path)
+                # Half-res demosaic cuts memory footprint by 75% and decodes 3-4x faster
+                img_array = load_raw_as_8bit_rgb_half_res(path)
             elif ext in (
                 SUPPORTED_FORMATS.get("jpg", [])
                 + SUPPORTED_FORMATS.get("png", [])
@@ -254,9 +296,13 @@ class BurstPreloadWorker(QThread):
                     img = ImageOps.exif_transpose(img)
                     if img.mode != "RGB":
                         img = img.convert("RGB")
+                    # Pre-downscale in PIL C-space if larger than preview bounds (2560x1440)
+                    if img.width > 2560 or img.height > 1440:
+                        img.thumbnail((2560, 1440), Image.Resampling.BILINEAR)
                     img_array = np.array(img)
 
             if img_array is not None and not self._is_aborted:
+                img_array = self._cap_extreme_frame(img_array)
                 if img_array.dtype != np.uint8:
                     from taichi_vision import taichi_aot
                     img_array = taichi_aot.cast(img_array, np.uint8)
@@ -271,6 +317,7 @@ class BurstPreloadWorker(QThread):
                     bytes_per_line,
                     QImage.Format.Format_RGB888,
                 ).copy()
+                del img_array
 
                 if not self._is_aborted and not q_img.isNull():
                     return path, q_img
@@ -323,6 +370,70 @@ class BurstPreloadWorker(QThread):
         self._executor = None
         if not self._is_aborted:
             self.preload_finished.emit()
+
+
+# ---------------------------------------------------------------------------
+# PLAYBACK CACHE BYTE ACCOUNTING
+# ---------------------------------------------------------------------------
+# Module-level helpers (rather than DisplayPanel methods) so a panel that only
+# carries the playback cache attributes stays usable.
+
+
+def _pixmap_bytes(pixmap) -> int:
+    """Approximate the RAM footprint of a QPixmap.
+
+    ``QPixmap`` has no ``sizeInBytes`` (unlike ``QImage``), so the byte width of
+    the stored depth is used instead.
+    """
+    try:
+        depth = int(pixmap.depth() or 32)
+        return int(pixmap.width()) * int(pixmap.height()) * max(1, depth // 8)
+    except Exception:
+        return 0
+
+
+def _playback_tally(panel) -> dict:
+    """Return the per-batch byte tally of *panel*, creating it on demand."""
+    tally = getattr(panel, "_playback_cache_bytes", None)
+    if tally is None:
+        tally = {}
+        panel._playback_cache_bytes = tally
+    return tally
+
+
+def _drop_playback_frames(panel, batch_id):
+    """Remove one batch's frames from the playback cache and its byte tally."""
+    frames = panel._batch_playback_cache.pop(batch_id, None)
+    _playback_tally(panel).pop(batch_id, None)
+    if frames:
+        frames.clear()
+    return frames
+
+
+def _evict_playback_budget(panel, keep_bid=None):
+    """Drop whole non-active batches until the playback frame budget is met.
+
+    The active batch (and the transient one) is never dropped here, so burst
+    playback never loses the frames it is currently cycling through.
+    """
+    max_bytes = getattr(panel, "_playback_cache_max_bytes", 0) or 0
+    if max_bytes <= 0:
+        return
+    tally = _playback_tally(panel)
+    total = sum(tally.values())
+
+    while total > max_bytes and len(panel._batch_playback_cache) > 1:
+        victim = None
+        for candidate in list(panel._batch_playback_cache.keys()):
+            if candidate in (keep_bid, "__transient__"):
+                continue
+            victim = candidate
+            break
+        if victim is None:
+            break
+        total -= tally.pop(victim, 0)
+        panel._batch_playback_cache.pop(victim, None)
+        print(f"[PlaybackCache] Budget evicted batch {victim} from RAM")
 
 
 @live_update("refresh_responsive_layout", on_resize=True)
@@ -382,25 +493,39 @@ class DisplayPanel(QWidget):
         self._is_checking_thumbnails = False  # Toast sequencing flag
         self.current_batch_name = None
         self.all_cards = {}  # Map card_id -> ImageCard widget
+        # Reverse index kept in sync by add_card()/drop_card()/clear_cards() so a
+        # preloaded thumbnail can locate its card in O(1) instead of scanning
+        # every card currently mounted in the grid.
+        self._card_paths: dict[str, str] = {}  # card_id -> image path
+        self._path_to_card: dict[str, str] = {}  # image path -> card_id
 
         # LRU cache of populated batches. Keyed by batch_id; each entry
         # stores the visual_images list and a list of ImageCard widgets
         # that can be re-attached to the grid without re-running the
-        # 30ms QTimer-based populate loop. Capped to 8 entries.
+        # 30ms QTimer-based populate loop. Capped to 4 entries.
         self._grid_cache: "OrderedDict[int, Tuple[list, list]]" = OrderedDict()
-        self._grid_cache_limit: int = 8
+        self._grid_cache_limit: int = 4
 
         # Restoring missing attributes
         self.current_preview_path = None
         self.current_results_map = {}
-        self.zoom_states = {}
-        # FIFO Playback Cache: stores up to 15 batches of burst frames in RAM
+        # Result of the last stack-folder scan for the active batch, so the
+        # switch path can reuse it instead of re-globbing.
+        self._current_has_results = None
+        self.zoom_states: "OrderedDict[str, Any]" = OrderedDict()
+        # FIFO Playback Cache: stores up to 3 batches of burst frames in RAM
         self._batch_playback_cache: "OrderedDict[str, dict[str, QPixmap]]" = (
             OrderedDict()
         )
-        self._batch_playback_cache_limit: int = 15
+        self._batch_playback_cache_limit: int = 3
+        # Total frame budget across every cached batch.  The active batch is
+        # never evicted, so burst playback keeps its frames; this only stops
+        # several non-active batches from holding hundreds of MB each.
+        self._playback_cache_max_bytes: int = 640 * 1024 * 1024
+        self._playback_cache_bytes: dict[str, int] = {}
         self._preview_pixmap_item = None
         self._needs_playback_fit: bool = False
+        self._layout_refresh_pending: bool = False
         self.toast = ToastManager(self)
         self.active_deletions = {}  # {batch_id: [paths]} for resume logic
         self.right_panel: Any = None
@@ -1098,6 +1223,9 @@ class DisplayPanel(QWidget):
         self._bg_preloaders.clear()
 
         self.logic.get_thumbnail_processor().stop_all(persist=False)
+        # Free the L1 thumbnails as well; the disabled state should not keep
+        # decoded images resident for the rest of the session.
+        self.logic.get_thumbnail_processor().clear_ram_cache()
         self.grid_manager.stop_staged_timer()
         self.toast.hide()
 
@@ -1192,7 +1320,7 @@ class DisplayPanel(QWidget):
         # for the same widget object; if cards were removed earlier we
         # re-add them here.
         try:
-            self.all_cards.clear()
+            self.clear_cards()
             container = self.grid_container
             container.set_batch_update(True)
             for card in cached_cards:
@@ -1208,7 +1336,7 @@ class DisplayPanel(QWidget):
                     continue
                 if hasattr(container, "container") and card.parent() != container.container:
                     card.setParent(container.container)
-                self.all_cards[str(card_id)] = card
+                self.add_card(card_id, card, getattr(card, "_image_path", None))
                 container.add_item(card)
                 card.show()
             self._touch_grid_cache(batch_id)
@@ -1245,6 +1373,10 @@ class DisplayPanel(QWidget):
         """
         Load batch images ke grid secara progresif (pure lazy loading).
         """
+        from pixel_refine_desktop.app_core import perf_probe
+
+        _mark = perf_probe.perf_mark("load_batch", batch_id=batch_id)
+
         # Snapshot previous batch cards into cache before clearing
         if (
             self.current_batch_id is not None
@@ -1329,6 +1461,7 @@ class DisplayPanel(QWidget):
             self.import_button.setVisible(True)
             self._show_empty_batch_state()
             self.show_grid()
+            _mark.end(images=0, restored=False)
             return
 
         self.import_button.setVisible(True)
@@ -1373,6 +1506,10 @@ class DisplayPanel(QWidget):
         if hasattr(self, "burst_loading_label"):
             self.burst_loading_label.setVisible(False)
 
+        # Release pooled engine buffers after the switch has painted.  Deferred
+        # and warm-up aware: see _trim_engine_memory.
+        QTimer.singleShot(0, self._trim_engine_memory)
+
         # Batch playback frames are preserved in RAM across batches (up to 15 batches FIFO)
 
         # NOTE: BurstCacheWorker is no longer started eagerly on every batch load.
@@ -1380,8 +1517,15 @@ class DisplayPanel(QWidget):
         # only when the user actually opens preview mode (double-click).
         # See _trigger_preview_preload() for the on-demand loader.
 
-        self.update_save_button_state()
-        QTimer.singleShot(0, self.refresh_responsive_layout)
+        self.update_controls_visibility_and_states(
+            has_results=getattr(self, "_current_has_results", None)
+        )
+        self._schedule_layout_refresh()
+        _mark.end(
+            images=len(visual_images),
+            restored=bool(restored),
+            **perf_probe.diagnose_panel(self),
+        )
 
     @Slot()
     def clear_display(self):
@@ -1396,6 +1540,18 @@ class DisplayPanel(QWidget):
 
         # 0. Cancel and reset
         self._reset_population_state()
+
+        # Abort any background burst preloader
+        if getattr(self, "_burst_preloader", None) is not None:
+            worker = self._burst_preloader
+            self._burst_preloader = None
+            worker.abort()
+            self._retained_workers.add(worker)
+            worker.finished.connect(lambda w=worker: self._retained_workers.discard(w))
+
+        # Clear transient playback frames if present
+        if "__transient__" in self._batch_playback_cache:
+            _drop_playback_frames(self, "__transient__")
 
         self._update_header_title()  # Clear header title
         # self._update_cross_batch_toast()  # Check other batches
@@ -1415,6 +1571,11 @@ class DisplayPanel(QWidget):
         if self.preview_scene:
             self.preview_scene.clear()
             self._preview_pixmap_item = None
+
+        # Reclaim engine buffers once the UI has settled.  Deferred and
+        # warm-up aware: an inline trim here blocks on the Taichi lock held by
+        # the silent TCM warm-up during startup (see _trim_engine_memory).
+        QTimer.singleShot(0, self._trim_engine_memory)
 
         self.show_grid()
         self.update_save_button_state()
@@ -1462,7 +1623,7 @@ class DisplayPanel(QWidget):
         ProcessManager.instance().cancel_context("display_populate")
         ProcessManager.instance().cancel_context("display_sequential_removal")
         self.grid_animator.stop_all()
-        self.all_cards = {}
+        self.clear_cards()
         self.selection_manager.clear()
         self.logic.grid_items.clear()
         self.grid_manager.stop_staged_timer()  # Menghentikan staged + recovery timer
@@ -1482,6 +1643,50 @@ class DisplayPanel(QWidget):
     # =========================================================================
     # === 3. PRIVATE METHODS - GRID MANAGEMENT ===
     # =========================================================================
+
+    def _trim_engine_memory(self):
+        """Release pooled engine buffers without blocking the batch switch.
+
+        ``trim_memory_pool`` synchronizes the engine before releasing buffers,
+        and the silent TCM warm-up holds the Taichi lock for its whole
+        module-loading session - so calling it inline made the first batch load
+        wait on that warm-up (measured: a 42 s switch).  The trim is now run on
+        the next event-loop tick and skipped entirely while the warm-up is still
+        running; the buffers it would free are the ones being warmed up.
+        """
+        try:
+            from pixel_refine_desktop.app_core.aot_warmup import (
+                is_silent_aot_warmup_running,
+            )
+
+            if is_silent_aot_warmup_running():
+                return
+        except Exception:
+            pass
+
+        try:
+            from taichi_vision import taichi_aot
+
+            taichi_aot.trim_memory_pool()
+        except Exception:
+            pass
+
+    def _schedule_layout_refresh(self):
+        """Coalesce responsive-layout refreshes onto a single event-loop tick.
+
+        A batch switch used to schedule ``refresh_responsive_layout`` twice (from
+        ``load_batch`` and again from ``show_grid``), which rebuilt the grid
+        layout twice for the same switch.
+        """
+        if self._layout_refresh_pending:
+            return
+        self._layout_refresh_pending = True
+
+        def _run():
+            self._layout_refresh_pending = False
+            self.refresh_responsive_layout()
+
+        QTimer.singleShot(0, _run)
 
     def refresh_responsive_layout(self):
         """
@@ -1514,6 +1719,29 @@ class DisplayPanel(QWidget):
             self.grid_container._rebuild_grid()
         if hasattr(self, "grid_manager"):
             self.grid_manager._update_window()
+
+    def add_card(self, card_id, card, path=None):
+        """Register a card in ``all_cards`` and keep the path index in sync."""
+        card_id = str(card_id)
+        self.all_cards[card_id] = card
+        if path:
+            self._card_paths[card_id] = path
+            self._path_to_card[path] = card_id
+
+    def drop_card(self, card_id):
+        """Remove a card from ``all_cards`` and the path index."""
+        card_id = str(card_id)
+        card = self.all_cards.pop(card_id, None)
+        path = self._card_paths.pop(card_id, None)
+        if path is not None and self._path_to_card.get(path) == card_id:
+            self._path_to_card.pop(path, None)
+        return card
+
+    def clear_cards(self):
+        """Drop every tracked card and its path index entry."""
+        self.all_cards.clear()
+        self._card_paths.clear()
+        self._path_to_card.clear()
 
     def _clear_grid(self):
         """Delegate to GridManager."""
@@ -1794,14 +2022,20 @@ class DisplayPanel(QWidget):
         self._enter_result_mode()
         self.update_save_button_state()
 
-    def check_result_availability(self):
+    def _scan_current_results(self):
+        """Scan the stack folder once for the current batch's processed results."""
+        if not self.logic.current_images:
+            return []
+        return self.logic.detect_processed_results(self.logic.current_images[0].path)
+
+    def check_result_availability(self, results=None):
         """Check if results exist for current batch and update 'Preview Process' button."""
         if not self.logic.current_images:
             self.preview_process_btn.setVisible(False)
             return
 
-        first_img_path = self.logic.current_images[0].path
-        results = self.logic.detect_processed_results(first_img_path)
+        if results is None:
+            results = self._scan_current_results()
         self.preview_process_btn.setVisible(bool(results))
 
     def show_grid(self):
@@ -1815,26 +2049,38 @@ class DisplayPanel(QWidget):
         # Save state before exiting preview
         if hasattr(self, "current_preview_path") and self.current_preview_path:
             if hasattr(self, "zoomable_preview") and self.preview_scene.items():
-                if not hasattr(self, "zoom_states"):
-                    self.zoom_states = {}
+                if not hasattr(self, "zoom_states") or not isinstance(self.zoom_states, OrderedDict):
+                    self.zoom_states = OrderedDict()
                 self.zoom_states[self.current_preview_path] = (
                     self.zoomable_preview.get_view_state()
                 )
+                while len(self.zoom_states) > 100:
+                    self.zoom_states.popitem(last=False)
+
+        # Clear preview scene when returning to grid to free massive comparison or preview pixmaps from VRAM/RAM
+        if self.preview_scene:
+            self.preview_scene.clear()
+            self._preview_pixmap_item = None
 
         self.display_stack.setCurrentIndex(0)
-        QTimer.singleShot(0, self.refresh_responsive_layout)
+        self._schedule_layout_refresh()
 
         # Update Header buttons
         self.back_btn.setVisible(False)
         self.result_selector.setVisible(False)  # Hide dropdown
-        self.check_result_availability()  # Update preview button visibility
+        # One filesystem scan per switch: the preview button and the Save state
+        # consume the same result set, so the value is threaded through instead
+        # of re-globbing the stack folder for each caller.
+        results = self._scan_current_results()
+        self._current_has_results = bool(results)
+        self.check_result_availability(results)  # Update preview button visibility
 
         if self.current_batch_id:
             self.import_button.setVisible(True)
         else:
             self.import_button.setVisible(False)
 
-        self.update_controls_visibility_and_states()
+        self.update_controls_visibility_and_states(has_results=results)
 
     def show_preview(self, show_dropdown=True):
         """Switch ke Preview View."""
@@ -2002,7 +2248,7 @@ class DisplayPanel(QWidget):
         if hasattr(self, "_batch_ids_to_delete") and self.controller:
             for batch_id in self._batch_ids_to_delete:
                 self.controller.delete_batch(batch_id)
-                self._batch_playback_cache.pop(str(batch_id), None)
+                _drop_playback_frames(self, str(batch_id))
 
             # Refresh the batch list in the right panel
             if self.right_panel:
@@ -2219,7 +2465,7 @@ class DisplayPanel(QWidget):
 
     @property
     def playback_cache(self) -> dict[str, QPixmap]:
-        """Returns the frame cache for the currently active batch from the 15-batch FIFO RAM store."""
+        """Returns the frame cache for the currently active batch from the FIFO RAM store."""
         bid = (
             str(self.current_batch_id)
             if self.current_batch_id is not None
@@ -2230,10 +2476,13 @@ class DisplayPanel(QWidget):
                 evicted_bid, evicted_dict = self._batch_playback_cache.popitem(
                     last=False
                 )
+                evicted_dict.clear()
+                del evicted_dict
                 print(
-                    f"[PlaybackCache] FIFO evicted batch {evicted_bid} ({len(evicted_dict)} frames) from RAM"
+                    f"[PlaybackCache] FIFO evicted batch {evicted_bid} from RAM"
                 )
             self._batch_playback_cache[bid] = {}
+            _playback_tally(self)[bid] = 0
         return self._batch_playback_cache[bid]
 
     @playback_cache.setter
@@ -2245,9 +2494,12 @@ class DisplayPanel(QWidget):
         )
         if isinstance(val, dict):
             self._batch_playback_cache[bid] = val
+            _playback_tally(self)[bid] = sum(
+                _pixmap_bytes(pm) for pm in val.values() if pm is not None
+            )
 
     def _store_playback_frame(self, batch_id: str, path: str, pixmap: QPixmap):
-        """Store a decoded frame into the FIFO 15-batch RAM cache."""
+        """Store a decoded frame into the FIFO RAM cache."""
         bid = (
             str(batch_id)
             if batch_id
@@ -2262,11 +2514,20 @@ class DisplayPanel(QWidget):
                 evicted_bid, evicted_dict = self._batch_playback_cache.popitem(
                     last=False
                 )
+                evicted_dict.clear()
+                del evicted_dict
+                _playback_tally(self).pop(evicted_bid, None)
                 print(
-                    f"[PlaybackCache] FIFO evicted batch {evicted_bid} ({len(evicted_dict)} frames) from RAM"
+                    f"[PlaybackCache] FIFO evicted batch {evicted_bid} from RAM"
                 )
             self._batch_playback_cache[bid] = {}
         self._batch_playback_cache[bid][path] = pixmap
+
+        # Track the frame bytes and drop whole non-active batches if the total
+        # exceeds the budget; the batch being viewed keeps all of its frames.
+        tally = _playback_tally(self)
+        tally[bid] = tally.get(bid, 0) + _pixmap_bytes(pixmap)
+        _evict_playback_budget(self, keep_bid=bid)
 
     def _on_image_pre_cached(self, path, q_image, batch_id=""):
         """Callback when an image is successfully pre-loaded and decoded in the background."""
@@ -2332,21 +2593,26 @@ class DisplayPanel(QWidget):
         if str(batch_id) != str(self.current_batch_id):
             return  # Batch tidak aktif, cukup cache di L0 — tidak perlu update UI
 
-        # Cari card yang sesuai dan update thumbnail-nya jika belum ter-load
-        for card_id, card in self.all_cards.items():
-            try:
-                if hasattr(card, "_image_path") and card._image_path == image_path:
-                    if not card.has_thumbnail():
-                        from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
-                            get_global_cache,
-                        )
+        # Path index lookup: the previous implementation scanned every card in
+        # the grid for each preloaded thumbnail (O(N^2) over a whole batch).
+        card_id = self._path_to_card.get(image_path)
+        if card_id is None:
+            return
 
-                        q_img = get_global_cache().get(image_path)
-                        if q_img and not q_img.isNull():
-                            card.set_thumbnail(QPixmap.fromImage(q_img))
-                    break
-            except Exception:
-                pass
+        card = self.all_cards.get(card_id)
+        if card is None or not is_widget_alive(card) or card.has_thumbnail():
+            return
+
+        try:
+            from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
+                get_global_cache,
+            )
+
+            q_img = get_global_cache().get(image_path)
+            if q_img and not q_img.isNull():
+                card.set_thumbnail(QPixmap.fromImage(q_img))
+        except Exception:
+            pass
 
     def _toggle_playback(self):
         """Toggle play/pause state for preview burst sequence."""
@@ -2450,6 +2716,11 @@ class DisplayPanel(QWidget):
             c_idx = paths.index(center_path)
             paths_to_load.sort(key=lambda p: abs(paths.index(p) - c_idx))
 
+        # Cap preload budget to 30 frames around center to avoid huge RAM bursts on 100+ frame sequences
+        max_preload_frames = 30
+        if len(paths_to_load) > max_preload_frames:
+            paths_to_load = paths_to_load[:max_preload_frames]
+
         self._burst_preloader = BurstPreloadWorker(
             paths_to_load, parent=self, batch_id=self.current_batch_id
         )
@@ -2538,11 +2809,16 @@ class DisplayPanel(QWidget):
                 ImageLoaderThread,
             )
 
-            def _on_fast_loaded(pixmap, path):
-                if pixmap and not pixmap.isNull():
-                    self.playback_cache[path] = pixmap
-                    if getattr(self, "current_preview_path", None) == path:
-                        self._update_preview_pixmap(pixmap)
+            def _on_fast_loaded(q_image, path):
+                if q_image is None or q_image.isNull():
+                    return
+                # Created on the GUI thread; the loader only produces QImage.
+                pixmap = QPixmap.fromImage(q_image)
+                if pixmap.isNull():
+                    return
+                self._store_playback_frame("", path, pixmap)
+                if getattr(self, "current_preview_path", None) == path:
+                    self._update_preview_pixmap(pixmap)
 
             if (
                 self.logic.image_loader_thread
@@ -2553,9 +2829,9 @@ class DisplayPanel(QWidget):
 
             loader = ImageLoaderThread(
                 image_path,
-                max_width=None,
-                max_height=None,
-                half_res=False,
+                max_width=2560,
+                max_height=1440,
+                half_res=True,
                 parent=self,
             )
             loader.image_loaded.connect(_on_fast_loaded)
@@ -2568,11 +2844,17 @@ class DisplayPanel(QWidget):
 
     def set_start_button_mode(self, active: bool):
         self.is_start_button_mode = active
-        # This path is called directly from the denoising selector.  Do not
+        # Card commands update this control immediately. Do not
         # synchronously scan the filesystem for result images before showing
         # the A/D and Start controls; that scan can make a simple UI change
         # appear blocked on large batches.
         self.update_controls_visibility_and_states(fast=True)
+
+    @Slot(object)
+    def set_start_command(self, command):
+        """Display the general Start control for a command supplied externally."""
+        self._start_command = command
+        self.set_start_button_mode(command is not None and command.direct_start)
 
     @Slot(dict)
     def apply_algorithm_settings_fast(self, settings):
@@ -2586,7 +2868,6 @@ class DisplayPanel(QWidget):
             return
         self._algorithm_ui_settings = dict(settings)
         denoising = str(settings.get("denoising", "")).strip()
-        super_resolution = str(settings.get("super_resolution", "")).strip()
         parameter_overlay_active = denoising in {
             "Average",
             "Median",
@@ -2601,20 +2882,14 @@ class DisplayPanel(QWidget):
             self.param_overlay.raise_()
         else:
             self.param_overlay.hide()
-        self.set_start_button_mode(
-            parameter_overlay_active
-            or super_resolution
-            not in {
-                "",
-                "None",
-                "No Super Resolution",
-            }
-        )
+        # Compatibility for callers supplying settings rather than a command.
+        from pixel_refine_desktop.enhance_stack.core.logic.card_process_command import build_start_command
+        self.set_start_command(build_start_command(settings))
 
     def update_save_button_state(self):
         self.update_controls_visibility_and_states()
 
-    def update_controls_visibility_and_states(self, fast=False):
+    def update_controls_visibility_and_states(self, fast=False, has_results=None):
         if not hasattr(self, "start_btn_ref"):
             return
 
@@ -2666,18 +2941,16 @@ class DisplayPanel(QWidget):
             self.playback_container.setVisible(show_playback)
 
         # 3. Save button visibility and state
-        has_results = False
-        if not fast and self.logic.current_images:
-            first_img_path = self.logic.current_images[0].path
-            results = self.logic.detect_processed_results(first_img_path)
-            if results:
-                has_results = True
-
-        # In fast mode the result scan is intentionally skipped, but the
-        # overlay still needs to be laid out immediately so Start is visible.
-        # Leave the existing Save state untouched until the normal refresh.
         if fast:
+            # Fast mode intentionally skips the result scan but still needs the
+            # overlay laid out immediately so Start is visible.  Leaving the
+            # value as None keeps the existing Save state untouched until the
+            # normal refresh.
             has_results = None
+        elif has_results is None:
+            # Callers that already scanned (e.g. show_grid) pass the value in so
+            # the stack folder is not globbed twice in the same switch.
+            has_results = bool(self._scan_current_results())
         if has_results is True:
             self.save_btn_ref.setEnabled(True)
             self.save_btn_ref.setStyleSheet(

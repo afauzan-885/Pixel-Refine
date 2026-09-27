@@ -16,7 +16,7 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
 )
 
 
-class FarnebackFlowCPU:
+class FarnebackFlow:
     NAME = "Farneback Optical Flow"
     KIND = "alignment"
     DESCRIPTION = "100% Taichi Vision GPU-Native Farneback Optical Flow Alignment."
@@ -58,10 +58,8 @@ class FarnebackFlowCPU:
     }
 
     def __init__(self):
-        # The reference is invariant across a burst.  Keep its native pyramid
-        # resident and replace it only when the reference identity/configuration
-        # changes.  This cache is optional and does not alter the public flow
-        # result or its dtype.
+        # The reference is invariant across a burst. Keep its native pyramid
+        # resident and replace it only when the reference identity/configuration changes.
         self._reference_cache = None
 
     def _release_reference_cache(self):
@@ -117,8 +115,6 @@ class FarnebackFlowCPU:
             self._reference_cache = {"key": key, "pyramid": tuple(pyramid)}
             return self._reference_cache["pyramid"]
         except Exception:
-            # The normal full-frame call remains the same-backend recovery
-            # path when an optional resident cache cannot be prepared.
             return None
 
     @classmethod
@@ -148,24 +144,45 @@ class FarnebackFlowCPU:
 
     @staticmethod
     def load_farneback_config(config_filename=None):
-        return FarnebackFlowCPU.load_config(config_filename=config_filename)
+        return FarnebackFlow.load_config(config_filename=config_filename)
 
     @staticmethod
     def load_farneback_config_for_batch(config_filename=None):
-        return FarnebackFlowCPU.load_config(config_filename=config_filename)
+        return FarnebackFlow.load_config(config_filename=config_filename)
 
     @staticmethod
     def _to_flow_gray(image):
         if image is None:
             return None
+        if hasattr(image, "handle"):
+            if getattr(image, "is_vector", False) and getattr(image, "vector_dim", 0) >= 3:
+                from taichi_vision import taichi_aot
+                return taichi_aot.cvtColor(image, taichi_aot.COLOR_RGB2GRAY)
+            return image
         img = np.ascontiguousarray(image)
-        if img.ndim == 3:
-            if img.shape[2] == 3:
+        if img.ndim == 3 and img.shape[2] >= 3:
+            # GPU-native color conversion eliminates CPU RAM footprint and computation latency
+            try:
+                from taichi_vision import taichi_aot
+                img_f32 = (
+                    img.astype(np.float32) / 255.0
+                    if img.dtype == np.uint8
+                    else (
+                        img.astype(np.float32) / 65535.0
+                        if img.dtype == np.uint16
+                        else np.clip(img.astype(np.float32), 0.0, 1.0)
+                    )
+                )
+                img_gpu = taichi_aot.upload(img_f32, is_vector=True, vector_dim=3)
+                gray_gpu = taichi_aot.cvtColor(img_gpu, taichi_aot.COLOR_RGB2GRAY)
+                img_gpu.release()
+                gray_arr = gray_gpu.to_numpy() * 255.0
+                gray_gpu.release()
+                return gray_arr.astype(np.float32)
+            except Exception:
                 gray = 0.2126 * img[:, :, 0] + 0.7152 * img[:, :, 1] + 0.0722 * img[:, :, 2]
-            else:
-                gray = img[:, :, 0]
         else:
-            gray = img
+            gray = img[:, :, 0] if img.ndim == 3 else img
         if gray.dtype == np.uint8:
             return gray.astype(np.float32)
         if gray.dtype == np.uint16:
@@ -268,3 +285,7 @@ def running_farneback_flow(*args, **kwargs):
     raise RuntimeError(
         "Farneback is now orchestrated by MFDenoiser. Use MFDenoiser with alignment='Farneback' instead."
     )
+
+
+# Backward compatibility alias
+FarnebackFlowCPU = FarnebackFlow

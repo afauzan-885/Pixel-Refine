@@ -7,7 +7,7 @@ from PySide6.QtCore import QThread, Signal
 import config
 
 # Import algorithm functions
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow_cpu import (
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow import (
     running_farneback_flow,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.AKAZE import (
@@ -20,12 +20,12 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
     running_median,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
-    running_similarity as running_mf_similarity,
     running_mf_denoiser,
 )
-
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
-    running_fusionnet,
+from pixel_refine_desktop.enhance_stack.core.algorithm.HDR import (
+    SPDEMRAlgorithm,
+    WeightedHDRAlgorithm,
+    running_hdr_fusion,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.SplatSR import (
     running_splatting_sr,
@@ -108,8 +108,28 @@ class AlgorithmProcessorThread(QThread):
                 return
 
             worker_mgr = BackendWorkerManager.instance()
-            if not worker_mgr.ensure_worker_ready():
-                self.error_occurred.emit("Backend worker failed to start.")
+
+            from pixel_refine_desktop.app_core import perf_probe
+
+            # The first start of a session waits for the worker's cold boot
+            # (engine init + algorithm pre-imports).  Say so in the UI instead of
+            # leaving the progress bar frozen at 0%, which reads as a hang.
+            self.progress_update.emit(0, "Menyiapkan mesin proses...")
+
+            # Measures the respawn cost when the idle policy has put the worker
+            # to sleep between batches; this is the batch-start latency.
+            # ensure_worker_ready() waits for the ready handshake, not merely a
+            # live process, within START_READY_TIMEOUT_S.
+            _ready_mark = perf_probe.perf_mark(
+                "worker_ready", batch_id=self.batch_id
+            )
+            _ready = worker_mgr.ensure_worker_ready()
+            _ready_mark.end(ready=_ready)
+            if not _ready:
+                self.error_occurred.emit(
+                    "Mesin proses belum siap (worker masih memuat). "
+                    "Tunggu sebentar lalu jalankan lagi."
+                )
                 return
 
             if self._is_cancelled or not self._is_running:
@@ -123,11 +143,13 @@ class AlgorithmProcessorThread(QThread):
                 "settings": self.settings,
             }
 
+            _task_mark = perf_probe.perf_mark("dispatch_task", batch_id=self.batch_id)
             result = worker_mgr.dispatch_task(
                 task_payload,
                 progress_cb=progress_callback,
                 stop_requested_cb=lambda: self._is_cancelled,
             )
+            _task_mark.end(success=bool(result.get("success", False)))
 
             if not result.get("success", False):
                 if result.get("type") == "cancelled" or self._is_cancelled:
@@ -147,6 +169,8 @@ class AlgorithmProcessorThread(QThread):
     def _run_in_process(self):
         """Fallback in-process algorithm execution."""
         try:
+            import os
+
             # Progress callback to emit signal with dual UI & Console messaging:
             def progress_callback(percent, message="", *args, **kwargs):
                 if self._is_running:
@@ -180,6 +204,7 @@ class AlgorithmProcessorThread(QThread):
             is_align_checked = self.settings.get(config.KEY_CHECKBOX_ALIGN, True)
             is_sr_checked = self.settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
             is_denoise_checked = self.settings.get(config.KEY_CHECKBOX_DENOISING, False)
+            is_hdr_checked = self.settings.get(config.KEY_CHECKBOX_HDR, False)
 
             raw_align = self.settings.get(config.KEY_ALIGNMENT) or self.settings.get(
                 config.KEY_ALIGNMENT_ALGO, "No Alignment"
@@ -209,6 +234,14 @@ class AlgorithmProcessorThread(QThread):
                 if (is_denoise_checked and raw_denoise not in ("", "None"))
                 else "No Denoising"
             )
+            raw_hdr = self.settings.get(config.KEY_HDR) or self.settings.get(
+                config.KEY_HDR_ALGO, "No HDR"
+            )
+            hdr_choice = (
+                raw_hdr
+                if (is_hdr_checked and raw_hdr not in ("", "None"))
+                else "No HDR"
+            )
 
             denoising_active = denoising_choice not in (
                 "",
@@ -226,11 +259,19 @@ class AlgorithmProcessorThread(QThread):
             # user-selected alignment stage before it; that would apply an
             # external alignment twice and would also force an HDF5 roundtrip.
             super_resolution_owns_alignment = super_resolution_choice == "splattingSR"
+            hdr_owns_alignment = hdr_choice in (
+                WeightedHDRAlgorithm.NAME,
+                WeightedHDRAlgorithm.LEGACY_NAME,
+                SPDEMRAlgorithm.NAME,
+            )
+            db_path = getattr(
+                getattr(self.parent_panel, "controller", None), "db_path", None
+            ) or os.environ.get("PIXEL_REFINE_SESSION_DB")
             print(
                 f"[AlgorithmProcessorThread] settings={self.settings} "
                 f"alignment_choice={alignment_choice} "
                 f"super_resolution_choice={super_resolution_choice} "
-                f"denoising_choice={denoising_choice}"
+                f"denoising_choice={denoising_choice} hdr_choice={hdr_choice}"
             )
 
             actions = {
@@ -313,6 +354,37 @@ class AlgorithmProcessorThread(QThread):
                     "No Super Resolution": lambda: None,
                     "None": lambda: None,
                 },
+                "hdr": {
+                    WeightedHDRAlgorithm.NAME: lambda: running_hdr_fusion(
+                        parent=self.parent_panel,
+                        single_process=self.single_process,
+                        batch_id=self.batch_id,
+                        algorithm_name=WeightedHDRAlgorithm.NAME,
+                        progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
+                        db_path=db_path,
+                    ),
+                    WeightedHDRAlgorithm.LEGACY_NAME: lambda: running_hdr_fusion(
+                        parent=self.parent_panel,
+                        single_process=self.single_process,
+                        batch_id=self.batch_id,
+                        algorithm_name=WeightedHDRAlgorithm.NAME,
+                        progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
+                        db_path=db_path,
+                    ),
+                    SPDEMRAlgorithm.NAME: lambda: running_hdr_fusion(
+                        parent=self.parent_panel,
+                        single_process=self.single_process,
+                        batch_id=self.batch_id,
+                        algorithm_name=SPDEMRAlgorithm.NAME,
+                        progress_callback=progress_callback,
+                        stop_callback=get_stop_cb,
+                        db_path=db_path,
+                    ),
+                    "No HDR": lambda: None,
+                    "None": lambda: None,
+                },
                 "denoising": {
                     "Average": lambda: running_mf_denoiser(
                         self.parent_panel,
@@ -331,28 +403,34 @@ class AlgorithmProcessorThread(QThread):
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
                     ),
-                    "Similarity": lambda: running_mf_similarity(
+                    "Similarity": lambda: running_mf_denoiser(
                         self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
+                        merging_mode="Similarity",
+                        output_suffix="similarity",
                         alignment_backend=alignment_choice,
                     ),
-                    "Spatial AI": lambda: running_fusionnet(
+                    "Spatial AI": lambda: running_mf_denoiser(
                         parent=self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
+                        merging_mode="FusionNet",
+                        output_suffix="fusionet",
                         alignment_backend=alignment_choice,
                     ),
-                    "FusionNet": lambda: running_fusionnet(
+                    "FusionNet": lambda: running_mf_denoiser(
                         parent=self.parent_panel,
                         single_process=self.single_process,
                         batch_id=self.batch_id,
                         progress_callback=progress_callback,
                         stop_callback=get_stop_cb,
+                        merging_mode="FusionNet",
+                        output_suffix="fusionet",
                         alignment_backend=alignment_choice,
                     ),
                     "No Denoising": lambda: None,
@@ -371,6 +449,7 @@ class AlgorithmProcessorThread(QThread):
                     "No Alignment",
                     "No Super Resolution",
                     "No Denoising",
+                    "No HDR",
                 ]:
                     return
                 if category in actions and selected_algo_name in actions[category]:
@@ -389,7 +468,11 @@ class AlgorithmProcessorThread(QThread):
                         f"[WARN] Algorithm '{selected_algo_name}' for category '{category}' not found in actions."
                     )
 
-            if denoising_owns_alignment or super_resolution_owns_alignment:
+            if (
+                denoising_owns_alignment
+                or super_resolution_owns_alignment
+                or hdr_owns_alignment
+            ):
                 if alignment_choice not in ("", "None", "No Alignment"):
                     print(
                         f"[AlgorithmProcessorThread] Alignment '{alignment_choice}' "
@@ -399,10 +482,12 @@ class AlgorithmProcessorThread(QThread):
                 if denoising_owns_alignment:
                     execute("denoising", denoising_choice)
                 execute("super_resolution", super_resolution_choice)
+                execute("hdr", hdr_choice)
             else:
                 execute("alignment", alignment_choice)
-                execute("denoising", denoising_choice)
                 execute("super_resolution", super_resolution_choice)
+                execute("hdr", hdr_choice)
+                execute("denoising", denoising_choice)
 
             if not any_algorithm_executed:
                 print(

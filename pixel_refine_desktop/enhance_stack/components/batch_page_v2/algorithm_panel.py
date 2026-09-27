@@ -26,6 +26,7 @@ from resources.GenericUILibrary.mixins import SyncMixin
 
 # Algorithm logic
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_logic import AlgorithmLogic
+from pixel_refine_desktop.enhance_stack.core.logic.card_process_command import build_start_command
 
 # Animation support
 from resources.animations.animation_manager import (
@@ -84,6 +85,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self._update_timer.timeout.connect(self._do_update_adaptive_ui)
         self._pending_settings = None
         self._is_processing = False
+        self._start_command = None
 
         # Timer for 1s delay before Cancel becomes active
         self._cancel_delay_timer = QTimer(self)
@@ -243,7 +245,14 @@ class AlgorithmPanel(QWidget, SyncMixin):
             self._on_cancel_requested()
             return
 
-        settings = self.logic.get_settings()
+        command = self._start_command
+        if command is not None:
+            command.dispatch(self._start_processing)
+        else:
+            self._start_processing(self.logic.get_settings())
+
+    def _start_processing(self, settings):
+        """Run the settings supplied by any card through the shared executor."""
 
         # 1. State lock
         self._is_processing = True
@@ -253,10 +262,11 @@ class AlgorithmPanel(QWidget, SyncMixin):
         active_algos = []
         if settings.get("alignment") and settings.get("alignment") != "No Alignment":
             active_algos.append(f"Penyelarasan ({settings['alignment']})")
-        if settings.get("denoising") and settings.get("denoising") != "No Denoising":
-            active_algos.append(f"Denoising ({settings['denoising']})")
-        if settings.get("super_resolution") and settings.get("super_resolution") != "No Super Resolution":
-            active_algos.append(f"Super Resolusi ({settings['super_resolution']})")
+        command = self._start_command
+        if command is not None:
+            active_algos.extend(
+                f"{stage.title} ({stage.algorithm})" for stage in command.stages
+            )
 
         msg = ", ".join(active_algos) if active_algos else "Memproses batch"
         
@@ -459,6 +469,11 @@ class AlgorithmPanel(QWidget, SyncMixin):
                     if all_settings.get(config.KEY_CHECKBOX_DENOISING, False)
                     else "No Denoising"
                 ),
+                config.KEY_HDR: (
+                    all_settings.get(config.KEY_HDR_ALGO, "No HDR")
+                    if all_settings.get(config.KEY_CHECKBOX_HDR, False)
+                    else "No HDR"
+                ),
                 config.KEY_CHECKBOX_ALIGN: bool(
                     all_settings.get(config.KEY_CHECKBOX_ALIGN, False)
                 ),
@@ -468,6 +483,9 @@ class AlgorithmPanel(QWidget, SyncMixin):
                 config.KEY_CHECKBOX_DENOISING: bool(
                     all_settings.get(config.KEY_CHECKBOX_DENOISING, False)
                 ),
+                config.KEY_CHECKBOX_HDR: bool(
+                    all_settings.get(config.KEY_CHECKBOX_HDR, False)
+                ),
             }
             # Update the UI
             self.update_settings(ui_settings)
@@ -475,6 +493,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
     def update_settings(self, settings):
         """Receive updated settings and trigger adaptive UI with debounce."""
         self.logic.set_settings(settings)
+        self.set_process_command(build_start_command(self.logic.get_settings()))
         self._pending_settings = settings
         self._update_timer.start(50)  # Small delay for state stability
 
@@ -487,7 +506,16 @@ class AlgorithmPanel(QWidget, SyncMixin):
     def update_settings_immediate(self, settings):
         """Bypass debounce for immediate initialization."""
         self.logic.set_settings(settings)
+        self.set_process_command(build_start_command(self.logic.get_settings()))
         self._update_adaptive_ui(settings)
+
+    def set_process_command(self, command):
+        """Receive a card-supplied command and forward it to the common control."""
+        self._start_command = command
+        if command is not None:
+            self.logic.set_settings(command.execution_settings())
+        if getattr(self, "display_panel", None) is not None:
+            self.display_panel.set_start_command(command)
 
     def _update_adaptive_ui(self, settings):
         """Update parameter stack with horizontal slide animation."""
@@ -495,26 +523,13 @@ class AlgorithmPanel(QWidget, SyncMixin):
         denoising = str(settings.get("denoising", "")).strip()
         super_res = str(settings.get("super_resolution", "")).strip()
 
-        # Relocate the Start button when the selected stage can be launched
-        # directly.  Average/Median/Similarity have no parameter page, and
-        # splattingSR follows the same contract: alignment is owned by its
-        # internal block-matching stage and therefore does not require an
-        # external parameter panel before starting.
-        is_no_algo_panel = denoising in [
-            "Average",
-            "Median",
-            "Similarity",
-            "FusionNet",
-            "Spatial AI",
-        ] or super_res not in ["", "None", "No Super Resolution"]
+        command = self._start_command
+        is_no_algo_panel = command is not None and command.direct_start
         for btn in self._all_process_buttons:
             if hasattr(self, "display_panel") and self.display_panel and btn == self.display_panel.start_btn_ref:
                 continue
             btn.setVisible(not is_no_algo_panel)
             
-        if hasattr(self, "display_panel") and self.display_panel:
-            self.display_panel.set_start_button_mode(is_no_algo_panel)
-
         none_values = [
             "",
             "None",

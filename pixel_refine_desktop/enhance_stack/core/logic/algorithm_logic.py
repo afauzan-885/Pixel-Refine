@@ -30,14 +30,17 @@ class AlgorithmLogic:
             config.KEY_ALIGNMENT: None,
             config.KEY_SUPER_RESOLUTION: None,
             config.KEY_DENOISING: None,
+            config.KEY_HDR: None,
             config.KEY_CHECKBOX_ALIGN: False,
             config.KEY_CHECKBOX_SUPER_RES: False,
             config.KEY_CHECKBOX_DENOISING: False,
+            config.KEY_CHECKBOX_HDR: False,
         }
         self.algorithm_names = {
             "alignment": [],
             "super_resolution": [],
             "denoising": [],
+            "hdr": [],
         }
         self.processing_state = {
             "progress": 0,
@@ -52,6 +55,7 @@ class AlgorithmLogic:
                 "super_resolution"
             )
             self.algorithm_names["denoising"] = get_algorithm_names("denoising")
+            self.algorithm_names["hdr"] = get_algorithm_names("hdr")
         except Exception as e:
             print(f"Error loading algorithm names: {e}")
 
@@ -94,6 +98,7 @@ class AlgorithmLogic:
                         config.KEY_CHECKBOX_ALIGN,
                         config.KEY_CHECKBOX_SUPER_RES,
                         config.KEY_CHECKBOX_DENOISING,
+                        config.KEY_CHECKBOX_HDR,
                     ):
                         self.settings[key] = bool(value)
                         continue

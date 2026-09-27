@@ -24,7 +24,7 @@ class AverageDenoisingAlgorithm:
         image_paths = getattr(ctx, "image_paths", None)
 
         if image_paths and len(image_paths) >= 2:
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.resident_pipeline import (
+            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.resident_pipeline import (
                 run_resident_pipeline,
             )
 
@@ -51,9 +51,10 @@ class AverageDenoisingAlgorithm:
             )
             batch_queue = int(
                 getattr(ctx, "params", {}).get(
-                    "batch_queue", getattr(ctx, "params", {}).get("batch_size", 3)
+                    "batch_queue", getattr(ctx, "params", {}).get("batch_size", 2)
                 )
             )
+            batch_queue = max(1, min(2, batch_queue))
 
             result_fp32, _ = run_resident_pipeline(
                 image_paths,
@@ -66,10 +67,20 @@ class AverageDenoisingAlgorithm:
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=getattr(ctx, "update_progress", None),
+                raw_native=bool(getattr(ctx, "is_raw_native", False)),
             )
 
             if result_fp32 is None:
                 return None
+
+            if bool(getattr(ctx, "is_raw_native", False)):
+                ctx.raw_native_result = result_fp32
+                result = result_fp32.preview_rgb
+                print(
+                    f"[Average][RAW Native] preview shape={result.shape} "
+                    f"dtype={result.dtype}; DNG carrier retained for save"
+                )
+                return result
 
             ref_dtype = getattr(ctx, "ref_dtype", np.uint16 if is_raw else np.uint8)
             result = restore_output_dtype(result_fp32, ref_dtype)

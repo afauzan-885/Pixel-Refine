@@ -1,16 +1,16 @@
-from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade_gpu import LucasKanadeGPU
+from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade import LucasKanade
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.optical_flow_utils.flow_blocking import to_flow_gray_u8
 import numpy as np
 import os
 import json
 
-ALGORITHM_PARAMETER_SETTINGS_FILE = "algorithm_parameter_settings.json"
+from config import ALGORITHM_PARAMETER_SETTINGS_FILE
 
-DEFAULT_BLOCK_MATCHING_GPU_CONFIG = {
+DEFAULT_BLOCK_MATCHING_CONFIG = {
     "mode": "fast",
 }
 
-BLOCK_MATCHING_GPU_PRESETS = {
+BLOCK_MATCHING_PRESETS = {
     "fast": {
         # Latency profile: 32x32 block grid and 9px window.
         "grid_step": 32,
@@ -72,9 +72,11 @@ BLOCK_MATCHING_GPU_PRESETS = {
     },
 }
 
+BLOCK_MATCHING_GPU_PRESETS = BLOCK_MATCHING_PRESETS
 
-class BlockMatchingGPU(LucasKanadeGPU):
-    NAME = "Block Matching GPU Optical Flow"
+
+class BlockMatching(LucasKanade):
+    NAME = "Block Matching Optical Flow"
     KIND = "alignment"
     DESCRIPTION = "Native AOT Block Matching optical flow for CPU, Vulkan, and OpenGL."
     GPU_MODULES = ("common", "block_matching", "pyramid", "remap")
@@ -111,10 +113,6 @@ class BlockMatchingGPU(LucasKanadeGPU):
         params = self._build_lk_params(config)
         from taichi_vision import taichi_aot
         if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
-            # Keep Block Matching at level-zero on Intel OpenGL. Its graph
-            # shares SSBO bindings with the Lucas pyramid and some drivers
-            # reject the combined binding set when algorithms are switched
-            # in the same process.
             params["maxLevel"] = 0
             if max(reference_gray.shape[:2]) > 768:
                 params["grid_step"] = max(64, int(params["grid_step"]))
@@ -153,10 +151,8 @@ class BlockMatchingGPU(LucasKanadeGPU):
         matching_reference=None,
         matching_target=None,
         return_gpu=False,
+        target_for_warping=None,
     ):
-        # Resolve the selected preset here as well as in load_config().  UI
-        # callers commonly pass only {"mode": "fast"}; forwarding that
-        # partial mapping used to silently fall back to base defaults.
         cfg = self._resolve_mode_config(dict(config or self.load_config()))
         cfg.setdefault("cache_reference_pyramid", True)
         cfg.setdefault("retain_native_pool", True)
@@ -181,21 +177,24 @@ class BlockMatchingGPU(LucasKanadeGPU):
             matching_reference=matching_reference,
             matching_target=matching_target,
             return_gpu=return_gpu,
+            target_for_warping=target_for_warping,
         )
 
     @staticmethod
     def load_config(batch_id=None, config_filename=None):
-        visible_config = DEFAULT_BLOCK_MATCHING_GPU_CONFIG.copy()
+        visible_config = DEFAULT_BLOCK_MATCHING_CONFIG.copy()
         config_filename = config_filename or ALGORITHM_PARAMETER_SETTINGS_FILE
         try:
             if os.path.exists(config_filename):
                 with open(config_filename, "r") as config_file:
                     params = json.load(config_file)
-                section = params.get("BlockMatchingGPU", {})
+                section = params.get("BlockMatching", {})
+                if not section:
+                    section = params.get("BlockMatchingGPU", {})
                 if isinstance(section, dict):
                     visible_config.update(section)
         except Exception as exc:
-            print(f"[BlockMatchingGPU] Failed to load config: {exc}")
+            print(f"[BlockMatching] Failed to load config: {exc}")
         if batch_id is not None:
             try:
                 from pixel_refine_desktop.enhance_stack.core.logic import (
@@ -206,15 +205,14 @@ class BlockMatchingGPU(LucasKanadeGPU):
                     str(batch_id),
                     {},
                 )
-                section = batch_params.get("block_matching_gpu_params", {})
+                section = batch_params.get("block_matching_params", {})
+                if not section:
+                    section = batch_params.get("block_matching_gpu_params", {})
                 if isinstance(section, dict):
                     visible_config.update(section)
             except Exception as exc:
-                print(f"[BlockMatchingGPU] Failed to load batch config: {exc}")
-        resolved = BlockMatchingGPU._resolve_mode_config(visible_config)
-        # Keep the reference pyramid and released per-frame temporaries
-        # reusable.  The base GPU aligner used to clear the pool on every
-        # frame, which turned Block Matching into an allocation benchmark.
+                print(f"[BlockMatching] Failed to load batch config: {exc}")
+        resolved = BlockMatching._resolve_mode_config(visible_config)
         resolved.setdefault("cache_reference_pyramid", True)
         resolved.setdefault("retain_native_pool", True)
         resolved.setdefault("conservative_vram", True)
@@ -225,14 +223,14 @@ class BlockMatchingGPU(LucasKanadeGPU):
         value = str(mode or "fast").strip().lower()
         if value in ("balanced", "balance mode"):
             return "balance"
-        if value not in BLOCK_MATCHING_GPU_PRESETS:
+        if value not in BLOCK_MATCHING_PRESETS:
             return "fast"
         return value
 
     @staticmethod
     def _resolve_mode_config(config):
-        mode = BlockMatchingGPU._normalize_mode(config.get("mode", "fast"))
-        resolved = BLOCK_MATCHING_GPU_PRESETS[mode].copy()
+        mode = BlockMatching._normalize_mode(config.get("mode", "fast"))
+        resolved = BLOCK_MATCHING_PRESETS[mode].copy()
         for key, value in config.items():
             if key != "mode":
                 resolved[key] = value
@@ -240,17 +238,28 @@ class BlockMatchingGPU(LucasKanadeGPU):
         return resolved
 
     @staticmethod
-    def load_block_matching_gpu_config(config_filename=None):
-        return BlockMatchingGPU.load_config(config_filename=config_filename)
+    def load_block_matching_config(config_filename=None):
+        return BlockMatching.load_config(config_filename=config_filename)
 
     @staticmethod
-    def load_block_matching_gpu_config_for_batch(config_filename=None):
-        return BlockMatchingGPU.load_config(config_filename=config_filename)
+    def load_block_matching_config_for_batch(config_filename=None):
+        return BlockMatching.load_config(config_filename=config_filename)
 
-    def calculate_flow(self, reference_gray, target_gray, config, point_executor=None):
+    load_block_matching_gpu_config = load_block_matching_config
+    load_block_matching_gpu_config_for_batch = load_block_matching_config_for_batch
+    def calculate_flow(
+        self,
+        reference_gray,
+        target_gray,
+        config,
+        point_executor=None,
+        return_gpu=False,
+    ):
         from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
 
         lk_params = self._build_lk_params(config)
+        if return_gpu:
+            lk_params["return_gpu"] = True
 
         try:
             flow = calcOpticalFlowBlockMatching(
@@ -261,10 +270,12 @@ class BlockMatchingGPU(LucasKanadeGPU):
             if isinstance(flow, tuple):
                 flow = flow[0]
             if flow is not None:
+                if return_gpu:
+                    return flow
                 return np.ascontiguousarray(flow, dtype=np.float32)
         except Exception as exc:
             print(
-                f"[BlockMatchingGPU] Dense AOT flow failed: {exc}"
+                f"[BlockMatching] Dense AOT flow failed: {exc}"
             )
             if bool(config.get("strict", False)):
                 raise RuntimeError("strict block-matching AOT flow failed") from exc
@@ -272,26 +283,6 @@ class BlockMatchingGPU(LucasKanadeGPU):
             raise RuntimeError("Block Matching AOT returned no flow")
         return np.zeros((reference_gray.shape[0], reference_gray.shape[1], 2), dtype=np.float32)
 
-    def _calculate_flow_gpu_buffer(
-        self,
-        reference_gray,
-        target_gray,
-        config,
-        reference_pyramid=None,
-    ):
-        from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
 
-        flow_kwargs = {
-            "prev": reference_gray,
-            "next": target_gray,
-            **self._build_lk_params(config),
-            "return_gpu": True,
-        }
-        if reference_pyramid is not None:
-            flow_kwargs["reference_pyramid"] = reference_pyramid
-        flow = calcOpticalFlowBlockMatching(**flow_kwargs)
-        if isinstance(flow, tuple):
-            flow = flow[0]
-        if flow is None or not hasattr(flow, "shape"):
-            raise RuntimeError("Block Matching AOT did not return a GPU flow buffer")
-        return flow
+# Backward compatibility alias
+BlockMatchingGPU = BlockMatching

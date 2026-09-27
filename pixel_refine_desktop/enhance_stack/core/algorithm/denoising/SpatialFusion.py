@@ -57,6 +57,7 @@ class SpatialFusionDenoisingAlgorithm:
         if hasattr(ctx, "params") and isinstance(ctx.params, dict):
             for k in (
                 "similarity_spatial_tile_size",
+                "similarity_spatial_work_resolution",
                 "similarity_spatial_motion_sensitivity",
                 "similarity_spatial_noise_mad_offset_factor",
                 "similarity_spatial_overlap_percent",
@@ -99,17 +100,17 @@ class SpatialFusionDenoisingAlgorithm:
 
         image_paths = getattr(ctx, "image_paths", None)
         if image_paths and len(image_paths) >= 2:
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.resident_pipeline import (
+            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.resident_pipeline import (
                 run_resident_pipeline,
             )
             import threading
 
             is_raw = bool(getattr(ctx, "is_linear_mode", False))
-            tile_size = max(4, int(config.get("similarity_spatial_tile_size", 16)))
-            overlap = float(config.get("similarity_spatial_overlap_percent", 0.35))
-            work_scale = float(
-                config.get("work_resolution_scale", config.get("proxy_scale", 0.50))
-            )
+            tile_size = max(8, int(config.get("similarity_spatial_tile_size", 24)))
+            overlap = float(np.clip(config.get("similarity_spatial_overlap_percent", 0.35), 0.0, 0.85))
+            # A dedicated setting preserves full-resolution behavior for old
+            # batches; the generic work_resolution_scale belongs to other paths.
+            work_scale = float(config["similarity_spatial_work_resolution"])
 
             stop_req = getattr(ctx, "stop_requested", None)
             if stop_req is not None and callable(stop_req) and stop_req():
@@ -117,7 +118,8 @@ class SpatialFusionDenoisingAlgorithm:
 
             print(
                 f"[SpatialFusion] Routing to GPU-resident pipeline: backend={backend} "
-                f"frames={len(image_paths)} tile={tile_size} overlap={overlap:.2f}"
+                f"frames={len(image_paths)} tile={tile_size} overlap={overlap:.2f} "
+                f"work_scale={work_scale:.2f}"
             )
 
             alignment_plan = (
@@ -130,9 +132,10 @@ class SpatialFusionDenoisingAlgorithm:
 
             batch_queue = int(
                 getattr(ctx, "params", {}).get(
-                    "batch_queue", getattr(ctx, "params", {}).get("batch_size", 3)
+                    "batch_queue", getattr(ctx, "params", {}).get("batch_size", 2)
                 )
             )
+            batch_queue = max(1, min(2, batch_queue))
 
             ghost_penalty = float(config.get("ghost_penalty", 1.0))
             chroma_sensitivity = float(
@@ -141,7 +144,7 @@ class SpatialFusionDenoisingAlgorithm:
                     config.get("similarity_chroma_sensitivity", 6.0),
                 )
             )
-            noise_sigma_cfg = config.get("noise_sigma")
+            noise_sigma_cfg = config.get("similarity_spatial_noise_sigma", config.get("noise_sigma"))
             noise_sigma_label = (
                 "auto"
                 if noise_sigma_cfg in (None, 0, 0.0)
@@ -164,6 +167,9 @@ class SpatialFusionDenoisingAlgorithm:
                 alignment_config=alignment_config,
                 spatial_config=config,
                 work_scale=work_scale,
+                flownet_work_scale=work_scale,
+                weightnet_work_scale=work_scale,
+                max_work_dimension=None,
                 tile_size=tile_size,
                 overlap=overlap,
                 ghost_penalty=ghost_penalty,
@@ -172,10 +178,20 @@ class SpatialFusionDenoisingAlgorithm:
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=getattr(ctx, "update_progress", None),
+                raw_native=bool(getattr(ctx, "is_raw_native", False)),
             )
 
             if result_fp32 is None:
                 return None
+
+            if bool(getattr(ctx, "is_raw_native", False)):
+                ctx.raw_native_result = result_fp32
+                result = result_fp32.preview_rgb
+                print(
+                    f"[SpatialFusion][RAW Native] preview shape={result.shape} "
+                    f"dtype={result.dtype}; DNG carrier retained for save"
+                )
+                return result
 
             ref_dtype = getattr(ctx, "ref_dtype", np.uint16 if is_raw else np.uint8)
             result = restore_output_dtype(result_fp32, ref_dtype)
@@ -205,8 +221,8 @@ class SpatialFusionDenoisingAlgorithm:
         )
 
         reference_float = normalize_image(reference, ref_dtype)
-        tile_size = max(4, int(config.get("similarity_spatial_tile_size", 12)))
-        overlap = float(config.get("similarity_spatial_overlap_percent", 0.35))
+        tile_size = max(8, int(config.get("similarity_spatial_tile_size", 24)))
+        overlap = float(np.clip(config.get("similarity_spatial_overlap_percent", 0.35), 0.0, 0.85))
         total_images = len(images)
 
         processor = SpatialFusionProcessor()

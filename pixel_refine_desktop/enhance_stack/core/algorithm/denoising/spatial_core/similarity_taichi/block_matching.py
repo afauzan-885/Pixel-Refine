@@ -22,6 +22,7 @@ if os.environ.get("AOT_MODE", "1") == "0":
 fast_tanh = None
 calculate_match_confidence = None
 calculate_hybrid_gradient_optimized = None
+calculate_hybrid_gradient_optimized_rgb = None
 
 if TAICHI_AVAILABLE:
 
@@ -50,7 +51,17 @@ if TAICHI_AVAILABLE:
         return ti.exp(-excess_mad * motion_sensitivity)
 
     @ti.func
-    def calculate_hybrid_gradient_optimized(
+    def _image_value(image: ti.template(), y: ti.i32, x: ti.i32,
+                     channel: ti.i32, is_rgb: ti.template()) -> ti.f32:
+        value = 0.0
+        if ti.static(is_rgb):
+            value = image[y, x, channel]
+        else:
+            value = image[y, x]
+        return value
+
+    @ti.func
+    def _calculate_hybrid_gradient_optimized_impl(
         current_img: ti.template(),
         reference_img: ti.template(),
         curr_grad_x: ti.template(),
@@ -66,7 +77,9 @@ if TAICHI_AVAILABLE:
         noise_level: float,
         grad_weight_factor: float,
         stab_epsilon: float,
-        flat_weight: float
+        flat_weight: float,
+        channel: ti.i32,
+        is_rgb: ti.template(),
     ) -> float:
         """
         Calculates the hybrid gradient similarity score between current and reference blocks.
@@ -78,11 +91,13 @@ if TAICHI_AVAILABLE:
         grad_sensitivity = 202.5
         # Adaptive Vision Boost: increase sensitivity dynamically on low-contrast tiles
         adaptive_grad_sensitivity = grad_sensitivity * (1.0 + 3.0 * flat_weight)
-        structure_min_threshold_sq = 150.0
+        # Normalized structure threshold squared for [0, 1] float images (150.0 / 255^2)
+        structure_min_threshold_sq = 0.002307
         # These values are constant for the complete tile.  Hoisting them
         # avoids repeating the same max/multiply and branch predicate for
         # every sampled pixel while preserving the original arithmetic.
         adaptive_diff_threshold = ti.max(0.005, noise_level * 0.2)
+        base_structure_thr_sq = ti.max(structure_min_threshold_sq, 4.0 * noise_level * noise_level) * (1.0 + flat_weight)
         noise_enabled = noise_level > stab_epsilon
 
         # 1-pixel border skip to prevent out of bounds and match C++
@@ -91,15 +106,32 @@ if TAICHI_AVAILABLE:
             for x in range((curr_w - 1) // 2):
                 img_x = c + 1 + x * 2
                 
-                p1_val = current_img[img_y, img_x]
-                p2_val = reference_img[img_y, img_x]
+                p1_val = _image_value(current_img, img_y, img_x, channel, is_rgb)
+                p2_val = _image_value(reference_img, img_y, img_x, channel, is_rgb)
                 pixel_diff = ti.abs(p1_val - p2_val)
                 
-                # --- Read Precomputed Gradients directly ---
-                gx1 = curr_grad_x[img_y, img_x]
-                gy1 = curr_grad_y[img_y, img_x]
-                gx2 = ref_grad_x[img_y, img_x]
-                gy2 = ref_grad_y[img_y, img_x]
+                # Compute the Sobel-like gradients at the sampled pixel. The
+                # old route materialized four full-resolution gradient planes
+                # before visiting the tiles. Inlining these few samples keeps
+                # gradient scratch bounded to registers while preserving the
+                # same stencil and arithmetic order as precompute_gradients.
+                gx1_center = _image_value(current_img, img_y, img_x + 1, channel, is_rgb) - _image_value(current_img, img_y, img_x - 1, channel, is_rgb)
+                gx1_top = _image_value(current_img, img_y - 1, img_x + 1, channel, is_rgb) - _image_value(current_img, img_y - 1, img_x - 1, channel, is_rgb)
+                gx1_bottom = _image_value(current_img, img_y + 1, img_x + 1, channel, is_rgb) - _image_value(current_img, img_y + 1, img_x - 1, channel, is_rgb)
+                gx1 = (gx1_center + gx1_top + gx1_bottom) * 0.33333333
+                gy1_center = _image_value(current_img, img_y + 1, img_x, channel, is_rgb) - _image_value(current_img, img_y - 1, img_x, channel, is_rgb)
+                gy1_left = _image_value(current_img, img_y + 1, img_x - 1, channel, is_rgb) - _image_value(current_img, img_y - 1, img_x - 1, channel, is_rgb)
+                gy1_right = _image_value(current_img, img_y + 1, img_x + 1, channel, is_rgb) - _image_value(current_img, img_y - 1, img_x + 1, channel, is_rgb)
+                gy1 = (gy1_center + gy1_left + gy1_right) * 0.33333333
+
+                gx2_center = _image_value(reference_img, img_y, img_x + 1, channel, is_rgb) - _image_value(reference_img, img_y, img_x - 1, channel, is_rgb)
+                gx2_top = _image_value(reference_img, img_y - 1, img_x + 1, channel, is_rgb) - _image_value(reference_img, img_y - 1, img_x - 1, channel, is_rgb)
+                gx2_bottom = _image_value(reference_img, img_y + 1, img_x + 1, channel, is_rgb) - _image_value(reference_img, img_y + 1, img_x - 1, channel, is_rgb)
+                gx2 = (gx2_center + gx2_top + gx2_bottom) * 0.33333333
+                gy2_center = _image_value(reference_img, img_y + 1, img_x, channel, is_rgb) - _image_value(reference_img, img_y - 1, img_x, channel, is_rgb)
+                gy2_left = _image_value(reference_img, img_y + 1, img_x - 1, channel, is_rgb) - _image_value(reference_img, img_y - 1, img_x - 1, channel, is_rgb)
+                gy2_right = _image_value(reference_img, img_y + 1, img_x + 1, channel, is_rgb) - _image_value(reference_img, img_y - 1, img_x + 1, channel, is_rgb)
+                gy2 = (gy2_center + gy2_left + gy2_right) * 0.33333333
                 
                 mag1_sq = gx1 * gx1 + gy1 * gy1
                 mag2_sq = gx2 * gx2 + gy2 * gy2
@@ -109,11 +141,12 @@ if TAICHI_AVAILABLE:
                 # Linear scaling maps p2_val=0 to scale=3.0 and p2_val=1.0 to scale=1.0. Extremely cheap on GPU.
                 tolerance_scale = ti.max(1.0, ti.min(3.0, 3.0 - 2.0 * p2_val))
                 local_adaptive_diff_threshold = adaptive_diff_threshold * tolerance_scale
+                local_structure_min_threshold_sq = base_structure_thr_sq * (tolerance_scale * tolerance_scale)
 
                 # --- continuous noise weight ---
                 noise_weight = 1.0
                 if noise_enabled:
-                    if min_mag_sq < structure_min_threshold_sq:
+                    if min_mag_sq < local_structure_min_threshold_sq:
                         # Flat area
                         local_thr = local_adaptive_diff_threshold * 1.5
                         if pixel_diff < local_thr:
@@ -139,7 +172,7 @@ if TAICHI_AVAILABLE:
                     dot = gx1 * gx2 + gy1 * gy2
                     cos_sim = dot / ti.sqrt(mag1_sq * mag2_sq)
                     
-                    if min_mag_sq > structure_min_threshold_sq and cos_sim < 0.2:
+                    if min_mag_sq > local_structure_min_threshold_sq and cos_sim < 0.2:
                         # Mismatched structure orientations: scale up pixel_diff to penalize mismatch and prevent ghosting
                         pixel_diff = pixel_diff * (1.5 - cos_sim)
                     else:
@@ -156,9 +189,42 @@ if TAICHI_AVAILABLE:
             l1_sum = 0.0
             for y in range(curr_h):
                 for x in range(curr_w):
-                    l1_sum += ti.abs(current_img[r + y, c + x] - reference_img[r + y, c + x])
+                    l1_sum += ti.abs(
+                        _image_value(current_img, r + y, c + x, channel, is_rgb)
+                        - _image_value(reference_img, r + y, c + x, channel, is_rgb)
+                    )
             res_val = l1_sum / float(curr_h * curr_w)
         else:
             res_val = weighted_sum / total_weight
 
         return res_val
+
+    @ti.func
+    def calculate_hybrid_gradient_optimized(
+        current_img: ti.template(), reference_img: ti.template(),
+        curr_grad_x: ti.template(), curr_grad_y: ti.template(),
+        ref_grad_x: ti.template(), ref_grad_y: ti.template(),
+        r: int, c: int, curr_h: int, curr_w: int, h: int, w: int,
+        noise_level: float, grad_weight_factor: float, stab_epsilon: float,
+        flat_weight: float,
+    ) -> float:
+        return _calculate_hybrid_gradient_optimized_impl(
+            current_img, reference_img, curr_grad_x, curr_grad_y,
+            ref_grad_x, ref_grad_y, r, c, curr_h, curr_w, h, w,
+            noise_level, grad_weight_factor, stab_epsilon, flat_weight,
+            0, False,
+        )
+
+    @ti.func
+    def calculate_hybrid_gradient_optimized_rgb(
+        current_img: ti.template(), reference_img: ti.template(),
+        r: int, c: int, curr_h: int, curr_w: int, h: int, w: int,
+        noise_level: float, grad_weight_factor: float, stab_epsilon: float,
+        flat_weight: float, channel: ti.i32,
+    ) -> float:
+        return _calculate_hybrid_gradient_optimized_impl(
+            current_img, reference_img, current_img, current_img,
+            reference_img, reference_img, r, c, curr_h, curr_w, h, w,
+            noise_level, grad_weight_factor, stab_epsilon, flat_weight,
+            channel, True,
+        )

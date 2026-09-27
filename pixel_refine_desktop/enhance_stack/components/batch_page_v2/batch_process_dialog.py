@@ -59,7 +59,7 @@ class MassAlgorithmEditDialog(QDialog):
             "Block Flow",
             "Farneback",
             "Lucas Kanade",
-            "Block Matching GPU",
+            "Block Matching",
             "No Alignment",
         ]
         backend_arch = get_backend_arch()
@@ -81,7 +81,7 @@ class MassAlgorithmEditDialog(QDialog):
                 "Average",
                 "Median",
                 "Similarity",
-                "Spatial AI",
+                "FusionNet",
                 "No Denoising",
             ],
         }
@@ -427,8 +427,14 @@ class MassAlgorithmEditDialog(QDialog):
                     "No Alignment",
                     "No Super Resolution",
                     "No Denoising",
+                    "No HDR",
                 ]
-                for key in ["alignment", "super_resolution", "denoising"]
+                for key in [
+                    "alignment",
+                    "super_resolution",
+                    "denoising",
+                    "hdr",
+                ]
             )
 
             if not has_active_algo:

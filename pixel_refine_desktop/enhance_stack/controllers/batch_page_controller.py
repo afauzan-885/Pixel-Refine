@@ -49,10 +49,9 @@ class BatchPageController(QObject):
         self.batch_repo = BatchRepository(db_path)
         self.db_path = db_path
 
-        # LRU cache for BatchModel lookups. Eliminates the SQLite hit
-        # when the same batch is re-selected from the right-side list.
-        # Keyed by batch_id; entries are evicted at _BATCH_CACHE_LIMIT
-        # or when invalidated by signals.
+        # Snapshot store of BatchModel lookups, keyed by batch_id and capped at
+        # _batch_cache_limit. Not consulted by ``get_batch`` (see its docstring);
+        # out-of-band writers drop snapshots through ``invalidate_batch_cache``.
         self._batch_cache: "OrderedDict[int, BatchModel]" = OrderedDict()
         self._batch_cache_limit: int = 64
 
@@ -112,9 +111,11 @@ class BatchPageController(QObject):
         """
         Get a specific batch with its images.
 
-        Cache hit returns the previously-fetched BatchModel without
-        hitting SQLite. Cache miss falls back to a per-batch query
-        and primes the cache.
+        Always re-reads SQLite. Batches can be modified outside this
+        controller (Bulk Mode writes the same database through its own
+        connection), so serving a cached ``BatchModel`` here would surface
+        stale images and an empty grid. The cost of this read is measured by
+        ``app_core.perf_probe`` before any caching is reintroduced.
 
         Args:
             batch_id: Batch ID

@@ -335,9 +335,24 @@ class LeftPanel(QWidget):
         # Fallback/Loose search if exact match fails (e.g. timestamp differences?)
         # But try exact first.
 
-        expected_path = next(
-            (path for path in expected_paths if os.path.exists(path)), None
+        existing_paths = [path for path in expected_paths if os.path.exists(path)]
+        # Both RGB Linear (.tif) and RAW Native (.dng) intentionally share
+        # the same stem.  Select the artifact written by the current run
+        # instead of always preferring the stale TIFF from an earlier mode.
+        expected_path = max(
+            existing_paths,
+            key=lambda path: os.stat(path).st_mtime_ns,
+            default=None,
         )
+        if len(existing_paths) > 1:
+            print(
+                "[LeftPanel] Result candidates: "
+                + ", ".join(
+                    f"{os.path.basename(path)}@{os.stat(path).st_mtime_ns}"
+                    for path in existing_paths
+                )
+                + f"; selected={os.path.basename(expected_path)}"
+            )
         if expected_path is not None:
             self.display_panel.display_processed_result(expected_path)
         else:

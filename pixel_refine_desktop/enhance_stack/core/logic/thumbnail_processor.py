@@ -313,7 +313,7 @@ class ThumbnailBulkWorker(QRunnable):
                     global_cache.put(path, q_img_to_emit)
                     processor = self.processor_ref()
                     if processor:
-                        processor.ram_cache[path] = q_img_to_emit
+                        processor._ram_cache_put(path, q_img_to_emit)
                     
                     if not self._should_abort():
                         self._safe_emit(q_img_to_emit, path)
@@ -506,7 +506,15 @@ class ThumbnailBatchProcessor(QObject):
         self.callbacks = {}  # image_path -> callback function
 
         # --- OPTIMASI HIGH-PERFORMANCE: CACHING & DEFERRED I/O ---
-        self.ram_cache = {}  # L1 Cache: path -> QImage (Instan)
+        # L1 cache: path -> QImage. Bounded by _ram_cache_put below; previously a
+        # plain dict that was never evicted, so every thumbnail decoded in a
+        # session stayed resident for the lifetime of the process.
+        self.ram_cache: "OrderedDict[str, object]" = OrderedDict()
+        self._ram_cache_bytes = 0
+        # The L1 cache is written by thumbnail workers and read from the GUI
+        # thread, so eviction (which mutates the OrderedDict ordering) needs a
+        # lock.  Mirrors the locking used by GlobalThumbnailCache above.
+        self._ram_cache_lock = threading.Lock()
         self.pending_save_queue = []  # Queue untuk simpan ke Disk (Deferred)
 
         # --- PROGRESS TRACKING ---
@@ -543,6 +551,54 @@ class ThumbnailBatchProcessor(QObject):
             max_concurrent = max(4, min(12, os.cpu_count() or 4))
         QThreadPool.globalInstance().setMaxThreadCount(max_concurrent)
 
+    # ------------------------------------------------------------------
+    # L1 RAM CACHE BOUNDING
+    # ------------------------------------------------------------------
+    # The L1 tier exists to make a repeat visit to a batch instant, so it only
+    # needs to hold roughly what the L0 global cache already holds.  Both an
+    # item cap and a byte budget are enforced because a thumbnail can be larger
+    # than the default 128x128 depending on configuration.
+    RAM_CACHE_MAX_ITEMS = 600
+    RAM_CACHE_MAX_BYTES = 64 * 1024 * 1024
+
+    @staticmethod
+    def _ram_cache_size(q_image):
+        try:
+            return int(q_image.sizeInBytes())
+        except Exception:
+            return 0
+
+    def _ram_cache_put(self, path, q_image):
+        """Insert into L1 with LRU + byte-budget eviction."""
+        with self._ram_cache_lock:
+            if path in self.ram_cache:
+                existing = self.ram_cache.pop(path)
+                self._ram_cache_bytes -= self._ram_cache_size(existing)
+
+            self.ram_cache[path] = q_image
+            self._ram_cache_bytes += self._ram_cache_size(q_image)
+
+            while len(self.ram_cache) > 1 and (
+                len(self.ram_cache) > self.RAM_CACHE_MAX_ITEMS
+                or self._ram_cache_bytes > self.RAM_CACHE_MAX_BYTES
+            ):
+                _old_path, old_image = self.ram_cache.popitem(last=False)
+                self._ram_cache_bytes -= self._ram_cache_size(old_image)
+
+    def _ram_cache_get(self, path):
+        """Return the cached QImage for *path* (marking it as recently used)."""
+        with self._ram_cache_lock:
+            if path not in self.ram_cache:
+                return None
+            self.ram_cache.move_to_end(path)
+            return self.ram_cache[path]
+
+    def clear_ram_cache(self):
+        """Drop every L1 thumbnail (used when the feature is switched off)."""
+        with self._ram_cache_lock:
+            self.ram_cache.clear()
+            self._ram_cache_bytes = 0
+
     def process_image(self, image_path, callback=None):
         """
         Process single image thumbnail dengan sistem cache 3 level (L0 Global -> L1 RAM -> L2 Disk).
@@ -562,17 +618,18 @@ class ThumbnailBatchProcessor(QObject):
         cached_l0 = global_cache.get(image_path)
         if cached_l0 is not None and not cached_l0.isNull():
             # Sinkronisasikan ke L1 juga
-            self.ram_cache[image_path] = cached_l0
+            self._ram_cache_put(image_path, cached_l0)
             if callback:
                 callback(cached_l0, image_path)
             return
 
         # 1. CEK RAM CACHE (L1 - Paling Cepat, session ini)
-        if image_path in self.ram_cache:
+        cached_l1 = self._ram_cache_get(image_path)
+        if cached_l1 is not None:
             # Populasi ke L0 jika belum ada
-            global_cache.put(image_path, self.ram_cache[image_path])
+            global_cache.put(image_path, cached_l1)
             if callback:
-                callback(self.ram_cache[image_path], image_path)
+                callback(cached_l1, image_path)
             return
 
         # 2. CEK DISK CACHE (L2) - Dihandle secara asinkron oleh worker di background thread!
@@ -644,7 +701,7 @@ class ThumbnailBatchProcessor(QObject):
             cached_l0 = global_cache.get(path)
             if cached_l0 is not None and not cached_l0.isNull():
                 # L0 hit: sinkronisasikan ke L1 juga
-                self.ram_cache[path] = cached_l0
+                self._ram_cache_put(path, cached_l0)
                 if callback:
                     callback(cached_l0, path)
 
@@ -666,11 +723,12 @@ class ThumbnailBatchProcessor(QObject):
         # 1. BULK LOAD DARI RAM (L1)
         still_remaining = []
         for path in remaining_paths:
-            if path in self.ram_cache:
+            cached_l1 = self._ram_cache_get(path)
+            if cached_l1 is not None:
                 # L1 hit: populasikan ke L0
-                global_cache.put(path, self.ram_cache[path])
+                global_cache.put(path, cached_l1)
                 if callback:
-                    callback(self.ram_cache[path], path)
+                    callback(cached_l1, path)
 
                 # Update progress even for cache hits (Avoid double counting)
                 if path not in self._processed_paths:
@@ -735,7 +793,7 @@ class ThumbnailBatchProcessor(QObject):
 
         if is_success:
             # Simpan ke RAM Cache (L1)
-            self.ram_cache[image_path] = q_image
+            self._ram_cache_put(image_path, q_image)
 
         # Progress tracking: Selalu update agar progress mencapai 100%
         if self.path_to_batch.get(image_path) == self.current_batch_id:

@@ -254,8 +254,11 @@ def register_hamilton_graphs(module, kernels):
     module.add_graph("hamilton_demosaic_rgb_half_res", g.compile())
 
     # 6. hamilton_demosaic_3channel (full demosaic -> grayscale luma)
+    # Only the edge-directed green pass feeds the luma output.  The former
+    # ``preprocess_wb`` dispatch wrote a full-resolution ``wb_bayer`` plane that
+    # no kernel in this graph ever read, costing one h*w float32 allocation and
+    # one extra full-frame dispatch on every call.
     g = ti.graph.GraphBuilder()
-    g.dispatch(kernels["preprocess_wb"], bayer, io["wb_bayer"], *common)
     g.dispatch(kernels["green_direct"], bayer, green, *common)
     g.dispatch(kernels["grayscale"], green, io["dst_2d"], s["h"], s["w"])
     module.add_graph("hamilton_demosaic_3channel", g.compile())

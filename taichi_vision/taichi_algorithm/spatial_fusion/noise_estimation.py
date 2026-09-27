@@ -84,14 +84,19 @@ def estimate_noise_sigma(
 def auto_motion_sensitivity(
     is_raw: bool = False,
     base: float = 150.0,
+    noise_sigma: Optional[float] = None,
 ) -> float:
-    """Return a sensible default motion sensitivity.
+    """Return noise-aware motion sensitivity scaled by base sensitivity.
 
-    Higher values reject ghosts more aggressively.  RAW/linear bursts are
-    typically noisier, so a slightly lower default keeps fine detail while
-    still suppressing ghosts.
+    Higher noise requires looser motion penalty to prevent false ghosting 
+    on noisy details; lower noise allows tighter ghost rejection.
     """
-    return base * (0.9 if is_raw else 1.0)
+    raw_factor = 0.9 if is_raw else 1.0
+    if noise_sigma is None or noise_sigma <= 0.0:
+        return float(base * raw_factor)
+    safe_sigma = max(1e-4, float(noise_sigma))
+    aware_factor = float(np.clip(np.sqrt(0.025 / safe_sigma), 0.4, 2.5))
+    return float(base * raw_factor * aware_factor)
 
 
 def resolve_spatial_thresholds(
@@ -106,8 +111,9 @@ def resolve_spatial_thresholds(
 
     Args:
         reference_work_gray: Work-resolution grayscale reference (GPU buffer or NumPy array).
-        noise_sigma:         Explicit noise sigma [0.0 - 1.0]; None -> auto-estimate on GPU.
-        motion_sensitivity:  Explicit motion sensitivity; None -> default.
+        noise_sigma:         Explicit noise sigma [0.0 - 1.0]; None/0.0 -> auto-estimate on GPU.
+        motion_sensitivity:  Base motion sensitivity from UI [10.0 - 3000.0]; None -> default 150.0.
+                             Modulated automatically by noise-awareness factor.
         noise_offset_factor: Explicit noise offset; None -> default 0.15.
         is_raw:              Whether the burst is RAW/linear (affects default).
 
@@ -124,12 +130,15 @@ def resolve_spatial_thresholds(
     else:
         noise_sigma = float(np.clip(noise_sigma, 1e-5, 0.99999))
 
-    if motion_sensitivity is None:
-        motion_sensitivity = auto_motion_sensitivity(is_raw=is_raw)
+    base_motion = 150.0 if (motion_sensitivity is None or motion_sensitivity <= 0.0) else float(motion_sensitivity)
+    effective_motion_sensitivity = auto_motion_sensitivity(
+        is_raw=is_raw, base=base_motion, noise_sigma=noise_sigma
+    )
+
     if noise_offset_factor is None:
         noise_offset_factor = 0.15
     return (
         float(noise_sigma),
-        float(motion_sensitivity),
+        float(effective_motion_sensitivity),
         float(noise_offset_factor),
     )
