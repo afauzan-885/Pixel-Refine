@@ -5,6 +5,7 @@ Uses Polynomial Expansion and Cramer's Rule Flow Solver compiled with Taichi AOT
 for pure GPU/native execution without OpenCV dependencies.
 """
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import json
 import os
 import numpy as np
@@ -16,10 +17,13 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
 )
 
 
+
+
 class FarnebackFlow:
-    NAME = "Farneback Optical Flow"
-    KIND = "alignment"
-    DESCRIPTION = "100% Taichi Vision GPU-Native Farneback Optical Flow Alignment."
+    SPEC = get_spec("alignment", "farneback")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     PRESETS = {
         "fast": {

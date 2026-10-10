@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 from itertools import chain
 
 from .card_content import CARD_CONTENT, CARD_NAME, LEGACY_CARD_NAME
@@ -9,13 +10,16 @@ from .hdr_fusion import WeightedHDRFusion, estimate_noise_taichi, rgb_to_gray
 from .spde_mr import SPDEMRAlgorithm, SPDEMRFusion
 
 
+
+
 class WeightedHDRAlgorithm:
     """Streaming weighted fusion over already aligned RGB frames."""
 
-    NAME = CARD_NAME
-    LEGACY_NAME = LEGACY_CARD_NAME
-    KIND = "hdr"
-    DESCRIPTION = CARD_CONTENT["description"]
+    SPEC = get_spec("hdr", "weighted")
+    NAME = SPEC.implementation_name
+    LEGACY_NAME = SPEC.aliases[0]
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
     CARD_CATEGORIES = ("hdr",)
 
     def run(self, ctx, frames, batch_plan=None):

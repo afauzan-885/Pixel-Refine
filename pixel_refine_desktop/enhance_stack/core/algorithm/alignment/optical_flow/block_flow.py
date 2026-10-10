@@ -7,6 +7,7 @@ block matching and optical flow (compute_flow.tcm) with memory-bounded
 streaming compositor for CPU and GPU fallback.
 """
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import json
 import os
 import numpy as np
@@ -72,10 +73,15 @@ BLOCK_FLOW_PRESETS = {
 }
 
 
+
+
 class BlockFlow(LucasKanade):
     """Canonical Block Flow alignment algorithm."""
 
-    NAME = "Block Flow"
+    SPEC = get_spec("alignment", "block_flow")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
     CATEGORY = "optical_flow"
     PRESETS = BLOCK_FLOW_PRESETS
 

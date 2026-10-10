@@ -4,6 +4,7 @@ import os
 from PySide6.QtWidgets import QApplication, QWidget
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE, CONFIG_DIR
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import normalize_name
 from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 
 
@@ -60,6 +61,7 @@ def find_active_right_panel():
 
 
 def save_alignment_config_for_active_batch(algorithm_name, params_key, config):
+    algorithm_name = normalize_name("alignment", algorithm_name)
     right_panel = find_active_right_panel()
     if not right_panel or not getattr(right_panel, "current_batch_id", None):
         return

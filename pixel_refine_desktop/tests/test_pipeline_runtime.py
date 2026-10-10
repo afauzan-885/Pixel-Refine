@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import threading
+import json
 
 import pytest
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
+    IN_PROCESSING_SETTING_KEY,
     PREFETCH_SETTING_KEY,
     PipelineCancelledError,
     PipelineRuntime,
+    normalize_in_processing_depth,
     normalize_prefetch_depth,
+    resolve_in_processing_depth,
     resolve_prefetch_depth,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime.runtime import (
@@ -32,6 +36,91 @@ def test_invalid_prefetch_depth_disables_prefetch(value):
 
 def test_performance_store_defaults_to_no_prefetch():
     assert DEFAULTS[PREFETCH_SETTING_KEY] == 0
+    assert DEFAULTS[IN_PROCESSING_SETTING_KEY] == 1
+
+
+@pytest.mark.parametrize("depth", range(1, 5))
+def test_in_processing_depth_accepts_supported_integer_range(depth):
+    assert normalize_in_processing_depth(depth) == depth
+    assert normalize_in_processing_depth(str(depth)) == depth
+
+
+@pytest.mark.parametrize("value", [0, -1, 5, 2.5, True, None, "bad", ""])
+def test_invalid_in_processing_depth_uses_serial_default(value):
+    assert normalize_in_processing_depth(value) == 1
+
+
+def test_resolve_in_processing_depth_reads_saved_performance_setting(
+    tmp_path, monkeypatch
+):
+    import config
+
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({IN_PROCESSING_SETTING_KEY: 3}), encoding="utf-8"
+    )
+    monkeypatch.setattr(config, "GENERAL_SETTINGS_FILE", str(settings_path))
+    assert resolve_in_processing_depth() == 3
+
+
+def test_runtime_in_processing_slots_are_shared_and_idempotent():
+    runtime = PipelineRuntime(in_processing_depth=2)
+    first = runtime.acquire_in_processing_slot()
+    second = runtime.acquire_in_processing_slot()
+    assert first is not None and second is not None
+    assert runtime.in_processing_frames == 2
+    assert runtime.peak_in_processing_frames == 2
+
+    started = threading.Event()
+    acquired = threading.Event()
+    result = []
+
+    def wait_for_slot():
+        started.set()
+        lease = runtime.acquire_in_processing_slot()
+        result.append(lease)
+        acquired.set()
+
+    worker = threading.Thread(target=wait_for_slot)
+    worker.start()
+    assert started.wait(1)
+    assert not acquired.wait(0.1)
+
+    first.release()
+    first.release()
+    assert acquired.wait(2)
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    third = result[0]
+    assert third is not None
+    assert runtime.in_processing_frames == 2
+
+    second.release()
+    third.release()
+    assert runtime.in_processing_frames == 0
+    runtime.close()
+
+
+def test_prepared_supports_use_the_runtime_shared_slot_pool():
+    runtime = PipelineRuntime(in_processing_depth=2)
+    held = runtime.acquire_in_processing_slot()
+    assert held is not None
+    prepared = runtime.iter_prepared_supports(
+        [7],
+        lambda index: f"raw-{index}",
+        lambda index, raw: (index, raw, "decoded"),
+    )
+    try:
+        index, frame = next(prepared)
+        assert index == 7
+        assert frame == (7, "raw-7", "decoded")
+        assert runtime.in_processing_frames == 2
+        assert runtime.peak_in_processing_frames == 2
+    finally:
+        prepared.close()
+        held.release()
+    assert runtime.in_processing_frames == 0
+    runtime.close()
 
 
 def test_saved_setting_wins_and_invalid_saved_value_disables_prefetch():
@@ -299,6 +388,65 @@ def test_runtime_workers_inherit_scope_and_stop_before_session_close():
     assert calls == ["worker-stopped", "session-close"]
 
 
+def test_in_processing_queue_preserves_order_bounds_frames_and_releases_each():
+    prepared_threads = []
+    released = []
+    runtime = PipelineRuntime(prefetch_depth=0, in_processing_depth=2)
+
+    def prepare(index, value):
+        prepared_threads.append(threading.get_ident())
+        return value * 10
+
+    stream = runtime.iter_prepared_supports(
+        range(8),
+        lambda index: index,
+        prepare,
+        prepared_disposer=released.append,
+    )
+    try:
+        result = []
+        for index, value in stream:
+            result.append((index, value))
+            threading.Event().wait(0.01)
+        assert result == [(index, index * 10) for index in range(8)]
+        assert runtime.peak_in_processing_frames <= 2
+        assert runtime.peak_in_processing_frames == 2
+        assert sorted(released) == [index * 10 for index in range(8)]
+        assert prepared_threads
+        assert set(prepared_threads) != {threading.get_ident()}
+    finally:
+        stream.close()
+        runtime.close()
+
+
+def test_in_processing_queue_drains_prepared_frames_when_consumer_stops_early():
+    prepared = []
+    released = []
+    enough_prepared = threading.Event()
+    runtime = PipelineRuntime(prefetch_depth=0, in_processing_depth=2)
+
+    def prepare(index, value):
+        prepared.append(value)
+        if len(prepared) >= 2:
+            enough_prepared.set()
+        return value
+
+    stream = runtime.iter_prepared_supports(
+        range(20),
+        lambda index: index,
+        prepare,
+        prepared_disposer=released.append,
+    )
+    try:
+        assert next(stream) == (0, 0)
+        assert enough_prepared.wait(2)
+    finally:
+        stream.close()
+        runtime.close()
+
+    assert sorted(released) == sorted(prepared)
+
+
 def test_close_waits_for_in_progress_decode_before_session_cleanup():
     started = threading.Event()
     finish_decode = threading.Event()
@@ -344,3 +492,4 @@ def test_recipe_error_is_not_masked_by_session_cleanup_error():
     runtime = PipelineRuntime(session_factory=lambda _: Session())
     with pytest.raises(ValueError, match="source failed"):
         runtime.execute(Source(), object(), [])
+    normalize_in_processing_depth,

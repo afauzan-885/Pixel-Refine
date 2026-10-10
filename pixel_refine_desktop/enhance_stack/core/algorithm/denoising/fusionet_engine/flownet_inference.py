@@ -42,6 +42,7 @@ class AOTOpticalFlowAligner:
         smooth: bool = True,
         adaptive: bool = True,
     ):
+        from taichi_vision import taichi_aot
         from taichi_vision.taichi_aot import get_engine
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
             taichi_bridge,
@@ -69,8 +70,8 @@ class AOTOpticalFlowAligner:
         self.adaptive = bool(adaptive)
 
         # Noise-Aware Analysis Pre-Filter on Reference Frame.  The resident
-        # pipeline can provide the score computed from the linear reference;
-        # reuse it so FlowNet does not re-estimate noise on AutoEnhance output.
+        # pipeline can provide its once-per-reference analysis noise score;
+        # reuse it so FlowNet does not re-estimate noise per frame.
         ref_denoised = None
         ref_for_pyramid = ref_rgb_f32
         self.prefilter_kernel_size = 0
@@ -85,7 +86,7 @@ class AOTOpticalFlowAligner:
                 score_source = "aligner-local"
             else:
                 ref_noise_score = float(noise_score)
-                score_source = "shared-linear-reference"
+                score_source = "shared-analysis-reference"
             print(
                 f"[FlowNet] Reference noise score={ref_noise_score:.6f} "
                 f"source={score_source}"
@@ -154,7 +155,6 @@ class AOTOpticalFlowAligner:
         self._retained_flow_owner = None
         self._flow_view_in_flight = False
         try:
-            from taichi_vision import taichi_aot
             from taichi_vision.taichi_algorithm.aot_api import (
                 aot_graph_available,
             )

@@ -5,6 +5,7 @@ Handles background execution of image processing algorithms with progress tracki
 
 from PySide6.QtCore import QThread, Signal
 import config
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec, normalize_name, plan_stages, run_algorithm
 
 # Import algorithm functions
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow import (
@@ -30,6 +31,201 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.HDR import (
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.SplatSR import (
     running_splatting_sr,
 )
+
+
+_SUPPORTED_BACKENDS = ("cuda", "vulkan", "opengl", "cpu")
+
+
+def _is_backend_compatibility_error(result):
+    """Retry only errors that point to an unavailable or failed backend graph."""
+    details = " ".join(
+        str(result.get(key, "")) for key in ("error", "traceback", "message")
+    ).casefold()
+    graph_markers = (".tcm", "tcm", "graph", "compute_graph", "aot")
+    graph_failures = (
+        "unavailable", "not found", "name not found", "compile",
+        "compilation", "c-api error", "launch failed",
+    )
+    device_markers = ("backend", "cuda", "vulkan", "opengl", "device")
+    device_failures = (
+        "failed to initialize", "could not initialize", "initialization failed",
+        "device lost", "device unavailable", "no cuda-capable device",
+    )
+    return (
+        any(marker in details for marker in graph_markers)
+        and any(marker in details for marker in graph_failures)
+    ) or (
+        any(marker in details for marker in device_markers)
+        and any(marker in details for marker in device_failures)
+    )
+
+
+def _fallback_backend_configs(worker_mgr):
+    """Build remaining backend candidates from the selected device's saved chain."""
+    active = worker_mgr.get_current_backend_config()
+    try:
+        from pixel_refine_desktop.ui.views.settings.General.general_store import (
+            get_general_store,
+        )
+
+        store = get_general_store()
+    except Exception:
+        store = None
+
+    chain = active.get("device_fallback_chain")
+    if not chain and store is not None:
+        chain = store.get("device_fallback_chain", [])
+    current_backend = str(active.get("arch", "cpu")).strip().lower()
+    if not chain or current_backend not in {
+        str(item).strip().lower() for item in chain
+    }:
+        if current_backend == "cuda":
+            chain = ["cuda", "vulkan", "opengl", "cpu"]
+        elif current_backend == "vulkan":
+            chain = ["vulkan", "opengl", "cpu"]
+        elif current_backend == "opengl":
+            chain = ["opengl", "cpu"]
+        else:
+            chain = [current_backend]
+    chain = [str(item).strip().lower() for item in (chain or [])]
+    chain = [item for item in chain if item in _SUPPORTED_BACKENDS]
+
+    try:
+        start_index = chain.index(current_backend) + 1
+    except ValueError:
+        return []
+
+    def stored_id(config_key, store_key, fallback):
+        value = active.get(config_key)
+        if value is None and store is not None:
+            value = store.get(store_key)
+        try:
+            if value is None or int(value) < 0:
+                return fallback
+        except (TypeError, ValueError):
+            return fallback
+        return int(value)
+
+    cuda_id = stored_id("cuda_device_id", "device_cuda_id", 0)
+    vulkan_id = stored_id("vulkan_device_id", "device_vulkan_id", 0)
+    base_text = active.get("selected_backend_text") or active.get(
+        "backend_text", "GPU"
+    )
+    candidates = []
+    for backend in chain[start_index:]:
+        device_id = {
+            "cuda": cuda_id,
+            "vulkan": vulkan_id,
+            "opengl": 0,
+            "cpu": 0,
+        }[backend]
+        candidate = dict(active)
+        candidate.update(
+            arch=backend,
+            device_id=device_id,
+            backend_text=f"{base_text} — {backend.upper()} auto fallback",
+            auto_fallback=True,
+            device_fallback_chain=chain,
+            cuda_device_id=cuda_id,
+            vulkan_device_id=vulkan_id,
+            selected_backend_text=base_text,
+            runtime_fallback=True,
+        )
+        candidates.append(candidate)
+    return candidates
+
+
+def dispatch_worker_task(worker_mgr, task_payload, progress_callback, stop_requested):
+    """Run a task with the shared backend recovery policy outside the UI thread."""
+    result = worker_mgr.dispatch_task(
+        task_payload,
+        progress_cb=progress_callback,
+        stop_requested_cb=stop_requested,
+    )
+
+    attempted_backends = []
+    while (
+        not result.get("success", False)
+        and result.get("type") != "cancelled"
+        and not stop_requested()
+        and _is_backend_compatibility_error(result)
+    ):
+        active_config = worker_mgr.get_current_backend_config()
+        try:
+            from pixel_refine_desktop.ui.views.settings.General.general_store import (
+                get_general_store,
+            )
+
+            auto_fallback = bool(
+                get_general_store().get(
+                    "auto_fallback", active_config.get("auto_fallback", True)
+                )
+            )
+        except Exception:
+            auto_fallback = bool(active_config.get("auto_fallback", True))
+        if not auto_fallback:
+            break
+
+        candidates = _fallback_backend_configs(worker_mgr)
+        if not candidates:
+            break
+
+        initial_error = result.get("error", "Unknown backend error.")
+        recovered = False
+        for candidate in candidates:
+            if stop_requested():
+                break
+            backend = candidate["arch"]
+            attempted_backends.append(backend.upper())
+            progress_callback(
+                0,
+                f"Backend tidak kompatibel; mencoba {backend.upper()} otomatis...",
+            )
+            print(
+                f"[AlgorithmProcessorThread] Backend error on "
+                f"{active_config.get('arch', 'unknown')}; trying {backend}.",
+                flush=True,
+            )
+            if not worker_mgr.switch_backend(candidate, force_restart=True):
+                print(
+                    f"[AlgorithmProcessorThread] Could not start {backend} fallback worker.",
+                    flush=True,
+                )
+                continue
+
+            if stop_requested():
+                break
+            result = worker_mgr.dispatch_task(
+                task_payload,
+                progress_cb=progress_callback,
+                stop_requested_cb=stop_requested,
+            )
+            if result.get("success", False):
+                progress_callback(
+                    0, f"Melanjutkan pemrosesan dengan {backend.upper()}..."
+                )
+                recovered = True
+                break
+            if result.get("type") == "cancelled" or stop_requested():
+                break
+            if not _is_backend_compatibility_error(result):
+                recovered = True
+                break
+            active_config = worker_mgr.get_current_backend_config()
+
+        if recovered or result.get("type") == "cancelled" or stop_requested():
+            break
+
+        if attempted_backends:
+            tried = " → ".join(attempted_backends)
+            last_error = result.get("error", initial_error)
+            result = dict(result)
+            result["error"] = (
+                f"Auto Fallback sudah mencoba {tried}, tetapi pemrosesan "
+                f"belum berhasil. Error terakhir: {last_error}"
+            )
+        break
+    return result
 
 
 class AlgorithmProcessorThread(QThread):
@@ -144,11 +340,11 @@ class AlgorithmProcessorThread(QThread):
             }
 
             _task_mark = perf_probe.perf_mark("dispatch_task", batch_id=self.batch_id)
-            result = worker_mgr.dispatch_task(
-                task_payload,
-                progress_cb=progress_callback,
-                stop_requested_cb=lambda: self._is_cancelled,
+            stop_requested = lambda: self._is_cancelled or not self._is_running
+            result = dispatch_worker_task(
+                worker_mgr, task_payload, progress_callback, stop_requested
             )
+
             _task_mark.end(success=bool(result.get("success", False)))
 
             if not result.get("success", False):
@@ -243,27 +439,11 @@ class AlgorithmProcessorThread(QThread):
                 else "No HDR"
             )
 
-            denoising_active = denoising_choice not in (
-                "",
-                "None",
-                "No Denoising",
-            )
-            denoising_owns_alignment = denoising_choice in (
-                "Average",
-                "Similarity",
-                "Spatial AI",
-                "FusionNet",
-            )
-            # SplattingSR performs its own internal Block Matching pass to
-            # generate sub-pixel flow/confidence maps.  Never run the
-            # user-selected alignment stage before it; that would apply an
-            # external alignment twice and would also force an HDF5 roundtrip.
-            super_resolution_owns_alignment = super_resolution_choice == "splattingSR"
-            hdr_owns_alignment = hdr_choice in (
-                WeightedHDRAlgorithm.NAME,
-                WeightedHDRAlgorithm.LEGACY_NAME,
-                SPDEMRAlgorithm.NAME,
-            )
+            alignment_choice = normalize_name("alignment", alignment_choice)
+            super_resolution_choice = normalize_name("super_resolution", super_resolution_choice)
+            denoising_choice = normalize_name("denoising", denoising_choice)
+            hdr_choice = normalize_name("hdr", hdr_choice)
+
             db_path = getattr(
                 getattr(self.parent_panel, "controller", None), "db_path", None
             ) or os.environ.get("PIXEL_REFINE_SESSION_DB")
@@ -274,220 +454,49 @@ class AlgorithmProcessorThread(QThread):
                 f"denoising_choice={denoising_choice} hdr_choice={hdr_choice}"
             )
 
-            actions = {
-                "alignment": {
-                    "Farneback": lambda: running_farneback_flow(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                    ),
-                    "Farneback Optical Flow": lambda: running_farneback_flow(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                    ),
-                    "AKAZE": lambda: running_akaze(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                    ),
-                    "OFB": lambda: running_mf_denoiser(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        alignment_backend="OFB",
-                        merging_mode="none",
-                    ),
-                    "Light Glue": lambda: running_light_glue(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                    ),
-                    "Lucas Kanade": lambda: running_mf_denoiser(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        alignment_backend="Lucas Kanade",
-                        merging_mode="none",
-                    ),
-                    "Block Matching GPU": lambda: running_mf_denoiser(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        alignment_backend="Block Matching GPU",
-                        merging_mode="none",
-                    ),
-                    "RAFT": lambda: running_mf_denoiser(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        alignment_backend="RAFT",
-                        merging_mode="none",
-                    ),
-                    "No Alignment": lambda: None,
-                    "None": lambda: None,
-                },
-                "super_resolution": {
-                    "splattingSR": lambda: running_splatting_sr(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                    ),
-                    "No Super Resolution": lambda: None,
-                    "None": lambda: None,
-                },
-                "hdr": {
-                    WeightedHDRAlgorithm.NAME: lambda: running_hdr_fusion(
-                        parent=self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        algorithm_name=WeightedHDRAlgorithm.NAME,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        db_path=db_path,
-                    ),
-                    WeightedHDRAlgorithm.LEGACY_NAME: lambda: running_hdr_fusion(
-                        parent=self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        algorithm_name=WeightedHDRAlgorithm.NAME,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        db_path=db_path,
-                    ),
-                    SPDEMRAlgorithm.NAME: lambda: running_hdr_fusion(
-                        parent=self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        algorithm_name=SPDEMRAlgorithm.NAME,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        db_path=db_path,
-                    ),
-                    "No HDR": lambda: None,
-                    "None": lambda: None,
-                },
-                "denoising": {
-                    "Average": lambda: running_mf_denoiser(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        merging_mode="average",
-                        output_suffix="average",
-                        alignment_backend=alignment_choice,
-                    ),
-                    "Median": lambda: running_median(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                    ),
-                    "Similarity": lambda: running_mf_denoiser(
-                        self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        merging_mode="Similarity",
-                        output_suffix="similarity",
-                        alignment_backend=alignment_choice,
-                    ),
-                    "Spatial AI": lambda: running_mf_denoiser(
-                        parent=self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        merging_mode="FusionNet",
-                        output_suffix="fusionet",
-                        alignment_backend=alignment_choice,
-                    ),
-                    "FusionNet": lambda: running_mf_denoiser(
-                        parent=self.parent_panel,
-                        single_process=self.single_process,
-                        batch_id=self.batch_id,
-                        progress_callback=progress_callback,
-                        stop_callback=get_stop_cb,
-                        merging_mode="FusionNet",
-                        output_suffix="fusionet",
-                        alignment_backend=alignment_choice,
-                    ),
-                    "No Denoising": lambda: None,
-                    "None": lambda: None,
-                },
-            }
-
             any_algorithm_executed = False
 
             def execute(category, selected_algo_name):
                 nonlocal any_algorithm_executed
                 if not self._is_running:
                     return
-                if not selected_algo_name or selected_algo_name in [
-                    "None",
-                    "No Alignment",
-                    "No Super Resolution",
-                    "No Denoising",
-                    "No HDR",
-                ]:
-                    return
-                if category in actions and selected_algo_name in actions[category]:
+                try:
+                    spec = get_spec(category, selected_algo_name)
+                    if spec.disabled:
+                        return
                     print(
-                        f"[INFO] Executing '{selected_algo_name}' for batch_id: {self.batch_id}"
+                        f"[INFO] Executing '{spec.name}' for batch_id: {self.batch_id}"
                     )
-                    try:
-                        actions[category][selected_algo_name]()
-                        any_algorithm_executed = True
-                    except Exception as e:
-                        error_msg = f"Failed to execute {selected_algo_name}: {e}"
-                        print(f"[ERROR] {error_msg}")
-                        self.error_occurred.emit(error_msg)
-                else:
-                    print(
-                        f"[WARN] Algorithm '{selected_algo_name}' for category '{category}' not found in actions."
+                    kwargs = {
+                        "single_process": self.single_process,
+                        "batch_id": self.batch_id,
+                        "progress_callback": progress_callback,
+                        "stop_callback": get_stop_cb,
+                    }
+                    if category == "hdr":
+                        kwargs["db_path"] = db_path
+                    if category == "denoising" and spec.owns_alignment:
+                        kwargs["alignment_backend"] = alignment_choice
+                    # Retain imported entrypoints for existing callers/test injection.
+                    entrypoint = globals().get(spec.entrypoint.rsplit(":", 1)[-1])
+                    run_algorithm(
+                        category, spec.key, self.parent_panel,
+                        executor=entrypoint, **kwargs,
                     )
+                    any_algorithm_executed = True
+                except Exception as exc:
+                    error_msg = f"Failed to execute {selected_algo_name}: {exc}"
+                    print(f"[ERROR] {error_msg}")
+                    self.error_occurred.emit(error_msg)
 
-            if (
-                denoising_owns_alignment
-                or super_resolution_owns_alignment
-                or hdr_owns_alignment
-            ):
-                if alignment_choice not in ("", "None", "No Alignment"):
-                    print(
-                        f"[AlgorithmProcessorThread] Alignment '{alignment_choice}' "
-                        "is owned by the selected internal pipeline; external "
-                        "alignment is bypassed."
-                    )
-                if denoising_owns_alignment:
-                    execute("denoising", denoising_choice)
-                execute("super_resolution", super_resolution_choice)
-                execute("hdr", hdr_choice)
-            else:
-                execute("alignment", alignment_choice)
-                execute("super_resolution", super_resolution_choice)
-                execute("hdr", hdr_choice)
-                execute("denoising", denoising_choice)
+            stages = plan_stages({
+                "alignment": alignment_choice,
+                "denoising": denoising_choice,
+                "super_resolution": super_resolution_choice,
+                "hdr": hdr_choice,
+            })
+            for spec in stages:
+                execute(spec.category, spec.name)
 
             if not any_algorithm_executed:
                 print(

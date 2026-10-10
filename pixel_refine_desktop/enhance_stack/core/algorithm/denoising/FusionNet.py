@@ -6,6 +6,7 @@ lifecycle) are delegated to ``resident_pipeline`` so MFDenoiser and the UI
 use the same contract as Similarity.
 """
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import gc
 from pathlib import Path
 import numpy as np
@@ -20,11 +21,10 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine
 class FusionNetDenoisingAlgorithm:
     """FusionNet adapter using resident alignment plus WeightNet inference."""
 
-    NAME = "FusionNet"
-    KIND = "denoising"
-    DESCRIPTION = (
-        "Deep burst fusion with resident alignment and 1-channel WeightNet inference."
-    )
+    SPEC = get_spec("denoising", "fusionnet")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     # Default Config Parameters (Configurable default parameters)
     DEFAULT_CONFIG = {
@@ -32,8 +32,9 @@ class FusionNetDenoisingAlgorithm:
         "tile_size": 512,  # WeightNet model block (256, 512, 1024)
         "input_channels": 1,
         "tile_overlap": 0.20,  # Tile overlap ratio (20% optimal for speed & seamless blend)
-        "ghost_penalty": 5.0,  # Maximum ghost penalty for clean/low-noise regions
-        "ghost_penalty_min": 0.85,  # Minimum ghost penalty for high-noise regions
+        "analysis_auto_enhance_mode": "natural",
+        "ghost_penalty": 3.5,  # Maximum ghost penalty for clean/low-noise regions
+        "ghost_penalty_min": 0.5,  # Minimum ghost penalty for high-noise regions
     }
 
     def _load_inputs(self, ctx, frames):
@@ -118,11 +119,16 @@ class FusionNetDenoisingAlgorithm:
         overlap = float(overlap)
         if overlap > 1.0:
             overlap /= 100.0
+        # Natural is the shared denoising analysis policy for alignment,
+        # weight inference, and reference-noise estimation. Ignore stale
+        # per-batch overrides so all paths remain consistent.
+        analysis_auto_enhance_mode = "natural"
         return {
             "work_scale": work_scale,
             "tile_size": tile_size,
             # Keep the model feed on the quality-validated luminance baseline.
             "input_channels": 1,
+            "analysis_auto_enhance_mode": analysis_auto_enhance_mode,
             "overlap": max(0.0, min(0.95, overlap)),
             "ghost_penalty": float(
                 params.get("ghost_penalty", self.DEFAULT_CONFIG["ghost_penalty"])
@@ -184,6 +190,7 @@ class FusionNetDenoisingAlgorithm:
             overlap=config["overlap"],
             ghost_penalty=config["ghost_penalty"],
             ghost_penalty_min=config["ghost_penalty_min"],
+            analysis_auto_enhance_mode=config["analysis_auto_enhance_mode"],
             ghost_cutoff=0.0,
             chroma_sensitivity=config["chroma_sensitivity"],
             is_raw=is_raw,
@@ -306,7 +313,9 @@ class FusionNetDenoisingAlgorithm:
                 apply_auto_enhance_np,
             )
 
-            auto_params = taichi_aot.analyze_auto_enhance_params(ref_linear)
+            auto_params = taichi_aot.analyze_auto_enhance_params(
+                ref_linear, mode=config["analysis_auto_enhance_mode"]
+            )
             ref_enhanced = apply_auto_enhance_np(ref_linear, **auto_params)
             del ref_linear
         else:

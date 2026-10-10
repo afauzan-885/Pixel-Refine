@@ -5448,6 +5448,76 @@ class AOTEngine:
                 self.release_staging_buffer(staging)
         return buf
 
+    def write_into(self, buffer, data, *, synchronize=True):
+        """Replace a resident buffer's contents without allocating a new target.
+
+        ``synchronize`` defaults to True because callers may be overwriting a
+        buffer that was read by previously queued kernels.  A caller may pass
+        False only when it has already synchronized or when the backend's
+        device-copy path provides the required queue ordering.
+        """
+        _heartbeat()
+        _init_aot_bridge()
+        if not isinstance(buffer, TaichiGPUBuffer):
+            raise TypeError("write_into expects a TaichiGPUBuffer destination")
+        if buffer.engine is not self:
+            raise ValueError("destination buffer belongs to a different AOT engine")
+        buffer._require_live("GPU buffer write")
+        arr = np.asarray(data)
+        if tuple(arr.shape) != tuple(buffer.shape):
+            raise ValueError(
+                f"Destination shape is {tuple(buffer.shape)}, got {tuple(arr.shape)}"
+            )
+        if np.dtype(arr.dtype) != np.dtype(buffer.dtype):
+            raise ValueError(
+                f"Destination dtype is {np.dtype(buffer.dtype)}, got {np.dtype(arr.dtype)}"
+            )
+        arr = np.ascontiguousarray(arr)
+        if int(arr.nbytes) != int(buffer.nbytes):
+            raise ValueError(
+                f"Destination size is {buffer.nbytes} bytes, got {arr.nbytes}"
+            )
+        self._assert_native_context_owner("write_into")
+        if synchronize:
+            self.sync()
+
+        if buffer.host_accessible:
+            _op_begin("write_to_gpu_buffer")
+            try:
+                _LIB.write_to_gpu_buffer(
+                    self.runtime, buffer.handle, arr.ctypes.data, buffer.nbytes
+                )
+            except Exception:
+                _record_error()
+                raise
+            finally:
+                _op_end()
+        else:
+            staging = self.acquire_staging_buffer(arr.shape, arr.dtype)
+            try:
+                _op_begin("write+copy_gpu_buffer")
+                try:
+                    _LIB.write_to_gpu_buffer(
+                        self.runtime,
+                        staging.handle,
+                        arr.ctypes.data,
+                        staging.nbytes,
+                    )
+                    _LIB.copy_gpu_buffer(
+                        self.runtime,
+                        staging.handle,
+                        buffer.handle,
+                        staging.nbytes,
+                    )
+                except Exception:
+                    _record_error()
+                    raise
+                finally:
+                    _op_end()
+            finally:
+                self.release_staging_buffer(staging)
+        return buffer
+
     def load(self, path):
         with self._lock:
             base, ext = os.path.splitext(path)

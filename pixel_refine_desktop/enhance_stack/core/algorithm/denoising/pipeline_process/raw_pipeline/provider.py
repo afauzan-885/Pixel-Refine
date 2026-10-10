@@ -33,6 +33,10 @@ _NO_ALIGNMENT = {"", "none", "no alignment", "no_alignment", "off"}
 def _release(buffer) -> None:
     if buffer is None:
         return
+    if isinstance(buffer, (tuple, list)):
+        for item in buffer:
+            _release(item)
+        return
     from ....pipeline_runtime import current_pipeline_runtime
     runtime = current_pipeline_runtime()
     if runtime is not None and runtime.buffer_session is not None:
@@ -63,6 +67,45 @@ def _phase_planes(frame, normalized: np.ndarray) -> tuple[np.ndarray, ...]:
         col = (plane_x - phase_x) & 1
         planes.append(np.ascontiguousarray(normalized[row::2, col::2], dtype=np.float32))
     return tuple(planes)
+
+
+def _normalize_phase_planes_into(frame, destinations) -> tuple[np.ndarray, ...]:
+    """Normalize CFA samples directly into reusable, contiguous plane arrays.
+
+    This preserves the scalar black/white, float32 reciprocal-multiply, clamp,
+    and phase ordering used by ``_normalized_for_rgb_parity`` followed by
+    ``_phase_planes`` while avoiding a full-size normalized mosaic temporary.
+    """
+
+    if len(destinations) != 4:
+        raise ValueError("RAW Native CFA workspace must contain four planes")
+    samples = np.asarray(frame.samples)
+    black = np.float32(int(float(frame.black_level[0])))
+    white = np.float32(int(float(frame.white_level[0])))
+    inverse_range = np.float32(1.0) / np.maximum(
+        np.float32(1.0), np.float32(white - black)
+    )
+    phase_y, phase_x = (int(frame.phase_origin[0]) & 1, int(frame.phase_origin[1]) & 1)
+    for index, destination in enumerate(destinations):
+        plane_y, plane_x = divmod(index, 2)
+        row = (plane_y - phase_y) & 1
+        col = (plane_x - phase_x) & 1
+        source = samples[row::2, col::2]
+        if destination.shape != source.shape or destination.dtype != np.float32:
+            raise ValueError(
+                "RAW Native CFA workspace shape/dtype mismatch: "
+                f"expected {source.shape}/float32, got "
+                f"{destination.shape}/{destination.dtype}"
+            )
+        np.subtract(source, black, out=destination, dtype=np.float32)
+        np.multiply(destination, inverse_range, out=destination)
+        np.clip(
+            destination,
+            np.float32(0.0),
+            np.float32(1.0),
+            out=destination,
+        )
+    return tuple(destinations)
 
 
 def _normalized_for_rgb_parity(frame) -> np.ndarray:
@@ -118,12 +161,12 @@ def _analysis_proxy(
     source_gpu=None,
     auto_enhance_params: Optional[dict] = None,
 ):
-    """Build the RGB alignment proxy while keeping RAW fusion linear.
+    """Build the RGB analysis proxy while keeping RAW fusion linear.
 
     ``auto_enhance_params`` is computed once from the full-resolution
-    reference and reused for every support frame, matching the RGB-resident
-    alignment contract.  The CFA carrier is never tone-mapped or
-    contrast-enhanced.
+    reference and reused for WeightNet frames when supplied. SpatialFusion
+    passes no parameters and uses linear reference/support proxies. The CFA
+    carrier is never tone-mapped or contrast-enhanced.
     """
     from taichi_vision import taichi_aot
     from ..resident_pipeline import _managed_api
@@ -150,7 +193,7 @@ def _analysis_proxy(
 
 
 def _warp_analysis_proxy(proxy_gpu, transform, *, height: int, width: int):
-    """Warp an AutoEnhanced work-resolution proxy for SpatialFusion weights."""
+    """Warp a work-resolution analysis proxy for SpatialFusion weights."""
     from taichi_vision import taichi_aot
     from ..resident_pipeline import _managed_api
     taichi_aot = _managed_api(taichi_aot)
@@ -325,13 +368,13 @@ def _preview_from_mosaic(
     )
 
 
-def _demosaic_carrier_gpu(carrier):
+def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None):
     """Demosaic an already-decoded carrier without a second file decode.
 
-    The analysis proxy used to call ``taichi_aot.demosaic(path)``, which re-opens
-    the DNG through an external RAW reader even though the provider already holds
-    the decoded mosaic.  Feeding that mosaic straight to the kernel with the
-    carrier's own tag-derived parameters reproduces the same proxy bit for bit.
+    Analysis uses full-resolution bilinear; the final CFA preview remains
+    Hamilton. Sensor normalization, WB and camera matrix still come from the
+    decoded carrier. No file re-open or CPU demosaic is introduced. ``method``
+    permits an explicit Hamilton quality oracle, not a silent backend fallback.
     """
     from taichi_vision import taichi_aot
     from ..resident_pipeline import _managed_api
@@ -343,8 +386,9 @@ def _demosaic_carrier_gpu(carrier):
     return taichi_aot.demosaic(
         np.ascontiguousarray(carrier.samples),
         **params,
-        method="hamilton",
+        method=method,
         return_gpu=True,
+        dst=dst,
     )
 
 
@@ -482,9 +526,8 @@ def _legacy_run_raw_native_resident_pipeline(
         # Cap the analysis side at 2048 pixels, matching the resident RGB
         # pipeline's bounded alignment footprint.
         capped_scale = geometry.effective_align_scale
-        # Match the RGB-resident contract: compute AutoEnhance v1 analysis
-        # parameters once from the full-resolution reference, then reuse them
-        # on the downscaled reference/support proxies.
+        # FusionNet retains reference-derived AutoEnhance, while SpatialFusion
+        # deliberately keeps its reference/support analysis proxies linear.
         from taichi_vision import taichi_aot
         from ..resident_pipeline import _managed_api
         taichi_aot = _managed_api(taichi_aot)
@@ -498,14 +541,21 @@ def _legacy_run_raw_native_resident_pipeline(
             str(image_paths[0]), method="hamilton", return_gpu=True
         )
         try:
-            analysis_params = analyze_auto_enhance_on_gpu(
-                ref_proxy_full_gpu, mode="analysis"
-            )
-            print(
-                "[RAW Native] AutoEnhance v1 alignment analysis: "
-                f"Gain={float(analysis_params.get('gain', 1.0)):.2f}x "
-                "(reference parameters reused)"
-            )
+            if normalized_engine == "spatial_fusion":
+                analysis_params = None
+                print(
+                    "[RAW Native] SpatialFusion analysis: linear reference/support "
+                    "proxies; AutoEnhance skipped"
+                )
+            else:
+                analysis_params = analyze_auto_enhance_on_gpu(
+                    ref_proxy_full_gpu, mode="natural"
+                )
+                print(
+                    "[RAW Native] AutoEnhance natural alignment/weight analysis: "
+                    f"Gain={float(analysis_params.get('gain', 1.0)):.2f}x "
+                    "(reference parameters reused)"
+                )
             ref_analysis_gpu = prepare_analysis_proxy_gpu(
                 ref_proxy_full_gpu,
                 work_shape=geometry.align_shape,
@@ -514,12 +564,32 @@ def _legacy_run_raw_native_resident_pipeline(
             analysis_context.analysis_params = analysis_params or {}
             analysis_context.reference_proxy = ref_analysis_gpu
             analysis_context.alignment_reference = ref_analysis_gpu
-            ref_noise_score, ghost_penalty = resolve_noise_adaptive_penalty(
-                ref_analysis_gpu,
-                ghost_penalty=ghost_penalty,
-                ghost_penalty_min=ghost_penalty_min,
-            )
+            noise_proxy_gpu = ref_analysis_gpu
+            owns_noise_proxy = False
+            if normalized_engine == "fusionet":
+                noise_analysis_params = analyze_auto_enhance_on_gpu(
+                    ref_proxy_full_gpu, mode="analysis"
+                )
+                noise_proxy_gpu = prepare_analysis_proxy_gpu(
+                    ref_proxy_full_gpu,
+                    work_shape=geometry.align_shape,
+                    analysis_params=noise_analysis_params,
+                )
+                owns_noise_proxy = noise_proxy_gpu is not ref_proxy_full_gpu
+            try:
+                ref_noise_score, ghost_penalty = resolve_noise_adaptive_penalty(
+                    noise_proxy_gpu,
+                    ghost_penalty=ghost_penalty,
+                    ghost_penalty_min=ghost_penalty_min,
+                )
+            finally:
+                if owns_noise_proxy and noise_proxy_gpu is not ref_analysis_gpu:
+                    _release(noise_proxy_gpu)
             analysis_context.noise_score = ref_noise_score
+            print(
+                "[RAW Native] Reference noise estimate source="
+                f"{'autoenhanced_analysis' if normalized_engine == 'fusionet' else 'linear_unenhanced' if normalized_engine == 'spatial_fusion' else 'autoenhanced_natural'}"
+            )
             print(
                 "[RAW Native] Alignment proxy ready: "
                 f"shape={tuple(ref_analysis_gpu.shape[:2])} CLAHE=off"
@@ -965,6 +1035,28 @@ def _legacy_run_raw_native_resident_pipeline(
     return result, float(result_mean_alpha)
 
 
+class _RawDngHostPayload:
+    """Queue-owned RAW bytes that can be dropped immediately after decoding."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: bytes):
+        self._data: bytes | None = data
+
+    def __len__(self) -> int:
+        return 0 if self._data is None else len(self._data)
+
+    def take(self) -> bytes:
+        if self._data is None:
+            raise RuntimeError("RAW DNG payload was already consumed or released")
+        data = self._data
+        self._data = None
+        return data
+
+    def close(self) -> None:
+        self._data = None
+
+
 class RawNativeProvider:
     """RAW Native carrier boundary used by the resident dispatcher.
 
@@ -985,6 +1077,11 @@ class RawNativeProvider:
         self._weight_gpu = None
         self._zero_flow_gpu = None
         self._one_weight_gpu = None
+        self._cfa_plane_shape = None
+        self._cfa_planes_host = None
+        self._cfa_planes_gpu = None
+        self._cfa_buffer_session = None
+        self._cfa_planes_initialized = False
         self._finalized = False
 
     def _read_frame(self, index: int):
@@ -994,6 +1091,45 @@ class RawNativeProvider:
         return RawMosaicFrame.from_dng(
             read_dng_aot(path),
             source_id=path,
+        )
+
+    def load_support_dng_bytes_host(self, index: int) -> bytes:
+        """Read an unchanged support DNG container for the bounded host queue."""
+
+        return Path(self.image_paths[int(index)]).read_bytes()
+
+    def load_support_dng_payload_host(self, index: int) -> _RawDngHostPayload:
+        """Read a DNG container into a releasable queue payload."""
+
+        return _RawDngHostPayload(self.load_support_dng_bytes_host(index))
+
+    def decode_support_dng_bytes_host(
+        self, index: int, dng_bytes: bytes
+    ) -> ProviderFrame:
+        """Decode a prefetched DNG after it has left the host queue."""
+
+        from taichi_vision.taichi_algorithm.compression import RawMosaicFrame, read_dng_aot
+
+        path = self.image_paths[int(index)]
+        frame = RawMosaicFrame.from_dng(read_dng_aot(dng_bytes), source_id=path)
+        return self._support_provider_frame(index, frame)
+
+    def _support_provider_frame(self, index: int, frame) -> ProviderFrame:
+        return ProviderFrame(
+            carrier=frame,
+            metadata=FrameMetadata(
+                source_id=self.image_paths[int(index)],
+                shape=tuple(int(value) for value in frame.shape),
+                dtype="float32",
+                color_model="cfa_linear",
+                carrier_kind="cfa",
+                orientation=int(frame.orientation),
+                extra={
+                    "bits_per_sample": int(frame.bits_per_sample),
+                    "cfa_pattern": tuple(int(value) for value in frame.cfa_pattern),
+                    "phase_origin": tuple(int(value) for value in frame.phase_origin),
+                },
+            ),
         )
 
     def load_reference(self) -> ProviderFrame:
@@ -1018,23 +1154,7 @@ class RawNativeProvider:
         )
 
     def load_support(self, index: int) -> ProviderFrame:
-        frame = self._read_frame(index)
-        return ProviderFrame(
-            carrier=frame,
-            metadata=FrameMetadata(
-                source_id=self.image_paths[int(index)],
-                shape=tuple(int(value) for value in frame.shape),
-                dtype="float32",
-                color_model="cfa_linear",
-                carrier_kind="cfa",
-                orientation=int(frame.orientation),
-                extra={
-                    "bits_per_sample": int(frame.bits_per_sample),
-                    "cfa_pattern": tuple(int(value) for value in frame.cfa_pattern),
-                    "phase_origin": tuple(int(value) for value in frame.phase_origin),
-                },
-            ),
-        )
+        return self._support_provider_frame(index, self._read_frame(index))
 
     def load_analysis_proxy(self, frame: ProviderFrame, *, work_shape, analysis_params=None):
         """Build the shared RGB proxy used only for alignment/weight analysis."""
@@ -1048,6 +1168,7 @@ class RawNativeProvider:
                 work_shape=work_shape,
                 analysis_params=analysis_params,
                 in_place=True,
+                source_is_disposable=True,
             )
             if analysis is not proxy:
                 _release(proxy)
@@ -1084,6 +1205,54 @@ class RawNativeProvider:
         finally:
             del normalized
 
+    def _ensure_cfa_workspace(self, frame) -> None:
+        """Allocate one reusable host/GPU CFA plane set for this burst."""
+
+        samples = np.asarray(frame.samples)
+        phase_y, phase_x = (int(frame.phase_origin[0]) & 1, int(frame.phase_origin[1]) & 1)
+        shapes = []
+        for index in range(4):
+            plane_y, plane_x = divmod(index, 2)
+            row = (plane_y - phase_y) & 1
+            col = (plane_x - phase_x) & 1
+            shapes.append(tuple(int(value) for value in samples[row::2, col::2].shape))
+        shape_key = tuple(shapes)
+        if self._cfa_planes_gpu is not None:
+            if self._cfa_plane_shape != shape_key:
+                raise ValueError("RAW Native CFA carrier shape changed within one burst")
+            return
+
+        host_planes = [np.empty(shape, dtype=np.float32) for shape in shapes]
+        gpu_planes = []
+        try:
+            from ....pipeline_runtime import current_pipeline_runtime
+
+            runtime = current_pipeline_runtime()
+            buffer_session = (
+                runtime.buffer_session if runtime is not None else None
+            )
+            for index, shape in enumerate(shapes):
+                if buffer_session is not None:
+                    buffer = buffer_session.acquire_buffer(
+                        shape,
+                        dtype=np.float32,
+                        is_vector=False,
+                        tag=f"raw-native-cfa-plane-{id(self)}-{index}",
+                    )
+                else:
+                    buffer = self._engine.allocate(
+                        shape, dtype=np.float32, is_vector=False
+                    )
+                gpu_planes.append(buffer)
+        except Exception:
+            for buffer in gpu_planes:
+                _release(buffer)
+            raise
+        self._cfa_plane_shape = shape_key
+        self._cfa_planes_host = host_planes
+        self._cfa_planes_gpu = gpu_planes
+        self._cfa_buffer_session = buffer_session
+
     def accumulate(self, frame: ProviderFrame, transform=None, weight_map=None) -> None:
         """Warp one CFA carrier and accumulate it with the shared weight map."""
 
@@ -1104,39 +1273,42 @@ class RawNativeProvider:
             remap_accumulate_cfa_weighted_taichi,
         )
 
-        normalized = _normalized_for_rgb_parity(support)
-        planes = _phase_planes(support, normalized)
-        gpu_planes = []
+        self._ensure_cfa_workspace(support)
+        planes = _normalize_phase_planes_into(support, self._cfa_planes_host)
+        gpu_planes = self._cfa_planes_gpu
         active_weight = weight_map if weight_map is not None else self._one_weight_gpu
-        try:
-            # Preserve each successful upload if a later plane fails.
-            for plane in planes:
-                gpu_planes.append(self._engine.upload(plane))
-            if isinstance(transform, np.ndarray) and transform.ndim == 2 and transform.shape == (3, 3):
-                _accumulate_homography_cfa(
-                    gpu_planes,
-                    transform,
-                    frame=reference,
-                    zero_flow_gpu=self._zero_flow_gpu,
-                    weight_map_gpu=active_weight,
-                    sum_gpu=self._sum_gpu,
-                    weight_gpu=self._weight_gpu,
-                )
-            else:
-                remap_accumulate_cfa_weighted_taichi(
-                    gpu_planes,
-                    transform if transform is not None else self._zero_flow_gpu,
-                    active_weight,
-                    self._sum_gpu,
-                    self._weight_gpu,
-                    full_shape=reference.shape,
-                    cfa_pattern=normalize_cfa_rgb_codes(reference.cfa_pattern),
-                    phase_origin=reference.phase_origin,
-                )
-        finally:
-            del normalized, planes
-            for plane in gpu_planes:
-                _release(plane)
+        # A mapped host-accessible plane can still be read by queued kernels;
+        # synchronize once before overwriting the set. Device-local writes use
+        # the engine's staging/copy route, which orders against prior work.
+        if self._cfa_planes_initialized and any(
+            bool(getattr(buffer, "host_accessible", False))
+            for buffer in gpu_planes
+        ):
+            self._engine.sync()
+        for destination, plane in zip(gpu_planes, planes):
+            self._engine.write_into(destination, plane, synchronize=False)
+        self._cfa_planes_initialized = True
+        if isinstance(transform, np.ndarray) and transform.ndim == 2 and transform.shape == (3, 3):
+            _accumulate_homography_cfa(
+                gpu_planes,
+                transform,
+                frame=reference,
+                zero_flow_gpu=self._zero_flow_gpu,
+                weight_map_gpu=active_weight,
+                sum_gpu=self._sum_gpu,
+                weight_gpu=self._weight_gpu,
+            )
+        else:
+            remap_accumulate_cfa_weighted_taichi(
+                gpu_planes,
+                transform if transform is not None else self._zero_flow_gpu,
+                active_weight,
+                self._sum_gpu,
+                self._weight_gpu,
+                full_shape=reference.shape,
+                cfa_pattern=normalize_cfa_rgb_codes(reference.cfa_pattern),
+                phase_origin=reference.phase_origin,
+            )
 
     def finalize(self, mean_alpha: float = 1.0) -> ResidentResult:
         """Normalize the CFA accumulator and create the one-time RGB preview."""
@@ -1199,10 +1371,20 @@ class RawNativeProvider:
         ):
             _release(getattr(self, name, None))
             setattr(self, name, None)
+        if self._cfa_planes_gpu is not None:
+            if self._cfa_buffer_session is not None:
+                self._cfa_buffer_session.release_tree(self._cfa_planes_gpu)
+            else:
+                _release(self._cfa_planes_gpu)
+            self._cfa_planes_gpu = None
         # The cached RawMosaicFrame owns the decoded host carrier.  Drop it at
         # the same lifecycle boundary as the GPU accumulator so a completed
         # burst cannot retain its reference image in the provider instance.
         self._reference_frame = None
+        self._cfa_planes_host = None
+        self._cfa_plane_shape = None
+        self._cfa_buffer_session = None
+        self._cfa_planes_initialized = False
         self._engine = None
         return None
 

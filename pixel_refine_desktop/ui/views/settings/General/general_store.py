@@ -1,5 +1,5 @@
 import os
-from resources.GenericUILibrary import get_store, DataStore
+from UILibrary import get_store, DataStore
 from config import GENERAL_SETTINGS_FILE
 
 DEFAULTS = {
@@ -14,6 +14,10 @@ DEFAULTS = {
     "device_backend_key": "cpu",
     "device_backend_arch": "cpu",
     "device_backend_id": -1,
+    "device_fallback_chain": [],
+    "device_cuda_id": -1,
+    "device_vulkan_id": -1,
+    "device_raw_name": "CPU (Universal)",
     "device_selector": {"vendor": "cpu", "name": "cpu universal"},
     "backend_test_results": {},
     "allowed_backend_ids": [],
@@ -22,9 +26,11 @@ DEFAULTS = {
     "compute_block_size": 1024,
     "compute_block_threshold_mp": 12.0,
     "compute_block_mode": "auto",
-    # Host-side decoded support frames waiting ahead of resident processing.
-    # Zero keeps the historical low-memory synchronous loading behavior.
+    # Compressed DNG container bytes read ahead from disk and held in host RAM.
+    # Zero keeps the historical synchronous disk-read behavior.
     "pipeline_prefetch_depth": 0,
+    # Bound the current support plus host-prepared support frames awaiting work.
+    "pipeline_in_processing_depth": 1,
     # The current resident pipeline processes decoded RGB.  Keep that route as
     # the compatible default while the pre-demosaic RAW fusion route is added.
     "processing_format": "RGB Linear",

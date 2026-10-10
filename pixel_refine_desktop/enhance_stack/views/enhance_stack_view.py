@@ -7,7 +7,7 @@ Subclass of WorkspaceView from workplace framework.
 from PySide6.QtCore import QThread, QTimer, Signal, QObject, Slot, Qt
 from PySide6.QtGui import QKeySequence, QShortcut, QIcon, QPixmap
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget, QProgressDialog, QLabel
-from resources.GenericUILibrary import AlertModal
+from UILibrary import AlertModal
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from pixel_refine_desktop.enhance_stack.core.logic.project_archive import (
     load_project,
@@ -320,7 +320,7 @@ class EnhanceStackView(WorkspaceView):
             # Selection restoration can normalize persisted settings; capture
             # the clean baseline only after that synchronization is complete.
             self._project_baseline_token = session_state_token(self.db_path)
-            from resources.GenericUILibrary import trigger_live_update
+            from UILibrary import trigger_live_update
 
             QTimer.singleShot(0, trigger_live_update)
             # Defer modal by 100ms so window paint events finish smoothly without tearing

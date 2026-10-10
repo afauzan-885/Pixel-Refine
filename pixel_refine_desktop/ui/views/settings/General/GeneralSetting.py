@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from PySide6.QtWidgets import QWidget, QComboBox, QBoxLayout
 from PySide6.QtCore import Qt, QObject, QThread, Signal
 
-from resources.GenericUILibrary import (
+from UILibrary import (
     Container,
     Stack,
     FormRow,
@@ -14,7 +14,7 @@ from resources.GenericUILibrary import (
     SyncMixin,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from resources.GenericUILibrary.modals import modal_confirm
+from UILibrary.modals import modal_confirm
 from .general_store import get_general_store
 from .helpers import restart_application
 from taichi_vision.device_selection import (
@@ -857,9 +857,10 @@ class GeneralSettingsPage(Container, SyncMixin):
 
     def update_theme(self):
         """Update checkbox styles and apply button variant styles dynamically on theme changes."""
-        from resources.GenericUILibrary.theme import (
+        from UILibrary.theme import (
             create_checkbox_style,
             create_button_style,
+            apply_style,
         )
 
         style = create_checkbox_style()
@@ -870,11 +871,11 @@ class GeneralSettingsPage(Container, SyncMixin):
             if cb is None:
                 continue
             if hasattr(cb, "checkbox"):
-                cb.checkbox.setStyleSheet(style)
+                apply_style(cb.checkbox, style)
 
         # Apply variant styling for buttons dynamically
         if hasattr(self, "apply_btn") and self.apply_btn:
-            self.apply_btn.setStyleSheet(create_button_style("success"))
+            apply_style(self.apply_btn, create_button_style("success"))
 
     def _scan_hardware_backend_options(self):
         """Enumerate physical hardware devices (CPU, iGPU, Dedicated GPU) without exposing API names."""
@@ -1136,6 +1137,21 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.store.set("device_backend_id", active_device_id)
         self.store.set("device_fallback_chain", fallback_chain)
         self.store.set("device_vendor", vendor)
+        self.store.set(
+            "device_cuda_id",
+            option.get("cuda_device_id")
+            if option.get("cuda_device_id") is not None
+            else -1,
+        )
+        self.store.set(
+            "device_vulkan_id",
+            option.get("vulkan_device_id", device_id)
+            if option.get("vulkan_device_id") is not None
+            else -1,
+        )
+        self.store.set(
+            "device_raw_name", option.get("raw_name") or option.get("text", "")
+        )
 
         if active_backend == "cpu":
             self.store.set(
@@ -1322,7 +1338,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.store.set("create_thumbnail", bool(checked))
         if hasattr(self.store, "save_to_file"):
             self.store.save_to_file()
-        from resources.GenericUILibrary import trigger_live_update
+        from UILibrary import trigger_live_update
 
         trigger_live_update()
 
@@ -1396,7 +1412,7 @@ class GeneralSettingsPage(Container, SyncMixin):
 
             broadcast_retranslate(main_win)
 
-        from resources.GenericUILibrary import Toast, trigger_live_update
+        from UILibrary import Toast, trigger_live_update
 
         trigger_live_update()
 
@@ -1443,7 +1459,7 @@ class GeneralSettingsPage(Container, SyncMixin):
             else status_record
         )
 
-        from resources.GenericUILibrary.theme import get_theme, create_select_style
+        from UILibrary.theme import get_theme, create_select_style, apply_style
 
         theme = get_theme()
 
@@ -1475,7 +1491,7 @@ class GeneralSettingsPage(Container, SyncMixin):
             """
             self.device_group.input.setStyleSheet(style)
         else:
-            self.device_group.input.setStyleSheet(create_select_style())
+            apply_style(self.device_group.input, create_select_style())
 
         # Update popup list items (disable and style unsupported items)
         model = self.device_group.input.model()
@@ -1651,7 +1667,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.test_btn.setText(language_config.BTN_TEST_BACKEND_HARDWARE)
         self.test_btn.setToolTip("")
 
-        from resources.GenericUILibrary import Toast
+        from UILibrary import Toast
 
         toast = Toast(
             language_config.MSG_BACKEND_TEST_CANCELLED,
@@ -1788,7 +1804,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         dialog.exec()
 
         # Toast result
-        from resources.GenericUILibrary import Toast
+        from UILibrary import Toast
 
         toast = Toast(
             language_config.MSG_BACKEND_TEST_FINISHED,

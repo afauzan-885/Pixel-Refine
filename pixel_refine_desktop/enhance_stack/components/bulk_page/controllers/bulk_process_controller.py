@@ -1,6 +1,12 @@
 import json
 import os
-import time
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_names, get_spec, plan_stages
+from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_result_service import (
+    batch_selections, copy_result, expected_output_names, find_existing_outputs,
+    returned_output_paths, usable_output,
+)
+import config
+from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_eta import BatchEtaEstimator
 from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
@@ -17,8 +23,9 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QComboBox,
     QMenu,
+    QSizePolicy,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QPoint, QEvent
+from PySide6.QtCore import Qt, QThread, Signal, QPoint, QEvent, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QShortcut
 from resources.styles.stylesheet import (
     CHECKBOX_SWITCH_STYLE,
@@ -29,7 +36,7 @@ from pixel_refine_desktop.ui.views.settings.General.Language import language_con
 from pixel_refine_desktop.enhance_stack.core.logic.batch_parameter_manager import (
     load_json_state,
 )
-from resources.GenericUILibrary import (
+from UILibrary import (
     ModalDialog,
     ProgressBar,
     Button,
@@ -39,6 +46,29 @@ from resources.GenericUILibrary import (
 def save_json_state(path, data):
     with open(path, "w") as f:
         json.dump(data, f, indent=4)
+
+
+def _parse_bulk_progress(*args, **kwargs):
+    """Normalize legacy positional and resident UI/console progress callbacks."""
+    if len(args) >= 3:
+        current, total, message = args[:3]
+        percent = int((current / total) * 100) if total else 0
+    elif len(args) >= 2:
+        percent, message = args[:2]
+    elif args:
+        percent = args[0]
+        message = kwargs.get("ui", kwargs.get("message", ""))
+        if not message:
+            message = kwargs.get("console", "")
+    else:
+        percent = kwargs.get("percent", 0)
+        message = kwargs.get("ui", kwargs.get("message", kwargs.get("console", "")))
+
+    try:
+        percent = int(percent)
+    except (TypeError, ValueError):
+        percent = 0
+    return percent, str(message or "")
 
 
 class MassAlgorithmEditDialog(ModalDialog):
@@ -63,24 +93,8 @@ class MassAlgorithmEditDialog(ModalDialog):
             for i, p in enumerate(self.panels)
         }
         self.algorithms = {
-            "alignment": [
-                language_config.UI_NO_CHANGE,
-                "OFB",
-                "AKAZE",
-                "Farneback",
-                "Lucas Kanade",
-                "Block Matching GPU",
-                "No Alignment",
-            ],
-            "super_resolution": [language_config.UI_NO_CHANGE, "No Super Resolution"],
-            "denoising": [
-                language_config.UI_NO_CHANGE,
-                "Average",
-                "Median",
-                "Similarity",
-                "FusionNet",
-                "No Denoising",
-            ],
+            category: [language_config.UI_NO_CHANGE, *get_names(category, context="bulk_edit")]
+            for category in ("alignment", "super_resolution", "denoising")
         }
         self.json_path = os.path.join("database", "align", "batch_parameter.json")
         self.initUI()
@@ -293,11 +307,16 @@ class BatchProcessDialog(ModalDialog):
 
         self._was_cancelled = False
         self._is_processing = False
-        self._start_time = None
         self._last_toggled_row = None
+        self._eta = None
+        self._close_after_processing = False
+        self._eta_timer = QTimer(self)
+        self._eta_timer.setInterval(1000)
+        self._eta_timer.timeout.connect(self._refresh_eta)
 
         self.initUI()
         self.populate_table()
+        QTimer.singleShot(0, self.adjust_column_widths)
 
     def initUI(self):
         container_layout = self.container.layout()
@@ -357,6 +376,13 @@ class BatchProcessDialog(ModalDialog):
         # 2. Table Widget with Master Header Checkbox
         self.table_widget = QTableWidget()
         self.table_widget.setColumnCount(4)
+        self.table_widget.setWordWrap(False)
+        self.table_widget.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.table_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table_widget.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.table_widget.verticalHeader().setDefaultSectionSize(44)
+        self.table_widget.setAutoFillBackground(True)
+        self.table_widget.viewport().setAutoFillBackground(True)
 
         # Set custom header with Master Checkbox
         self.header_view = MasterHeaderView(
@@ -418,7 +444,7 @@ class BatchProcessDialog(ModalDialog):
         self.progress_container.setStyleSheet(
             """
             QWidget#ProgressCardContainer {
-                background-color: rgba(241, 245, 249, 0.85);
+                background-color: #F1F5F9;
                 border: 1px solid #CBD5E1;
                 border-radius: 8px;
             }
@@ -460,7 +486,11 @@ class BatchProcessDialog(ModalDialog):
         self.progress_detail_label.setStyleSheet(
             "font-family: 'Segoe UI', Arial; font-size: 11px; color: #475569; font-weight: 500; margin-top: 1px;"
         )
-        self.progress_detail_label.hide()
+        self.progress_detail_label.setWordWrap(False)
+        self.progress_detail_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.progress_detail_label.setFixedHeight(
+            self.progress_detail_label.fontMetrics().height()
+        )
         prog_card_layout.addWidget(self.progress_detail_label)
 
         layout.addWidget(self.progress_container)
@@ -492,6 +522,12 @@ class BatchProcessDialog(ModalDialog):
         )
         self.action_button.setObjectName("actionButton")
         self._apply_start_button_style()
+        self.action_button.setFixedWidth(max(
+            self.action_button.fontMetrics().horizontalAdvance(text) for text in (
+                language_config.PROGRESS_SECTION_PROCESS_BUTTON_TEXT,
+                language_config.BATCH_CANCELED_PROCESS,
+            )
+        ) + 48)
 
         self.close_button = Button(language_config.CLOSE_BUTTON, variant="secondary")
         self.close_button.setStyleSheet(
@@ -730,10 +766,9 @@ class BatchProcessDialog(ModalDialog):
             batch_id = getattr(panel, "batch_id", getattr(panel, "id", ""))
             algo_summary = self._get_algorithm_summary(batch_id)
             self._update_details_cell(i, algo_summary)
-        self.table_widget.resizeRowsToContents()
 
     def _set_row_color(self, row, color):
-        color_name = color.name() if color != Qt.transparent else "transparent"
+        color_name = color.name() if color != Qt.transparent else "#FFFFFF"
         for col in range(self.table_widget.columnCount()):
             item = self.table_widget.item(row, col)
             if item:
@@ -774,6 +809,7 @@ class BatchProcessDialog(ModalDialog):
         self.table_widget.setRowCount(len(self.panels))
         for i, panel in enumerate(self.panels):
             checkbox_widget = QWidget()
+            checkbox_widget.setStyleSheet("background-color: #FFFFFF;")
             chk_layout = QHBoxLayout(checkbox_widget)
             chk_box = QCheckBox()
             chk_box.setStyleSheet(CHECKBOX_SWITCH_STYLE)
@@ -812,26 +848,15 @@ class BatchProcessDialog(ModalDialog):
             self.table_widget.setItem(i, 2, item_status)
 
             algo_summary = self._get_algorithm_summary(batch_id)
-            details_label = QLabel(algo_summary)
-            details_label.setWordWrap(True)
-            if algo_summary == language_config.UI_ALGORITHM_NOT_SET:
-                details_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            else:
-                details_label.setAlignment(
-                    Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
-                )
-
-            cell_widget = QWidget()
-            cell_layout = QVBoxLayout(cell_widget)
-            cell_layout.addWidget(details_label)
-            cell_layout.setContentsMargins(5, 5, 5, 5)
-            self.table_widget.setCellWidget(i, 3, cell_widget)
+            item_details = QTableWidgetItem(algo_summary)
+            item_details.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            item_details.setToolTip(algo_summary)
+            self.table_widget.setItem(i, 3, item_details)
 
         self.table_widget.setVerticalHeaderLabels(
             [str(i + 1) for i in range(len(self.panels))]
         )
         self.adjust_column_widths()
-        self.table_widget.resizeRowsToContents()
         self._update_master_checkbox_visual()
 
     def resizeEvent(self, event):
@@ -846,8 +871,8 @@ class BatchProcessDialog(ModalDialog):
         self.table_widget.item(row, 2).setTextAlignment(Qt.AlignCenter)
         self._update_details_cell(row, result_message)
         self._set_row_color(row, color)
-        self.table_widget.resizeRowsToContents()
         self.processed_count += 1
+        self._eta.finish(success)
 
         num_total = len(self.panels_to_process_with_rows)
         overall_percent = (
@@ -859,12 +884,21 @@ class BatchProcessDialog(ModalDialog):
 
     def on_processing_complete(self, failed_batches_summary):
         self.reset_dialog_state()
-        self._update_progress_and_eta(100, "Batch processing complete!")
-        self.eta_label.setText("ETA: Completed")
+        total = len(self.panels_to_process_with_rows)
+        if self._was_cancelled:
+            percent = int(100 * self.processed_count / total) if total else 0
+            self._update_progress_and_eta(percent, "Batch processing cancelled.")
+            self.progress_status_tag.setText("Cancelled")
+            self.eta_label.setText("ETA: Cancelled")
+        else:
+            message = f"Batch processing complete: {len(failed_batches_summary)} failed." if failed_batches_summary else "Batch processing complete!"
+            self._update_progress_and_eta(100, message)
+            self.progress_status_tag.setText("Completed with errors" if failed_batches_summary else "Completed")
+            self.eta_label.setText("ETA: Completed")
 
         if failed_batches_summary:
             print(f"Failed batches: {failed_batches_summary}")
-        else:
+        elif not self._was_cancelled:
             print("Batch processing completed successfully!")
 
     def on_progress_update_from_thread(
@@ -877,7 +911,7 @@ class BatchProcessDialog(ModalDialog):
         overall_percent = (
             int(
                 (
-                    (self.processed_count + (percent_in_batch / 100.0))
+                    (self.processed_count + (max(0, min(99, percent_in_batch)) / 100.0))
                     / num_total_batches
                 )
                 * 100
@@ -886,9 +920,8 @@ class BatchProcessDialog(ModalDialog):
             else 0
         )
 
-        detail_msg = f"{current_num}/{total_num} batches processed... ({details})"
+        detail_msg = f"{self.processed_count}/{total_num} batches processed... ({details})"
         self._update_progress_and_eta(overall_percent, detail_msg)
-        self.table_widget.resizeRowToContents(row)
 
     def _update_progress_and_eta(self, percent, detail_msg=""):
         self.progress_bar.setValue(percent)
@@ -900,37 +933,36 @@ class BatchProcessDialog(ModalDialog):
                 "font-family: 'Segoe UI', Arial; font-size: 11.5px; font-weight: 600; color: #0284C7; margin-left: 8px;"
             )
             self.progress_detail_label.setText(detail_msg)
-            self.progress_detail_label.show()
+            self.progress_detail_label.setToolTip(detail_msg)
         else:
             self.progress_status_tag.setText("Ready to process")
             self.progress_status_tag.setStyleSheet(
                 "font-family: 'Segoe UI', Arial; font-size: 11.5px; font-weight: 600; color: #10B981; margin-left: 8px;"
             )
-            self.progress_detail_label.hide()
+            self.progress_detail_label.clear()
+            self.progress_detail_label.setToolTip("")
 
-        if self._start_time and percent > 0 and percent < 100:
-            elapsed = time.time() - self._start_time
-            est_total = (elapsed / percent) * 100
-            remaining = max(0, int(est_total - elapsed))
+        self._refresh_eta()
+
+    def _on_batch_started(self, row, reused):
+        self._eta.begin(reused)
+        self._refresh_eta()
+
+    def _refresh_eta(self):
+        if not self._is_processing or self._eta is None:
+            return
+        remaining = self._eta.remaining()
+        if remaining is not None:
             mins, secs = divmod(remaining, 60)
             self.eta_label.setText(f"ETA: {mins:02d}:{secs:02d}")
-        elif percent >= 100:
-            self.eta_label.setText("ETA: 00:00")
         else:
             self.eta_label.setText("ETA: Estimating...")
 
     def _update_details_cell(self, row, text):
-        widget = self.table_widget.cellWidget(row, 3)
-        if widget:
-            label = widget.findChild(QLabel)
-            if label:
-                if text == language_config.UI_ALGORITHM_NOT_SET:
-                    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                else:
-                    label.setAlignment(
-                        Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
-                    )
-                label.setText(text)
+        item = self.table_widget.item(row, 3)
+        if item:
+            item.setText(text)
+            item.setToolTip(text)
 
     def start_processing(self):
         self._was_cancelled = False
@@ -959,7 +991,9 @@ class BatchProcessDialog(ModalDialog):
             self._set_row_color(row, Qt.transparent)
 
         self._is_processing = True
-        self._start_time = time.time()
+        self.processed_count = 0
+        self._eta = BatchEtaEstimator(len(self.panels_to_process_with_rows))
+        self._eta_timer.start()
 
         self._apply_cancel_button_style()
         self.browse_button.setEnabled(False)
@@ -968,21 +1002,21 @@ class BatchProcessDialog(ModalDialog):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self._update_progress_and_eta(0, "Starting batch process...")
-        self.processed_count = 0
-
         self.processing_thread = ProcessingThread(
             self.panels_to_process_with_rows, self.batch_page_layout, target_folder
         )
         self.processing_thread.progress_update.connect(
             self.on_progress_update_from_thread
         )
+        self.processing_thread.batch_started.connect(self._on_batch_started)
         self.processing_thread.batch_finished.connect(self.on_batch_finished)
         self.processing_thread.processing_complete.connect(self.on_processing_complete)
+        self.processing_thread.finished.connect(self._on_worker_stopped)
         self.processing_thread.start()
 
     def cancel_processing(self):
         if hasattr(self, "processing_thread") and self.processing_thread.isRunning():
-            from resources.GenericUILibrary import modal_confirm
+            from UILibrary import modal_confirm
 
             reply = modal_confirm.question(
                 self,
@@ -991,36 +1025,42 @@ class BatchProcessDialog(ModalDialog):
             if reply:
                 self._was_cancelled = True
                 self.processing_thread.stop()
-                self.processing_thread.wait()
-                self.reset_dialog_state()
+                self.action_button.setEnabled(False)
+                self.progress_status_tag.setText("Cancelling...")
 
     def closeEvent(self, event):
-        """Stop an active batch before accepting any dialog-close request.
-
-        The custom title-bar close button and the native window close action
-        both call ``QDialog.close()`` directly, so they bypass
-        :meth:`cancel_processing` (and its confirmation prompt).  Leaving the
-        worker alive while the dialog is destroyed can let a batch continue to
-        write output and can retain GPU/runtime resources after the UI appears
-        closed.  Close is therefore treated as an unconditional cancellation
-        for an active worker, then waits for the worker's cooperative stop
-        callback before releasing the dialog.
-        """
+        """Keep the dialog alive until cancellation completes without blocking Qt."""
         processing_thread = getattr(self, "processing_thread", None)
         if processing_thread is not None and processing_thread.isRunning():
             self._was_cancelled = True
+            self._close_after_processing = True
             processing_thread.stop()
-            processing_thread.wait()
-            self.reset_dialog_state()
+            self.action_button.setEnabled(False)
+            self.progress_status_tag.setText("Cancelling...")
+            event.ignore()
+            return
 
         event.accept()
         super().closeEvent(event)
 
+    def _on_worker_stopped(self):
+        if self._close_after_processing:
+            self._close_after_processing = False
+            self.close()
+
+    def reject(self):
+        processing_thread = getattr(self, "processing_thread", None)
+        if processing_thread is not None and processing_thread.isRunning():
+            self.close()
+        else:
+            super().reject()
+
     def reset_dialog_state(self):
         self._is_processing = False
-        self._start_time = None
+        self._eta_timer.stop()
 
         self._apply_start_button_style()
+        self.action_button.setEnabled(True)
         self.browse_button.setEnabled(True)
         self.edit_algo_button.setEnabled(True)
 
@@ -1041,8 +1081,9 @@ class BatchProcessDialog(ModalDialog):
 
     def adjust_column_widths(self):
         header = self.table_widget.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table_widget.setColumnWidth(0, 36)
 
         available_width = (
             self.table_widget.viewport().width()
@@ -1050,9 +1091,8 @@ class BatchProcessDialog(ModalDialog):
             - header.sectionSize(2)
         )
         header.setSectionResizeMode(1, QHeaderView.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
         self.table_widget.setColumnWidth(1, int(available_width * (1 / 4)))
-        self.table_widget.setColumnWidth(3, int(available_width * (3 / 4)))
 
     def browse_output_folder(self):
         folder = QFileDialog.getExistingDirectory(
@@ -1063,6 +1103,7 @@ class BatchProcessDialog(ModalDialog):
 
 
 class ProcessingThread(QThread):
+    batch_started = Signal(int, bool)
     progress_update = Signal(int, str, str, int, int, int)
     batch_finished = Signal(int, bool, str)
     processing_complete = Signal(list)
@@ -1073,6 +1114,62 @@ class ProcessingThread(QThread):
         self.batch_page_layout = batch_page_layout
         self.target_folder = target_folder
         self._is_running = True
+
+    def _result_identity(self, panel, batch_id):
+        database = getattr(self.batch_page_layout, "database_manager", None)
+        if database is None:
+            return None, [os.path.join("database", "stack")]
+        image_paths = [path for path in database.get_images_by_batch(batch_id)
+                       if os.path.isfile(path)]
+        stages = plan_stages(self._batch_selections(panel, batch_id))
+        settings = {}
+        if os.path.isfile(config.GENERAL_SETTINGS_FILE):
+            with open(config.GENERAL_SETTINGS_FILE, "r", encoding="utf-8") as stream:
+                settings = json.load(stream)
+        names = expected_output_names(stages, image_paths, settings)
+        directories = [os.path.join("database", "stack")]
+        db_path = getattr(database, "db_path", None)
+        if db_path:
+            directories.append(os.path.join(os.path.dirname(db_path), "stack"))
+        return names, directories
+
+    def _batch_selections(self, panel, batch_id):
+        state_path = getattr(self.batch_page_layout, "json_path", None) or os.path.join(
+            "database", "align", "batch_parameter.json"
+        )
+        state = load_json_state(state_path).get(str(batch_id), {}) if os.path.isfile(state_path) else {}
+        return batch_selections(state, getattr(panel, "selected_algorithms", {}))
+
+    def _process_batch(self, panel, batch_id, progress_callback):
+        from pixel_refine_desktop.enhance_stack.core.logic.algorithm_processor import dispatch_worker_task
+        from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_manager import BackendWorkerManager
+
+        selections = self._batch_selections(panel, batch_id)
+        settings = dict(selections)
+        for category, key in (
+            ("alignment", config.KEY_CHECKBOX_ALIGN),
+            ("denoising", config.KEY_CHECKBOX_DENOISING),
+            ("super_resolution", config.KEY_CHECKBOX_SUPER_RES),
+            ("hdr", config.KEY_CHECKBOX_HDR),
+        ):
+            settings[key] = not get_spec(category, selections[category]).disabled
+        database = getattr(self.batch_page_layout, "database_manager", None)
+        db_path = getattr(database, "db_path", None) or os.environ.get("PIXEL_REFINE_SESSION_DB")
+        if not db_path:
+            raise RuntimeError("A session database is required for batch processing")
+        progress_callback(0, "Menyiapkan mesin proses...")
+        result = dispatch_worker_task(
+            BackendWorkerManager.instance(),
+            {"batch_id": batch_id, "single_process": False, "db_path": db_path, "settings": settings},
+            lambda percent, message="": progress_callback(percent, str(message).split("||", 1)[0]),
+            lambda: not self._is_running,
+        )
+        if result.get("type") == "cancelled":
+            self._is_running = False
+            return []
+        if not result.get("success"):
+            raise RuntimeError(result.get("error", "Batch worker failed"))
+        return result.get("output_paths", [])
 
     def run(self):
         failed_batches_summary = []
@@ -1089,20 +1186,13 @@ class ProcessingThread(QThread):
 
             try:
 
-                def sub_process_progress_callback(*args):
+                def sub_process_progress_callback(*args, **kwargs):
                     if not self._is_running:
                         return
-                    percent = 0
-                    message = ""
                     current_num_for_ui = i + 1
-
-                    if len(args) == 3:
-                        current, total, message = args
-                        percent = int((current / total) * 100) if total > 0 else 0
-                    elif len(args) == 2:
-                        percent, message = args
-                    else:
+                    if not args and not kwargs:
                         return
+                    percent, message = _parse_bulk_progress(*args, **kwargs)
 
                     self.progress_update.emit(
                         row,
@@ -1113,48 +1203,60 @@ class ProcessingThread(QThread):
                         total_batches_to_process,
                     )
 
-                files_before = set(self.batch_page_layout.get_files_in_stack_folder())
                 target_panel = getattr(panel, "original_panel", panel)
-                if hasattr(target_panel, "process_all_batch"):
-                    target_panel.process_all_batch(
-                        progress_callback=sub_process_progress_callback,
-                        stop_callback=lambda: not self._is_running,
-                    )
+                if not os.path.isdir(self.target_folder):
+                    raise OSError(f"Target folder is not accessible: {self.target_folder}")
+                names, stack_directories = self._result_identity(target_panel, batch_id)
+                outputs = find_existing_outputs(names, [self.target_folder, *stack_directories])
+                reused = bool(outputs)
+                self.batch_started.emit(row, reused)
+                if reused:
+                    print(f"[Bulk Save] batch={batch_id} reusing exact outputs: {outputs}")
+                    sub_process_progress_callback(100, "Existing result found; skipping stacking")
                 else:
-                    from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_combined_panel import (
-                        CombinedPanel,
-                    )
+                    result = self._process_batch(target_panel, batch_id, sub_process_progress_callback)
+                    if not self._is_running:
+                        break
+                    outputs = returned_output_paths(result)
+                    if not outputs:
+                        # Compatibility for entrypoints that still return None:
+                        # use exact expected names, never folder set-differences.
+                        outputs = find_existing_outputs(names, stack_directories)
+                    if not outputs or any(not usable_output(path) for path in outputs):
+                        raise OSError(f"No complete output generated for batch {batch_id}; expected={names}")
+                    if names and not set(names).issubset({os.path.basename(path) for path in outputs}):
+                        raise OSError(f"Incomplete output set for batch {batch_id}; expected={names}, returned={outputs}")
 
-                    db_mgr = getattr(self.batch_page_layout, "database_manager", None)
-                    temp_panel = CombinedPanel(database_manager=db_mgr, batch_id=batch_id)
-                    temp_panel.process_all_batch(
-                        progress_callback=sub_process_progress_callback,
-                        stop_callback=lambda: not self._is_running,
-                    )
-                files_after = set(self.batch_page_layout.get_files_in_stack_folder())
-                new_files = list(files_after - files_before)
-
-                if new_files:
-                    output_file = new_files[0]
-                    move_success = self.batch_page_layout._move_single_batch_result(
-                        output_file, self.target_folder
-                    )
-                    if move_success:
-                        self.batch_finished.emit(row, True, "Success: Saved")
+                details = []
+                sub_process_progress_callback(99, "Menyimpan hasil ke folder tujuan...")
+                for output_file in dict.fromkeys(outputs):
+                    if not self._is_running:
+                        break
+                    if reused:
+                        destination = os.path.join(self.target_folder, os.path.basename(output_file))
+                        success, detail = copy_result(output_file, destination)
                     else:
-                        self.batch_finished.emit(
-                            row, False, "Error: Failed to move result."
+                        success = self.batch_page_layout._move_single_batch_result(
+                            output_file, self.target_folder
                         )
-                else:
-                    self.batch_finished.emit(
-                        row, False, "Error: No output file generated."
-                    )
+                        detail = getattr(self.batch_page_layout, "_last_result_export_detail", "")
+                    if not success:
+                        raise OSError(f"Could not save {os.path.basename(output_file)}: {detail}")
+                    details.append(detail)
+                if not self._is_running:
+                    break
+                message = "Success: Reused existing result" if reused else "Success: Saved"
+                warnings = [detail for detail in details if "original retained" in detail]
+                if warnings:
+                    message += "; output saved, locked original retained"
+                self.batch_finished.emit(row, True, message)
 
             except Exception as e:
                 error_detail = str(e)
                 failed_summary = {"seq": seq_num, "id": batch_id, "error": error_detail}
                 failed_batches_summary.append(failed_summary)
-                self.batch_finished.emit(row, False, f"Failed: {error_detail[:100]}...")
+                print(f"[Bulk Save] batch={batch_id} error: {error_detail}")
+                self.batch_finished.emit(row, False, f"Failed: {error_detail}")
 
         self.processing_complete.emit(failed_batches_summary)
 

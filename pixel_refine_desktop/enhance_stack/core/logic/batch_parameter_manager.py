@@ -7,6 +7,7 @@ import json
 import os
 from typing import Dict, Any, Optional
 import config
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec, normalize_name
 
 
 # Centralized JSON path for batch parameters
@@ -14,15 +15,7 @@ BATCH_PARAMETER_PATH = os.path.join("database", "align", "batch_parameter.json")
 
 
 def _normalize_alignment_name(name: str) -> str:
-    mapping = {
-        "Farneback Optical Flow": "Farneback",
-        "Lucas Kanade Optical Flow": "Lucas Kanade",
-        "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
-        "Block Matching GPU Optical Flow": "Block Matching GPU",
-        "RAFT Optical Flow": "RAFT",
-        "ORB": "OFB",
-    }
-    return mapping.get(str(name or "").strip(), str(name or ""))
+    return normalize_name("alignment", name)
 
 
 def get_json_path() -> str:
@@ -247,22 +240,10 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
     if not alignment_active:
         alignment_algo = "No Alignment"
 
-    params_key_map = {
-        "AKAZE": "akaze_params",
-        "OFB": "ofb_params",
-        "ORB": "ofb_params",
-        "Light Glue": "light_glue_params",
-        "Farneback": "farneback_params",
-        "Lucas Kanade": "lucas_kanade_params",
-        "Block Matching": "block_matching_params",
-        "Block Matching GPU": "block_matching_gpu_params",
-        "Block Flow": "block_flow_params",
-        "RAFT": "raft_params",
-    }
-    params_key = params_key_map.get(alignment_algo, "")
-    params = batch_entry.get(params_key, {}) if params_key else {}
-    if not isinstance(params, dict):
-        params = {}
+    spec = get_spec("alignment", alignment_algo)
+    params_key = spec.parameter_keys[0] if spec.parameter_keys else ""
+    params = next((batch_entry[key] for key in spec.parameter_keys
+                   if isinstance(batch_entry.get(key), dict) and batch_entry[key]), {})
     if alignment_algo == "Lucas Kanade":
         gpu_params = batch_entry.get("lucas_kanade_gpu_params", {})
         if not isinstance(gpu_params, dict):
@@ -271,11 +252,6 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
             **dict(params),
             "gpu_params": dict(gpu_params),
         }
-    elif alignment_algo in ("Block Matching", "Block Matching GPU"):
-        if not params:
-            params = batch_entry.get("block_matching_params") or batch_entry.get("block_matching_gpu_params", {})
-            if not isinstance(params, dict):
-                params = {}
 
     reference_path = str(batch_entry.get("reference_image_path", "") or "")
     return {

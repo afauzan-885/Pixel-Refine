@@ -14,36 +14,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QEvent
-from resources.GenericUILibrary import live_update
+from UILibrary import live_update
 
-# Import parameter pages
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.light_glue_parameter_settings import (
-    load_light_glue_config,
-    save_light_glue_config_for_active_batch,
-)
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.farneback_parameter_settings import (
-    load_farneback_config,
-    save_farneback_config_for_active_batch,
-)
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.lucas_kanade_parameter_settings import (
-    load_lucas_kanade_config,
-    save_lucas_kanade_config_for_active_batch,
-)
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.block_matching_parameter_settings import (
-    load_block_matching_config,
-    save_block_matching_config_for_active_batch,
-)
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.raft_parameter_settings import (
-    load_raft_config,
-    save_raft_config_for_active_batch,
-)
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.akaze_parameter_settings import (
-    load_akaze_config,
-    save_akaze_config_for_active_batch,
-)
-from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.ofb_parameter_settings import (
-    load_ofb_config,
-    save_ofb_config_for_active_batch,
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import (
+    get_names, get_parameter_provider, get_spec, normalize_name,
 )
 from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.MFDenoiser_parameter_settings import (
@@ -51,10 +25,6 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoi
     get_denoising_settings_page,
     get_mfdenoiser_settings_page,
 )
-from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
-    get_algorithm_names as get_mfdenoiser_algorithm_names,
-)
-
 # Colors
 COLOR_ALIGNMENT_RED = "#E74C3C"      # Premium calm red
 COLOR_DENOISING_GREEN = "#2ECC71"    # Premium calm green
@@ -101,12 +71,6 @@ class SwitchableParameterPanel(QWidget):
         if key is None or key in ("device_backend_arch", "device_backend_id"):
             self._filter_alignment_for_backend()
 
-    # RAFT still requires its external model/runtime. Lucas-Kanade, Block
-    # Matching, and Farneback use the validated native AOT paths on OpenGL.
-    _VULKAN_ONLY_ALIGNMENT = {"RAFT"}
-    _CPU_HIDDEN_ALIGNMENT = {"RAFT"}
-    _HIDDEN_ALIGNMENT = {"RAFT", "Light Glue", "LightGlue"}
-
     def _repopulate_alignment_combo(self):
         """Rebuild the alignment combo items based on current backend arch & denoising algorithm.
 
@@ -114,11 +78,9 @@ class SwitchableParameterPanel(QWidget):
         selected denoiser owns execution, while this combo only selects the
         algorithm contract passed through MFDenoiser.
         """
-        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.backend_arch_helper import get_backend_arch
         if not hasattr(self, "align_dropdown"):
             return
 
-        backend_arch = get_backend_arch()
         combo = self.align_dropdown
 
         # Remember current selection
@@ -128,13 +90,8 @@ class SwitchableParameterPanel(QWidget):
         combo.blockSignals(True)
         combo.clear()
 
-        for name in self.alignment_algorithm_names:
-            if name in self._HIDDEN_ALIGNMENT:
-                continue
-            if backend_arch == "opengl" and name in self._VULKAN_ONLY_ALIGNMENT:
-                continue
-            if backend_arch == "cpu" and name in self._CPU_HIDDEN_ALIGNMENT:
-                continue
+        process = get_spec("denoising", self.current_denoising_algo).key
+        for name in get_names("alignment", context="resident", process=process):
             combo.addItem(name)
         fallback_default = "No Alignment"
 
@@ -165,20 +122,9 @@ class SwitchableParameterPanel(QWidget):
             if hasattr(right_panel, "_on_settings_changed"):
                 right_panel._on_settings_changed(save_to_store=True)
 
-        if selected_text == "Farneback":
-            save_farneback_config_for_active_batch(load_farneback_config())
-        elif selected_text == "OFB":
-            save_ofb_config_for_active_batch(load_ofb_config())
-        elif selected_text == "AKAZE":
-            save_akaze_config_for_active_batch(load_akaze_config())
-        elif selected_text == "Light Glue":
-            save_light_glue_config_for_active_batch(load_light_glue_config())
-        elif selected_text == "Lucas Kanade":
-            save_lucas_kanade_config_for_active_batch(load_lucas_kanade_config())
-        elif selected_text == "Block Matching GPU":
-            save_block_matching_config_for_active_batch(load_block_matching_config())
-        elif selected_text == "RAFT":
-            save_raft_config_for_active_batch(load_raft_config())
+        provider = get_parameter_provider("alignment", selected_text)
+        if provider:
+            provider["save_batch"](provider["load"]())
 
         print(
             f"[SwitchableParameterPanel] persisted alignment='{selected_text}' "
@@ -512,7 +458,7 @@ class SwitchableParameterPanel(QWidget):
         self.align_dropdown = QComboBox()
 
         # Keep ALL algorithm names so pages are always built (needed if user switches to GPU later)
-        self.alignment_algorithm_names = get_mfdenoiser_algorithm_names("alignment")
+        self.alignment_algorithm_names = get_names("alignment", context="resident")
 
         # Build ALL parameter pages into the stack keyed by name (name-based lookup in _on_alignment_algo_changed)
         self.alignment_pages = {}
@@ -868,14 +814,4 @@ class SwitchableParameterPanel(QWidget):
         return True
 
     def _normalize_alignment_name(self, value):
-        mapping = {
-            "Farneback Optical Flow": "Farneback",
-            "Lucas Kanade Optical Flow": "Lucas Kanade",
-            "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
-            "Block Matching GPU Optical Flow": "Block Matching GPU",
-            "Dense Optical Flow": "Block Flow",
-            "compute_flow": "Block Flow",
-            "FlowNet": "Block Flow",
-            "RAFT Optical Flow": "RAFT",
-        }
-        return mapping.get(str(value or "").strip(), str(value or "No Alignment"))
+        return normalize_name("alignment", value, default="No Alignment")

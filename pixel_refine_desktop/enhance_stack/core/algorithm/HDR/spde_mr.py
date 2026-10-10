@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 from .SPDE.core import (
     PATCH_SIZE,
     PATCH_STRIDE,
@@ -12,15 +13,15 @@ from .SPDE.core import (
 from .card_content import SPDE_MR_NAME
 
 
+
+
 class SPDEMRAlgorithm:
     """Expose the patch HDR option and delegate fusion work to ``HDR/SPDE``."""
 
-    NAME = SPDE_MR_NAME
-    KIND = "hdr"
-    DESCRIPTION = (
-        "Patch-based HDR using 8x8 blocks, stride 4, structure threshold 0.8, "
-        "and local E×C×S priority."
-    )
+    SPEC = get_spec("hdr", "spde_mr")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
     CARD_CATEGORIES = ("hdr",)
 
     def create_fusion(self, reference_rgb, *, radiance_enabled: bool):

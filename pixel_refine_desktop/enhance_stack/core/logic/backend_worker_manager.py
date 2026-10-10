@@ -19,6 +19,8 @@ import threading
 import subprocess
 from typing import Optional, Dict, Any, Callable
 
+from taichi_vision.backend_config import BackendConfig, backend_env
+
 
 class WindowsJobObject:
     """Binds child processes to a Windows Job Object with KILL_ON_JOB_CLOSE."""
@@ -358,7 +360,10 @@ class BackendWorkerManager:
         return self._await_ready(proc, self.START_READY_TIMEOUT_S)
 
     def _is_config_equal(self, a: Dict[str, Any], b: Dict[str, Any]) -> bool:
-        keys_to_compare = ("arch", "device_id", "vendor", "auto_fallback", "onnx_runtime")
+        keys_to_compare = (
+            "arch", "device_id", "vendor", "auto_fallback", "onnx_runtime",
+            "device_fallback_chain", "cuda_device_id", "vulkan_device_id",
+        )
         return all(a.get(k) == b.get(k) for k in keys_to_compare)
 
     def ensure_worker_ready(self, timeout: Optional[float] = None) -> bool:
@@ -465,6 +470,15 @@ class BackendWorkerManager:
                     "backend_text": store.get("device_backend", "CPU (Universal)"),
                     "auto_fallback": bool(store.get("auto_fallback", True)),
                     "onnx_runtime": store.get("onnx_runtime", "auto"),
+                    "device_fallback_chain": store.get(
+                        "device_fallback_chain",
+                        [store.get("device_backend_arch", "cpu")],
+                    ),
+                    "cuda_device_id": store.get("device_cuda_id", -1),
+                    "vulkan_device_id": store.get("device_vulkan_id", -1),
+                    "selected_backend_text": store.get(
+                        "device_backend", "CPU (Universal)"
+                    ),
                 }
             except Exception:
                 pass
@@ -481,14 +495,30 @@ class BackendWorkerManager:
         auto_fallback = self._active_backend_config.get("auto_fallback")
         onnx_runtime = self._active_backend_config.get("onnx_runtime")
 
+        # The runtime resolves canonical variables before the legacy aliases.
+        # Override both on every launch/retry so inherited CUDA settings cannot
+        # silently override a newly selected Vulkan/OpenGL/CPU backend.
+        backend_config = BackendConfig(backend=arch, device_id=device_id, vendor=vendor)
+        arch = backend_config.backend
+        device_id = str(backend_config.device_id)
+        env.update(backend_env(backend_config))
         env["AOT_ARCH"] = arch
         env["AOT_DEVICE"] = device_id
+        if arch == "cuda":
+            env["CUDA_DEVICE"] = device_id
+        else:
+            for key in (
+                "CUDA_EXPECTED_NAME", "CUDA_DEVICE", "PIXEL_REFINE_CUDA_DEVICE"
+            ):
+                env.pop(key, None)
         if vendor:
             env["TARGET_VENDOR"] = vendor
 
         if auto_fallback is not None:
             env["PIXEL_REFINE_AOT_AUTO_FALLBACK"] = "1" if auto_fallback else "0"
-            env["PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK"] = "1" if auto_fallback else "0"
+            # Keep C++ engine initialization from jumping straight to CPU. The
+            # task runner owns the ordered CUDA -> Vulkan -> OpenGL -> CPU retry.
+            env["PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK"] = "0"
             if not auto_fallback:
                 env["AOT_STRICT_BACKEND"] = "1"
             else:

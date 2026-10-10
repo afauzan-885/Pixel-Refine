@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from resources.GenericUILibrary import (
+from UILibrary import (
     Button,
     Checkbox,
     Container,
@@ -28,10 +28,14 @@ from pixel_refine_desktop.ui.views.settings.General.GeneralSetting import (
     GeneralSettingsPage,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from resources.GenericUILibrary.modals import modal_confirm
+from UILibrary.modals import modal_confirm
 from pixel_refine_desktop.ui.views.settings.General.helpers import restart_application
 from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
+    IN_PROCESSING_MAX,
+    IN_PROCESSING_MIN,
+    IN_PROCESSING_SETTING_KEY,
     PREFETCH_SETTING_KEY,
+    normalize_in_processing_depth,
     normalize_prefetch_depth,
 )
 
@@ -182,14 +186,17 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.compute_block_size_group.setVisible(False)
 
         prefetch_label = getattr(
-            language_config, "LBL_PIPELINE_PREFETCH", "Host Frame Prefetch"
+            language_config, "LBL_PIPELINE_PREFETCH", "RAM Queue"
         )
         prefetch_tip = getattr(
             language_config,
             "PIPELINE_PREFETCH_TIP",
-            "Number of decoded support frames allowed to wait in host RAM. "
-            "0 disables prefetch; 1-4 bounds the host queue. Higher values can "
-            "increase RAM use. Frames are not prefetched to GPU memory.",
+            "Maximum number of unchanged source-file byte payloads held for "
+            "read-ahead in RAM (for DNG, the original DNG container bytes). "
+            "Payloads are not decoded, demosaiced, or converted to float until "
+            "they leave this queue. 0 disables read-ahead; 1-4 bounds the "
+            "number of prefetched files. They are not sent to GPU memory by "
+            "this queue.",
         )
         self.pipeline_prefetch_group = FormGroup(
             label=prefetch_label, input_type="number", auto_sync=False
@@ -207,6 +214,38 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             self._on_pipeline_prefetch_changed
         )
         right_form.add_row(self.pipeline_prefetch_group)
+
+        in_processing_label = getattr(
+            language_config, "LBL_IN_PROCESSING_QUEUE", "In-Processing Queue"
+        )
+        in_processing_tip = getattr(
+            language_config,
+            "IN_PROCESSING_QUEUE_TIP",
+            "Maximum number of support frames admitted to the processing path, "
+            "including the active frame and host-prepared frames waiting for "
+            "their turn. 1 is the conservative serial mode; higher values "
+            "allow bounded host decode/preparation and resident pipeline work "
+            "ahead. GPU launches remain protected by the existing backend "
+            "synchronization and are not assumed concurrent.",
+        )
+        self.in_processing_queue_group = FormGroup(
+            label=in_processing_label, input_type="number", auto_sync=False
+        )
+        self.in_processing_queue_group.input.setRange(
+            IN_PROCESSING_MIN, IN_PROCESSING_MAX
+        )
+        self.in_processing_queue_group.input.setSingleStep(1)
+        self.in_processing_queue_group.input.setToolTip(in_processing_tip)
+        self.in_processing_queue_group.setToolTip(in_processing_tip)
+        saved_in_processing = self.store.get(IN_PROCESSING_SETTING_KEY, 1)
+        effective_in_processing = normalize_in_processing_depth(saved_in_processing)
+        if saved_in_processing != effective_in_processing:
+            self.store.set(IN_PROCESSING_SETTING_KEY, effective_in_processing)
+        self.in_processing_queue_group.input.setValue(effective_in_processing)
+        self.in_processing_queue_group.input.valueChanged.connect(
+            self._on_in_processing_queue_changed
+        )
+        right_form.add_row(self.in_processing_queue_group)
 
         onnx_label = getattr(language_config, "LBL_ONNX_RUNTIME", "ONNX Runtime")
         self.onnx_runtime_group = FormGroup(
@@ -671,6 +710,11 @@ class PerformanceSettingsPage(GeneralSettingsPage):
     def _on_pipeline_prefetch_changed(self, value: int):
         self.store.set(PREFETCH_SETTING_KEY, normalize_prefetch_depth(value))
 
+    def _on_in_processing_queue_changed(self, value: int):
+        self.store.set(
+            IN_PROCESSING_SETTING_KEY, normalize_in_processing_depth(value)
+        )
+
     def _on_performance_store_changed(self, key, _value):
         if key is None or key == PREFETCH_SETTING_KEY:
             group = getattr(self, "pipeline_prefetch_group", None)
@@ -679,6 +723,19 @@ class PerformanceSettingsPage(GeneralSettingsPage):
                 depth = normalize_prefetch_depth(raw_value)
                 if raw_value != depth:
                     self.store.set(PREFETCH_SETTING_KEY, depth)
+                    return
+                spinbox = group.input
+                if spinbox.value() != depth:
+                    spinbox.blockSignals(True)
+                    spinbox.setValue(depth)
+                    spinbox.blockSignals(False)
+        if key is None or key == IN_PROCESSING_SETTING_KEY:
+            group = getattr(self, "in_processing_queue_group", None)
+            if group is not None:
+                raw_value = self.store.get(IN_PROCESSING_SETTING_KEY, 1)
+                depth = normalize_in_processing_depth(raw_value)
+                if raw_value != depth:
+                    self.store.set(IN_PROCESSING_SETTING_KEY, depth)
                     return
                 spinbox = group.input
                 if spinbox.value() != depth:
@@ -716,6 +773,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             getattr(getattr(self, "device_group", None), "input", None),
             getattr(getattr(self, "compute_block_size_group", None), "input", None),
             getattr(getattr(self, "pipeline_prefetch_group", None), "input", None),
+            getattr(getattr(self, "in_processing_queue_group", None), "input", None),
             getattr(
                 getattr(self, "compute_block_threshold_group", None), "input", None
             ),
@@ -906,6 +964,14 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             else self.store.get("device_backend", "CPU (Universal)"),
             "auto_fallback": bool(self.store.get("auto_fallback", True)),
             "onnx_runtime": self.store.get("onnx_runtime", "auto"),
+            "device_fallback_chain": self.store.get(
+                "device_fallback_chain", [self.store.get("device_backend_arch", "cpu")]
+            ),
+            "cuda_device_id": self.store.get("device_cuda_id", -1),
+            "vulkan_device_id": self.store.get("device_vulkan_id", -1),
+            "selected_backend_text": self.store.get(
+                "device_backend", "CPU (Universal)"
+            ),
         }
 
     def _on_gpu_device_available(self, _device):
@@ -938,7 +1004,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             return
         self._manual_gpu_retry = False
         try:
-            from resources.GenericUILibrary import Toast
+            from UILibrary import Toast
 
             Toast(
                 getattr(
@@ -956,7 +1022,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
     def _on_worker_backend_switch_finished(self, switched, config):
         """Report the worker move and offer the restart the main runtime needs."""
         try:
-            from resources.GenericUILibrary import Toast
+            from UILibrary import Toast
 
             if switched:
                 Toast(
@@ -987,7 +1053,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
     def _offer_restart_for_gpu(self, config):
         """Ask before restarting: never restart the application automatically."""
         try:
-            from resources.GenericUILibrary.modals import modal_confirm
+            from UILibrary.modals import modal_confirm
 
             dialog = modal_confirm(
                 getattr(
@@ -1271,15 +1337,13 @@ class PerformanceSettingsPage(GeneralSettingsPage):
     def update_theme(self):
         """Update button styles, checkbox styles, and form elements dynamically on theme change."""
         super().update_theme()
-        from resources.GenericUILibrary.theme import get_theme, create_checkbox_style
+        from UILibrary.theme import get_theme, create_checkbox_style, apply_style
 
         theme = get_theme()
         if hasattr(self, "auto_fallback_cb") and hasattr(
             self.auto_fallback_cb, "checkbox"
         ):
-            self.auto_fallback_cb.checkbox.setStyleSheet(
-                create_checkbox_style(theme=theme)
-            )
+            apply_style(self.auto_fallback_cb.checkbox, create_checkbox_style(theme=theme))
         if hasattr(self, "test_btn") and self.test_btn:
             self.test_btn.setStyleSheet(
                 f"QPushButton {{"
@@ -1335,7 +1399,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
                 f"[PerformanceSettingsPage] Realtime worker backend switch error: {exc}"
             )
 
-        from resources.GenericUILibrary import Toast, trigger_live_update
+        from UILibrary import Toast, trigger_live_update
 
         trigger_live_update()
         self._initial_device_backend = selected_backend_text

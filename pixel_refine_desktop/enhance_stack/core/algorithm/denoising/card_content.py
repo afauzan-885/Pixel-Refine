@@ -1,6 +1,8 @@
 """Localized display content for the multi-frame denoising card."""
 
 
+from ..catalog import get_spec, normalize_name
+
 CARD_NAME = "MF-Denoising"
 DESCRIPTION_TRANSLATION_KEY = "DESC_DENOISING_CARD"
 
@@ -30,7 +32,7 @@ def get_process_command(settings):
         stored_key=config.KEY_DENOISING_ALGO,
         enabled_key=config.KEY_CHECKBOX_DENOISING, title=CARD_NAME,
         none_value="No Denoising",
-        direct_start=algorithm in {
-            "Average", "Median", "Similarity", "Spatial AI", "FusionNet",
-        },
+        direct_start=bool(algorithm) and get_spec(
+            "denoising", normalize_name("denoising", algorithm)
+        ).entrypoint != "",
     )

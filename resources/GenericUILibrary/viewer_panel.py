@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 
-from UI.resources.GenericUILibrary.ui_component import GridItemWidget, LoadingOverlay
+from .ui_component import GridItemWidget, LoadingOverlay
 
 class ViewerPanel(QWidget):
     import_clicked = Signal()

@@ -5,6 +5,7 @@ Uses Oriented FAST + ANMS Grid Keypoint Extraction & Oriented BRIEF (256-bit)
 descriptor matching compiled with Taichi AOT for zero-copy GPU execution.
 """
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import json
 import os
 import numpy as np
@@ -16,10 +17,13 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
 )
 
 
+
+
 class OFBAlgorithm:
-    NAME = "OFB"
-    KIND = "alignment"
-    DESCRIPTION = "100% Taichi Vision GPU-Native Oriented FAST and BRIEF Feature Alignment."
+    SPEC = get_spec("alignment", "ofb")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     PRESETS = {
         "fast": {"max_kps": 600, "grid_size": 32, "threshold": 0.05, "ratio": 0.75},

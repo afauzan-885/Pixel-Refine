@@ -21,6 +21,7 @@ class PipelineOptions:
     """Execution settings shared by algorithms without imposing their schema."""
 
     prefetch_depth: int = 0
+    in_processing_depth: int = 1
     values: Mapping[str, Any] = field(default_factory=dict)
 
 

@@ -1,3 +1,4 @@
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import os
 import gc
 import json
@@ -201,7 +202,13 @@ def _fused_reconstruction_available(native_splat):
     return True, ""
 
 
+
+
 class SplatSRAlgorithm:
+    SPEC = get_spec("super_resolution", "splatting_sr")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     def __init__(self, db_path, hdf5_path="database/align/aligned_images.h5"):
         self.db_path = db_path
@@ -2066,6 +2073,7 @@ def main(
         else:
             if update_progress:
                 update_progress(100, "Failed to run super resolution.")
+        return saved_path
 
     except Exception as e:
         traceback.print_exc()
@@ -2092,14 +2100,13 @@ def running_splatting_sr(
         )
 
     if progress_callback is not None:
-        main(
+        return main(
             db_path=db_path,
             update_progress=progress_callback,
             stop_requested=stop_callback,
             single_process=False if batch_id is not None else bool(single_process),
             batch_id=batch_id,
         )
-        return
 
     process_finished = False
     dialog = QDialog(parent)

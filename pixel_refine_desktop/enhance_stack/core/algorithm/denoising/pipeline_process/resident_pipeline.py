@@ -51,6 +51,7 @@ from .contracts import ResidentAnalysisContext, ResidentGeometry, scale_homograp
 from ...pipeline_runtime import (
     PipelineRuntime,
     current_pipeline_runtime,
+    resolve_in_processing_depth,
     resolve_prefetch_depth,
     runtime_entrypoint,
 )
@@ -68,6 +69,86 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser impo
     _align_percent,
     _merge_percent,
 )
+
+ANALYSIS_AUTO_ENHANCE_MODE = "natural"
+
+
+def _resolve_spatial_analysis_config(
+    config, *, tile_size, overlap, work_shape, noise_score, is_raw
+):
+    """Resolve one identical spatial-weight policy for RGB and CFA carriers."""
+    from taichi_vision.taichi_algorithm.spatial_fusion import auto_motion_sensitivity
+
+    cfg = config or {}
+    tile = max(
+        8, min(int(cfg.get("similarity_spatial_tile_size", tile_size)), min(work_shape))
+    )
+    ratio = float(cfg.get("similarity_spatial_overlap_percent", overlap))
+    base_motion = float(
+        cfg.get("similarity_spatial_motion_sensitivity",
+                cfg.get("motion_sensitivity", cfg.get("motion_sensivity", 150.0)))
+    )
+    offset = float(
+        cfg.get("similarity_spatial_noise_mad_offset_factor",
+                cfg.get("noise_offset_factor",
+                        cfg.get("noise_mad_offset_factor", cfg.get("noise_offset", 0.15))))
+    )
+    explicit_sigma = cfg.get("similarity_spatial_noise_sigma", cfg.get("noise_sigma"))
+    if explicit_sigma is not None and float(explicit_sigma) > 0:
+        sigma, mode = float(explicit_sigma), "explicit_ui"
+    elif noise_score is not None:
+        sigma, mode = (
+            float(np.clip(noise_score, 1e-4, 0.99999)),
+            "linear_reference_score",
+        )
+    else:
+        sigma, mode = 0.025, "fallback"
+    motion = auto_motion_sensitivity(is_raw=is_raw, base=base_motion, noise_sigma=sigma)
+    return tile, ratio, motion, offset, sigma, mode
+
+
+def _resolve_reference_analysis_params(
+    reference,
+    *,
+    enabled,
+    supplied=None,
+    needs_analysis=True,
+    mode=ANALYSIS_AUTO_ENHANCE_MODE,
+):
+    """Analyze a reference once so its stage-specific RGB parameters are reused."""
+    override = os.environ.get("PIXEL_REFINE_ANALYSIS_ENHANCE")
+    if override is not None:
+        enabled = override.strip().lower() not in ("0", "false", "off", "no")
+    if not enabled or not needs_analysis:
+        return None
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode not in {"analysis", "natural"}:
+        raise ValueError(f"Unsupported AutoEnhance mode: {mode!r}")
+    return supplied or analyze_auto_enhance_on_gpu(reference, mode=normalized_mode)
+
+
+def _resolve_engine_analysis_params(
+    reference,
+    *,
+    weight_engine,
+    enabled,
+    supplied=None,
+    needs_analysis=True,
+    mode=ANALYSIS_AUTO_ENHANCE_MODE,
+):
+    """Resolve the reference-driven transform for a requested pipeline stage."""
+    if (
+        str(weight_engine).strip().lower() == "spatial_fusion"
+        and str(mode).strip().lower() != "analysis"
+    ):
+        return None
+    return _resolve_reference_analysis_params(
+        reference,
+        enabled=enabled,
+        supplied=supplied,
+        needs_analysis=needs_analysis,
+        mode=mode,
+    )
 
 
 def _resolve_weightnet_input_channels(session, requested: Optional[int]) -> int:
@@ -378,6 +459,81 @@ def resolve_noise_adaptive_penalty(
     return score, float(active)
 
 
+def prepare_reference_analysis_and_noise(
+    source_gpu: TaichiGPUBuffer,
+    *,
+    work_shape: tuple[int, int],
+    analysis_params: Optional[dict],
+    ghost_penalty: float,
+    ghost_penalty_min: Optional[float] = None,
+    in_place: bool = False,
+    source_is_disposable: bool = False,
+    noise_source_gpu: Optional[TaichiGPUBuffer] = None,
+    noise_analysis_params: Optional[dict] = None,
+) -> tuple[TaichiGPUBuffer, Optional[float], float]:
+    """Prepare the reference analysis proxy, then estimate its noise once.
+
+    Keep RGB Linear and RAW Native on the same ordering: work-resolution
+    analysis proxy -> reference AutoEnhance -> noise estimate by default.
+    FusionNet may provide an independent reference and AutoEnhance parameter
+    set for noise estimation while its natural-mode WeightNet proxy remains
+    separate from the alignment proxy. SpatialFusion can use an independent
+    linear source for noise and weight scoring.
+    """
+
+    # If the same linear source is needed for noise estimation, do not let an
+    # in-place AutoEnhance consume/mutate it, even when the caller considers
+    # that proxy disposable.
+    preserve_noise_source = noise_source_gpu is source_gpu
+    analysis_gpu = prepare_analysis_proxy_gpu(
+        source_gpu,
+        work_shape=work_shape,
+        analysis_params=analysis_params,
+        in_place=in_place,
+        source_is_disposable=(source_is_disposable and not preserve_noise_source),
+    )
+    noise_gpu = analysis_gpu
+    owns_noise_gpu = False
+    can_reuse_analysis_for_noise = (
+        noise_source_gpu is source_gpu
+        and noise_analysis_params == analysis_params
+    )
+    if noise_source_gpu is not None and not can_reuse_analysis_for_noise:
+        noise_gpu = prepare_analysis_proxy_gpu(
+            noise_source_gpu,
+            work_shape=work_shape,
+            analysis_params=noise_analysis_params,
+        )
+        owns_noise_gpu = noise_gpu is not noise_source_gpu and noise_gpu is not analysis_gpu
+    try:
+        score, active_penalty = resolve_noise_adaptive_penalty(
+            noise_gpu,
+            ghost_penalty=ghost_penalty,
+            ghost_penalty_min=ghost_penalty_min,
+        )
+    finally:
+        if owns_noise_gpu:
+            _destroy_work_item(noise_gpu)
+    if score is not None:
+        source = (
+            "autoenhanced_analysis"
+            if noise_source_gpu is not None and noise_analysis_params is not None
+            else "linear_unenhanced"
+            if noise_source_gpu is not None
+            else (
+            "autoenhanced_natural"
+            if analysis_params is not None
+            else "linear_proxy_enhance_disabled"
+            )
+        )
+        print(
+            "[GPU Pipeline] Reference noise estimate (Taichi Vision): "
+            f"score={score:.6f} source={source} "
+            f"shape={tuple(int(v) for v in analysis_gpu.shape[:2])}"
+        )
+    return analysis_gpu, score, active_penalty
+
+
 def apply_clahe_16bit_reference(
     rgb_chw: np.ndarray,
     clip_limit: float = 2.0,
@@ -600,9 +756,17 @@ class _WeightNetReadbackWorkspace:
 class _WeightNetUploadWorkspace:
     """Reuse the HWC host staging array used to upload each weight map."""
 
-    def __init__(self, shape: tuple[int, int]):
+    def __init__(self, shape: tuple[int, int], *, channels: int = 3):
         height, width = (max(1, int(shape[0])), max(1, int(shape[1])))
-        self.hwc = np.empty((height, width, 3), dtype=np.float32)
+        self.shape = (height, width)
+        self.channels = int(channels)
+        if self.channels not in (1, 3):
+            raise ValueError(f"WeightNet upload staging supports 1 or 3 channels, got {channels}")
+        self.hwc = (
+            None
+            if self.channels == 1
+            else np.empty((height, width, 3), dtype=np.float32)
+        )
         _own_component(self)
 
     def close(self):
@@ -610,6 +774,18 @@ class _WeightNetUploadWorkspace:
 
     def stage(self, weight_chw: np.ndarray) -> np.ndarray:
         array = np.asarray(weight_chw, dtype=np.float32)
+        if self.channels == 1:
+            if array.ndim == 3 and array.shape[0] == 1:
+                array = array[0]
+            if array.ndim != 2 or tuple(array.shape) != self.shape:
+                raise ValueError(
+                    f"Scalar weight map shape {array.shape} does not match "
+                    f"workspace {self.shape}"
+                )
+            # The scalar inference result is already contiguous and upload()
+            # consumes it immediately; pass a view instead of staging a second
+            # full-resolution host copy.
+            return array
         if array.ndim == 3 and array.shape[0] == 3:
             if tuple(array.shape[1:]) != self.hwc.shape[:2]:
                 raise ValueError(
@@ -1724,22 +1900,23 @@ def create_resident_aligner(
     noise_score: Optional[float] = None,
 ):
     """Factory creating the appropriate GPU-resident aligner instance."""
-    plan_clean = str(alignment_plan or "").strip().lower()
-    if plan_clean in ("no alignment", "none", "off", ""):
+    from ...catalog import get_spec
+
+    spec = get_spec("alignment", alignment_plan or "none", context="resident")
+    route = spec.resident_route
+    if route == "none":
         print("[GPU Pipeline] Aligner: No Alignment (Bypass)")
         return NoAlignmentGPUAligner(ref_analysis_gpu)
-    elif plan_clean in ("ofb", "orb", "akaze", "feature matching"):
-        print(f"[GPU Pipeline] Aligner: Feature Matching ({plan_clean.upper()})")
+    elif route in ("ofb", "akaze"):
+        print(f"[GPU Pipeline] Aligner: Feature Matching ({spec.name})")
         return FeatureMatchingGPUAligner(
             ref_analysis_gpu,
-            feature_type=plan_clean,
+            feature_type=route,
             work_scale=work_scale,
             full_shape=full_shape,
             feature_config=alignment_config,
         )
-    elif plan_clean in (
-        "block matching", "block_matching", "block matching gpu", "blockmatching", "block align", "bm"
-    ):
+    elif route == "block_matching":
         print("[GPU Pipeline] Aligner: Block Matching GPU")
         return BlockMatchingResidentAligner(
             ref_analysis_gpu,
@@ -1747,7 +1924,7 @@ def create_resident_aligner(
             full_shape=full_shape,
             alignment_config=alignment_config,
         )
-    elif "lucas" in plan_clean or "lk" in plan_clean:
+    elif route == "lucas_kanade":
         print("[GPU Pipeline] Aligner: Lucas Kanade GPU")
         return LucasKanadeResidentAligner(
             ref_analysis_gpu,
@@ -1755,20 +1932,15 @@ def create_resident_aligner(
             full_shape=full_shape,
             alignment_config=alignment_config,
         )
-    elif "farneback" in plan_clean:
+    elif route == "farneback":
         return FarnebackResidentAligner(
             ref_analysis_gpu,
             work_scale=work_scale,
             full_shape=full_shape,
             alignment_config=alignment_config,
         )
-    elif plan_clean in ("sift", "lightglue", "light glue"):
-        raise ValueError(
-            f"Unsupported resident feature aligner '{alignment_plan}'. "
-            "Use OFB/ORB or AKAZE; SIFT and LightGlue were removed from the native path."
-        )
-    else:
-        print(f"[GPU Pipeline] Aligner: Dense Optical Flow Adaptive Multi-Tile ({plan_clean})")
+    elif route == "block_flow":
+        print(f"[GPU Pipeline] Aligner: Dense Optical Flow Adaptive Multi-Tile ({spec.name})")
         from ..fusionet_engine.flownet_inference import AOTOpticalFlowAligner
 
         smooth = True
@@ -1785,6 +1957,8 @@ def create_resident_aligner(
             smooth=smooth,
             adaptive=True,
         )
+
+    raise ValueError(f"No resident aligner registered for '{spec.name}'")
 
 
 # ---------------------------------------------------------------------------
@@ -1897,11 +2071,9 @@ def _prepare_raw_aligned_analysis(
 def _gpu_blend_frame(sum_img_gpu, weight_sum_gpu, supp_aligned_gpu, weight_work_gpu):
     """Blend one support frame into the GPU-resident accumulator.
 
-    Uses accumulate_spatial_merging_taichi from SpatialFusion which
-    auto-dispatches to the vec3 kernel when given a 3D weight map.
-
-    The vec3 kernel performs per-channel bilinear upsample + multiply + accumulate
-    entirely on GPU on-the-fly — saving 144 MB VRAM per frame.
+    Uses the shared Taichi accumulator. Scalar WeightNet maps stay 2D and
+    dispatch to scalar-to-RGB accumulation; SpatialFusion and legacy RGB maps
+    retain their existing scalar/vec3 dispatch.
     """
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi import (
         accumulate_spatial_merging_taichi,
@@ -1909,7 +2081,11 @@ def _gpu_blend_frame(sum_img_gpu, weight_sum_gpu, supp_aligned_gpu, weight_work_
 
     accumulate_spatial_merging_taichi(
         current_image_full=supp_aligned_gpu.view_as_vector(False),
-        weight_map_work=weight_work_gpu.view_as_vector(False),
+        weight_map_work=(
+            weight_work_gpu.view_as_vector(False)
+            if len(weight_work_gpu.shape) > 2
+            else weight_work_gpu
+        ),
         final_image_sum=sum_img_gpu.view_as_vector(False),
         weight_map_sum_full=weight_sum_gpu.view_as_vector(False),
     )
@@ -1926,6 +2102,7 @@ def _run_shared_raw_provider_pipeline(
     alignment_config: Optional[dict] = None,
     spatial_config: Optional[dict] = None,
     analysis_enhance: bool = True,
+    analysis_auto_enhance_mode: str = ANALYSIS_AUTO_ENHANCE_MODE,
     work_scale: float = 0.50,
     flownet_work_scale: Optional[float] = None,
     weightnet_work_scale: Optional[float] = None,
@@ -1952,6 +2129,9 @@ def _run_shared_raw_provider_pipeline(
     """
 
     normalized_engine = str(weight_engine).strip().lower()
+    # Retain the argument for compatibility. Stages below explicitly use
+    # analysis mode for alignment and natural mode for FusionNet weight input.
+    analysis_auto_enhance_mode = ANALYSIS_AUTO_ENHANCE_MODE
     if normalized_engine not in ("average", "spatial_fusion", "fusionet"):
         raise NotImplementedError(
             "RAW Native supports Average, SpatialFusion, and FusionNet."
@@ -1982,6 +2162,7 @@ def _run_shared_raw_provider_pipeline(
     if runtime is None:
         runtime = PipelineRuntime(
             prefetch_depth=resolve_prefetch_depth(prefetch_depth),
+            in_processing_depth=resolve_in_processing_depth(),
             stop_event=stop_event,
             progress_callback=progress_callback,
         )
@@ -1996,6 +2177,7 @@ def _run_shared_raw_provider_pipeline(
     aligner = None
     ref_proxy_full_gpu = None
     ref_analysis_gpu = None
+    ref_weight_analysis_gpu = None
     ref_spatial_gray_gpu = None
     spatial_rows_gpu = None
     spatial_cols_gpu = None
@@ -2009,7 +2191,8 @@ def _run_shared_raw_provider_pipeline(
     weightnet_support_workspace = None
     weightnet_upload_workspace = None
     ref_frame = None
-    analysis_params = auto_params or {}
+    analysis_params = None
+    weight_analysis_params = None
     spatial_state = None
     mean_alpha = 1.0
 
@@ -2091,50 +2274,104 @@ def _run_shared_raw_provider_pipeline(
                 geometry.weight_shape, channels=weightnet_channels
             )
             weightnet_upload_workspace = _WeightNetUploadWorkspace(
-                geometry.weight_shape
+                geometry.weight_shape, channels=weightnet_channels
             )
         ref_noise_score = None
         if needs_analysis:
             from .raw_pipeline.provider import _demosaic_carrier_gpu
 
             ref_proxy_full_gpu = _demosaic_carrier_gpu(ref_frame.carrier)
-            env_override = os.environ.get("PIXEL_REFINE_ANALYSIS_ENHANCE")
-            if env_override is not None:
-                analysis_enhance = env_override.strip().lower() not in ("0", "false", "off", "no")
-            analysis_params = auto_params or None
-            if analysis_enhance:
-                if not analysis_params:
-                    analysis_params = analyze_auto_enhance_on_gpu(
-                        ref_proxy_full_gpu, mode="analysis"
-                    )
-            else:
-                analysis_params = None
-
-            # Estimasi noise murni dari versi RAW yang belum di-autoenhance sama sekali
-            ref_noise_score, ghost_penalty = resolve_noise_adaptive_penalty(
-                ref_proxy_full_gpu,
-                ghost_penalty=ghost_penalty,
-                ghost_penalty_min=ghost_penalty_min,
+            print("[RAW Native] Analysis demosaic: bilinear, full-resolution; final preview: Hamilton")
+            alignment_mode = (
+                "analysis"
+                if normalized_engine in ("fusionet", "spatial_fusion")
+                else ANALYSIS_AUTO_ENHANCE_MODE
             )
+            analysis_params = _resolve_engine_analysis_params(
+                ref_proxy_full_gpu,
+                weight_engine=normalized_engine,
+                enabled=analysis_enhance,
+                supplied=(auto_params if alignment_mode != "analysis" else None),
+                mode=alignment_mode,
+            )
+            if normalized_engine == "fusionet":
+                weight_analysis_params = _resolve_reference_analysis_params(
+                    ref_proxy_full_gpu,
+                    enabled=analysis_enhance,
+                    supplied=auto_params,
+                    needs_analysis=needs_analysis,
+                    mode="natural",
+                )
+            noise_analysis_params = (
+                analysis_params if normalized_engine == "fusionet" else None
+            )
+            if normalized_engine in ("fusionet", "spatial_fusion"):
+                ref_weight_analysis_gpu = prepare_analysis_proxy_gpu(
+                    ref_proxy_full_gpu,
+                    work_shape=geometry.weight_shape,
+                    analysis_params=(
+                        weight_analysis_params
+                        if normalized_engine == "fusionet"
+                        else None
+                    ),
+                )
+                if ref_weight_analysis_gpu is ref_proxy_full_gpu:
+                    ref_weight_analysis_gpu = taichi_aot.copy(
+                        ref_weight_analysis_gpu, return_gpu=True
+                    )
+            if analysis_params is not None:
+                print(
+                    "[RAW Native] Alignment AutoEnhance "
+                    f"({alignment_mode}, uncapped gain): "
+                    f"Gain={float(analysis_params.get('gain', 1.0)):.2f}x "
+                    "(reference parameters reused for support alignment; "
+                    "CFA fusion carrier remains unchanged)"
+                )
+            else:
+                print(
+                    "[RAW Native] Alignment AutoEnhance skipped; "
+                    "alignment proxy remains linear"
+                )
+            if weight_analysis_params is not None:
+                print(
+                    "[RAW Native] FusionNet WeightNet AutoEnhance (natural): "
+                    f"Gain={float(weight_analysis_params.get('gain', 1.0)):.2f}x"
+                )
 
-            # Noise analysis stays on the unenhanced reference. Weight analysis
-            # uses the disposable AutoEnhanced proxy created below.
+            ref_analysis_gpu, ref_noise_score, ghost_penalty = (
+                prepare_reference_analysis_and_noise(
+                    ref_proxy_full_gpu,
+                    work_shape=geometry.align_shape,
+                    analysis_params=analysis_params,
+                    ghost_penalty=ghost_penalty,
+                    ghost_penalty_min=ghost_penalty_min,
+                    in_place=False,
+                    source_is_disposable=False,
+                    noise_source_gpu=(
+                        ref_proxy_full_gpu
+                        if normalized_engine in ("fusionet", "spatial_fusion")
+                        else None
+                    ),
+                    noise_analysis_params=noise_analysis_params,
+                )
+            )
+            if ref_proxy_full_gpu is not ref_analysis_gpu:
+                _destroy_work_item(ref_proxy_full_gpu)
+            ref_proxy_full_gpu = None
+
             ref_spatial_gray_gpu = None
             if normalized_engine == "spatial_fusion":
-                cfg = dict(spatial_config or {})
-                tile = max(4, int(cfg.get("similarity_spatial_tile_size", 12)))
-                overlap_value = float(
-                    cfg.get("similarity_spatial_overlap_percent", overlap)
+                (
+                    tile, overlap_value, motion, noise_offset, noise_sigma, sigma_mode
+                ) = _resolve_spatial_analysis_config(
+                    spatial_config, tile_size=tile_size, overlap=overlap,
+                    work_shape=geometry.weight_shape, noise_score=ref_noise_score,
+                    is_raw=True,
                 )
-                motion = float(
-                    cfg.get("similarity_spatial_motion_sensitivity", 150.0)
-                )
-                noise_offset = float(
-                    cfg.get("similarity_spatial_noise_mad_offset_factor", 0.15)
-                )
-                noise_sigma = float(
-                    cfg.get("noise_sigma")
-                    or (ref_noise_score if ref_noise_score is not None else 0.025)
+                print(
+                    f"[RAW Native] SpatialFusion kernel parameters: tile={tile} "
+                    f"overlap={overlap_value:.3f} motion_sensitivity={motion:.3f} "
+                    f"(noise-aware) noise_sigma={noise_sigma:.6f} (mode={sigma_mode})"
                 )
                 spatial_rows = _compute_tile_starts(
                     geometry.weight_shape[0], tile, overlap=overlap_value
@@ -2155,48 +2392,22 @@ def _run_shared_raw_provider_pipeline(
                 )
                 spatial_scratch = _own_component(SpatialScratchCache(), releaser=lambda cache: cache.clear())
                 spatial_state = (tile, overlap_value, motion, noise_offset, noise_sigma)
-            # Kalkulasi alignment KHUSUS menggunakan proxy AutoEnhance analisis
-            ref_analysis_gpu = prepare_analysis_proxy_gpu(
-                ref_proxy_full_gpu,
-                work_shape=geometry.align_shape,
-                analysis_params=analysis_params,
-                in_place=True,
-                source_is_disposable=True,
-            )
-            if ref_proxy_full_gpu is not ref_analysis_gpu:
-                _destroy_work_item(ref_proxy_full_gpu)
-            ref_proxy_full_gpu = None
             if normalized_engine == "spatial_fusion":
-                ref_analysis_gray_gpu = taichi_aot.cvtColor(
-                    ref_analysis_gpu, taichi_aot.COLOR_RGB2GRAY
-                )
-                if tuple(ref_analysis_gray_gpu.shape[:2]) != geometry.weight_shape:
-                    ref_spatial_gray_gpu = buffer_session.own(
-                        taichi_aot.resize(
-                            ref_analysis_gray_gpu,
-                            (geometry.weight_shape[1], geometry.weight_shape[0]),
-                            interpolation=taichi_aot.INTER_AREA,
-                            return_gpu=True,
-                        )
-                    )
-                    _destroy_work_item(ref_analysis_gray_gpu)
-                else:
-                    ref_spatial_gray_gpu = buffer_session.own(ref_analysis_gray_gpu)
-                print(
-                    "[RAW Native] SpatialFusion weight analysis: "
-                    "reference AutoEnhance params -> in-place analysis proxy -> "
-                    "reused grayscale scratch; CFA carrier unchanged"
-                )
-            if normalized_engine == "fusionet":
-                if tuple(ref_analysis_gpu.shape[:2]) != geometry.weight_shape:
-                    ref_weight_analysis_gpu = taichi_aot.resize(
-                        ref_analysis_gpu,
-                        (geometry.weight_shape[1], geometry.weight_shape[0]),
-                        interpolation=taichi_aot.INTER_AREA,
+                ref_spatial_gray_gpu = buffer_session.own(
+                    taichi_aot.cvtColor(
+                        ref_weight_analysis_gpu,
+                        taichi_aot.COLOR_RGB2GRAY,
                         return_gpu=True,
                     )
-                else:
-                    ref_weight_analysis_gpu = ref_analysis_gpu
+                )
+                _destroy_work_item(ref_weight_analysis_gpu)
+                ref_weight_analysis_gpu = None
+                print(
+                    "[RAW Native] SpatialFusion weight analysis: "
+                    "linear proxy -> grayscale scratch; "
+                    "CFA carrier unchanged"
+                )
+            if normalized_engine == "fusionet":
                 if weightnet_channels == 1:
                     taichi_aot.cvtColor(
                         ref_weight_analysis_gpu,
@@ -2213,6 +2424,7 @@ def _run_shared_raw_provider_pipeline(
                 )
                 if ref_weight_analysis_gpu is not ref_analysis_gpu:
                     _destroy_work_item(ref_weight_analysis_gpu)
+                ref_weight_analysis_gpu = None
             print(
                 "[GPU Pipeline] Shared RAW analysis: "
                 f"full={geometry.full_shape} align={geometry.align_shape} "
@@ -2231,8 +2443,8 @@ def _run_shared_raw_provider_pipeline(
                     noise_score=ref_noise_score,
                 )
 
-        # All consumers of the reference RGB proxy are done: every resident
-        # aligner derives its own gray/pyramid buffers inside its constructor.
+            # The aligner has derived its persistent features; weight analysis
+            # was prepared from its independent natural/linear proxy above.
         _destroy_work_item(ref_analysis_gpu)
         ref_analysis_gpu = None
 
@@ -2240,15 +2452,34 @@ def _run_shared_raw_provider_pipeline(
         pipeline_telemetry.emit("reference_loaded")
         total_supports = len(image_paths) - 1
         alpha_total = 0.0
-        for ordinal, support_frame in runtime.iter_supports(
+
+        def _load_support_dng_payload(index):
+            return provider.load_support_dng_payload_host(index)
+
+        def _decode_support_payload(ordinal, support_payload):
+            dng_bytes = None
+            try:
+                dng_bytes = support_payload.take()
+                return provider.decode_support_dng_bytes_host(ordinal, dng_bytes)
+            finally:
+                # The in-processing queue owns decoded CFA carriers, not a
+                # second copy of the compressed DNG container bytes.
+                dng_bytes = None
+                support_payload.close()
+
+        for ordinal, support_frame in runtime.iter_prepared_supports(
             range(1, len(image_paths)),
-            provider.load_support,
+            _load_support_dng_payload,
+            _decode_support_payload,
             raise_on_cancel=True,
+            source_disposer=lambda payload: payload.close(),
         ):
             if _cancelled():
                 raise RuntimeError("RAW Native processing cancelled")
+
             support_linear_full = None
             support_analysis = None
+            support_weight_analysis = None
             alignment_preview = None
             aligned_weight_rgb = None
             aligned_analysis_weight = None
@@ -2260,7 +2491,25 @@ def _run_shared_raw_provider_pipeline(
 
                     support_linear_full = _demosaic_carrier_gpu(support_frame.carrier)
 
-                    # 1. Alignment: proxy AutoEnhance analisis khusus alignment
+                    # Build the independent WeightNet/SpatialFusion proxy before
+                    # alignment enhancement can reuse the disposable RGB buffer.
+                    if normalized_engine in ("fusionet", "spatial_fusion"):
+                        support_weight_analysis = prepare_analysis_proxy_gpu(
+                            support_linear_full,
+                            work_shape=geometry.weight_shape,
+                            analysis_params=(
+                                weight_analysis_params
+                                if normalized_engine == "fusionet"
+                                else None
+                            ),
+                        )
+                        if support_weight_analysis is support_linear_full:
+                            support_weight_analysis = taichi_aot.copy(
+                                support_weight_analysis, return_gpu=True
+                            )
+
+                    # Alignment always uses the reference-derived full analysis
+                    # AutoEnhance proxy for both selected weight engines.
                     if normalized_engine in ("fusionet", "spatial_fusion"):
                         support_analysis = prepare_analysis_proxy_gpu(
                             support_linear_full,
@@ -2301,65 +2550,51 @@ def _run_shared_raw_provider_pipeline(
                                 return_gpu=True,
                                 return_transform=True,
                             )
-                        if (
+                        if normalized_engine not in ("fusionet", "spatial_fusion") and (
                             alignment_preview is not None
                             and alignment_preview is not support_analysis
                         ):
                             _destroy_work_item(alignment_preview)
-                        alignment_preview = None
+                            alignment_preview = None
 
                 if normalized_engine not in ("fusionet", "spatial_fusion"):
                     _destroy_work_item(support_analysis)
                     support_analysis = None
 
-                # Both weight engines score the same AutoEnhanced analysis proxy;
-                # the original CFA carrier remains untouched for accumulation.
-                if normalized_engine == "spatial_fusion":
-                    support_weight_analysis = support_analysis
-                    if tuple(support_analysis.shape[:2]) != geometry.weight_shape:
-                        support_weight_analysis = taichi_aot.resize(
-                            support_analysis,
-                            (geometry.weight_shape[1], geometry.weight_shape[0]),
-                            interpolation=taichi_aot.INTER_AREA,
-                            return_gpu=True,
-                        )
-                    aligned_weight_rgb = _warp_analysis(
-                        support_weight_analysis, transform, geometry.weight_shape
+                # Alignment and weight scoring use separate proxies; FusionNet
+                # scores natural-mode input while SpatialFusion stays linear.
+                if normalized_engine in ("spatial_fusion", "fusionet"):
+                    # The aligner preview belongs to the analysis-mode proxy,
+                    # so it cannot stand in for the independent natural/linear
+                    # weight proxy even when both grids have the same shape.
+                    if alignment_preview is not None and alignment_preview is not support_analysis:
+                        _destroy_work_item(alignment_preview)
+                    alignment_preview = None
+                    aligned_weight_proxy, unused_preview = _prepare_raw_aligned_analysis(
+                        support_weight_analysis, alignment_preview, transform,
+                        align_shape=geometry.weight_shape, warp_analysis=_warp_analysis
                     )
+                    # Transfer the already-aligned preview to the weight stage.
+                    # A different analysis grid deliberately retains resize->warp.
+                    if (
+                        unused_preview is not None
+                        and unused_preview is not support_weight_analysis
+                    ):
+                        _destroy_work_item(unused_preview)
+                    alignment_preview = None
                     if (
                         support_weight_analysis is not support_analysis
-                        and support_weight_analysis is not aligned_weight_rgb
+                        and support_weight_analysis is not aligned_weight_proxy
                     ):
                         _destroy_work_item(support_weight_analysis)
-                    if (
-                        support_linear_full is not None
-                        and support_linear_full is not support_analysis
-                    ):
-                        _destroy_work_item(support_linear_full)
-                    support_linear_full = None
-                    if support_analysis is None:
-                        raise RuntimeError("SpatialFusion analysis proxy was not prepared")
-                elif normalized_engine == "fusionet":
-                    if tuple(support_analysis.shape[:2]) != geometry.weight_shape:
-                        support_weight_analysis = taichi_aot.resize(
-                            support_analysis,
-                            (geometry.weight_shape[1], geometry.weight_shape[0]),
-                            interpolation=taichi_aot.INTER_AREA,
-                            return_gpu=True,
-                        )
+                    if normalized_engine == "spatial_fusion":
+                        aligned_weight_rgb = aligned_weight_proxy
                     else:
-                        support_weight_analysis = support_analysis
-                    aligned_analysis_weight = _warp_analysis(
-                        support_weight_analysis, transform, geometry.weight_shape
-                    )
-                    if (
-                        support_weight_analysis is not support_analysis
-                        and support_weight_analysis is not aligned_analysis_weight
-                    ):
-                        _destroy_work_item(support_weight_analysis)
-                    if aligned_analysis_weight is not support_analysis:
+                        aligned_analysis_weight = aligned_weight_proxy
+                    if aligned_weight_proxy is not support_analysis:
                         _destroy_work_item(support_analysis)
                         support_analysis = None
+                    support_weight_analysis = None
     
                 if normalized_engine == "spatial_fusion":
                     tile, overlap_value, motion, noise_offset, noise_sigma = spatial_state
@@ -2425,16 +2660,22 @@ def _run_shared_raw_provider_pipeline(
                         ghost_cutoff=float(ghost_cutoff),
                         chroma_sensitivity=float(chroma_sensitivity),
                         stop_event=stop_event,
+                        return_scalar=(weightnet_channels == 1),
                     )
-                    weight_hwc = (
+                    weight_upload = (
                         weightnet_upload_workspace.stage(weight_chw)
                         if weightnet_upload_workspace is not None
-                        else np.ascontiguousarray(
-                            np.transpose(weight_chw, (1, 2, 0)),
-                            dtype=np.float32,
+                        else (
+                            np.ascontiguousarray(weight_chw[0], dtype=np.float32)
+                            if weightnet_channels == 1
+                            else np.ascontiguousarray(
+                                np.transpose(weight_chw, (1, 2, 0)),
+                                dtype=np.float32,
+                            )
                         )
                     )
-                    weight_gpu = engine.upload(weight_hwc, is_vector=False)
+                    weight_gpu = engine.upload(weight_upload, is_vector=False)
+                    del weight_upload
                     if aligned_analysis_weight is not None:
                         if support_analysis is aligned_analysis_weight:
                             support_analysis = None
@@ -2449,12 +2690,14 @@ def _run_shared_raw_provider_pipeline(
                 released_ids = set()
                 for buffer in (
                     aligned_weight_rgb,
+                    support_weight_analysis,
                     support_linear_full,
                 ):
                     if buffer is not None and id(buffer) not in released_ids:
                         _destroy_work_item(buffer)
                         released_ids.add(id(buffer))
                 aligned_weight_rgb = None
+                support_weight_analysis = None
                 support_linear_full = None
 
                 # ``accumulate`` warps the CFA carrier and blends it, which is
@@ -2480,6 +2723,7 @@ def _run_shared_raw_provider_pipeline(
                 released_ids = set()
                 for buffer in (
                     aligned_weight_rgb,
+                    support_weight_analysis,
                     support_linear_full,
                     support_analysis,
                     aligned_analysis_weight,
@@ -2506,6 +2750,7 @@ def _run_shared_raw_provider_pipeline(
         for buffer in (
             ref_proxy_full_gpu,
             ref_analysis_gpu,
+            ref_weight_analysis_gpu,
         ):
             _destroy_work_item(buffer)
         if spatial_scratch is not None:
@@ -2557,6 +2802,7 @@ def run_gpu_resident_pipeline(
     alignment_config: Optional[dict] = None,
     spatial_config: Optional[dict] = None,
     analysis_enhance: bool = True,
+    analysis_auto_enhance_mode: str = ANALYSIS_AUTO_ENHANCE_MODE,
     work_scale: float = 0.50,
     flownet_work_scale: Optional[float] = None,
     weightnet_work_scale: Optional[float] = None,
@@ -2612,11 +2858,14 @@ def run_gpu_resident_pipeline(
         alignment_only: If True, executes pure alignment without blending.
         batch_queue: Deprecated compatibility argument retained for existing
             callers. The saved Performance-page setting is authoritative.
-        prefetch_depth: Optional per-call override for the host support queue
-            depth (0 disables prefetch; 1-4 bounds decoded frames in RAM).
+        prefetch_depth: Optional per-call override for the RAM Queue (0 disables
+            read-ahead; 1-4 bounds unchanged source-file byte payloads in RAM).
         batch_plan: Optional comparison-frame ranges from MFDenoiser. The
             reference frame (index 0) remains resident for the whole call.
         auto_params: Pre-computed auto_enhance params (analyzed on first frame if None).
+        analysis_auto_enhance_mode: Compatibility argument. FusionNet and
+            SpatialFusion alignment use analysis mode; FusionNet weight input
+            retains natural mode and SpatialFusion weight input remains linear.
         stop_event: Cancellation signal.
         progress_callback: Progress reporting callback.
 
@@ -2628,10 +2877,14 @@ def run_gpu_resident_pipeline(
     source_mode = str(source_mode).strip().lower()
     if source_mode not in {"rgb", "raw_rgb", "raw_native", "video_rgb"}:
         raise ValueError(f"Unsupported resident source_mode: {source_mode!r}")
+    # The public parameter remains accepted for source compatibility; each
+    # engine stage below chooses its explicit analysis/natural/linear contract.
+    analysis_auto_enhance_mode = ANALYSIS_AUTO_ENHANCE_MODE
     runtime = current_pipeline_runtime()
     if runtime is None:
         runtime = PipelineRuntime(
             prefetch_depth=resolve_prefetch_depth(prefetch_depth),
+            in_processing_depth=resolve_in_processing_depth(),
             stop_event=stop_event,
             progress_callback=progress_callback,
         )
@@ -2678,6 +2931,7 @@ def run_gpu_resident_pipeline(
             progress_callback=progress_callback,
             weightnet_input_channels=weightnet_input_channels,
             analysis_enhance=analysis_enhance,
+            analysis_auto_enhance_mode=analysis_auto_enhance_mode,
             prefetch_depth=runtime.prefetch_depth,
             _runtime=runtime,
         )
@@ -2768,7 +3022,7 @@ def run_gpu_resident_pipeline(
     )
     pipeline_telemetry.emit("reference_loaded")
     # ------------------------------------------------------------------
-    # PHASE 2: Tier 1 Analysis AutoEnhance for Feature Extraction
+    # PHASE 2: Resolve independent alignment and weight-analysis transforms.
     # ------------------------------------------------------------------
     alignment_key = str(alignment_plan or "").strip().lower()
     no_alignment = alignment_key in {
@@ -2784,26 +3038,52 @@ def run_gpu_resident_pipeline(
     # analysis pass from the simplest and most common fast path.
     needs_analysis = not (weight_engine == "average" and no_alignment)
 
-    # AutoEnhance analysis on reference frame:
-    # - Versi 1 (Analysis / High-Key): For Alignment & ONNX WeightNet (Used for BOTH RAW & Non-RAW)
-    # Parameters are computed once from the reference and reused for every
-    # support frame.  The linear fusion buffers themselves remain untouched.
-    env_override = os.environ.get("PIXEL_REFINE_ANALYSIS_ENHANCE")
-    if env_override is not None:
-        analysis_enhance = env_override.strip().lower() not in ("0", "false", "off", "no")
-
-    analysis_params = auto_params or None
-    if needs_analysis and analysis_enhance:
-        if not analysis_params:
-            analysis_params = analyze_auto_enhance_on_gpu(ref_gpu, mode="analysis")
-        print(
-            f"[GPU Pipeline] AutoEnhance (analysis): Gain={analysis_params['gain']:.2f}x "
-            "(reference parameters reused for alignment/WeightNet analysis)"
+    # Alignment uses the full analysis mode for FusionNet and SpatialFusion.
+    # FusionNet's WeightNet parameters remain separately resolved in natural mode.
+    alignment_mode = (
+        "analysis"
+        if weight_engine in ("fusionet", "spatial_fusion")
+        else ANALYSIS_AUTO_ENHANCE_MODE
+    )
+    analysis_params = _resolve_engine_analysis_params(
+        ref_gpu,
+        weight_engine=weight_engine,
+        enabled=analysis_enhance,
+        supplied=(auto_params if alignment_mode != "analysis" else None),
+        needs_analysis=needs_analysis,
+        mode=alignment_mode,
+    )
+    weight_analysis_params = None
+    if weight_engine == "fusionet":
+        weight_analysis_params = _resolve_reference_analysis_params(
+            ref_gpu,
+            enabled=analysis_enhance,
+            supplied=auto_params,
+            needs_analysis=needs_analysis,
+            mode="natural",
         )
-    else:
-        analysis_params = None
-        reason = "disabled via analysis_enhance=False" if not analysis_enhance else "average + no alignment"
-        print(f"[GPU Pipeline] AutoEnhance (analysis): skipped ({reason})")
+    if analysis_params is not None:
+        print(
+            f"[GPU Pipeline] Alignment AutoEnhance "
+            f"({alignment_mode}): "
+            f"Gain={analysis_params['gain']:.2f}x "
+            "(uncapped reference-derived gain; reused on support alignment proxies)"
+        )
+    if weight_analysis_params is not None:
+        print(
+            "[GPU Pipeline] FusionNet WeightNet AutoEnhance (natural): "
+            f"Gain={weight_analysis_params['gain']:.2f}x "
+            "(reference-derived parameters reused for weight inference)"
+        )
+    if analysis_params is None:
+        reason = (
+            "disabled via analysis_enhance=False"
+            if not analysis_enhance
+            else "average + no alignment"
+        )
+        print(f"[GPU Pipeline] Alignment AutoEnhance skipped ({reason})")
+    if weight_engine == "fusionet" and weight_analysis_params is None:
+        print("[GPU Pipeline] FusionNet natural WeightNet AutoEnhance skipped")
 
     # ------------------------------------------------------------------
     # PHASE 3: Create Analysis Reference & Work-Resolution Copy
@@ -2836,39 +3116,35 @@ def run_gpu_resident_pipeline(
         f"max_work_dimension={('disabled' if max_work_dimension is None else f'{int(max_work_dimension)}px')}"
     )
 
-    # Create the canonical high-contrast analysis proxy through the shared
-    # helper.  RAW Native uses this same function for its demosaic-only proxy;
-    # the carrier itself remains linear and untouched.
+    # Keep alignment/noise analysis separate from the linear fusion carrier and
+    # from FusionNet's natural-mode WeightNet input.
     ref_analysis_flow_gpu = None
     ref_analysis_gpu = None
     ref_noise_score = None
     if needs_analysis:
-        ref_analysis_flow_gpu = prepare_analysis_proxy_gpu(
-            ref_gpu,
-            work_shape=geometry.align_shape,
-            analysis_params=analysis_params,
-            in_place=(
-                weight_engine in ("fusionet", "spatial_fusion")
-                and analysis_params is not None
-            ),
+        ref_analysis_flow_gpu, ref_noise_score, ghost_penalty = (
+            prepare_reference_analysis_and_noise(
+                ref_gpu,
+                work_shape=geometry.align_shape,
+                analysis_params=analysis_params,
+                ghost_penalty=ghost_penalty,
+                ghost_penalty_min=ghost_penalty_min,
+                in_place=False,
+                noise_source_gpu=(
+                    ref_gpu
+                    if weight_engine in ("fusionet", "spatial_fusion")
+                    else None
+                ),
+                noise_analysis_params=(
+                    analysis_params if weight_engine == "fusionet" else None
+                ),
+            )
         )
 
         ref_analysis_gpu = ref_analysis_flow_gpu
         analysis_context.reference_proxy = ref_analysis_gpu
         analysis_context.alignment_reference = ref_analysis_gpu
-
-        # Estimasi noise murni dari versi RAW/linear yang belum di-autoenhance sama sekali.
-        ref_noise_score, ghost_penalty = resolve_noise_adaptive_penalty(
-            ref_gpu,
-            ghost_penalty=ghost_penalty,
-            ghost_penalty_min=ghost_penalty_min,
-        )
         analysis_context.noise_score = ref_noise_score
-        if ref_noise_score is not None:
-            print(
-                f"[GPU Pipeline] Reference noise estimate (Taichi Vision): "
-                f"score={ref_noise_score:.6f} source=raw_linear_unenhanced"
-            )
 
     ref_work_rgb_np = None
     weightnet_gray_gpu = None
@@ -2913,10 +3189,11 @@ def run_gpu_resident_pipeline(
             for _ in range(1)
         )
         weightnet_upload_workspace = _WeightNetUploadWorkspace(
-            (work_h, work_w)
+            (work_h, work_w), channels=weightnet_channels
         )
         weightnet_upload_workspaces = (weightnet_upload_workspace,) + tuple(
-            _WeightNetUploadWorkspace((work_h, work_w)) for _ in range(1)
+            _WeightNetUploadWorkspace((work_h, work_w), channels=weightnet_channels)
+            for _ in range(1)
         )
 
     if weight_engine == "spatial_fusion":
@@ -2931,77 +3208,32 @@ def run_gpu_resident_pipeline(
             resolve_spatial_thresholds,
         )
 
-        cfg = spatial_config or {}
-        st_size = int(
-            cfg.get(
-                "similarity_spatial_tile_size",
-                tile_size,
-            )
+        (
+            st_size, spatial_overlap, spatial_motion_sens,
+            spatial_noise_offset, spatial_noise_sigma, spatial_sigma_mode,
+        ) = _resolve_spatial_analysis_config(
+            spatial_config, tile_size=tile_size, overlap=overlap,
+            work_shape=(work_h, work_w), noise_score=ref_noise_score, is_raw=is_raw,
         )
-        st_size = max(8, min(st_size, min(work_h, work_w)))
         spatial_tile_h = st_size
         spatial_tile_w = st_size
-        spatial_overlap = float(cfg.get("similarity_spatial_overlap_percent", overlap))
-        spatial_motion_sens = float(
-            cfg.get(
-                "similarity_spatial_motion_sensitivity",
-                cfg.get("motion_sensitivity", cfg.get("motion_sensivity", 150.0)),
-            )
-        )
-        spatial_noise_offset = float(
-            cfg.get(
-                "similarity_spatial_noise_mad_offset_factor",
-                cfg.get(
-                    "noise_offset_factor",
-                    cfg.get("noise_mad_offset_factor", cfg.get("noise_offset", 0.15)),
-                ),
-            )
-        )
 
-        # SpatialFusion scores the same AutoEnhanced analysis proxy as
-        # FusionNet, reduced directly to its persistent grayscale reference.
+        # SpatialFusion aligns with the analysis-enhanced proxy but scores its
+        # independent linear reference proxy.
         print(
-            "[GPU Pipeline] SpatialFusion weight analysis: reference AutoEnhance "
-            "params -> in-place analysis proxy -> reused grayscale scratch; "
+            "[GPU Pipeline] SpatialFusion alignment uses AutoEnhance analysis; "
+            "weight scoring uses linear reference/support proxies; "
             "linear fusion carrier unchanged"
         )
+        ref_spatial_linear_gpu = prepare_analysis_proxy_gpu(
+            ref_gpu, work_shape=geometry.weight_shape, analysis_params=None
+        )
         ref_spatial_gray_source_gpu = taichi_aot.cvtColor(
-            ref_analysis_flow_gpu, taichi_aot.COLOR_RGB2GRAY
+            ref_spatial_linear_gpu, taichi_aot.COLOR_RGB2GRAY
         )
-        if tuple(ref_spatial_gray_source_gpu.shape[:2]) != geometry.weight_shape:
-            ref_spatial_gray_gpu = taichi_aot.resize(
-                ref_spatial_gray_source_gpu,
-                (weight_work_w, weight_work_h),
-                interpolation=taichi_aot.INTER_AREA,
-                return_gpu=True,
-            )
-            _destroy_work_item(ref_spatial_gray_source_gpu)
-        else:
-            ref_spatial_gray_gpu = ref_spatial_gray_source_gpu
-
-        # Estimasi noise fisik sensor murni dari versi RAW yang belum di-autoenhance
-        if ref_noise_score is not None:
-            auto_noise_sigma = float(np.clip(ref_noise_score, 1e-4, 0.99999))
-            spatial_sigma_mode = "raw_linear_score"
-        else:
-            auto_noise_sigma = 0.025
-            spatial_sigma_mode = "fallback"
-
-        from taichi_vision.taichi_algorithm.spatial_fusion import auto_motion_sensitivity
-
-        explicit_noise_sigma = cfg.get("similarity_spatial_noise_sigma", cfg.get("noise_sigma"))
-        if explicit_noise_sigma is not None and float(explicit_noise_sigma) > 0.0:
-            spatial_noise_sigma = float(explicit_noise_sigma)
-            spatial_sigma_mode = "explicit_ui"
-        else:
-            spatial_noise_sigma = auto_noise_sigma
-
-        # Noise-aware motion sensitivity modulation
-        spatial_motion_sens = auto_motion_sensitivity(
-            is_raw=is_raw,
-            base=spatial_motion_sens,
-            noise_sigma=spatial_noise_sigma,
-        )
+        if ref_spatial_linear_gpu is not ref_gpu:
+            _destroy_work_item(ref_spatial_linear_gpu)
+        ref_spatial_gray_gpu = ref_spatial_gray_source_gpu
 
         print(
             f"[SpatialFusion] Kernel parameters: tile={spatial_tile_h} "
@@ -3037,31 +3269,21 @@ def run_gpu_resident_pipeline(
         spatial_weight_slots.put_nowait(spatial_weight_post_b_gpu)
         spatial_scratch = _own_component(SpatialScratchCache(), releaser=lambda cache: cache.clear())
     elif weight_engine == "fusionet":
-        # Reuse the AutoEnhanced alignment proxy as the RGB WeightNet input.
-        reference_analysis_gpu = (
-            ref_analysis_flow_gpu
-            if ref_analysis_flow_gpu is not None
-            else ref_gpu
+        # WeightNet keeps its natural-mode reference; alignment uses the
+        # separate analysis-mode proxy.
+        reference_analysis_gpu = prepare_analysis_proxy_gpu(
+            ref_gpu,
+            work_shape=geometry.weight_shape,
+            analysis_params=weight_analysis_params,
         )
         if weightnet_channels == 1:
             reference_gray_source_gpu = reference_analysis_gpu
-            if tuple(
-                int(value) for value in reference_analysis_gpu.shape[:2]
-            ) != geometry.weight_shape:
-                reference_gray_source_gpu = taichi_aot.resize(
-                    reference_analysis_gpu,
-                    (weight_work_w, weight_work_h),
-                    interpolation=taichi_aot.INTER_AREA,
-                    return_gpu=True,
-                )
             taichi_aot.cvtColor(
                 reference_gray_source_gpu,
                 taichi_aot.COLOR_RGB2GRAY,
                 dst=weightnet_gray_gpu,
                 return_gpu=True,
             )
-            if reference_gray_source_gpu is not reference_analysis_gpu:
-                _destroy_work_item(reference_gray_source_gpu)
             reference_weight_input_gpu = weightnet_gray_gpu
         else:
             reference_weight_input_gpu = reference_analysis_gpu
@@ -3073,6 +3295,8 @@ def run_gpu_resident_pipeline(
         )
         analysis_context.weight_reference = ref_work_rgb_np
         analysis_context.clahe_transfer_map = ref_transfer_map
+        if reference_analysis_gpu is not ref_gpu:
+            _destroy_work_item(reference_analysis_gpu)
 
     def _is_persistent_weight(buf):
         return (
@@ -3113,10 +3337,12 @@ def run_gpu_resident_pipeline(
     # ------------------------------------------------------------------
     # Directly use ref_gpu as sum_img_gpu accumulator to save 144MB VRAM
     sum_img_gpu = ref_gpu
-    if weight_engine in ("spatial_fusion", "average"):
-        # Average weights are uniform across channels. Keep the accumulator
-        # scalar just like SpatialFusion; the common AOT graph broadcasts it
-        # into the RGB sum and avoids a redundant full-resolution vec3 map.
+    if weight_engine in ("spatial_fusion", "average") or (
+        weight_engine == "fusionet" and weightnet_channels == 1
+    ):
+        # These engines produce one color-neutral confidence value per pixel.
+        # Keep its accumulator scalar and broadcast only while updating RGB;
+        # do not retain a redundant full-resolution vec3 weight sum.
         weight_sum_gpu = engine.upload(np.ones((target_h, target_w), dtype=np.float32))
     else:
         # FusionNet/WeightNet outputs a 3-channel (vec3) weightmap [H, W, 3].
@@ -3137,15 +3363,21 @@ def run_gpu_resident_pipeline(
     is_cpu_backend = engine_arch == "cpu"
     is_thread_affine = engine_arch in ("opengl", "gles")
 
-    # One runtime-owned producer stages only decoded host frames.  The setting
-    # is a strict queue capacity: zero performs synchronous loading.
+    # The RAM Queue controls the host loader queue. The separate in-processing
+    # limiter below spans admission through final blend for this support frame.
     q_depth = runtime.prefetch_depth
+    in_processing_lock = threading.Lock()
+    in_processing_active: dict[int, Any] = {}
+    in_processing_peak = 0
 
     if progress_callback:
         progress_callback(
             PROGRESS_MERGE_MIN,
             ui="Menyiapkan Pipeline...",
-            console=f"Memulai Pipeline Asynchronous Flow (host_queue={q_depth}, gpu_in_flight=1)...",
+            console=(
+                "Memulai Pipeline Asynchronous Flow "
+                f"(ram_queue={q_depth}, in_processing={runtime.in_processing_depth})..."
+            ),
         )
 
     _SENTINEL = object()
@@ -3155,7 +3387,8 @@ def run_gpu_resident_pipeline(
 
     print(
         f"[GPU Pipeline] Universal Multi-Stage Queue initialized: "
-        f"host_queue={q_depth}, vram_input_in_flight=1, gpu_in_flight=1 (bounded VRAM footprint, cpu_mode={is_cpu_backend})"
+        f"ram_queue={q_depth}, in_processing_queue={runtime.in_processing_depth}, "
+        f"stage_queue_capacity=1, cpu_mode={is_cpu_backend}"
     )
 
     pipeline_error = None
@@ -3176,6 +3409,78 @@ def run_gpu_resident_pipeline(
 
     def _workers_stopped():
         return _is_stopped() or runtime.worker_stop_requested
+
+    def _release_in_processing_slot(index):
+        with in_processing_lock:
+            lease = in_processing_active.pop(int(index), None)
+        if lease is not None:
+            lease.release()
+
+    def _release_all_in_processing_slots():
+        with in_processing_lock:
+            leases = tuple(in_processing_active.values())
+            in_processing_active.clear()
+        for lease in leases:
+            lease.release()
+
+    def _iter_in_processing_supports(
+        indices, loader, *, disposer=None, prepare=None
+    ):
+        """Admit a queued source payload, then prepare it inside its processing slot."""
+        nonlocal in_processing_peak
+        supports = iter(
+            runtime.iter_supports(
+                indices,
+                loader,
+                stop_when=lambda: _workers_stopped() or pipeline_error is not None,
+                disposer=disposer,
+            )
+        )
+        try:
+            while not _workers_stopped() and pipeline_error is None:
+                lease = runtime.acquire_in_processing_slot(
+                    stop_when=lambda: _workers_stopped() or pipeline_error is not None
+                )
+                if lease is None:
+                    break
+                try:
+                    index, source_payload = next(supports)
+                except StopIteration:
+                    lease.release()
+                    break
+                except BaseException:
+                    lease.release()
+                    raise
+                with in_processing_lock:
+                    in_processing_active[int(index)] = lease
+                    in_processing_peak = max(
+                        in_processing_peak, len(in_processing_active)
+                    )
+                try:
+                    support = (
+                        prepare(index, source_payload)
+                        if prepare is not None
+                        else source_payload
+                    )
+                except BaseException:
+                    if disposer is not None:
+                        try:
+                            disposer(source_payload)
+                        except Exception:
+                            pass
+                    _release_in_processing_slot(index)
+                    raise
+                finally:
+                    # For byte-backed payloads, prepare consumes and clears the
+                    # wrapper; do not retain the source container while its
+                    # decoded frame proceeds through alignment and blending.
+                    source_payload = None
+                yield index, support
+        finally:
+            try:
+                supports.close()
+            except Exception:
+                pass
 
     def _put_stage_end(stage_queue):
         # Consumers can exit on cancel/error before reading the sentinel.
@@ -3227,8 +3532,8 @@ def run_gpu_resident_pipeline(
                 pipeline_error = exc
 
     def _load_host_support(index):
-        """Decode only; resizing and all Taichi work stay out of prefetch."""
-        return rgb_provider.load_support_host(index)
+        """Read original file bytes only; decoding happens after queue admission."""
+        return rgb_provider.load_support_bytes_host(index)
 
     # ------------------------------------------------------------------
     # Worker 1.5: Dedicated VRAM Uploader (PCIe DMA Double-Buffering)
@@ -3241,11 +3546,11 @@ def run_gpu_resident_pipeline(
         except Exception:
             pass
         try:
-            for curr_idx, supp_linear_input in runtime.iter_supports(
+            for curr_idx, supp_linear_input in _iter_in_processing_supports(
                 range(1, num_images),
                 _load_host_support,
-                stop_when=lambda: _workers_stopped() or pipeline_error is not None,
-                disposer=_destroy_work_item,
+                disposer=lambda payload: payload.close(),
+                prepare=rgb_provider.decode_support_bytes_host,
             ):
                 if _workers_stopped() or pipeline_error is not None:
                     _destroy_work_item(supp_linear_input)
@@ -3300,10 +3605,8 @@ def run_gpu_resident_pipeline(
                         supp_analysis_flow_gpu = supp_linear_gpu
                         supp_analysis_sec_gpu = supp_linear_gpu
                     else:
-                        # Resize to work resolution, then apply the reference's
-                        # AutoEnhance parameters in-place on that disposable
-                        # proxy. At native resolution the helper makes one exact
-                        # copy so the linear fusion carrier remains untouched.
+                        # Keep the alignment proxy independent from the linear
+                        # fusion carrier and from the weight-scoring proxy.
                         supp_analysis_flow_gpu = prepare_analysis_proxy_gpu(
                             supp_linear_gpu,
                             work_shape=geometry.align_shape,
@@ -3311,18 +3614,17 @@ def run_gpu_resident_pipeline(
                             in_place=True,
                         )
 
-                        # Both weight engines reuse the same AutoEnhanced
-                        # analysis proxy; only the linear carrier stays separate.
-                        if weight_engine in ("fusionet", "spatial_fusion") and tuple(
-                            int(value) for value in supp_analysis_flow_gpu.shape[:2]
-                        ) == geometry.weight_shape:
-                            supp_analysis_sec_gpu = supp_analysis_flow_gpu
-                        elif weight_engine in ("fusionet", "spatial_fusion"):
-                            supp_analysis_sec_gpu = taichi_aot.resize(
-                                supp_analysis_flow_gpu,
-                                (weight_work_w, weight_work_h),
-                                interpolation=taichi_aot.INTER_AREA,
-                                return_gpu=True,
+                        if weight_engine == "fusionet":
+                            supp_analysis_sec_gpu = prepare_analysis_proxy_gpu(
+                                supp_linear_gpu,
+                                work_shape=geometry.weight_shape,
+                                analysis_params=weight_analysis_params,
+                            )
+                        elif weight_engine == "spatial_fusion":
+                            supp_analysis_sec_gpu = prepare_analysis_proxy_gpu(
+                                supp_linear_gpu,
+                                work_shape=geometry.weight_shape,
+                                analysis_params=None,
                             )
                         # Other engines keep their prior linear secondary path.
                         elif (weight_work_h, weight_work_w) != (target_h, target_w):
@@ -3497,6 +3799,7 @@ def run_gpu_resident_pipeline(
                 if alignment_only:
                     _destroy_work_item(supp_aligned_linear_gpu)
                     _destroy_work_item_except(supp_work_item, supp_aligned_linear_gpu)
+                    _release_in_processing_slot(curr_idx)
                     if progress_callback:
                         progress_callback(
                             _align_percent(curr_idx, total_supp),
@@ -3638,6 +3941,7 @@ def run_gpu_resident_pipeline(
                         ghost_cutoff=ghost_cutoff,
                         chroma_sensitivity=chroma_sensitivity,
                         stop_event=stop_event,
+                        return_scalar=(weightnet_channels == 1),
                     )
                     upload_workspace = (
                         weightnet_upload_workspaces[curr_idx & 1]
@@ -3648,13 +3952,11 @@ def run_gpu_resident_pipeline(
                         weight_work_item = upload_workspace.stage(weight_work_np)
                     else:
                         weight_work_item = np.ascontiguousarray(
-                            np.transpose(weight_work_np, (1, 2, 0)),
+                            weight_work_np[0]
+                            if weightnet_channels == 1
+                            else np.transpose(weight_work_np, (1, 2, 0)),
                             dtype=np.float32,
                         )
-                    if weight_work_item.ndim == 3 and weight_work_item.shape[2] == 1:
-                        weight_work_item = np.repeat(weight_work_item, 3, axis=2)
-                    elif weight_work_item.ndim == 2:
-                        weight_work_item = np.repeat(weight_work_item[:, :, None], 3, axis=2)
                     del weight_work_np
 
                 queued = False
@@ -3710,11 +4012,11 @@ def run_gpu_resident_pipeline(
 
         processed_count = 0
         try:
-            for curr_idx, supp_linear_np in runtime.iter_supports(
+            for curr_idx, supp_linear_np in _iter_in_processing_supports(
                 range(1, num_images),
                 _load_host_support,
-                stop_when=lambda: _workers_stopped() or pipeline_error is not None,
-                disposer=_destroy_work_item,
+                disposer=lambda payload: payload.close(),
+                prepare=rgb_provider.decode_support_bytes_host,
             ):
                 if pipeline_error is not None:
                     raise pipeline_error
@@ -3759,40 +4061,30 @@ def run_gpu_resident_pipeline(
                     else:
                         supp_linear_flow_gpu = supp_linear_gpu
 
-                    # Generate on-the-fly Versi 1 (Analysis High-Key) on work-res directly
-                    if analysis_params is not None:
-                        supp_analysis_flow_gpu = apply_auto_enhance_on_gpu(
-                            supp_linear_flow_gpu,
-                            analysis_params,
-                            dst=(
-                                supp_linear_flow_gpu
-                                if (
-                                    weight_engine == "fusionet"
-                                    and supp_linear_flow_gpu is not supp_linear_gpu
-                                )
-                                else None
-                            ),
-                        )
-                        if (
-                            supp_linear_flow_gpu is not supp_linear_gpu
-                            and supp_analysis_flow_gpu is not supp_linear_flow_gpu
-                        ):
-                            _destroy_work_item(supp_linear_flow_gpu)
-                    else:
-                        supp_analysis_flow_gpu = supp_linear_flow_gpu
+                    supp_analysis_flow_gpu = prepare_analysis_proxy_gpu(
+                        supp_linear_flow_gpu,
+                        work_shape=geometry.align_shape,
+                        analysis_params=analysis_params,
+                        in_place=True,
+                    )
+                    if (
+                        supp_linear_flow_gpu is not supp_linear_gpu
+                        and supp_analysis_flow_gpu is not supp_linear_flow_gpu
+                    ):
+                        _destroy_work_item(supp_linear_flow_gpu)
 
-                    if weight_engine == "fusionet" and tuple(
-                        int(value) for value in supp_analysis_flow_gpu.shape[:2]
-                    ) == geometry.weight_shape:
-                        supp_analysis_sec_gpu = supp_analysis_flow_gpu
-                    elif weight_engine == "fusionet":
-                        supp_analysis_sec_gpu = taichi_aot.resize(
-                            supp_analysis_flow_gpu,
-                            (weight_work_w, weight_work_h),
-                            interpolation=taichi_aot.INTER_AREA,
-                            return_gpu=True,
+                    if weight_engine == "fusionet":
+                        supp_analysis_sec_gpu = prepare_analysis_proxy_gpu(
+                            supp_linear_gpu,
+                            work_shape=geometry.weight_shape,
+                            analysis_params=weight_analysis_params,
                         )
-                    # Prepare linear secondary for other consumers.
+                    elif weight_engine == "spatial_fusion":
+                        supp_analysis_sec_gpu = prepare_analysis_proxy_gpu(
+                            supp_linear_gpu,
+                            work_shape=geometry.weight_shape,
+                            analysis_params=None,
+                        )
                     elif (weight_work_h, weight_work_w) != (target_h, target_w):
                         supp_analysis_sec_gpu = taichi_aot.resize(
                             supp_linear_gpu,
@@ -3908,19 +4200,18 @@ def run_gpu_resident_pipeline(
                         ghost_cutoff=ghost_cutoff,
                         chroma_sensitivity=chroma_sensitivity,
                         stop_event=stop_event,
+                        return_scalar=(weightnet_channels == 1),
                     )
                     weight_work_item = (
                         weightnet_upload_workspace.stage(weight_work_np)
                         if weightnet_upload_workspace is not None
                         else np.ascontiguousarray(
-                            np.transpose(weight_work_np, (1, 2, 0)),
+                            weight_work_np[0]
+                            if weightnet_channels == 1
+                            else np.transpose(weight_work_np, (1, 2, 0)),
                             dtype=np.float32,
                         )
                     )
-                    if weight_work_item.ndim == 3 and weight_work_item.shape[2] == 1:
-                        weight_work_item = np.repeat(weight_work_item, 3, axis=2)
-                    elif weight_work_item.ndim == 2:
-                        weight_work_item = np.repeat(weight_work_item[:, :, None], 3, axis=2)
                     del weight_work_np
 
                 processed_count += 1
@@ -3971,8 +4262,10 @@ def run_gpu_resident_pipeline(
                     f"(alpha={alpha_mean:.3f})"
                 )
                 pipeline_telemetry.emit(f"blend_{curr_idx}")
+                _release_in_processing_slot(curr_idx)
         finally:
             runtime.close_streams()
+            _release_all_in_processing_slots()
     else:
         # Launch background stages for thread-safe backends (CUDA/Vulkan)
         t_uploader = runtime.start_worker(
@@ -3997,6 +4290,7 @@ def run_gpu_resident_pipeline(
             t_uploader.join()
             t_aligner.join()
             runtime.stop_workers()
+            _release_all_in_processing_slots()
             ref_out = ref_gpu.to_numpy()
             buffer_session.release_all_except()
             return _export_result(ref_out), 1.0
@@ -4084,9 +4378,10 @@ def run_gpu_resident_pipeline(
 
                 print(
                     f"[GPU Flow Coordinator] Frame {curr_idx}/{total_supp} ({curr_name}) blended "
-                    f"(alpha={alpha_mean:.3f}, in_flight={weighted_queue.qsize()})"
+                    f"(alpha={alpha_mean:.3f}, in_processing={len(in_processing_active)})"
                 )
                 pipeline_telemetry.emit(f"blend_{curr_idx}")
+                _release_in_processing_slot(curr_idx)
 
         finally:
             runtime.stop_workers()
@@ -4112,6 +4407,8 @@ def run_gpu_resident_pipeline(
                     except Exception:
                         pass
 
+            _release_all_in_processing_slots()
+
             if _is_stopped() or pipeline_error is not None:
                 try:
                     if pipeline_error is None:
@@ -4132,6 +4429,11 @@ def run_gpu_resident_pipeline(
                     except Exception:
                         pass
                     gc.collect()
+
+    print(
+        "[GPU Pipeline] In-Processing Queue peak: "
+        f"{in_processing_peak}/{runtime.in_processing_depth} support frames"
+    )
 
     if pipeline_error is not None:
         print(f"[GPU Pipeline] Pipeline aborted due to error: {pipeline_error}")
@@ -4234,6 +4536,7 @@ __all__ = [
     "analyze_auto_enhance_on_gpu",
     "apply_auto_enhance_on_gpu",
     "prepare_analysis_proxy_gpu",
+    "prepare_reference_analysis_and_noise",
     "resolve_noise_adaptive_penalty",
     "apply_clahe_16bit_reference",
     "apply_precomputed_transfer_map",

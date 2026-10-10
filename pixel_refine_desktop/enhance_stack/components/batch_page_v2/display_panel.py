@@ -41,14 +41,14 @@ from PySide6.QtGui import QPixmap, QColor, QImage
 import os
 
 # Generic UI Library
-from resources.GenericUILibrary import (
+from UILibrary import (
     Button,
     IconButton,
     Container,
     OverlayContainer,
     OverlayPosition,
 )
-from resources.GenericUILibrary.grids import GridContainer
+from UILibrary.grids import GridContainer
 from resources.animations.animation_manager import (
     StackedWidgetAnimator,
 )
@@ -109,7 +109,7 @@ from config import SUPPORTED_FORMATS
 
 # Import the new widget
 from .multiple_batch_delete_widget import MultipleBatchDeleteWidget
-from resources.GenericUILibrary import live_update
+from UILibrary import live_update
 import numpy as np
 
 
@@ -945,18 +945,10 @@ class DisplayPanel(QWidget):
         self.save_btn_ref.clicked.connect(self._on_save_clicked)
 
         self.start_btn_ref = Button("▶ Start", variant="primary")
-        from resources.GenericUILibrary.theme import get_theme, create_button_style
+        from UILibrary.theme import get_theme, create_button_style, apply_style
 
         theme = get_theme()
-        self.start_btn_ref.setStyleSheet(
-            create_button_style(self.start_btn_ref.variant, theme)
-            + """
-            QPushButton {
-                padding: 5px;
-                font-size: 10pt;
-            }
-        """
-        )
+        apply_style(self.start_btn_ref, create_button_style(self.start_btn_ref.variant, theme).with_overrides(padding="5px", font_size="10pt"))
         self.start_btn_ref.setFixedSize(110, 32)
         self.start_btn_ref.setVisible(False)
         self.is_start_button_mode = False
@@ -2262,7 +2254,7 @@ class DisplayPanel(QWidget):
     # =========================================================================
 
     def _get_bulk_mode_btn_stylesheet(self, is_bulk, font_size):
-        from resources.GenericUILibrary.theme import get_theme
+        from UILibrary.theme import get_theme
 
         theme = get_theme()
         if is_bulk:

@@ -261,7 +261,7 @@ def extract_demosaic_parameters(path: str | Path, cfa_pattern, *, frame=None) ->
 
 
 def carrier_demosaic_parameters(frame) -> dict:
-    """Hamilton demosaic parameters for an already-decoded carrier mosaic.
+    """Demosaic parameters for an already-decoded carrier mosaic.
 
     ``extract_demosaic_parameters`` describes a *normalized* preview and consults
     an external RAW reader for camera WB and colour matrix.  The RAW Native

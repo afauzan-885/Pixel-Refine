@@ -16,6 +16,7 @@ from typing import Optional
 import numpy as np
 
 from ._common_helpers import frame_info as _frame_info
+from ..catalog import create_registry, get_names, get_options, get_spec, normalize_name
 
 from config import GENERAL_SETTINGS_FILE
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
@@ -90,18 +91,20 @@ def _merge_percent(i: int, total: int) -> int:
 
 
 class NoAlignmentAlgorithm:
-    NAME = "No Alignment"
-    KIND = "alignment"
-    DESCRIPTION = "Skip alignment."
+    SPEC = get_spec("alignment", "none")
+    NAME = SPEC.name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     def run(self, ctx, frames, batch_plan=None):
         return list(frames) if frames else []
 
 
 class NoDenoisingAlgorithm:
-    NAME = "No Denoising"
-    KIND = "denoising"
-    DESCRIPTION = "Return the reference/aligned first frame unchanged."
+    SPEC = get_spec("denoising", "none")
+    NAME = SPEC.name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     def run(self, ctx, frames, batch_plan=None):
         if not frames:
@@ -110,114 +113,23 @@ class NoDenoisingAlgorithm:
 
 
 def get_alignment_registry():
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.AKAZE import (
-        AKAZEAlgorithm,
-    )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.Light_Glue import (
-        LightGlueAlgorithm,
-    )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.OFB import (
-        OFBAlgorithm,
-    )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow import (
-        FarnebackFlow,
-    )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lucas_kanade import (
-        LucasKanade,
-    )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_matching import (
-        BlockMatching,
-    )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.block_flow import (
-        BlockFlow,
-    )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.raft_flow import (
-        RAFTFlow,
-    )
-
-    algorithms = [
-        NoAlignmentAlgorithm(),
-        OFBAlgorithm(),
-        AKAZEAlgorithm(),
-        LightGlueAlgorithm(),
-        FarnebackFlow(),
-        LucasKanade(),
-        BlockMatching(),
-        BlockFlow(),
-        RAFTFlow(),
-    ]
-    registry = {algo.NAME: algo for algo in algorithms}
-    # Backward compatibility aliases for UI/batch selectors
-    registry["Lucas Kanade"] = registry.get("Lucas Kanade Optical Flow")
-    registry["Lucas Kanade GPU"] = registry.get("Lucas Kanade Optical Flow")
-    registry["Lucas Kanade GPU Optical Flow"] = registry.get("Lucas Kanade Optical Flow")
-    registry["Lucas Kanade CPU"] = registry.get("Lucas Kanade Optical Flow")
-    registry["Block Matching"] = registry.get("Block Matching Optical Flow")
-    registry["Block Matching GPU"] = registry.get("Block Matching Optical Flow")
-    registry["Block Matching GPU Optical Flow"] = registry.get("Block Matching Optical Flow")
-    registry["Block Flow"] = registry.get("Block Flow")
-    registry["Dense Optical Flow"] = registry.get("Block Flow")
-    registry["compute_flow"] = registry.get("Block Flow")
-    registry["FlowNet"] = registry.get("Block Flow")
-    registry["Farneback"] = registry.get("Farneback Optical Flow")
-    registry["Farneback Flow CPU"] = registry.get("Farneback Optical Flow")
-    return registry
+    return create_registry("alignment")
 
 
 def get_denoising_registry():
-    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Average import (
-        AverageDenoisingAlgorithm,
-    )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.SpatialFusion import (
-        SpatialFusionDenoisingAlgorithm,
-    )
-    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet import (
-        FusionNetDenoisingAlgorithm,
-    )
-    algorithms = [
-        NoDenoisingAlgorithm(),
-        AverageDenoisingAlgorithm(),
-        SpatialFusionDenoisingAlgorithm(),
-        FusionNetDenoisingAlgorithm(),
-    ]
-    return {algo.NAME: algo for algo in algorithms}
+    return create_registry("denoising")
 
 
 def get_available_algorithms(category):
-    if category == "alignment":
-        return get_alignment_registry()
-    if category == "denoising":
-        return get_denoising_registry()
-    return {}
+    return create_registry(category) if category in ("alignment", "denoising") else {}
 
 
 def get_algorithm_options(category):
-    if category == "alignment":
-        descriptions = {
-            name: getattr(algo, "DESCRIPTION", name)
-            for name, algo in get_available_algorithms(category).items()
-        }
-        ordered_names = [
-            "No Alignment",
-            "OFB",
-            "AKAZE",
-            "Light Glue",
-            "Farneback",
-            "Lucas Kanade",
-            "Block Matching GPU",
-            "RAFT",
-        ]
-        return [(name, descriptions.get(name, name)) for name in ordered_names]
-
-    return [
-        (name, getattr(algo, "DESCRIPTION", name))
-        for name, algo in get_available_algorithms(category).items()
-    ]
+    return get_options(category)
 
 
 def get_algorithm_names(category):
-    """Derive the display order from :func:`get_algorithm_options`."""
-    return [name for name, _ in get_algorithm_options(category)]
+    return get_names(category)
 
 
 def _normalize_algorithm_name(name):
@@ -233,26 +145,10 @@ def _resolve_algorithm(registry, requested_name, fallback_name):
         if _normalize_algorithm_name(name) == normalized:
             return algorithm
 
-    # Common aliases
-    aliases = {
-        "ofb": "OFB",
-        "orb": "OFB",
-        "akaze": "AKAZE",
-        "light glue": "Light Glue",
-        "lightglue": "Light Glue",
-        "farneback": "Farneback Optical Flow",
-        "lucas kanade": "Lucas Kanade Optical Flow",
-        "average": "Average",
-        "similarity": "Similarity",
-        "spatial fusion": "Similarity",
-        "fusionnet": "FusionNet",
-        "spatial ai": "FusionNet",
-        "no alignment": "No Alignment",
-        "no denoising": "No Denoising",
-    }
-    target = aliases.get(normalized)
-    if target and target in registry:
-        return registry[target]
+    for category in ("alignment", "denoising"):
+        target = normalize_name(category, requested_name)
+        if target in registry:
+            return registry[target]
 
     return registry[fallback_name]
 
@@ -512,8 +408,9 @@ class MFDenoiserAlgorithm:
         sees *which* alignment algorithm is about to run.
         """
         alignment_name = ctx.params.get("alignment_plan", "No Alignment")
-        registry = get_alignment_registry()
-        algorithm = _resolve_algorithm(registry, alignment_name, "No Alignment")
+        process = get_spec("denoising", ctx.params.get("merge_plan", "none")).key
+        spec = get_spec("alignment", alignment_name, context="resident", process=process)
+        algorithm = spec.create()
         ctx.alignment_selection_name = alignment_name
         ctx.alignment_effective_name = algorithm.NAME
 
@@ -535,8 +432,8 @@ class MFDenoiserAlgorithm:
         ``resident_pipeline.run_gpu_resident_pipeline`` (band 5-90).
         """
         denoising_name = ctx.params.get("merge_plan", "No Denoising")
-        registry = get_denoising_registry()
-        algorithm = _resolve_algorithm(registry, denoising_name, "No Denoising")
+        spec = get_spec("denoising", denoising_name)
+        algorithm = spec.create()
         print(
             f"[MFDenoiser][Merge] selected={denoising_name} resolved={algorithm.NAME} "
             f"input_frames={len(ctx.aligned_frames or ctx.frames)} batch_plan={batch_plan}"
@@ -844,7 +741,7 @@ def running_mf_denoiser(
             clear_raw=clear_raw,
         )
 
-    from resources.GenericUILibrary import ProgressModal
+    from UILibrary import ProgressModal
 
     dialog = ProgressModal(
         title="MFDenoiser Processing",

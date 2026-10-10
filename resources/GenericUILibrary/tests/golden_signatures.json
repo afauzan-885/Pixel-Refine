@@ -1,0 +1,6150 @@
+{
+  "meta": {
+    "source_commit": "79c932724f88364c41b3d7e3dedc7ab6f99d2b0c",
+    "root_exports": [
+      "apply_stylesheet",
+      "Button",
+      "IconButton",
+      "ButtonGroup",
+      "ToggleButton",
+      "FormGroup",
+      "Input",
+      "Select",
+      "Checkbox",
+      "Radio",
+      "RadioGroup",
+      "FormRow",
+      "Container",
+      "Row",
+      "Col",
+      "Stack",
+      "ScrollContainer",
+      "GridLayout",
+      "Spacer",
+      "Card",
+      "CardHeader",
+      "CardBody",
+      "CardFooter",
+      "CardGroup",
+      "FeatureCard",
+      "FeatureCardGroup",
+      "ListGroup",
+      "ImageCard",
+      "EmptyState",
+      "SkeletonLoader",
+      "Modal",
+      "ModalHeader",
+      "ModalBody",
+      "ModalFooter",
+      "Overlay",
+      "Toast",
+      "LoadingSpinner",
+      "modal_confirm",
+      "OverlayContainer",
+      "OverlayPosition",
+      "GridContainer",
+      "GridItem",
+      "Gallery",
+      "ThumbnailGrid",
+      "DataTable",
+      "TabContainer",
+      "TabPane",
+      "SimpleTabs",
+      "Collapse",
+      "Accordion",
+      "AccordionItem",
+      "Navbar",
+      "NavItem",
+      "Sidebar",
+      "SidebarItem",
+      "ProgressBar",
+      "CustomProgressBar",
+      "CircularProgressFallback",
+      "IndeterminateProgress",
+      "ProgressGroup",
+      "Theme",
+      "DarkTheme",
+      "LightTheme",
+      "ImageCompareItem",
+      "ImageCompareWidget",
+      "GridItemWidget",
+      "LoadingOverlay",
+      "HorizontalScrollRow",
+      "BatchCard",
+      "NewBatchCard",
+      "DotIndicator",
+      "BottomActionBar",
+      "DataStore",
+      "get_store",
+      "RealtimeMixin",
+      "SyncMixin",
+      "AdaptiveSizingMixin",
+      "live_update",
+      "trigger_live_update"
+    ],
+    "source_sha256": {
+      "buttons.py": "5459d364dabb0c169bf96aea85fef87b3de8e60fa7236c419c5d71ff746b7160",
+      "forms.py": "f36cbf0f4cbf187e08030315a6e507e62ed88b0c39283865c6e48e2cce1e3e2e",
+      "containers.py": "492c455cfce5e3cf041bab8a4cdea30d42612cdf3d8dbd72e780f5650d5b6b66",
+      "cards.py": "2e0d29033de47fd971bd9302134bc0b8dd84cb47fc5ca09cbd7a62033d11ec9d",
+      "list_group.py": "4c8d710ab27e2f8b695c3118a9742ac980fe063a06e201ac5736a25b7ea115bb",
+      "image_grid.py": "dc613ce8b85c09ecf1393808c6444e864791da3923097f76a322699ebb05eafd",
+      "empty_state.py": "89566a6f4beeac91981275a7dc5d991d2597854f4da3f914f66fc6c0ba1d461f",
+      "skeleton.py": "dcfcaa2d8da2f8e19ecab3a1582b3dc89c033a4e06512143a1d7428cc1ff9a9e",
+      "modals.py": "2c0f37abfb194833fcaeaa9ef019337a6827b7a37b6868302e10781a362a8157",
+      "overlays.py": "dd261815d5c2b2b8e3283b4f5ad2578c89f42dab29130254b038f3c3129b206e",
+      "grids.py": "610458c4a37ba30cafb1759dbd75f2ec9c2f548b8f5a507fb587f1a4ce00d7aa",
+      "tables.py": "87978a8ec0892da4fed2fbaab4c37c61e3039381379b4437269a5a6e27e364c6",
+      "tabs.py": "82ae4323e4c4ceba8b02227e5bae69a6936d18d0111a84e4ffed22a06946b491",
+      "collapse.py": "ec7d2ed6c2a7b72251c923cbae5e4769b2ede2fabda2e28bd13d1e54ea8716c2",
+      "navbar.py": "5ecc149e022f3fe71b2028d681fad5b28d3150c3e496197431bace6ac823dfd4",
+      "horizontal_scroll.py": "f35a6ae9ac9dcac26a5b2664c3931d5365f4110a74661a9566b9248da16480a1",
+      "dot_indicator.py": "cbeb060037eae0bd044986a50037bd42b04af08cd8ca7ed3fac125d534a3fe43",
+      "bottom_action_bar.py": "3a3af6b16b8d8b545f8933515ca1a890082430f23e24e328b3a8a3e52678a8b0",
+      "progress_bars.py": "12c36aa83ff9eccbdce6e4e7132a3e733f7c08e22414f25cc9cfc87394e5cae4",
+      "comparison.py": "90db7c47d060bdde5c63c66953bc46282f3cf48b483ea2397e14eede8c25205b",
+      "ui_component.py": "bbe463852eba575af9a9cb280ebd0a7a28e7a4b5ee4b98ba0e459948fefbc4b1",
+      "store.py": "9aa2a4400f3114fb018fbd40b98f6381d7bdda8b7c36919ee943f5383b3e33ae",
+      "mixins.py": "111e08a7bad689038fedd12a39c840be1dfa6cd2698e4d3bc8fbf0838fcab3ed",
+      "live_update.py": "5d70e9c855e55d7aca8ccec827f74145fba05429c68d76e9688df6402b950c60",
+      "theme.py": "da03eb1728720da6e23daa46f04fb0d118c2958286315d7663253cd916a3ae9c",
+      "style_spec.py": "52ab6ec54fd71bc42fb54331fce623d8862ddfa54f1fe8f24eb3b8f42d2aee7b",
+      "config_panel.py": "2880c52ff08730617846bde3893e90b0216a0290bf60d431cc3f329a4fe065e5",
+      "selector_panel.py": "e3e4233076b8e09e1586c2e0c2706f33173c98a5c1116451e458447931525a5b",
+      "viewer_panel.py": "e0a160ed8c27045c0f2f1be93a6fdb8f01918a9ad3c6d9182b805df74fe4a117",
+      "workspace_layout.py": "defc4f654d242a4ec1d18837e65383d1facb1431b77427c5aa2095cc853e2154"
+    }
+  },
+  "modules": {
+    "buttons": {
+      "classes": {
+        "Button": {
+          "init": {
+            "parameters": [
+              {
+                "name": "text",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "variant",
+                "kind": "positional_or_keyword",
+                "default": "'secondary'",
+                "annotation": null
+              },
+              {
+                "name": "object_name",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "bg_color",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "text_color",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "hover_color",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "setText": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "full_text": {
+              "parameters": [],
+              "returns": null
+            },
+            "setToolTip": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_content_width_limit": {
+              "parameters": [
+                {
+                  "name": "width",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "reference",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "margin",
+                  "kind": "keyword_only",
+                  "default": "0",
+                  "annotation": null
+                },
+                {
+                  "name": "minimum_width",
+                  "kind": "keyword_only",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "refresh_content_width": {
+              "parameters": [],
+              "returns": null
+            },
+            "eventFilter": {
+              "parameters": [
+                {
+                  "name": "watched",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "resizeEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_variant": {
+              "parameters": [
+                {
+                  "name": "variant",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "IconButton": {
+          "init": {
+            "parameters": [
+              {
+                "name": "text",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "icon",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "icon_path",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "variant",
+                "kind": "positional_or_keyword",
+                "default": "'secondary'",
+                "annotation": null
+              },
+              {
+                "name": "text_tooltip",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "square_size",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "bg_color",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "text_color",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "hover_color",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {},
+          "properties": {},
+          "signals": []
+        },
+        "ButtonGroup": {
+          "init": {
+            "parameters": [
+              {
+                "name": "orientation",
+                "kind": "positional_or_keyword",
+                "default": "'horizontal'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_button": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "variant",
+                  "kind": "positional_or_keyword",
+                  "default": "'secondary'",
+                  "annotation": null
+                },
+                {
+                  "name": "checkable",
+                  "kind": "positional_or_keyword",
+                  "default": "False",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_button": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_active": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "button_clicked"
+          ]
+        },
+        "ToggleButton": {
+          "init": {
+            "parameters": [
+              {
+                "name": "text",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "checked",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {},
+          "properties": {},
+          "signals": []
+        },
+        "ToggleSwitch": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "isChecked": {
+              "parameters": [],
+              "returns": null
+            },
+            "setChecked": {
+              "parameters": [
+                {
+                  "name": "checked",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "paintEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "toggled"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "forms": {
+      "classes": {
+        "FormGroup": {
+          "init": {
+            "parameters": [
+              {
+                "name": "label",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "input_type",
+                "kind": "positional_or_keyword",
+                "default": "'text'",
+                "annotation": null
+              },
+              {
+                "name": "placeholder",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "auto_sync",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "get_value": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_value": {
+              "parameters": [
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_options": {
+              "parameters": [
+                {
+                  "name": "options",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "on_store_changed": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "value_changed"
+          ]
+        },
+        "Input": {
+          "init": {
+            "parameters": [
+              {
+                "name": "placeholder",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_state": {
+              "parameters": [
+                {
+                  "name": "state",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "Select": {
+          "init": {
+            "parameters": [
+              {
+                "name": "options",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "placeholder",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_options": {
+              "parameters": [
+                {
+                  "name": "options",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "value_changed"
+          ]
+        },
+        "Checkbox": {
+          "init": {
+            "parameters": [
+              {
+                "name": "text",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "checked",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "auto_sync",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "is_checked": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_checked": {
+              "parameters": [
+                {
+                  "name": "checked",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "on_store_changed": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "toggled"
+          ]
+        },
+        "Radio": {
+          "init": {
+            "parameters": [
+              {
+                "name": "text",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "checked",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "is_checked": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_checked": {
+              "parameters": [
+                {
+                  "name": "checked",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "toggled"
+          ]
+        },
+        "RadioGroup": {
+          "init": {
+            "parameters": [
+              {
+                "name": "options",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "orientation",
+                "kind": "positional_or_keyword",
+                "default": "'vertical'",
+                "annotation": null
+              },
+              {
+                "name": "auto_sync",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_option": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "checked",
+                  "kind": "positional_or_keyword",
+                  "default": "False",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_selected_index": {
+              "parameters": [],
+              "returns": null
+            },
+            "get_selected_text": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_selected": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "on_store_changed": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "selection_changed"
+          ]
+        },
+        "FormRow": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_field": {
+              "parameters": [
+                {
+                  "name": "label",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_row": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "containers": {
+      "classes": {
+        "Container": {
+          "init": {
+            "parameters": [
+              {
+                "name": "padding",
+                "kind": "positional_or_keyword",
+                "default": "10",
+                "annotation": null
+              },
+              {
+                "name": "fluid",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_layout": {
+              "parameters": [
+                {
+                  "name": "layout",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_stretch": {
+              "parameters": [
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "1",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "Row": {
+          "init": {
+            "parameters": [
+              {
+                "name": "spacing",
+                "kind": "positional_or_keyword",
+                "default": "10",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_column": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_stretch": {
+              "parameters": [
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "1",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "Col": {
+          "init": {
+            "parameters": [
+              {
+                "name": "span",
+                "kind": "positional_or_keyword",
+                "default": "12",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_stretch": {
+              "parameters": [
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "1",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "Stack": {
+          "init": {
+            "parameters": [
+              {
+                "name": "orientation",
+                "kind": "positional_or_keyword",
+                "default": "'vertical'",
+                "annotation": null
+              },
+              {
+                "name": "spacing",
+                "kind": "positional_or_keyword",
+                "default": "5",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_item": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_stretch": {
+              "parameters": [
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "1",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "insert_item": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "remove_item": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "clear": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "ScrollContainer": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "GridLayout": {
+          "init": {
+            "parameters": [
+              {
+                "name": "columns",
+                "kind": "positional_or_keyword",
+                "default": "3",
+                "annotation": null
+              },
+              {
+                "name": "spacing",
+                "kind": "positional_or_keyword",
+                "default": "10",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_item": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_item_at": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "row",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "col",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "row_span",
+                  "kind": "positional_or_keyword",
+                  "default": "1",
+                  "annotation": null
+                },
+                {
+                  "name": "col_span",
+                  "kind": "positional_or_keyword",
+                  "default": "1",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "clear": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "Spacer": {
+          "init": {
+            "parameters": [
+              {
+                "name": "width",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "height",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {},
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "cards": {
+      "classes": {
+        "Card": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "bg_color",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "border_color",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_title": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_header_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_body_content": {
+              "parameters": [
+                {
+                  "name": "content",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_body_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_footer_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "clear_body": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "CardHeader": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_title": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_action": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "CardBody": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_content": {
+              "parameters": [
+                {
+                  "name": "content",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "CardFooter": {
+          "init": {
+            "parameters": [
+              {
+                "name": "align",
+                "kind": "positional_or_keyword",
+                "default": "'right'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_action": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "CardGroup": {
+          "init": {
+            "parameters": [
+              {
+                "name": "spacing",
+                "kind": "positional_or_keyword",
+                "default": "10",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_card": {
+              "parameters": [
+                {
+                  "name": "card",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "1",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "FeatureCardGroup": {
+          "init": {
+            "parameters": [
+              {
+                "name": "columns",
+                "kind": "positional_or_keyword",
+                "default": "2",
+                "annotation": null
+              },
+              {
+                "name": "spacing",
+                "kind": "positional_or_keyword",
+                "default": "10",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_card": {
+              "parameters": [
+                {
+                  "name": "card",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "sizeHint": {
+              "parameters": [],
+              "returns": null
+            },
+            "minimumSizeHint": {
+              "parameters": [],
+              "returns": null
+            },
+            "heightForWidth": {
+              "parameters": [
+                {
+                  "name": "width",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "resizeEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "eventFilter": {
+              "parameters": [
+                {
+                  "name": "watched",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "FeatureCard": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "description",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "options",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "fallback_val",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "adaptive_directions",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "dropdown_font_min_px",
+                "kind": "positional_or_keyword",
+                "default": "8",
+                "annotation": null
+              },
+              {
+                "name": "dropdown_font_max_px",
+                "kind": "positional_or_keyword",
+                "default": "12",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "setEnabled": {
+              "parameters": [
+                {
+                  "name": "enabled",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "resizeEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "heightForWidth": {
+              "parameters": [
+                {
+                  "name": "width",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "setChecked": {
+              "parameters": [
+                {
+                  "name": "checked",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "animate",
+                  "kind": "positional_or_keyword",
+                  "default": "True",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "keyPressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_value": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_value": {
+              "parameters": [
+                {
+                  "name": "val",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "update_styles": {
+              "parameters": [],
+              "returns": null
+            },
+            "update_theme": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "value_changed",
+            "checked_changed"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "list_group": {
+      "classes": {
+        "ListGroup": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "reordering",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "on_store_changed": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "sync_items": {
+              "parameters": [
+                {
+                  "name": "new_data_list",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_item": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "str"
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "clear": {
+              "parameters": [],
+              "returns": null
+            },
+            "clear_selection": {
+              "parameters": [],
+              "returns": null
+            },
+            "get_selected_values": {
+              "parameters": [],
+              "returns": null
+            },
+            "get_selected_labels": {
+              "parameters": [],
+              "returns": null
+            },
+            "remove_selected_items": {
+              "parameters": [],
+              "returns": null
+            },
+            "select_first": {
+              "parameters": [],
+              "returns": null
+            },
+            "select_item_by_value": {
+              "parameters": [
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_all_values": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_move_mode": {
+              "parameters": [
+                {
+                  "name": "enabled",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "bool"
+                }
+              ],
+              "returns": null
+            },
+            "eventFilter": {
+              "parameters": [
+                {
+                  "name": "source",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {
+            "reordering_animation": {
+              "get": {
+                "parameters": [],
+                "returns": null
+              },
+              "set": {
+                "parameters": [
+                  {
+                    "name": "enabled",
+                    "kind": "positional_or_keyword",
+                    "default": null,
+                    "annotation": "bool"
+                  }
+                ],
+                "returns": null
+              }
+            },
+            "count": {
+              "get": {
+                "parameters": [],
+                "returns": null
+              },
+              "set": null
+            },
+            "widget": {
+              "get": {
+                "parameters": [],
+                "returns": null
+              },
+              "set": null
+            }
+          },
+          "signals": [
+            "selection_changed",
+            "item_double_clicked",
+            "item_renamed",
+            "delete_key_pressed",
+            "items_reordered"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "image_grid": {
+      "classes": {
+        "ImageCard": {
+          "init": {
+            "parameters": [
+              {
+                "name": "card_id",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": "str"
+              },
+              {
+                "name": "size",
+                "kind": "positional_or_keyword",
+                "default": "110",
+                "annotation": "int"
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "setVisible": {
+              "parameters": [
+                {
+                  "name": "visible",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "bool"
+                }
+              ],
+              "returns": null
+            },
+            "set_image": {
+              "parameters": [
+                {
+                  "name": "q_image",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "Union[QImage, QPixmap]"
+                },
+                {
+                  "name": "scale_to_fit",
+                  "kind": "positional_or_keyword",
+                  "default": "True",
+                  "annotation": "bool"
+                }
+              ],
+              "returns": null
+            },
+            "set_thumbnail": {
+              "parameters": [
+                {
+                  "name": "pixmap_or_image",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "Union[QImage, QPixmap]"
+                }
+              ],
+              "returns": null
+            },
+            "has_image": {
+              "parameters": [],
+              "returns": "bool"
+            },
+            "has_thumbnail": {
+              "parameters": [],
+              "returns": "bool"
+            },
+            "set_loading": {
+              "parameters": [
+                {
+                  "name": "loading",
+                  "kind": "positional_or_keyword",
+                  "default": "True",
+                  "annotation": "bool"
+                }
+              ],
+              "returns": null
+            },
+            "set_placeholder_text": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "str"
+                }
+              ],
+              "returns": null
+            },
+            "unload_image": {
+              "parameters": [],
+              "returns": null
+            },
+            "get_opacity": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_opacity": {
+              "parameters": [
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "select": {
+              "parameters": [],
+              "returns": null
+            },
+            "deselect": {
+              "parameters": [],
+              "returns": null
+            },
+            "toggle_selection": {
+              "parameters": [],
+              "returns": null
+            },
+            "is_selected": {
+              "parameters": [],
+              "returns": "bool"
+            },
+            "paintEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QMouseEvent"
+                }
+              ],
+              "returns": null
+            },
+            "mouseDoubleClickEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QMouseEvent"
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "clicked",
+            "double_clicked"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "empty_state": {
+      "classes": {
+        "EmptyState": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": "str"
+              },
+              {
+                "name": "message",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": "str"
+              },
+              {
+                "name": "button_text",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": "str"
+              },
+              {
+                "name": "button_variant",
+                "kind": "positional_or_keyword",
+                "default": "'primary'",
+                "annotation": "str"
+              },
+              {
+                "name": "on_click",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_text": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": "str"
+                },
+                {
+                  "name": "message",
+                  "kind": "positional_or_keyword",
+                  "default": "''",
+                  "annotation": "str"
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "skeleton": {
+      "classes": {
+        "SkeletonLoader": {
+          "init": {
+            "parameters": [
+              {
+                "name": "height",
+                "kind": "positional_or_keyword",
+                "default": "100",
+                "annotation": null
+              },
+              {
+                "name": "border_radius",
+                "kind": "positional_or_keyword",
+                "default": "6",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {},
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "modals": {
+      "classes": {
+        "Modal": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "size",
+                "kind": "positional_or_keyword",
+                "default": "'medium'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_title": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_body": {
+              "parameters": [
+                {
+                  "name": "content",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_body_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_footer_button": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "variant",
+                  "kind": "positional_or_keyword",
+                  "default": "'secondary'",
+                  "annotation": null
+                },
+                {
+                  "name": "callback",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "fit_to_content": {
+              "parameters": [
+                {
+                  "name": "max_width",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "max_height",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "ModalHeader": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_title": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "ModalBody": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_content": {
+              "parameters": [
+                {
+                  "name": "content",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "ModalFooter": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_action": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "Overlay": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "show_message": {
+              "parameters": [
+                {
+                  "name": "message",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "hide_overlay": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "Toast": {
+          "init": {
+            "parameters": [
+              {
+                "name": "message",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "variant",
+                "kind": "positional_or_keyword",
+                "default": "'info'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "show_toast": {
+              "parameters": [
+                {
+                  "name": "duration",
+                  "kind": "positional_or_keyword",
+                  "default": "3000",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "LoadingSpinner": {
+          "init": {
+            "parameters": [
+              {
+                "name": "message",
+                "kind": "positional_or_keyword",
+                "default": "'Loading...'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_message": {
+              "parameters": [
+                {
+                  "name": "message",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "ModalDialog": {
+          "init": {
+            "parameters": [
+              {
+                "name": "message",
+                "kind": "positional_or_keyword",
+                "default": "'Are you sure?'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "'Confirm Delete'",
+                "annotation": null
+              },
+              {
+                "name": "show_checkbox",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "checkbox_text",
+                "kind": "positional_or_keyword",
+                "default": "'jangan tampilkan lagi'",
+                "annotation": null
+              },
+              {
+                "name": "close_on_click_outside",
+                "kind": "positional_or_keyword",
+                "default": "True",
+                "annotation": null
+              },
+              {
+                "name": "on_close_callback",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "width",
+                "kind": "positional_or_keyword",
+                "default": "480",
+                "annotation": null
+              },
+              {
+                "name": "height",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mouseMoveEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mouseReleaseEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "showEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "question": {
+              "parameters": [
+                {
+                  "name": "parent",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "message",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "AlertModal": {
+          "init": {
+            "parameters": [
+              {
+                "name": "message",
+                "kind": "positional_or_keyword",
+                "default": "'An error occurred'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "'Notice'",
+                "annotation": null
+              },
+              {
+                "name": "variant",
+                "kind": "positional_or_keyword",
+                "default": "'warning'",
+                "annotation": null
+              },
+              {
+                "name": "width",
+                "kind": "positional_or_keyword",
+                "default": "400",
+                "annotation": null
+              },
+              {
+                "name": "height",
+                "kind": "positional_or_keyword",
+                "default": "180",
+                "annotation": null
+              },
+              {
+                "name": "auto_dismiss_seconds",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "closeEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "accept": {
+              "parameters": [],
+              "returns": null
+            },
+            "reject": {
+              "parameters": [],
+              "returns": null
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mouseMoveEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mouseReleaseEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "showEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "show_alert": {
+              "parameters": [
+                {
+                  "name": "parent",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "message",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": "'Notice'",
+                  "annotation": null
+                },
+                {
+                  "name": "variant",
+                  "kind": "positional_or_keyword",
+                  "default": "'warning'",
+                  "annotation": null
+                },
+                {
+                  "name": "auto_dismiss_seconds",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "ProgressModal": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "'Processing Task...'",
+                "annotation": null
+              },
+              {
+                "name": "message",
+                "kind": "positional_or_keyword",
+                "default": "'Initializing pipeline...'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "allow_cancel",
+                "kind": "positional_or_keyword",
+                "default": "True",
+                "annotation": null
+              },
+              {
+                "name": "on_cancel_callback",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "width",
+                "kind": "positional_or_keyword",
+                "default": "540",
+                "annotation": null
+              },
+              {
+                "name": "height",
+                "kind": "positional_or_keyword",
+                "default": "380",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_progress": {
+              "parameters": [
+                {
+                  "name": "percent",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "message",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "append_log": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mouseMoveEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mouseReleaseEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "showEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "overlays": {
+      "classes": {
+        "OverlayPosition": {
+          "init": null,
+          "methods": {},
+          "properties": {},
+          "signals": []
+        },
+        "OverlayContainer": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "position",
+                "kind": "positional_or_keyword",
+                "default": "OverlayPosition.BOTTOM_CENTER",
+                "annotation": null
+              },
+              {
+                "name": "margin",
+                "kind": "positional_or_keyword",
+                "default": "20",
+                "annotation": null
+              },
+              {
+                "name": "smart_positioning",
+                "kind": "positional_or_keyword",
+                "default": "True",
+                "annotation": null
+              },
+              {
+                "name": "close_on_click_outside",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "dim_background",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "dim_opacity",
+                "kind": "positional_or_keyword",
+                "default": "0.5",
+                "annotation": null
+              },
+              {
+                "name": "blur_background",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "blur_radius",
+                "kind": "positional_or_keyword",
+                "default": "10",
+                "annotation": null
+              },
+              {
+                "name": "shadow_enabled",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "shadow_blur_radius",
+                "kind": "positional_or_keyword",
+                "default": "20",
+                "annotation": null
+              },
+              {
+                "name": "shadow_color",
+                "kind": "positional_or_keyword",
+                "default": "QColor(0, 0, 0, 80)",
+                "annotation": null
+              },
+              {
+                "name": "shadow_offset",
+                "kind": "positional_or_keyword",
+                "default": "QPoint(0, 4)",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_content": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "setParent": {
+              "parameters": [
+                {
+                  "name": "parent",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "mode",
+                  "kind": "positional_or_keyword",
+                  "default": "Qt.WindowType.Widget",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "setVisible": {
+              "parameters": [
+                {
+                  "name": "visible",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "showEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "hideEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "paintEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "eventFilter": {
+              "parameters": [
+                {
+                  "name": "obj",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "grids": {
+      "classes": {
+        "GridContainer": {
+          "init": {
+            "parameters": [
+              {
+                "name": "columns",
+                "kind": "positional_or_keyword",
+                "default": "4",
+                "annotation": null
+              },
+              {
+                "name": "spacing",
+                "kind": "positional_or_keyword",
+                "default": "10",
+                "annotation": null
+              },
+              {
+                "name": "wrap_mode",
+                "kind": "positional_or_keyword",
+                "default": "'vertical'",
+                "annotation": null
+              },
+              {
+                "name": "column_mode",
+                "kind": "positional_or_keyword",
+                "default": "'fixed'",
+                "annotation": null
+              },
+              {
+                "name": "item_width",
+                "kind": "positional_or_keyword",
+                "default": "120",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_item": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "remove_item": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "rebuild",
+                  "kind": "positional_or_keyword",
+                  "default": "True",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "clear_items": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_batch_update": {
+              "parameters": [
+                {
+                  "name": "active",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "bool"
+                }
+              ],
+              "returns": null
+            },
+            "on_store_changed": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "sync_items": {
+              "parameters": [
+                {
+                  "name": "new_data_list",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_item_count": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_wrap_mode": {
+              "parameters": [
+                {
+                  "name": "mode",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_column_mode": {
+              "parameters": [
+                {
+                  "name": "mode",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "item_width",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "resizeEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "refresh_responsive_layout": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "GridItem": {
+          "init": {
+            "parameters": [
+              {
+                "name": "item_id",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "label",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "size",
+                "kind": "positional_or_keyword",
+                "default": "110",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_selected": {
+              "parameters": [
+                {
+                  "name": "selected",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "is_selected": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_content": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_label": {
+              "parameters": [
+                {
+                  "name": "label",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "paintEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QMouseEvent"
+                }
+              ],
+              "returns": null
+            },
+            "mouseDoubleClickEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QMouseEvent"
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "clicked",
+            "double_clicked"
+          ]
+        },
+        "Gallery": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "columns",
+                "kind": "positional_or_keyword",
+                "default": "4",
+                "annotation": null
+              },
+              {
+                "name": "show_header",
+                "kind": "positional_or_keyword",
+                "default": "True",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_title": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_item": {
+              "parameters": [
+                {
+                  "name": "item_id",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "label",
+                  "kind": "positional_or_keyword",
+                  "default": "''",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "remove_item": {
+              "parameters": [
+                {
+                  "name": "item_id",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "clear_items": {
+              "parameters": [],
+              "returns": null
+            },
+            "get_item": {
+              "parameters": [
+                {
+                  "name": "item_id",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_item_selected": {
+              "parameters": [
+                {
+                  "name": "item_id",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "selected",
+                  "kind": "positional_or_keyword",
+                  "default": "True",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "item_clicked",
+            "item_double_clicked"
+          ]
+        },
+        "ThumbnailGrid": {
+          "init": {
+            "parameters": [
+              {
+                "name": "columns",
+                "kind": "positional_or_keyword",
+                "default": "5",
+                "annotation": null
+              },
+              {
+                "name": "thumbnail_size",
+                "kind": "positional_or_keyword",
+                "default": "110",
+                "annotation": null
+              },
+              {
+                "name": "wrap_mode",
+                "kind": "positional_or_keyword",
+                "default": "'vertical'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_thumbnail": {
+              "parameters": [
+                {
+                  "name": "item_id",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "label",
+                  "kind": "positional_or_keyword",
+                  "default": "''",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_thumbnail": {
+              "parameters": [
+                {
+                  "name": "item_id",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "clear_thumbnails": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "thumbnail_clicked"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "tables": {
+      "classes": {
+        "DataTable": {
+          "init": {
+            "parameters": [
+              {
+                "name": "columns",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "setup_columns": {
+              "parameters": [
+                {
+                  "name": "headers",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "clear_rows": {
+              "parameters": [],
+              "returns": null
+            },
+            "add_row_items": {
+              "parameters": [
+                {
+                  "name": "items",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_row_color": {
+              "parameters": [
+                {
+                  "name": "row",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "color",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QColor"
+                }
+              ],
+              "returns": null
+            },
+            "get_cell_widget": {
+              "parameters": [
+                {
+                  "name": "row",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "col",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "resize_columns_to_content": {
+              "parameters": [
+                {
+                  "name": "target_cols",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "tabs": {
+      "classes": {
+        "AnimatedTabContainer": {
+          "init": {
+            "parameters": [
+              {
+                "name": "enable_animations",
+                "kind": "positional_or_keyword",
+                "default": "True",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_tab": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "remove_tab": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_current_tab": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_current_tab": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "tab_changed"
+          ]
+        },
+        "TabPane": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_content": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "SimpleTabs": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_tab": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_tab_widget": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "tab_changed"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "collapse": {
+      "classes": {
+        "Collapse": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "expanded",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_title": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_content": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "toggle": {
+              "parameters": [],
+              "returns": null
+            },
+            "expand": {
+              "parameters": [],
+              "returns": null
+            },
+            "collapse_panel": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "toggled"
+          ]
+        },
+        "Accordion": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_item": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "expand_item": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "collapse_all": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "item_expanded"
+          ]
+        },
+        "AccordionItem": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "widget",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "get_title": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_content": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "toggle": {
+              "parameters": [],
+              "returns": null
+            },
+            "expand": {
+              "parameters": [],
+              "returns": null
+            },
+            "collapse_panel": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "toggled"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "navbar": {
+      "classes": {
+        "Navbar": {
+          "init": {
+            "parameters": [
+              {
+                "name": "brand",
+                "kind": "positional_or_keyword",
+                "default": "''",
+                "annotation": null
+              },
+              {
+                "name": "height",
+                "kind": "positional_or_keyword",
+                "default": "50",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_brand": {
+              "parameters": [
+                {
+                  "name": "brand",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_nav_item": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "callback",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_action": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_active_item": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "nav_clicked"
+          ]
+        },
+        "NavItem": {
+          "init": {
+            "parameters": [
+              {
+                "name": "text",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_active": {
+              "parameters": [
+                {
+                  "name": "active",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "Sidebar": {
+          "init": {
+            "parameters": [
+              {
+                "name": "width",
+                "kind": "positional_or_keyword",
+                "default": "200",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_item": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "icon_path",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_separator": {
+              "parameters": [],
+              "returns": null
+            },
+            "add_stretch": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_active_item": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "item_clicked"
+          ]
+        },
+        "SidebarItem": {
+          "init": {
+            "parameters": [
+              {
+                "name": "text",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "icon_path",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_active": {
+              "parameters": [
+                {
+                  "name": "active",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "horizontal_scroll": {
+      "classes": {
+        "HorizontalScrollRow": {
+          "init": {
+            "parameters": [
+              {
+                "name": "spacing",
+                "kind": "positional_or_keyword",
+                "default": "8",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_widget": {
+              "parameters": [
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "stretch",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_stretch": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "BatchCard": {
+          "init": {
+            "parameters": [
+              {
+                "name": "name",
+                "kind": "positional_or_keyword",
+                "default": "'Batch'",
+                "annotation": null
+              },
+              {
+                "name": "image_count",
+                "kind": "positional_or_keyword",
+                "default": "0",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_name": {
+              "parameters": [
+                {
+                  "name": "name",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "NewBatchCard": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {},
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "dot_indicator": {
+      "classes": {
+        "DotIndicator": {
+          "init": {
+            "parameters": [
+              {
+                "name": "count",
+                "kind": "positional_or_keyword",
+                "default": "6",
+                "annotation": null
+              },
+              {
+                "name": "active_index",
+                "kind": "positional_or_keyword",
+                "default": "0",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_count": {
+              "parameters": [
+                {
+                  "name": "count",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "paintEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {
+            "active_index": {
+              "get": {
+                "parameters": [],
+                "returns": null
+              },
+              "set": {
+                "parameters": [
+                  {
+                    "name": "index",
+                    "kind": "positional_or_keyword",
+                    "default": null,
+                    "annotation": null
+                  }
+                ],
+                "returns": null
+              }
+            }
+          },
+          "signals": [
+            "index_changed"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "bottom_action_bar": {
+      "classes": {
+        "BottomActionBar": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_nav_item": {
+              "parameters": [
+                {
+                  "name": "name",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "icon_path",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "callback",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_primary_action": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "callback",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_running_state": {
+              "parameters": [
+                {
+                  "name": "is_running",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "nav_clicked",
+            "primary_action_clicked"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "progress_bars": {
+      "classes": {
+        "ProgressBar": {
+          "init": {
+            "parameters": [
+              {
+                "name": "style",
+                "kind": "positional_or_keyword",
+                "default": "'linear'",
+                "annotation": null
+              },
+              {
+                "name": "variant",
+                "kind": "positional_or_keyword",
+                "default": "'primary'",
+                "annotation": null
+              },
+              {
+                "name": "show_label",
+                "kind": "positional_or_keyword",
+                "default": "True",
+                "annotation": null
+              },
+              {
+                "name": "minimalist",
+                "kind": "positional_or_keyword",
+                "default": "False",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_value": {
+              "parameters": [
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "smooth",
+                  "kind": "positional_or_keyword",
+                  "default": "True",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_value": {
+              "parameters": [],
+              "returns": null
+            },
+            "set_max_value": {
+              "parameters": [
+                {
+                  "name": "max_value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "setValue": {
+              "parameters": [
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "setRange": {
+              "parameters": [
+                {
+                  "name": "min_val",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "max_val",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "setFormat": {
+              "parameters": [
+                {
+                  "name": "fmt",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "setVisible": {
+              "parameters": [
+                {
+                  "name": "visible",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "animate_to": {
+              "parameters": [
+                {
+                  "name": "target_value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "duration",
+                  "kind": "positional_or_keyword",
+                  "default": "1000",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "on_store_changed": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "value_changed"
+          ]
+        },
+        "CustomProgressBar": {
+          "init": {
+            "parameters": [
+              {
+                "name": "style",
+                "kind": "positional_or_keyword",
+                "default": "'linear'",
+                "annotation": null
+              },
+              {
+                "name": "variant",
+                "kind": "positional_or_keyword",
+                "default": "'primary'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "setValue": {
+              "parameters": [
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "value": {
+              "parameters": [],
+              "returns": null
+            },
+            "start_animation": {
+              "parameters": [],
+              "returns": null
+            },
+            "paintEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "CircularProgressFallback": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "setValue": {
+              "parameters": [
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "value": {
+              "parameters": [],
+              "returns": null
+            },
+            "paintEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "IndeterminateProgress": {
+          "init": {
+            "parameters": [
+              {
+                "name": "style",
+                "kind": "positional_or_keyword",
+                "default": "'spinner'",
+                "annotation": null
+              },
+              {
+                "name": "size",
+                "kind": "positional_or_keyword",
+                "default": "40",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "start": {
+              "parameters": [],
+              "returns": null
+            },
+            "stop": {
+              "parameters": [],
+              "returns": null
+            },
+            "paintEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "ProgressGroup": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_progress": {
+              "parameters": [
+                {
+                  "name": "label",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                },
+                {
+                  "name": "variant",
+                  "kind": "positional_or_keyword",
+                  "default": "'primary'",
+                  "annotation": null
+                },
+                {
+                  "name": "style",
+                  "kind": "positional_or_keyword",
+                  "default": "'linear'",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "on_store_changed": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "update_progress": {
+              "parameters": [
+                {
+                  "name": "index",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "clear": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "comparison": {
+      "classes": {
+        "ImageCompareItem": {
+          "init": {
+            "parameters": [
+              {
+                "name": "left_pixmap",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "right_pixmap",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "left_label",
+                "kind": "positional_or_keyword",
+                "default": "'Original'",
+                "annotation": null
+              },
+              {
+                "name": "right_label",
+                "kind": "positional_or_keyword",
+                "default": "'Processed'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "boundingRect": {
+              "parameters": [],
+              "returns": null
+            },
+            "paint": {
+              "parameters": [
+                {
+                  "name": "painter",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QPainter"
+                },
+                {
+                  "name": "option",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QStyleOptionGraphicsItem"
+                },
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": "Optional[QWidget]"
+                }
+              ],
+              "returns": "None"
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mouseMoveEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mouseReleaseEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "ImageCompareWidget": {
+          "init": {
+            "parameters": [
+              {
+                "name": "left_pixmap",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": "Optional[QPixmap]"
+              },
+              {
+                "name": "right_pixmap",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": "Optional[QPixmap]"
+              },
+              {
+                "name": "left_label",
+                "kind": "positional_or_keyword",
+                "default": "'Original'",
+                "annotation": null
+              },
+              {
+                "name": "right_label",
+                "kind": "positional_or_keyword",
+                "default": "'Processed'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_images": {
+              "parameters": [
+                {
+                  "name": "left_pixmap",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QPixmap"
+                },
+                {
+                  "name": "right_pixmap",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QPixmap"
+                }
+              ],
+              "returns": null
+            },
+            "paintEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mouseMoveEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mouseReleaseEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "ui_component": {
+      "classes": {
+        "GridItemWidget": {
+          "init": {
+            "parameters": [
+              {
+                "name": "item_id",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "label_text",
+                "kind": "positional_or_keyword",
+                "default": null,
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_selected": {
+              "parameters": [
+                {
+                  "name": "selected",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "bool"
+                }
+              ],
+              "returns": null
+            },
+            "paintEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "mousePressEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QMouseEvent"
+                }
+              ],
+              "returns": null
+            },
+            "mouseDoubleClickEvent": {
+              "parameters": [
+                {
+                  "name": "event",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "QMouseEvent"
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "clicked",
+            "double_clicked"
+          ]
+        },
+        "LoadingOverlay": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_status": {
+              "parameters": [
+                {
+                  "name": "text",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "percentage",
+                  "kind": "positional_or_keyword",
+                  "default": "0",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "store": {
+      "classes": {
+        "DataStore": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "notify",
+                  "kind": "positional_or_keyword",
+                  "default": "True",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "silent_set": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "default",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "update_bulk": {
+              "parameters": [
+                {
+                  "name": "data_dict",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "deep",
+                  "kind": "positional_or_keyword",
+                  "default": "True",
+                  "annotation": null
+                },
+                {
+                  "name": "save",
+                  "kind": "positional_or_keyword",
+                  "default": "True",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "transaction": {
+              "parameters": [],
+              "returns": null
+            },
+            "bind_to_file": {
+              "parameters": [
+                {
+                  "name": "file_path",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "load_from_file": {
+              "parameters": [],
+              "returns": null
+            },
+            "save_to_file": {
+              "parameters": [],
+              "returns": null
+            },
+            "schedule_save": {
+              "parameters": [
+                {
+                  "name": "delay_ms",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "changed"
+          ]
+        }
+      },
+      "functions": {
+        "get_store": {
+          "parameters": [],
+          "returns": null
+        }
+      }
+    },
+    "mixins": {
+      "classes": {
+        "RealtimeMixin": {
+          "init": null,
+          "methods": {
+            "bind_store": {
+              "parameters": [
+                {
+                  "name": "store",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "on_store_changed": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_data": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_data": {
+              "parameters": [
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "notify",
+                  "kind": "positional_or_keyword",
+                  "default": "True",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "signal_blocker": {
+              "parameters": [],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "SyncMixin": {
+          "init": null,
+          "methods": {
+            "bind_store": {
+              "parameters": [
+                {
+                  "name": "store",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "set_scope": {
+              "parameters": [
+                {
+                  "name": "prefix",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_binding": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "widget",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "property_name",
+                  "kind": "positional_or_keyword",
+                  "default": "'value'",
+                  "annotation": null
+                },
+                {
+                  "name": "fallback",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "on_store_changed": {
+              "parameters": [
+                {
+                  "name": "key",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "value",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "AdaptiveSizingMixin": {
+          "init": null,
+          "methods": {
+            "init_adaptive_sizing": {
+              "parameters": [
+                {
+                  "name": "allowed_directions",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "calculate_adaptive_font_size": {
+              "parameters": [
+                {
+                  "name": "current_width",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "ranges",
+                  "kind": "positional_or_keyword",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "apply_word_wrap": {
+              "parameters": [
+                {
+                  "name": "labels",
+                  "kind": "var_positional",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "live_update": {
+      "classes": {},
+      "functions": {
+        "live_update": {
+          "parameters": [
+            {
+              "name": "arg",
+              "kind": "positional_or_keyword",
+              "default": "None",
+              "annotation": null
+            },
+            {
+              "name": "method_name",
+              "kind": "positional_or_keyword",
+              "default": "'retranslate_ui'",
+              "annotation": null
+            },
+            {
+              "name": "on_resize",
+              "kind": "positional_or_keyword",
+              "default": "False",
+              "annotation": null
+            }
+          ],
+          "returns": null
+        },
+        "trigger_live_update": {
+          "parameters": [
+            {
+              "name": "args",
+              "kind": "var_positional",
+              "default": null,
+              "annotation": null
+            },
+            {
+              "name": "kwargs",
+              "kind": "var_keyword",
+              "default": null,
+              "annotation": null
+            }
+          ],
+          "returns": null
+        }
+      }
+    },
+    "theme": {
+      "classes": {
+        "Theme": {
+          "init": {
+            "parameters": [],
+            "returns": null
+          },
+          "methods": {
+            "get_variant_color": {
+              "parameters": [
+                {
+                  "name": "variant",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "get_variant_hover_color": {
+              "parameters": [
+                {
+                  "name": "variant",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        },
+        "DarkTheme": {
+          "init": {
+            "parameters": [],
+            "returns": null
+          },
+          "methods": {
+            "get_variant_hover_color": {
+              "parameters": [
+                {
+                  "name": "variant",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {
+        "get_theme": {
+          "parameters": [],
+          "returns": null
+        },
+        "set_theme": {
+          "parameters": [
+            {
+              "name": "theme",
+              "kind": "positional_or_keyword",
+              "default": null,
+              "annotation": null
+            }
+          ],
+          "returns": null
+        },
+        "create_button_style": {
+          "parameters": [
+            {
+              "name": "variant",
+              "kind": "positional_or_keyword",
+              "default": "'secondary'",
+              "annotation": null
+            },
+            {
+              "name": "theme",
+              "kind": "positional_or_keyword",
+              "default": "None",
+              "annotation": null
+            }
+          ],
+          "returns": null
+        },
+        "create_card_style": {
+          "parameters": [
+            {
+              "name": "theme",
+              "kind": "positional_or_keyword",
+              "default": "None",
+              "annotation": null
+            }
+          ],
+          "returns": null
+        },
+        "create_input_style": {
+          "parameters": [
+            {
+              "name": "theme",
+              "kind": "positional_or_keyword",
+              "default": "None",
+              "annotation": null
+            }
+          ],
+          "returns": null
+        },
+        "create_select_style": {
+          "parameters": [
+            {
+              "name": "theme",
+              "kind": "positional_or_keyword",
+              "default": "None",
+              "annotation": null
+            }
+          ],
+          "returns": null
+        },
+        "create_list_style": {
+          "parameters": [
+            {
+              "name": "theme",
+              "kind": "positional_or_keyword",
+              "default": "None",
+              "annotation": null
+            }
+          ],
+          "returns": null
+        },
+        "create_scrollbar_style": {
+          "parameters": [
+            {
+              "name": "theme",
+              "kind": "positional_or_keyword",
+              "default": "None",
+              "annotation": null
+            }
+          ],
+          "returns": null
+        },
+        "create_checkbox_style": {
+          "parameters": [
+            {
+              "name": "theme",
+              "kind": "positional_or_keyword",
+              "default": "None",
+              "annotation": null
+            }
+          ],
+          "returns": null
+        },
+        "apply_style": {
+          "parameters": [
+            {
+              "name": "widget",
+              "kind": "positional_or_keyword",
+              "default": null,
+              "annotation": null
+            },
+            {
+              "name": "spec",
+              "kind": "positional_or_keyword",
+              "default": null,
+              "annotation": null
+            }
+          ],
+          "returns": null
+        }
+      }
+    },
+    "style_spec": {
+      "classes": {
+        "StyleSpec": {
+          "init": null,
+          "methods": {
+            "with_overrides": {
+              "parameters": [
+                {
+                  "name": "values",
+                  "kind": "var_keyword",
+                  "default": null,
+                  "annotation": "Any"
+                }
+              ],
+              "returns": "'StyleSpec'"
+            },
+            "to_dict": {
+              "parameters": [],
+              "returns": "dict[str, Any]"
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    },
+    "config_panel": {
+      "classes": {
+        "ConfigPanel": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {},
+          "properties": {},
+          "signals": [
+            "apply_clicked"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "selector_panel": {
+      "classes": {
+        "SelectorPanel": {
+          "init": {
+            "parameters": [
+              {
+                "name": "title",
+                "kind": "positional_or_keyword",
+                "default": "'Items'",
+                "annotation": null
+              },
+              {
+                "name": "action_btn_text",
+                "kind": "positional_or_keyword",
+                "default": "'Process'",
+                "annotation": null
+              },
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "add_item": {
+              "parameters": [
+                {
+                  "name": "item_id",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "label",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "remove_item": {
+              "parameters": [
+                {
+                  "name": "item_id",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "item_selected",
+            "selection_cleared",
+            "add_requested",
+            "delete_requested",
+            "action_requested"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "viewer_panel": {
+      "classes": {
+        "ViewerPanel": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "set_view_title": {
+              "parameters": [
+                {
+                  "name": "title",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "show_empty_state": {
+              "parameters": [],
+              "returns": null
+            },
+            "show_grid": {
+              "parameters": [],
+              "returns": null
+            },
+            "show_loading": {
+              "parameters": [
+                {
+                  "name": "message",
+                  "kind": "positional_or_keyword",
+                  "default": "'Processing...'",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "add_grid_item": {
+              "parameters": [
+                {
+                  "name": "item_id",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "label",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": [
+            "import_clicked",
+            "back_clicked"
+          ]
+        }
+      },
+      "functions": {}
+    },
+    "workspace_layout": {
+      "classes": {
+        "WorkspaceLayout": {
+          "init": {
+            "parameters": [
+              {
+                "name": "parent",
+                "kind": "positional_or_keyword",
+                "default": "None",
+                "annotation": null
+              }
+            ],
+            "returns": null
+          },
+          "methods": {
+            "toggle_config_panel": {
+              "parameters": [
+                {
+                  "name": "show",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": "bool"
+                }
+              ],
+              "returns": null
+            }
+          },
+          "properties": {},
+          "signals": []
+        }
+      },
+      "functions": {}
+    }
+  },
+  "root_functions": {
+    "apply_stylesheet": {
+      "parameters": [],
+      "returns": null
+    }
+  }
+}

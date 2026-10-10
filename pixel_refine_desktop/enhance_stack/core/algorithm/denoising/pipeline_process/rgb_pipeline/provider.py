@@ -8,6 +8,28 @@ from typing import Sequence
 from ..contracts import FrameMetadata, ProviderFrame, SourceMode
 
 
+class _RGBHostBytePayload:
+    """Own unchanged source-file bytes while they wait in the RAM queue."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: bytes):
+        self._data: bytes | None = data
+
+    def __len__(self) -> int:
+        return 0 if self._data is None else len(self._data)
+
+    def take(self) -> bytes:
+        if self._data is None:
+            raise RuntimeError("Source byte payload was already consumed or released")
+        data = self._data
+        self._data = None
+        return data
+
+    def close(self) -> None:
+        self._data = None
+
+
 class RGBFrameProvider:
     """Load RGB (or demosaiced RAW) carriers and bind the shared accumulator."""
 
@@ -55,6 +77,30 @@ class RGBFrameProvider:
         from ...fusionet_engine.weightnet_inference import load_rgb_linear_image
 
         return load_rgb_linear_image(self.image_paths[int(index)], is_raw=self.is_raw)
+
+    def load_support_bytes_host(self, index: int) -> _RGBHostBytePayload:
+        """Read original source bytes without decoding for the bounded RAM queue."""
+
+        return _RGBHostBytePayload(Path(self.image_paths[int(index)]).read_bytes())
+
+    def decode_support_bytes_host(
+        self, index: int, payload: _RGBHostBytePayload
+    ):
+        """Decode a queued source payload after it enters in-processing."""
+
+        encoded = None
+        try:
+            encoded = payload.take()
+            from ...fusionet_engine.weightnet_inference import (
+                load_rgb_linear_image_bytes,
+            )
+
+            return load_rgb_linear_image_bytes(
+                self.image_paths[int(index)], encoded, is_raw=self.is_raw
+            )
+        finally:
+            encoded = None
+            payload.close()
 
     def load_support(self, index: int) -> ProviderFrame:
         carrier = self.load_support_host(index)

@@ -1,16 +1,15 @@
 """Display metadata for the HDR algorithm option and featured card."""
 
-CARD_NAME = "Weighted HDR"
-LEGACY_CARD_NAME = "Weighted HDR (Foundation)"
-SPDE_MR_NAME = "SPDE-MR HDR Fusion"
-LEGACY_SPDE_MR_NAME = "SPDE-MR (Patch-Based)"
+from ..catalog import get_spec, get_names
+
+CARD_NAME = get_spec("hdr", "weighted").name
+LEGACY_CARD_NAME = get_spec("hdr", "weighted").aliases[0]
+SPDE_MR_NAME = get_spec("hdr", "spde_mr").name
+LEGACY_SPDE_MR_NAME = get_spec("hdr", "spde_mr").aliases[0]
 FEATURE_CARD_NAME = "HDR Fusion"
 CARD_CONTENT = {
     "name": CARD_NAME,
-    "description": (
-        "Gabungkan frame dengan bobot eksposur, estimasi SNR Taichi, dan "
-        "penyelarasan MTB."
-    ),
+    "description": get_spec("hdr", "weighted").description,
 }
 
 
@@ -33,6 +32,5 @@ def get_process_command(settings):
         settings, category=config.KEY_HDR, stored_key=config.KEY_HDR_ALGO,
         enabled_key=config.KEY_CHECKBOX_HDR, title=FEATURE_CARD_NAME,
         none_value="No HDR",
-        aliases={LEGACY_CARD_NAME: CARD_NAME, LEGACY_SPDE_MR_NAME: SPDE_MR_NAME},
-        supported_algorithms=(CARD_NAME, SPDE_MR_NAME),
+        supported_algorithms=get_names("hdr", include_disabled=False),
     )

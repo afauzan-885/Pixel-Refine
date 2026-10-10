@@ -2,6 +2,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.lu
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.optical_flow_utils.flow_blocking import to_flow_gray_u8
 import numpy as np
 import os
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import json
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
@@ -75,10 +76,13 @@ BLOCK_MATCHING_PRESETS = {
 BLOCK_MATCHING_GPU_PRESETS = BLOCK_MATCHING_PRESETS
 
 
+
+
 class BlockMatching(LucasKanade):
-    NAME = "Block Matching Optical Flow"
-    KIND = "alignment"
-    DESCRIPTION = "Native AOT Block Matching optical flow for CPU, Vulkan, and OpenGL."
+    SPEC = get_spec("alignment", "block_matching")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
     GPU_MODULES = ("common", "block_matching", "pyramid", "remap")
     DEVICE_RESERVATION = "block_matching_frame"
 

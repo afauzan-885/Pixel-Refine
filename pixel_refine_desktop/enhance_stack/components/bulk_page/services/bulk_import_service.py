@@ -203,18 +203,22 @@ def handle_add_image_to_batch(
             weakref.ref(list_layout) if isinstance(list_layout, QObject) else None
         )
 
-        for path in unique_files:
-            try:
-                if not thumbnail_creation_enabled():
-                    break
-                loader = ThumbnailLoader(path)
-                callback = make_safe_callback(path, layout_ref)
-                loader.thumbnail_ready.connect(callback)
-                loader.start()
-                thumbnail_threads.append(loader)
-                newly_added_count += 1
-            except Exception as e_thumb:
-                print(f"[BulkImportService] Error starting thumbnail loader for {path}: {e_thumb}")
+        if getattr(batch_page_layout, "thumbnail_scheduler", None) is not None:
+            # data_changed refreshes the manifest and lets the viewport schedule jobs.
+            newly_added_count = len(unique_files)
+        else:
+            for path in unique_files:
+                try:
+                    if not thumbnail_creation_enabled():
+                        break
+                    loader = ThumbnailLoader(path)
+                    callback = make_safe_callback(path, layout_ref)
+                    loader.thumbnail_ready.connect(callback)
+                    loader.start()
+                    thumbnail_threads.append(loader)
+                    newly_added_count += 1
+                except Exception as e_thumb:
+                    print(f"[BulkImportService] Error starting thumbnail loader for {path}: {e_thumb}")
 
         print(f"[BulkImportService] Added {newly_added_count} images to batch {batch_id}")
         batch_page_layout.data_changed.emit()

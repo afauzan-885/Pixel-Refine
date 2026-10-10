@@ -6,6 +6,7 @@ Separated dari UI untuk better maintainability dan testability.
 
 from typing import Dict, List, Optional
 import config
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import normalize_name
 
 # Backend logic helper
 from pixel_refine_desktop.enhance_stack.models.algorithm_list import (
@@ -102,6 +103,7 @@ class AlgorithmLogic:
                     ):
                         self.settings[key] = bool(value)
                         continue
+                    value = normalize_name(key, value) if value is not None else None
                     # Robust check: allow None or "None" variants
                     if value is None or str(value).strip().lower() in ["none", ""]:
                         self.settings[key] = None  # Normalize to None

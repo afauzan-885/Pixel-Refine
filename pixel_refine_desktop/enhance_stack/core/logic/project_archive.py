@@ -300,6 +300,25 @@ def _merge_snapshot(
     target.execute("PRAGMA foreign_keys = ON")
     remap: dict[int, int] = {}
     try:
+        source_tables = {
+            row[0]
+            for row in source.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        if source_tables and not {
+            "batch_process",
+            "batch_process_image",
+            "images",
+        }.issubset(source_tables):
+            missing = sorted(
+                {"batch_process", "batch_process_image", "images"} - source_tables
+            )
+            raise ValueError(
+                "Invalid project database schema; missing required table(s): "
+                + ", ".join(missing)
+            )
+
         target.execute("BEGIN")
         if replace:
             # The project file is the source of truth for an explicit Open
@@ -308,11 +327,17 @@ def _merge_snapshot(
             target.execute("DELETE FROM single_process_image")
             target.execute("DELETE FROM batch_process")
             target.execute("DELETE FROM images")
-        source_columns = _table_columns(source, "batch_process")
-        order_expr = "order_index" if "order_index" in source_columns else "0"
-        batches = source.execute(
-            f"SELECT id, batch_name, {order_expr} FROM batch_process ORDER BY id"
-        ).fetchall()
+        if source_tables:
+            source_columns = _table_columns(source, "batch_process")
+            order_expr = "order_index" if "order_index" in source_columns else "0"
+            batches = source.execute(
+                f"SELECT id, batch_name, {order_expr} FROM batch_process ORDER BY id"
+            ).fetchall()
+        else:
+            # A valid but empty project can contain an uninitialized SQLite
+            # file. Treat it as an empty snapshot (not as a missing-table SQL
+            # failure), particularly for explicit Replace/Open operations.
+            batches = []
         target_batch_columns = _table_columns(target, "batch_process")
         for source_id, name, order_index in batches:
             row = target.execute(
@@ -331,13 +356,22 @@ def _merge_snapshot(
                 target_id = int(target.execute("SELECT last_insert_rowid()").fetchone()[0])
             remap[int(source_id)] = target_id
 
-        source_image_paths = dict(source.execute("SELECT id, path FROM images").fetchall())
+        source_image_paths = (
+            dict(source.execute("SELECT id, path FROM images").fetchall())
+            if source_tables
+            else {}
+        )
         for path in source_image_paths.values():
             target.execute("INSERT OR IGNORE INTO images(path) VALUES (?)", (path,))
 
-        for batch_id, image_id, is_reference in source.execute(
-            "SELECT batch_id, image_id_batch, is_reference_batch FROM batch_process_image"
-        ).fetchall():
+        source_links = (
+            source.execute(
+                "SELECT batch_id, image_id_batch, is_reference_batch FROM batch_process_image"
+            ).fetchall()
+            if source_tables
+            else []
+        )
+        for batch_id, image_id, is_reference in source_links:
             target_batch = remap.get(int(batch_id))
             source_path = source_image_paths.get(int(image_id))
             image_row = (

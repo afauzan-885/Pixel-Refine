@@ -301,6 +301,15 @@ class WorkerRunner:
                         merging_mode="none",
                         db_path=db_path,
                     ),
+                    "Block Flow": lambda: running_mf_denoiser(
+                        single_process=single_process,
+                        batch_id=batch_id,
+                        progress_callback=progress_callback,
+                        stop_callback=stop_callback,
+                        alignment_backend="Block Flow",
+                        merging_mode="none",
+                        db_path=db_path,
+                    ),
                     "RAFT": lambda: running_mf_denoiser(
                         single_process=single_process,
                         batch_id=batch_id,
@@ -404,7 +413,11 @@ class WorkerRunner:
                 },
             }
 
+            from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import run_algorithm
+            from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_result_service import returned_output_paths
+
             any_executed = False
+            output_paths = []
 
             def execute(category, selected_algo_name):
                 nonlocal any_executed
@@ -424,14 +437,16 @@ class WorkerRunner:
                         "level": "info",
                         "message": f"Worker executing '{selected_algo_name}' for batch_id: {batch_id}",
                     })
-                    actions[category][selected_algo_name]()
+                    output_paths.extend(returned_output_paths(actions[category][selected_algo_name]()))
                     any_executed = True
                 else:
-                    send_ipc({
-                        "type": "log",
-                        "level": "warning",
-                        "message": f"Algorithm '{selected_algo_name}' in category '{category}' not recognized.",
-                    })
+                    result = run_algorithm(
+                        category, selected_algo_name, single_process=single_process,
+                        batch_id=batch_id, progress_callback=progress_callback,
+                        stop_callback=stop_callback,
+                    )
+                    output_paths.extend(returned_output_paths(result))
+                    any_executed = True
 
             if (
                 denoising_owns_alignment
@@ -455,6 +470,7 @@ class WorkerRunner:
                     "message": "Task cancelled by user (partial result preserved).",
                     "success": True,
                     "any_executed": any_executed,
+                    "output_paths": output_paths,
                     "recovered": True,
                 })
             else:
@@ -463,6 +479,7 @@ class WorkerRunner:
                     "task_id": task_id,
                     "success": True,
                     "any_executed": any_executed,
+                    "output_paths": output_paths,
                 })
 
         except Exception as exc:

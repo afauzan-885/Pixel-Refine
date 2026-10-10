@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QFont, QDoubleValidator
 from PySide6.QtCore import Qt, QLocale
 
-from resources.GenericUILibrary import FormGroup, live_update
+from UILibrary import FormGroup, live_update
 from resources.styles.stylesheet import SLIDER_STYLE, APPLY_BUTTON, SCROLL_AREA
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
@@ -46,62 +46,8 @@ from .similarity_parameter_settings import (
     save_similarity_config_for_active_batch,
     save_similarity_v1_config,
 )
-from .fusionnet_parameter_settings import (
-    PARAMETER_SCHEMA as FUSIONNET_PARAMETER_SCHEMA,
-    load_fusionnet_config,
-    save_fusionnet_config,
-    save_fusionnet_config_for_active_batch,
-)
-from ..parameter_alignment.akaze_parameter_settings import (
-    PARAMETER_SCHEMA as AKAZE_PARAMETER_SCHEMA,
-    load_akaze_config,
-    save_akaze_config,
-    save_akaze_config_for_active_batch,
-)
-from ..parameter_alignment.ofb_parameter_settings import (
-    PARAMETER_SCHEMA as OFB_PARAMETER_SCHEMA,
-    load_ofb_config,
-    save_ofb_config,
-    save_ofb_config_for_active_batch,
-)
-from ..parameter_alignment.light_glue_parameter_settings import (
-    PARAMETER_SCHEMA as LIGHT_GLUE_PARAMETER_SCHEMA,
-    load_light_glue_config,
-    save_light_glue_config,
-    save_light_glue_config_for_active_batch,
-)
-from ..parameter_alignment.farneback_parameter_settings import (
-    PARAMETER_SCHEMA as FARNEBACK_PARAMETER_SCHEMA,
-    load_farneback_config,
-    save_farneback_config,
-    save_farneback_config_for_active_batch,
-)
-from ..parameter_alignment.lucas_kanade_parameter_settings import (
-    PARAMETER_SCHEMA as LUCAS_KANADE_PARAMETER_SCHEMA,
-    load_lucas_kanade_config,
-    save_lucas_kanade_config,
-    save_lucas_kanade_config_for_active_batch,
-)
-from ..parameter_alignment.block_matching_parameter_settings import (
-    GPU_PARAMETER_SCHEMA as BLOCK_MATCHING_GPU_PARAMETER_SCHEMA,
-    load_block_matching_config,
-    save_block_matching_config,
-    save_block_matching_config_for_active_batch,
-)
-from ..parameter_alignment.raft_parameter_settings import (
-    PARAMETER_SCHEMA as RAFT_PARAMETER_SCHEMA,
-    load_raft_config,
-    save_raft_config,
-    save_raft_config_for_active_batch,
-)
-from ..parameter_alignment.block_flow_parameter_settings import (
-    PARAMETER_SCHEMA as BLOCK_FLOW_PARAMETER_SCHEMA,
-    load_block_flow_config,
-    save_block_flow_config,
-    save_block_flow_config_for_active_batch,
-)
-from ..parameter_alignment.alignment_config_provider import (
-    save_alignment_config_for_active_batch,
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import (
+    get_parameter_provider, get_specs, normalize_name,
 )
 
 
@@ -380,70 +326,12 @@ def collect(widget_map):
 
 
 ALIGNMENT_PARAMETER_PROVIDERS = {
-    "AKAZE": {
-        "schema": AKAZE_PARAMETER_SCHEMA,
-        "load": load_akaze_config,
-        "save": save_akaze_config,
-        "save_batch": save_akaze_config_for_active_batch,
-    },
-    "OFB": {
-        "schema": OFB_PARAMETER_SCHEMA,
-        "load": load_ofb_config,
-        "save": save_ofb_config,
-        "save_batch": save_ofb_config_for_active_batch,
-    },
-    "Light Glue": {
-        "schema": LIGHT_GLUE_PARAMETER_SCHEMA,
-        "load": load_light_glue_config,
-        "save": save_light_glue_config,
-        "save_batch": save_light_glue_config_for_active_batch,
-    },
-    "Farneback": {
-        "schema": FARNEBACK_PARAMETER_SCHEMA,
-        "load": load_farneback_config,
-        "save": save_farneback_config,
-        "save_batch": save_farneback_config_for_active_batch,
-    },
-    "Lucas Kanade": {
-        "schema": LUCAS_KANADE_PARAMETER_SCHEMA,
-        "load": load_lucas_kanade_config,
-        "save": save_lucas_kanade_config,
-        "save_batch": save_lucas_kanade_config_for_active_batch,
-    },
-    "Block Flow": {
-        "schema": BLOCK_FLOW_PARAMETER_SCHEMA,
-        "load": load_block_flow_config,
-        "save": save_block_flow_config,
-        "save_batch": save_block_flow_config_for_active_batch,
-    },
-    "Block Matching GPU": {
-        "schema": BLOCK_MATCHING_GPU_PARAMETER_SCHEMA,
-        "load": load_block_matching_config,
-        "save": save_block_matching_config,
-        "save_batch": save_block_matching_config_for_active_batch,
-    },
-    "RAFT": {
-        "schema": RAFT_PARAMETER_SCHEMA,
-        "load": load_raft_config,
-        "save": save_raft_config,
-        "save_batch": save_raft_config_for_active_batch,
-    },
+    spec.name: get_parameter_provider("alignment", spec.name)
+    for spec in get_specs("alignment") if spec.parameters
 }
-
-
 DENOISING_PARAMETER_PROVIDERS = {
-    "Similarity": {
-        "schema": SIMILARITY_PARAMETER_SCHEMA,
-        "load": load_similarity_config,
-        "save": save_similarity_config,
-        "save_batch": save_similarity_config_for_active_batch,
-    },
-    "FusionNet": {
-        "schema": FUSIONNET_PARAMETER_SCHEMA,
-        "load": load_fusionnet_config,
-        "save": save_fusionnet_config,
-        "save_batch": save_fusionnet_config_for_active_batch,
-    },
+    spec.name: get_parameter_provider("denoising", spec.name)
+    for spec in get_specs("denoising") if spec.parameters
 }
 # ═══════════════════════════════════════════════════════════════════════
 # SIMILARITY PARAMETER PAGE
@@ -638,8 +526,8 @@ class AlignmentParameterPage(QWidget):
 
     def __init__(self, algorithm_name, parent=None):
         super().__init__(parent)
-        self.algorithm_name = algorithm_name
-        self.provider = ALIGNMENT_PARAMETER_PROVIDERS.get(algorithm_name)
+        self.algorithm_name = normalize_name("alignment", algorithm_name)
+        self.provider = ALIGNMENT_PARAMETER_PROVIDERS.get(self.algorithm_name)
         self.controls = {}
         self._loading = False
         self._responsive_slider_rows = []
@@ -892,8 +780,8 @@ class DenoisingParameterPage(AlignmentParameterPage):
 
     def __init__(self, algorithm_name, parent=None):
         QWidget.__init__(self, parent)
-        self.algorithm_name = algorithm_name
-        self.provider = DENOISING_PARAMETER_PROVIDERS.get(algorithm_name)
+        self.algorithm_name = normalize_name("denoising", algorithm_name)
+        self.provider = DENOISING_PARAMETER_PROVIDERS.get(self.algorithm_name)
         self.controls = {}
         self._loading = False
         self._responsive_slider_rows = []
@@ -921,7 +809,7 @@ def get_denoising_settings_page(algorithm_name):
         return scroll
 
     page = DenoisingParameterPage(
-        "FusionNet" if algorithm_name == "Spatial AI" else algorithm_name
+        normalize_name("denoising", algorithm_name)
     )
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)

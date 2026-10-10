@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
-from resources.GenericUILibrary import (
+from UILibrary import (
     Button,
     ProgressBar as ModernProgressBar,
 )
@@ -153,17 +153,9 @@ class WorkspaceParameterPanel(QWidget):
         self.process_btn = Button("▶ Start", variant="primary")
         self.process_btn.setFixedWidth(180)
 
-        from resources.GenericUILibrary.theme import get_theme, create_button_style
+        from UILibrary.theme import get_theme, create_button_style, apply_style
         theme = get_theme()
-        self.process_btn.setStyleSheet(
-            create_button_style(self.process_btn.variant, theme)
-            + """
-            QPushButton {
-                padding: 6px 12px;
-                font-size: 10pt;
-            }
-        """
-        )
+        apply_style(self.process_btn, create_button_style(self.process_btn.variant, theme).with_overrides(padding="6px 12px", font_size="10pt"))
 
         self.process_btn.clicked.connect(self._on_process_button_clicked)
         btn_layout.addWidget(self.process_btn)
@@ -366,7 +358,7 @@ class WorkspaceParameterPanel(QWidget):
 
     def _update_all_buttons(self, enabled=None, text=None, variant=None):
         """Sync semua process button instances."""
-        from resources.GenericUILibrary.theme import get_theme, create_button_style
+        from UILibrary.theme import get_theme, create_button_style, apply_style
         theme = get_theme()
         for btn in self._all_process_buttons:
             try:
@@ -379,15 +371,7 @@ class WorkspaceParameterPanel(QWidget):
                     btn.setObjectName(
                         "deleteButton" if variant == "danger" else "processButton"
                     )
-                    btn.setStyleSheet(
-                        create_button_style(btn.variant, theme)
-                        + """
-                        QPushButton {
-                            padding: 6px 12px;
-                            font-size: 10pt;
-                        }
-                    """
-                    )
+                    apply_style(btn, create_button_style(btn.variant, theme).with_overrides(padding="6px 12px", font_size="10pt"))
                     btn.style().unpolish(btn)
                     btn.style().polish(btn)
             except RuntimeError:

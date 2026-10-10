@@ -1,5 +1,4 @@
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -12,23 +11,21 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 from PySide6.QtCore import Signal, Qt, QTimer, QEvent
-from resources.animations.animation_manager import (
-    StackedWidgetAnimator,
-)
 import json
 import os
 import config
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import normalize_name
 
 
 # Generic UI Library
-from resources.GenericUILibrary import (
+from UILibrary import (
     ListGroup,
     Button,
     FormGroup,
     FeatureCard,
     FeatureCardGroup,
 )
-from resources.GenericUILibrary.mixins import SyncMixin
+from UILibrary.mixins import SyncMixin
 
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (
     BatchProcessDialog,
@@ -53,7 +50,7 @@ from resources.animations.animation_manager import (
 )
 
 
-from resources.GenericUILibrary import live_update
+from UILibrary import live_update
 
 
 @live_update
@@ -172,15 +169,8 @@ class RightPanel(QWidget, SyncMixin):
 
     def _normalize_alignment_form_value(self):
         raw_value = self.align_form.get_value()
-        mapping = {
-            "Farneback Optical Flow": "Farneback",
-            "Lucas Kanade Optical Flow": "Lucas Kanade",
-            "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
-            "Block Matching GPU Optical Flow": "Block Matching GPU",
-            "RAFT Optical Flow": "RAFT",
-        }
-        normalized = mapping.get(str(raw_value or "").strip())
-        if normalized:
+        normalized = normalize_name("alignment", raw_value)
+        if normalized and normalized != raw_value:
             self.align_form.set_value(normalized)
 
     def _save_batch_settings(self):
@@ -339,7 +329,7 @@ class RightPanel(QWidget, SyncMixin):
         self.denoise_card.value_changed.connect(self._on_settings_changed)
         self.add_binding("denoising_algo", self.denoise_card, fallback="No Denoising")
 
-        self.card_group = FeatureCardGroup(columns=2, spacing=10)
+        self.card_group = FeatureCardGroup(columns=2, spacing=4)
         for card in (self.sr_card, self.hdr_card, self.denoise_card):
             self.card_group.add_card(card)
             card.checked_changed.connect(
@@ -351,14 +341,6 @@ class RightPanel(QWidget, SyncMixin):
         self.scroll_content_layout.addWidget(
             self.card_group, 0, Qt.AlignmentFlag.AlignTop
         )
-
-        for card in (self.sr_card, self.hdr_card, self.denoise_card):
-            card.combo.setStyleSheet(card.combo.styleSheet() + """
-            QComboBox {
-                padding: 3px 6px;
-                font-size: 9pt;
-            }
-        """)
 
         self.scroll_area.setWidget(self.scroll_content)
 
@@ -444,12 +426,9 @@ class RightPanel(QWidget, SyncMixin):
             self.process_all_btn.setFixedHeight(btn_h)
             
             font_size = 8.0 + f * 3.0  # scale from 8pt to 11pt
-            from resources.GenericUILibrary.theme import get_theme, create_button_style
+            from UILibrary.theme import get_theme, create_button_style, apply_style
             theme = get_theme()
-            base_style = create_button_style("primary", theme)
-            self.process_all_btn.setStyleSheet(
-                base_style + f" QPushButton {{ padding: 2px 4px; font-size: {font_size:.1f}pt; }}"
-            )
+            apply_style(self.process_all_btn, create_button_style("primary", theme).with_overrides(padding="2px 4px", font_size=f"{font_size:.1f}pt"))
 
     def _on_settings_changed(self, save_to_store=True):
         """Emit current settings and optionally save to persistence."""
@@ -461,11 +440,24 @@ class RightPanel(QWidget, SyncMixin):
             # Repair older batch settings that enabled multiple operations.
             self._on_card_checked(checked_cards[-1], True)
             save_to_store = True
-        for card in (self.sr_card, self.hdr_card, self.denoise_card):
-            card.combo.setEnabled(card.is_checked)
         self._balance_splitter_sizes()
 
-        settings = {
+        settings = self._collect_ui_settings()
+
+        if settings == self._last_emitted_settings:
+            if save_to_store and self.current_batch_id is not None:
+                self._sync_store_timer.start()
+            return
+
+        self._publish_settings(settings)
+
+        # Save to Store after a short debounce to avoid rapid file writes.
+        if save_to_store and self.current_batch_id is not None:
+            self._sync_store_timer.start()
+
+    def _collect_ui_settings(self):
+        """Read the current widgets directly, without relying on queued signals."""
+        return {
             config.KEY_ALIGNMENT: self.align_form.get_value() or "",
             config.KEY_SUPER_RESOLUTION: self.sr_card.get_value() or "",
             config.KEY_DENOISING: self.denoise_card.get_value() or "",
@@ -477,21 +469,65 @@ class RightPanel(QWidget, SyncMixin):
             config.KEY_CHECKBOX_HDR: bool(self.hdr_card.is_checked),
         }
 
-        if settings == self._last_emitted_settings:
-            return
-
+    def _publish_settings(self, settings):
+        """Publish a fresh in-memory snapshot to the batch workflow."""
         self._last_emitted_settings = settings.copy()
-
-        # Publish a complete in-memory snapshot before notifying consumers.
         self.logic.set_settings(settings)
-
-        # 1. Emit realtime signal for UI adaptation
         self.algorithm_settings_changed.emit(settings)
         self.process_command_changed.emit(build_start_command(settings))
 
-        # 3. Save to Store if triggered by user interaction (debounced 1s)
-        if save_to_store and self.current_batch_id is not None:
+    def _collect_store_settings(self):
+        """Read this batch's persisted values for the delayed-save comparison."""
+        if not getattr(self, "_store", None) or self.current_batch_id is None:
+            return None
+
+        prefix = str(self.current_batch_id)
+
+        def stored(key, fallback):
+            return self._store.get(f"{prefix}.{key}", fallback)
+
+        alignment = stored(config.KEY_ALIGNMENT_ALGO, "No Alignment") or "No Alignment"
+        return {
+            config.KEY_ALIGNMENT: alignment,
+            config.KEY_SUPER_RESOLUTION: stored(
+                config.KEY_SUPER_RESOLUTION_ALGO, "No Super Resolution"
+            ) or "No Super Resolution",
+            config.KEY_DENOISING: stored(
+                config.KEY_DENOISING_ALGO, "No Denoising"
+            ) or "No Denoising",
+            config.KEY_HDR: stored(config.KEY_HDR_ALGO, "No HDR") or "No HDR",
+            config.KEY_CHECKBOX_ALIGN: bool(
+                stored(config.KEY_CHECKBOX_ALIGN, alignment != "No Alignment")
+            ),
+            config.KEY_CHECKBOX_SUPER_RES: bool(
+                stored(config.KEY_CHECKBOX_SUPER_RES, False)
+            ),
+            config.KEY_CHECKBOX_DENOISING: bool(
+                stored(config.KEY_CHECKBOX_DENOISING, False)
+            ),
+            config.KEY_CHECKBOX_HDR: bool(stored(config.KEY_CHECKBOX_HDR, False)),
+        }
+
+    def snapshot_settings_for_start(self):
+        """Use visible controls immediately and queue persistence only if stale."""
+        checked_cards = [
+            card for card in (self.sr_card, self.hdr_card, self.denoise_card)
+            if card.is_checked
+        ]
+        if len(checked_cards) > 1:
+            self._on_card_checked(checked_cards[-1], True)
+
+        settings = self._collect_ui_settings()
+        if settings != self._last_emitted_settings:
+            self._publish_settings(settings)
+        else:
+            self.logic.set_settings(settings)
+
+        if self._collect_store_settings() != settings:
             self._sync_store_timer.start()
+        else:
+            self._sync_store_timer.stop()
+        return settings.copy()
 
     def get_current_settings(self):
         """Public accessor for settings."""
@@ -572,7 +608,7 @@ class RightPanel(QWidget, SyncMixin):
             show_confirm = True
 
         if show_confirm:
-            from resources.GenericUILibrary.modals import modal_confirm
+            from UILibrary.modals import modal_confirm
             from PySide6.QtWidgets import QDialog
             dialog = modal_confirm(
                 message="Apakah Anda yakin ingin membuat batch baru?",
@@ -617,7 +653,7 @@ class RightPanel(QWidget, SyncMixin):
         if not selected_ids:
             return
 
-        from resources.GenericUILibrary import modal_confirm
+        from UILibrary import modal_confirm
         confirmed = modal_confirm.question(
             self,
             language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(len(selected_ids))
@@ -685,13 +721,7 @@ class RightPanel(QWidget, SyncMixin):
         if checked:
             for card in (self.sr_card, self.hdr_card, self.denoise_card):
                 if card is not selected and card.is_checked:
-                    card.blockSignals(True)
-                    try:
-                        card.setChecked(False, animate=False)
-                    finally:
-                        card.blockSignals(False)
-        for card in (self.sr_card, self.hdr_card, self.denoise_card):
-            card.combo.setEnabled(card.is_checked)
+                    card.set_value(card.fallback_val)
         self._layout_balance_timer.start(0)
 
     def eventFilter(self, watched, event):
@@ -943,8 +973,8 @@ class RightPanel(QWidget, SyncMixin):
             if card is not None and hasattr(card, "update_theme"):
                 card.update_theme()
         # 3. Update buttons
-        from resources.GenericUILibrary.theme import get_theme, create_button_style
+        from UILibrary.theme import get_theme, create_button_style, apply_style
         theme = get_theme()
         for btn in [self.new_btn, self.del_btn, self.process_all_btn]:
             if btn:
-                btn.setStyleSheet(create_button_style(btn.variant, theme) + " QPushButton { padding: 4px 8px; font-size: 8pt; }")
+                apply_style(btn, create_button_style(btn.variant, theme).with_overrides(padding="4px 8px", font_size="8pt"))

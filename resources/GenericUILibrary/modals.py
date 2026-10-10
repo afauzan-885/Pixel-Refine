@@ -608,17 +608,17 @@ class ModalDialog(QDialog):
 
             button_layout.addStretch()
 
-            from .theme import get_theme, create_button_style
+            from .theme import get_theme, create_button_style, apply_style
             theme = get_theme()
             from .buttons import Button
             self.yes_button = Button("Yes", variant="primary")
             self.yes_button.setFixedWidth(32)
-            self.yes_button.setStyleSheet(create_button_style("primary", theme) + " QPushButton { border: 1px solid #A9DFBF; padding: 2px; font-size: 8pt; }")
+            apply_style(self.yes_button, create_button_style("primary", theme).with_overrides(padding="2px", font_size="8pt"))
             self.yes_button.clicked.connect(self.accept)
 
             self.no_button = Button("No", variant="secondary")
             self.no_button.setFixedWidth(32)
-            self.no_button.setStyleSheet(create_button_style("secondary", theme) + f" QPushButton {{ border: 1px solid {theme.border_color}; background-color: {theme.bg_secondary}; color: {theme.text_primary}; padding: 2px; font-size: 8pt; }}")
+            apply_style(self.no_button, create_button_style("secondary", theme).with_overrides(background=theme.bg_secondary, color=theme.text_primary, border_color=theme.border_color, border_width=1, padding="2px", font_size="8pt"))
             self.no_button.clicked.connect(self._trigger_close_or_cancel)
 
             button_layout.addWidget(self.yes_button)
@@ -823,13 +823,13 @@ class AlertModal(QDialog):
         button_layout.addStretch()
 
         from .buttons import Button
-        from .theme import get_theme, create_button_style
+        from .theme import get_theme, create_button_style, apply_style
         theme = get_theme()
 
         btn_variant = "danger" if variant in ("danger", "error") else "primary"
         self.ok_button = Button("OK", variant=btn_variant)
         self.ok_button.setFixedWidth(75)
-        self.ok_button.setStyleSheet(create_button_style(btn_variant, theme) + " QPushButton { font-size: 9pt; padding: 4px 12px; }")
+        apply_style(self.ok_button, create_button_style(btn_variant, theme).with_overrides(font_size="9pt", padding="4px 12px"))
         self.ok_button.clicked.connect(self.accept)
 
         button_layout.addWidget(self.ok_button)

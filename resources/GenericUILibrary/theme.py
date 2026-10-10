@@ -343,7 +343,7 @@ def create_button_style(variant="secondary", theme=None):
     Create button stylesheet for a given variant
 
     Usage:
-        btn.setStyleSheet(create_button_style("primary"))
+        apply_style(btn, create_button_style("primary"))
     """
     if theme is None:
         theme = get_theme()
@@ -702,3 +702,234 @@ try:
 except ImportError:
     # Fallback jika dijalankan di environment non-PySide6 (misalnya unit test luar)
     pass
+
+
+# ---------------------------------------------------------------------------
+# Shared backend-neutral style contract (overrides the legacy QSS builders).
+# Keep this schema and values in sync with UILibrary/theme.py.
+# ---------------------------------------------------------------------------
+from .style_spec import StyleSpec
+
+
+def _neutral_border_color(value, fallback=None):
+    if not value or value == "none":
+        return fallback
+    fields = str(value).split()
+    return fields[-1] if fields else fallback
+
+
+def create_button_style(variant="secondary", theme=None):
+    if theme is None:
+        theme = get_theme()
+    border_color, border_width = None, 0
+    if variant == "primary":
+        bg, fg = theme.btn_primary_bg, theme.btn_primary_text
+        border_color, border_width = _neutral_border_color(theme.btn_primary_border), 1
+    elif variant == "success":
+        bg, fg = theme.btn_success_bg, theme.btn_success_text
+        border_color, border_width = _neutral_border_color(theme.btn_success_border), 1
+    elif variant == "danger":
+        bg, fg = theme.btn_danger_bg, theme.btn_danger_text
+        border_color, border_width = _neutral_border_color(theme.btn_danger_border), 1
+    else:
+        bg = theme.get_variant_color(variant)
+        fg = theme.text_white if variant in ("info", "dark") else theme.text_primary
+    return StyleSpec(
+        "button",
+        {"background": bg, "color": fg, "border_color": border_color,
+         "border_width": border_width, "radius": theme.radius_md,
+         "padding": "8px 16px", "font_size": theme.font_md,
+         "font_weight": "bold"},
+        {"hover": {"background": theme.get_variant_hover_color(variant)},
+         "disabled": {"background": theme.bg_secondary, "color": theme.text_muted}},
+        {},
+    )
+
+
+def create_card_style(theme=None):
+    theme = theme or get_theme()
+    return StyleSpec("card", {"background": theme.bg_primary,
+        "border_color": theme.border_color, "border_width": 1,
+        "radius": theme.radius_lg}, {}, {})
+
+
+def create_input_style(theme=None):
+    theme = theme or get_theme()
+    return StyleSpec("input", {"background": theme.bg_primary,
+        "border_color": theme.border_color, "border_width": 1,
+        "radius": theme.radius_sm, "padding": "6px 10px",
+        "font_size": theme.font_md, "color": theme.text_primary},
+        {"focus": {"border_color": theme.focus_color, "border_width": 2},
+         "disabled": {"background": theme.bg_secondary, "color": theme.text_muted}}, {})
+
+
+def create_select_style(theme=None):
+    theme = theme or get_theme()
+    return StyleSpec("select", {"background": theme.bg_primary,
+        "border_color": theme.border_color, "border_width": 1,
+        "radius": theme.radius_sm, "padding": "6px 10px",
+        "font_size": theme.font_md, "color": theme.text_primary},
+        {"hover": {"border_color": theme.focus_color}},
+        {"popup": {"background": theme.bg_primary,
+                    "border_color": theme.border_color,
+                    "border_width": 1,
+                    "selected_background": theme.primary,
+                    "selected_color": theme.text_white},
+         "dropdown": {"padding_right": 5}})
+
+
+def create_list_style(theme=None):
+    theme = theme or get_theme()
+    return StyleSpec("list", {"background": theme.bg_primary,
+        "border_color": theme.border_color, "border_width": 1,
+        "radius": theme.radius_md},
+        {"item_hover": {"background": theme.bg_secondary},
+         "item_selected": {"background": theme.primary, "color": theme.text_white}},
+        {"item": {"padding": 8, "radius": theme.radius_sm}})
+
+
+def create_scrollbar_style(theme=None):
+    theme = theme or get_theme()
+    return StyleSpec("scrollbar", {"track": "transparent", "thickness": 10},
+        {"hover": {"handle_color": theme.text_secondary}},
+        {"handle": {"color": theme.border_dark, "radius": 5,
+                     "minimum_vertical": 25, "minimum_horizontal": 25}})
+
+
+def create_checkbox_style(theme=None):
+    theme = theme or get_theme()
+    hover = theme.get_variant_hover_color("primary")
+    return StyleSpec("checkbox", {"spacing": 12, "font_size": "11pt",
+        "color": theme.text_checkbox},
+        {"focus": {"color": theme.focus_color},
+         "disabled": {"color": theme.text_muted},
+         "hover": {"indicator_background": theme.bg_secondary,
+                   "indicator_border_color": theme.focus_color},
+         "checked": {"indicator_background": theme.focus_color,
+                     "indicator_border_color": theme.focus_color},
+         "checked_hover": {"indicator_background": hover,
+                            "indicator_border_color": hover}},
+        {"indicator": {"width": 15, "height": 15, "radius": 8,
+                        "border_color": theme.border_color,
+                        "border_width": 1,
+                        "background": theme.bg_primary},
+         "disabled_indicator": {"background": theme.bg_secondary,
+                                "border_color": theme.border_color,
+                                "border_width": 1}})
+
+
+def _qss_declarations(values):
+    names = {"background": "background-color", "border_color": "border-color",
+             "radius": "border-radius", "font_size": "font-size",
+             "font_weight": "font-weight", "indicator_background": "background-color",
+             "indicator_border_color": "border-color", "selected_background": "background-color",
+             "selected_color": "color", "handle_color": "background-color",
+             "padding_right": "padding-right"}
+    out = []
+    values = dict(values)
+    color, width = values.pop("border_color", None), values.pop("border_width", None)
+    if width:
+        out.append(f"border: {width}px solid {color};")
+    elif color:
+        out.append(f"border-color: {color};")
+    for key, value in values.items():
+        if value is not None:
+            name = names.get(key, key.replace("_", "-"))
+            if key == "radius":
+                value = f"{value}px"
+            elif key in {"width", "height", "padding", "padding_right"} and isinstance(value, (int, float)):
+                value = f"{value}px"
+            out.append(f"{name}: {value};")
+    return " ".join(out)
+
+
+def apply_style(widget, spec):
+    """Render a neutral descriptor as QSS for a PySide6 control."""
+    if not isinstance(spec, StyleSpec):
+        raise TypeError("spec must be a StyleSpec")
+    selectors = {"button": "QPushButton", "card": "QFrame",
+        "input": "QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox",
+        "select": "QComboBox", "list": "QListWidget",
+        "scrollbar": "QScrollBar", "checkbox": "QCheckBox"}
+    try:
+        selector = selectors[spec.kind]
+    except KeyError as exc:
+        raise ValueError(f"unsupported StyleSpec kind: {spec.kind}") from exc
+    if spec.kind == "scrollbar":
+        base = spec.base
+        handle = spec.parts.get("handle", {})
+        hover = spec.states.get("hover", {}).get("handle_color")
+        rules = [
+            f"QScrollBar:vertical {{ background: {base['track']}; width: {base['thickness']}px; margin: 0px; }}",
+            f"QScrollBar:horizontal {{ background: {base['track']}; height: {base['thickness']}px; margin: 0px; }}",
+            "QScrollBar::handle { " + _qss_declarations({"background": handle.get("color"), "radius": handle.get("radius")}) + " }",
+            f"QScrollBar::handle:vertical {{ min-height: {handle.get('minimum_vertical', 25)}px; }}",
+            f"QScrollBar::handle:horizontal {{ min-width: {handle.get('minimum_horizontal', 25)}px; }}",
+            "QScrollBar::add-line, QScrollBar::sub-line { height: 0px; width: 0px; background: none; }",
+            "QScrollBar::add-page, QScrollBar::sub-page { background: none; }",
+        ]
+        if hover:
+            rules.append(f"QScrollBar::handle:hover {{ background-color: {hover}; }}")
+        widget.setStyleSheet("\n".join(rules))
+        return widget
+    rules = [f"{selector} {{ {_qss_declarations(spec.base)} }}"]
+    suffixes = {"hover": ":hover", "focus": ":focus", "disabled": ":disabled",
+                "checked": ":checked", "checked_hover": ":checked:hover"}
+    if spec.kind == "input":
+        states = {"focus": ":focus", "disabled": ":disabled"}
+    elif spec.kind == "select":
+        states = {"hover": ":hover"}
+    elif spec.kind == "checkbox":
+        states = {"focus": ":focus", "disabled": ":disabled",
+                  "hover": "::indicator:hover", "checked": "::indicator:checked",
+                  "checked_hover": "::indicator:checked:hover"}
+    elif spec.kind == "list":
+        states = {"item_hover": "::item:hover", "item_selected": "::item:selected"}
+    elif spec.kind == "scrollbar":
+        states = {"hover": "::handle:hover"}
+    else:
+        states = suffixes
+    for state, suffix in states.items():
+        if state in spec.states:
+            state_selectors = ", ".join(
+                f"{part.strip()}{suffix}" for part in selector.split(",")
+            )
+            rules.append(f"{state_selectors} {{ {_qss_declarations(spec.states[state])} }}")
+    if spec.kind == "select":
+        popup = spec.parts.get("popup", {})
+        rules.append("QComboBox QAbstractItemView { " + _qss_declarations({
+            "background": popup.get("background"),
+            "border_color": popup.get("border_color"),
+            "border_width": popup.get("border_width"),
+        }) + " }")
+        rules.append("QComboBox QAbstractItemView::item:selected { " + _qss_declarations({
+            "background": popup.get("selected_background"),
+            "color": popup.get("selected_color"),
+        }) + " }")
+    if spec.kind == "list":
+        item = spec.parts.get("item", {})
+        rules.append("QListWidget::item { " + _qss_declarations(item) + " }")
+    if spec.kind == "scrollbar":
+        handle = spec.parts.get("handle", {})
+        rules.append("QScrollBar::handle { " + _qss_declarations({
+            "background": handle.get("color"), "radius": handle.get("radius")
+        }) + " }")
+    if spec.kind == "checkbox":
+        indicator = spec.parts.get("indicator", {})
+        disabled_indicator = spec.parts.get("disabled_indicator", {})
+        rules.append("QCheckBox::indicator { " + _qss_declarations({
+            "width": indicator.get("width"), "height": indicator.get("height"),
+            "radius": indicator.get("radius"), "border_color": indicator.get("border_color"),
+            "border_width": indicator.get("border_width"),
+            "background": indicator.get("background")
+        }) + " }")
+        if disabled_indicator:
+            rules.append("QCheckBox::indicator:disabled { " + _qss_declarations({
+                "border_color": disabled_indicator.get("border_color"),
+                "border_width": disabled_indicator.get("border_width"),
+                "background": disabled_indicator.get("background"),
+            }) + " }")
+    if not hasattr(widget, "setStyleSheet"):
+        raise TypeError(f"{type(widget).__name__} is not a PySide6 styled widget")
+    widget.setStyleSheet("\n".join(rules))
+    return widget

@@ -167,7 +167,7 @@ def test_external_import_sync_to_batch_mode(qapp):
         assert display_panel.grid_content_stack.currentWidget() == display_panel.grid_container
 
         # Ensure NO rogue ImageCard top-level windows were launched!
-        from resources.GenericUILibrary import ImageCard
+        from UILibrary import ImageCard
         card_windows = [w for w in qapp.topLevelWidgets() if isinstance(w, ImageCard)]
         assert len(card_windows) == 0
 

@@ -3313,13 +3313,25 @@ def box_filter(src, kernel_size=3, return_gpu=False, dst=None):
     h, w = src_buf.shape[:2]
     radius = kernel_size // 2
     is_3d = len(src_buf.shape) == 3
+    if is_3d and src_buf.shape[-1] == 3 and not getattr(src_buf, "is_vector", False):
+        # Use the validated RGB graph for both HWC and vec3 callers. A view
+        # only changes ABI metadata; the legacy scalar RGB artifact omits R/G
+        # writes and must not be selected for physical HWC RGB storage.
+        src_buf = src_buf.view_as_vector(True, vector_dim=3)
+    is_vec = getattr(src_buf, "is_vector", False)
 
     if dst is None:
-        dst_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_3d)
+        # HWC storage can be a scalar ndim=3 array or a vec3 ndim=2 array.
+        # Match the selected graph, not merely the number of shape entries.
+        dst_buf = OutputArray(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
     else:
         dst_buf = dst
 
-    is_vec = getattr(src_buf, "is_vector", False)
+    dst_arg = dst_buf
+    if is_3d and getattr(dst_buf, "is_vector", False) != is_vec:
+        # A view changes only graph argument metadata; retain caller ownership
+        # and return the original destination without any upload/copy.
+        dst_arg = dst_buf.view_as_vector(is_vec, vector_dim=3)
 
     if kernel_size == 3:
         target = "box_filter_fused_3x3_1ch_f32"
@@ -3329,7 +3341,7 @@ def box_filter(src, kernel_size=3, return_gpu=False, dst=None):
                 if is_vec
                 else "box_filter_fused_3x3_3ch_f32"
             )
-        _mod("box_filter").run(target, src=src_buf, dst=dst_buf, h=h, w=w)
+        _mod("box_filter").run(target, src=src_buf, dst=dst_arg, h=h, w=w)
     else:
         tmp_buf = engine.allocate(src_buf.shape, dtype=src_buf.dtype, is_vector=is_vec)
         target = "box_filter_separable_generic_1ch_f32"
@@ -3339,10 +3351,12 @@ def box_filter(src, kernel_size=3, return_gpu=False, dst=None):
                 if is_vec
                 else "box_filter_separable_generic_3ch_f32"
             )
-        _mod("box_filter").run(
-            target, src=src_buf, tmp=tmp_buf, dst=dst_buf, h=h, w=w, radius=radius
-        )
-        tmp_buf.release()
+        try:
+            _mod("box_filter").run(
+                target, src=src_buf, tmp=tmp_buf, dst=dst_arg, h=h, w=w, radius=radius
+            )
+        finally:
+            tmp_buf.release()
 
     return dst_buf if return_gpu else dst_buf.to_numpy()
 

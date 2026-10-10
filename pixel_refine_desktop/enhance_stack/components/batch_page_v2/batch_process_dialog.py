@@ -22,7 +22,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication
 
 # Generic UI Library
-from resources.GenericUILibrary import (
+from UILibrary import (
     DataTable,
     Button,
     ModalDialog,

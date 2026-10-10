@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Callable, Mapping
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import normalize_name
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,7 @@ def create_card_command(
         return None
     if not settings.get(enabled_key, True):
         return None
-    algorithm = (aliases or {}).get(algorithm, algorithm)
+    algorithm = normalize_name(category, (aliases or {}).get(algorithm, algorithm))
     if supported_algorithms is not None and algorithm not in supported_algorithms:
         return None
     return CardProcessCommand(category, algorithm, title, enabled_key, direct_start)

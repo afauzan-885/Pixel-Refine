@@ -1,3 +1,4 @@
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import json
 import os
 
@@ -38,10 +39,13 @@ RAFT_PRESETS = {
 }
 
 
+
+
 class RAFTFlow(LucasKanade):
-    NAME = "RAFT Optical Flow"
-    KIND = "alignment"
-    DESCRIPTION = "ONNX RAFT optical flow alignment with dynamic 360x480 model tiles."
+    SPEC = get_spec("alignment", "raft")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     def __init__(self):
         super().__init__()

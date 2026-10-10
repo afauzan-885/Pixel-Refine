@@ -9,7 +9,7 @@ dengan enhance_stack tetapi dengan pengaturan 3D reconstruction.
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout
 from PySide6.QtCore import Qt
 
-from resources.GenericUILibrary import (
+from UILibrary import (
     FormGroup,
     Button,
 )

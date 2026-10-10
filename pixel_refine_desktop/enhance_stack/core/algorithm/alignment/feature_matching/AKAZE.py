@@ -5,6 +5,7 @@ Uses Non-linear Diffusion Scale-Space & Sub-pixel Hessian ANMS from Taichi Visio
 for robust and fast feature-based global motion estimation.
 """
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import json
 import os
 import numpy as np
@@ -16,10 +17,13 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
 )
 
 
+
+
 class AKAZEAlgorithm:
-    NAME = "AKAZE"
-    KIND = "alignment"
-    DESCRIPTION = "Taichi Vision Accelerated Non-linear Diffusion Scale-Space Alignment."
+    SPEC = get_spec("alignment", "akaze")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     PRESETS = {
         "fast": {"thresh": 0.003, "octaves": 3, "layers": 3, "ratio": 0.75, "max_kps": 600},

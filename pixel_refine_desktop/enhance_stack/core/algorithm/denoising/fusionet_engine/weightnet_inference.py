@@ -145,6 +145,86 @@ def load_rgb_linear_image(path: str | Path, is_raw: bool = False) -> np.ndarray:
     return np.ascontiguousarray(image_rgb.astype(np.float32), dtype=np.float32)
 
 
+def load_rgb_linear_image_bytes(
+    path: str | Path,
+    encoded: bytes | bytearray | memoryview,
+    is_raw: bool = False,
+) -> np.ndarray:
+    """Decode unchanged source-file bytes into the canonical linear RGB format.
+
+    This mirrors :func:`load_rgb_linear_image` while avoiding a second disk read
+    after a source payload has been prefetched into the RAM Queue.
+    """
+    from io import BytesIO
+
+    path = Path(path)
+    encoded_bytes = bytes(encoded)
+    if not encoded_bytes:
+        raise ValueError(f"Image payload is empty: {path}")
+
+    from taichi_vision import taichi_aot
+
+    if is_raw or path.suffix.lower() in RAW_EXTENSIONS:
+        try:
+            import rawpy
+
+            with rawpy.imread(BytesIO(encoded_bytes)) as raw:
+                demosaiced = taichi_aot.demosaic(
+                    raw,
+                    method="hamilton",
+                    return_gpu=False,
+                )
+            img_np = np.asarray(demosaiced, dtype=np.float32)
+        except Exception:
+            import rawpy
+
+            with rawpy.imread(BytesIO(encoded_bytes)) as raw:
+                rgb = raw.postprocess(
+                    gamma=(1, 1),
+                    no_auto_bright=True,
+                    output_bps=16,
+                    use_camera_wb=True,
+                    highlight_mode=rawpy.HighlightMode.Blend,
+                )
+            img_np = rgb.astype(np.float32) / 65535.0
+        if img_np.ndim != 3 or img_np.shape[2] != 3:
+            raise ValueError(
+                f"Raw decoding failed for {path}, got shape {img_np.shape}"
+            )
+        max_v = float(np.max(img_np)) if img_np.size > 0 else 1.0
+        if max_v > 1.5:
+            scale = 65535.0 if max_v > 255.0 else 255.0
+            img_np /= scale
+        return np.ascontiguousarray(np.clip(img_np, 0.0, 1.0), dtype=np.float32)
+
+    image_bgr = cv2.imdecode(
+        np.frombuffer(encoded_bytes, dtype=np.uint8), cv2.IMREAD_UNCHANGED
+    )
+    if image_bgr is None:
+        raise ValueError(f"Failed to decode image bytes: {path}")
+
+    try:
+        with Image.open(BytesIO(encoded_bytes)) as image:
+            orientation = int(image.getexif().get(0x0112, 1))
+    except Exception:
+        orientation = 1
+    if orientation != 1:
+        image_bgr = _apply_orientation(image_bgr, orientation)
+
+    if image_bgr.ndim == 2:
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2RGB)
+    else:
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    del image_bgr
+
+    if np.issubdtype(image_rgb.dtype, np.integer):
+        scale = 65535.0 if image_rgb.dtype == np.uint16 else 255.0
+        return np.ascontiguousarray(
+            image_rgb.astype(np.float32) / scale, dtype=np.float32
+        )
+    return np.ascontiguousarray(image_rgb.astype(np.float32), dtype=np.float32)
+
+
 def load_burst_images(paths: Sequence[str | Path]) -> list[np.ndarray]:
     """
     Loads burst images and applies AutoEnhance:
@@ -161,7 +241,7 @@ def load_burst_images(paths: Sequence[str | Path]) -> list[np.ndarray]:
     target_h, target_w = ref_linear.shape[:2]
 
     # 2. Analyze Reference Frame ONCE
-    params = taichi_aot.analyze_auto_enhance_params(ref_linear)
+    params = taichi_aot.analyze_auto_enhance_params(ref_linear, mode="natural")
     print(
         f"[AutoEnhance Burst] Analyzed ref={Path(paths[0]).name} -> "
         f"gain={params['gain']:.4f}, white={params['white_level']:.4f}, "
@@ -471,11 +551,13 @@ def infer_single_support_weight_map(
     chroma_sensitivity: float = 6.0,
     stop_event: Optional[threading.Event] = None,
     progress: Optional[Callable[[int, str], None]] = None,
+    return_scalar: bool = False,
 ) -> tuple[np.ndarray, float]:
     """
     Computes a 3-channel fusion weight map for one reference/support pair.
     Inputs may be RGB CHW or already converted luminance [1, H, W].
-    Output: weight_map_work [3, work_h, work_w], mean_alpha
+    Output: weight_map_work [3, work_h, work_w] by default, or the native
+    scalar map [1, work_h, work_w] when ``return_scalar`` is requested.
     """
     channels, work_h, work_w = ref_work.shape
     if channels not in (1, 3) or tuple(supp_work.shape) != tuple(ref_work.shape):
@@ -811,8 +893,13 @@ def infer_single_support_weight_map(
             1.0,
         )
 
-    # Pure AI Weight Map: Direct broadcast of color-neutral unified weight map to 3 channels [3, H, W]
-    weight_map_work = np.repeat(weight_map_norm, 3, axis=0).astype(np.float32)
+    # The resident FusionNet path can fuse this color-neutral scalar map
+    # directly. Keep the historical RGB-shaped result as the public default
+    # for compatibility with older callers.
+    if return_scalar:
+        weight_map_work = np.asarray(weight_map_norm, dtype=np.float32)
+    else:
+        weight_map_work = np.repeat(weight_map_norm, 3, axis=0).astype(np.float32)
 
     mean_alpha = alpha_total / max(1, total_tiles)
     return weight_map_work, mean_alpha

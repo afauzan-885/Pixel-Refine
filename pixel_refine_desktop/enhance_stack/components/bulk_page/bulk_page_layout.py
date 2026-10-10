@@ -2,6 +2,8 @@ import json
 import os
 import shutil
 import sqlite3
+import time
+from types import SimpleNamespace
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -42,13 +44,22 @@ from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_drop_
 )
 from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_thumbnail_service import (
     stop_process_thumbnails,
+    ThumbnailScheduler,
 )
 from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
     ThumbnailPolicy,
     thumbnail_creation_enabled,
 )
+from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_result_service import (
+    move_result,
+)
 
-from resources.GenericUILibrary import ScrollContainer, live_update
+from UILibrary import ScrollContainer, live_update
+
+
+def _move_file_with_verified_copy_fallback(source_path, destination_path):
+    """Move a result, falling back to a verified copy if Windows blocks rename."""
+    return move_result(source_path, destination_path)
 
 
 class BatchPreloaderThread(QThread):
@@ -75,7 +86,7 @@ class BatchPreloaderThread(QThread):
             )
             valid_paths = [p for p in raw_paths if os.path.exists(p)]
 
-            json_path = os.path.join("database", "align", "batch_parameter.json")
+            json_path = getattr(self, "json_path", os.path.join("database", "align", "batch_parameter.json"))
             state = {}
             if os.path.exists(json_path):
                 try:
@@ -84,10 +95,12 @@ class BatchPreloaderThread(QThread):
                 except Exception:
                     state = {}
 
-            self.batch_prepared.emit(self.batch_id, state, valid_paths)
+            if not self.isInterruptionRequested():
+                self.batch_prepared.emit(self.batch_id, state, valid_paths)
         except Exception as e:
             print(f"[ERROR] BatchPreloaderThread error for batch {self.batch_id}: {e}")
-            self.batch_prepared.emit(self.batch_id, {}, [])
+            if not self.isInterruptionRequested():
+                self.batch_prepared.emit(self.batch_id, {}, [])
 
 
 class BulkBatchScrollContainer(ScrollContainer):
@@ -236,7 +249,25 @@ class BulkPageLayout(QWidget):
         # Hook scroll listener for lazy loading (Task 4)
         self.limit = 10
         self.load_timer_running = False
-        self.MAX_CONCURRENT_BATCH_LOADERS = 5
+        self.MAX_CONCURRENT_BATCH_LOADERS = 2
+        self.thumbnail_scheduler = ThumbnailScheduler(self)
+        self._batch_ids = []
+        self._batch_positions = {}
+        self._view_generation = 0
+        self._view_active = True
+        self._wanted_batch_ids = set()
+        self._prepared_batch_data = {}
+        self._manifest_dirty = set()
+        self._active_preloaders = []
+        self._materialize_timer = QTimer(self)
+        self._materialize_timer.setSingleShot(True)
+        self._materialize_timer.timeout.connect(self._load_next_batch_incrementally)
+        self._viewport_timer = QTimer(self)
+        self._viewport_timer.setSingleShot(True)
+        self._viewport_timer.timeout.connect(self._refresh_visible_thumbnails)
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.timeout.connect(self._extend_batch_view)
         self._thumbnail_batch_queue = []
         self._active_thumbnail_batches = []
         self.main_scroll_area.verticalScrollBar().valueChanged.connect(
@@ -246,70 +277,103 @@ class BulkPageLayout(QWidget):
         self.layout.addWidget(self.main_scroll_area)
 
     def _on_scroll_changed(self, value):
-        scroll_bar = self.main_scroll_area.verticalScrollBar()
-        if scroll_bar.maximum() > 0 and value > scroll_bar.maximum() * 0.8:
-            db_ids = self.database_manager.get_all_batch_ids()
-            if self.limit < len(db_ids):
-                self.limit += 10
-                self.update_batch_view()
+        if not self._scroll_timer.isActive():
+            self._scroll_timer.start(16)
+        if not self._viewport_timer.isActive():
+            self._viewport_timer.start(16)
+
+    def _extend_batch_view(self):
+        bar = self.main_scroll_area.verticalScrollBar()
+        if bar.maximum() > 0 and bar.value() > bar.maximum() * 0.8 and self.limit < len(self._batch_ids):
+            self.limit = min(self.limit + 10, len(self._batch_ids))
+            self._render_batch_view()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._view_active = True
+        self._viewport_timer.start(0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_viewport_timer"):
+            self._viewport_timer.start(0)
 
     def _load_next_batch_incrementally(self):
-        from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
-            is_widget_alive,
-        )
-
-        if not self.loading_queue:
+        if not self._view_active or not self.loading_queue:
             self.load_timer_running = False
             return
-
+        if len(self._active_preloaders) >= 2:
+            return
         batch_id = self.loading_queue.pop(0)
-        skeleton = self.active_skeletons.pop(batch_id, None)
-
-        # Offload DB & JSON state parsing to background worker thread
-        preloader = BatchPreloaderThread(self.database_manager, batch_id, parent=self)
-
-        def on_preloaded(b_id, pre_state, valid_paths):
-            new_panel = self.setup_combined_panel(
-                b_id, preloaded_state=pre_state, preloaded_image_paths=valid_paths
-            )
-
-            # Replace skeleton in layout
-            if skeleton and is_widget_alive(skeleton):
-                idx = self.main_panel_container.indexOf(skeleton)
-                if idx != -1:
-                    self.main_panel_container.removeWidget(skeleton)
-                    skeleton.hide()
-                    skeleton.deleteLater()
-                    self.main_panel_container.insertWidget(idx, new_panel)
-                else:
-                    self.main_panel_container.addWidget(new_panel)
+        if batch_id not in self._wanted_batch_ids or (
+            batch_id not in self.active_skeletons and batch_id not in self._manifest_dirty
+        ):
+            self._materialize_timer.start(8)
+            return
+        prepared = self._prepared_batch_data.get(batch_id)
+        if prepared is not None:
+            panel = self.active_batch_panels.get(batch_id)
+            if panel is not None:
+                panel.refresh_image_paths(prepared[1])
+                self._manifest_dirty.discard(batch_id)
+                self._viewport_timer.start(0)
             else:
-                if self._spacer_item:
-                    self.main_panel_container.insertWidget(
-                        self.main_panel_container.count() - 1, new_panel
-                    )
-                else:
-                    self.main_panel_container.addWidget(new_panel)
-
-            self._start_fade_in_animation(new_panel)
-            self._schedule_reorder()
-            self._manage_placeholder_and_spacer()
-            if hasattr(self.main_scroll_area, "update_inner_dimensions"):
-                self.main_scroll_area.update_inner_dimensions()
-
-            # Schedule next batch preloader asynchronously with 500ms breathing room interval
-            QTimer.singleShot(100, self._load_next_batch_incrementally)
-
-        preloader.batch_prepared.connect(on_preloaded)
-        preloader.start()
-        if not hasattr(self, "_active_preloaders"):
-            self._active_preloaders = []
+                self._materialize_batch(batch_id, *prepared)
+            self._materialize_timer.start(8)
+            return
+        preloader = BatchPreloaderThread(self.database_manager, batch_id, parent=self)
+        preloader.json_path = self.json_path
+        preloader.view_generation = self._view_generation
+        preloader.batch_prepared.connect(self._on_batch_prepared)
+        preloader.finished.connect(self._on_preloader_finished)
         self._active_preloaders.append(preloader)
+        preloader.start()
+        self._materialize_timer.start(8)
+
+    @Slot(object, dict, list)
+    def _on_batch_prepared(self, batch_id, state, paths):
+        preloader = self.sender()
+        if preloader.view_generation != self._view_generation or batch_id not in self._batch_positions:
+            return
+        self._prepared_batch_data[batch_id] = (state, paths)
+        if self._view_active and batch_id in self._wanted_batch_ids:
+            panel = self.active_batch_panels.get(batch_id)
+            if panel is not None:
+                panel.refresh_image_paths(paths)
+                self._manifest_dirty.discard(batch_id)
+                self._viewport_timer.start(0)
+            else:
+                self._materialize_batch(batch_id, state, paths)
+
+    @Slot()
+    def _on_preloader_finished(self):
+        preloader = self.sender()
+        if preloader in self._active_preloaders:
+            self._active_preloaders.remove(preloader)
+        preloader.deleteLater()
+        if self._view_active:
+            self._viewport_timer.start(0)
+
+    def _materialize_batch(self, batch_id, state, paths):
+        skeleton = self.active_skeletons.pop(batch_id, None)
+        if skeleton is None:
+            return
+        panel = self.setup_combined_panel(
+            batch_id, preloaded_state=self.batch_states.get(batch_id, state),
+            preloaded_image_paths=paths,
+        )
+        index = self.main_panel_container.indexOf(skeleton)
+        self.main_panel_container.removeWidget(skeleton)
+        skeleton.hide()
+        skeleton.deleteLater()
+        self.main_panel_container.insertWidget(max(0, index), panel)
+        panel.update_sequential_number(self._batch_positions.get(batch_id, 0) + 1)
+        self._viewport_timer.start(0)
 
     def refresh_after_project_load(self):
         """Discard legacy UI caches and rebuild from the active session DB."""
         self.stop_thumbnail()
-        for panel in list(self.active_batch_panels.values()):
+        for panel in list(self._panel_cache.values()):
             try:
                 self.main_panel_container.removeWidget(panel)
                 panel.deleteLater()
@@ -324,17 +388,27 @@ class BulkPageLayout(QWidget):
         self.active_batch_panels.clear()
         self.active_skeletons.clear()
         self._panel_cache.clear()
+        self._prepared_batch_data.clear()
+        self._manifest_dirty.clear()
         self.batch_states.clear()
         self.loading_queue.clear()
         self.limit = 10
         self.update_batch_view()
 
     def update_batch_view(self):
-        """
-        Memperbarui tampilan daftar batch secara cerdas dengan lazy loading dan skeleton loader.
-        """
-        # 1. Dapatkan state dari database dan UI
-        db_ids = self.database_manager.get_all_batch_ids()
+        """Refresh the index on data changes; scrolling reuses this snapshot."""
+        self._view_active = True
+        self._batch_ids = self.database_manager.get_all_batch_ids()
+        self._batch_positions = {batch_id: index for index, batch_id in enumerate(self._batch_ids)}
+        self._view_generation += 1
+        for preloader in self._active_preloaders:
+            preloader.requestInterruption()
+        self._prepared_batch_data.clear()
+        self._manifest_dirty = set(self._panel_cache)
+        self._render_batch_view()
+
+    def _render_batch_view(self):
+        db_ids = self._batch_ids
         if not hasattr(self, "limit"):
             self.limit = 10
         visible_db_ids = db_ids[: self.limit]
@@ -348,6 +422,8 @@ class BulkPageLayout(QWidget):
             panel_to_remove = self.active_batch_panels.pop(batch_id, None)
             if panel_to_remove:
                 self.batch_states.pop(batch_id, None)
+                panel_to_remove.pause_thumbnail_loading()
+                self._panel_cache.pop(batch_id, None)
 
                 # Hapus widget dari layout SECARA LANGSUNG
                 self.main_panel_container.removeWidget(panel_to_remove)
@@ -380,14 +456,6 @@ class BulkPageLayout(QWidget):
             for bid in visible_db_ids
             if bid not in ui_ids and bid not in self.active_skeletons
         ]
-        if ids_to_add:
-            for bid, panel in list(self.active_batch_panels.items()):
-                try:
-                    if panel:
-                        self.batch_states[bid] = panel.get_current_state()
-                except Exception:
-                    pass
-
         for batch_id in ids_to_add:
             # --- CACHE HIT: Reuse panel yang sudah pernah dibuat ---
             cached_panel = self._panel_cache.get(batch_id)
@@ -402,21 +470,17 @@ class BulkPageLayout(QWidget):
                         self.main_panel_container.addWidget(cached_panel)
                     cached_panel.show()
                     self.active_batch_panels[batch_id] = cached_panel
+                    self._enqueue_thumbnail_loading(cached_panel)
                     continue  # langsung ke batch_id berikutnya
                 except RuntimeError:
                     # Panel sudah dihancurkan, hapus dari cache
                     self._panel_cache.pop(batch_id, None)
 
-            # --- DIRECT PANEL CREATION (Setara V0.5.1, instan & bebas stutter) ---
-            new_panel = self.setup_combined_panel(batch_id)
-            if self._spacer_item:
-                insert_idx = self.main_panel_container.count() - 1
-                self.main_panel_container.insertWidget(insert_idx, new_panel)
-            else:
-                self.main_panel_container.addWidget(new_panel)
-
-            if len(ids_to_add) <= 2:
-                self._start_fade_in_animation(new_panel)
+            skeleton = SkeletonCombinedPanel(self)
+            skeleton.batch_label.setText(f"Batch {self._batch_positions[batch_id] + 1}")
+            self.active_skeletons[batch_id] = skeleton
+            index = self.main_panel_container.count() - (1 if self._spacer_item else 0)
+            self.main_panel_container.insertWidget(index, skeleton)
 
         # 4. Atur ulang nomor urut visual untuk semua panel yang ada
         self._schedule_reorder()
@@ -426,20 +490,15 @@ class BulkPageLayout(QWidget):
 
         if hasattr(self.main_scroll_area, "update_inner_dimensions"):
             self.main_scroll_area.update_inner_dimensions()
+        self._viewport_timer.start(0)
 
     def _reorder_visual_batch_numbers(self):
-        """Mengatur ulang label nomor urut (Batch #1, Batch #2, dst.) pada semua panel."""
-        # Ambil semua widget CombinedPanel yang ada di layout
-        panels_in_layout = []
-        for i in range(self.main_panel_container.count()):
-            widget = self.main_panel_container.itemAt(i).widget()
-            # Pastikan itu adalah instance dari CombinedPanel
-            if widget and isinstance(widget, CombinedPanel):
-                panels_in_layout.append(widget)
-
-        # Update nomor urut berdasarkan posisi mereka di layout
-        for index, panel in enumerate(panels_in_layout):
-            panel.update_sequential_number(index + 1)
+        for batch_id, panel in self.active_batch_panels.items():
+            number = self._batch_positions.get(batch_id, 0) + 1
+            if panel.sequential_batch_number != number:
+                panel.update_sequential_number(number)
+        for batch_id, skeleton in self.active_skeletons.items():
+            skeleton.batch_label.setText(f"Batch {self._batch_positions.get(batch_id, 0) + 1}")
 
     def _manage_placeholder_and_spacer(self):
         """Menampilkan placeholder jika tidak ada batch, atau spacer jika ada batch."""
@@ -566,6 +625,11 @@ class BulkPageLayout(QWidget):
             return
 
         if all_new_states:
+            for batch_id in self._batch_ids:
+                if str(batch_id) in all_new_states:
+                    self.batch_states[batch_id] = all_new_states[str(batch_id)]
+            for batch_id, (_, paths) in list(self._prepared_batch_data.items()):
+                self._prepared_batch_data[batch_id] = (all_new_states.get(str(batch_id), {}), paths)
             self.parameters_changed.emit(all_new_states)
 
         self.param_watcher.removePath(path)
@@ -593,31 +657,79 @@ class BulkPageLayout(QWidget):
         self._panel_cache[batch_id] = combined_panel
         self.parameters_changed.connect(combined_panel.refresh_ui_from_broadcast)
 
-        # Enqueue untuk pemuatan thumbnail sekuensial per batch
+        combined_panel.set_waiting_state()
         self._enqueue_thumbnail_loading(combined_panel)
         return combined_panel
 
     def _enqueue_thumbnail_loading(self, panel):
-        """Tambahkan panel ke dalam antrean pemuatan thumbnail paralel hingga 5 batch."""
-        if not thumbnail_creation_enabled(self.thumbnail_policy):
+        if thumbnail_creation_enabled(self.thumbnail_policy):
+            self._viewport_timer.start(0)
+
+    def _refresh_visible_thumbnails(self):
+        if not self._view_active:
             return
+        bar = self.main_scroll_area.verticalScrollBar()
+        top = bar.value()
+        bottom = top + self.main_scroll_area.viewport().height()
+        near = []
+        widgets = {**self.active_skeletons, **dict(self.active_batch_panels)}
+        for batch_id, widget in widgets.items():
+            y = widget.geometry().top()
+            end = y + widget.height()
+            if end >= top - 140 and y <= bottom + 140:
+                distance = max(top - end, y - bottom, 0)
+                near.append((distance, y, batch_id))
+        near.sort()
+        self._wanted_batch_ids = {entry[2] for entry in near}
+        for panel in list(self._active_thumbnail_batches):
+            if panel.batch_id not in self._wanted_batch_ids:
+                self._active_thumbnail_batches.remove(panel)
+                panel.pause_thumbnail_loading()
+        inflight = {thread.batch_id for thread in self._active_preloaders}
+        self.loading_queue = [batch_id for _, _, batch_id in near
+                              if (batch_id in self.active_skeletons or batch_id in self._manifest_dirty)
+                              and batch_id not in inflight]
+        if self.loading_queue and not self._materialize_timer.isActive():
+            self._materialize_timer.start(8)
+        self._thumbnail_batch_queue = []
+        if thumbnail_creation_enabled(self.thumbnail_policy):
+            for _, _, batch_id in near:
+                panel = self.active_batch_panels.get(batch_id)
+                if panel is not None and panel not in self._active_thumbnail_batches and any(
+                    panel.needs_thumbnail(path) for path in panel.image_paths_in_batch
+                ):
+                    self._thumbnail_batch_queue.append(panel)
+            self._process_thumbnail_queue()
+        self._trim_panel_cache(top, bottom)
 
-        if not hasattr(self, "_thumbnail_batch_queue"):
-            self._thumbnail_batch_queue = []
-        if not hasattr(self, "_active_thumbnail_batches"):
-            self._active_thumbnail_batches = []
-
-        if panel not in self._thumbnail_batch_queue and panel not in self._active_thumbnail_batches:
-            self._thumbnail_batch_queue.append(panel)
-            # Jika kapasitas 5 batch aktif sedang penuh, tampilkan placeholder antrean 'Menunggu'
-            if len(self._active_thumbnail_batches) >= self.MAX_CONCURRENT_BATCH_LOADERS:
-                if hasattr(panel, "set_waiting_state"):
-                    panel.set_waiting_state()
-
-        self._process_thumbnail_queue()
+    def _trim_panel_cache(self, top, bottom):
+        if len(self._panel_cache) <= 24:
+            return
+        candidates = sorted(
+            ((abs(panel.geometry().top() - (top + bottom) / 2), batch_id, panel)
+             for batch_id, panel in self._panel_cache.items()
+             if batch_id not in self._wanted_batch_ids
+             and not (getattr(panel, "_preview_thread", None) and panel._preview_thread.isRunning())), reverse=True,
+        )
+        for _, batch_id, panel in candidates:
+            if len(self._panel_cache) <= 24:
+                break
+            self.batch_states[batch_id] = panel.get_current_state()
+            panel.pause_thumbnail_loading()
+            index = self.main_panel_container.indexOf(panel)
+            if index >= 0:
+                skeleton = SkeletonCombinedPanel(self)
+                skeleton.batch_label.setText(f"Batch {self._batch_positions.get(batch_id, 0) + 1}")
+                self.main_panel_container.removeWidget(panel)
+                self.main_panel_container.insertWidget(index, skeleton)
+                self.active_skeletons[batch_id] = skeleton
+            self.active_batch_panels.pop(batch_id, None)
+            self._panel_cache.pop(batch_id, None)
+            panel.hide()
+            panel.deleteLater()
 
     def _process_thumbnail_queue(self):
-        """Proses antrean thumbnail secara paralel hingga 5 batch sekaligus."""
+        """Schedule nearby batches through the shared bounded thumbnail queue."""
         if not thumbnail_creation_enabled(self.thumbnail_policy):
             self._thumbnail_batch_queue.clear()
             if hasattr(self, "_active_thumbnail_batches"):
@@ -649,11 +761,13 @@ class BulkPageLayout(QWidget):
     @Slot(bool)
     def _on_thumbnail_policy_changed(self, enabled):
         if enabled:
+            self._viewport_timer.start(0)
             return
 
         self._thumbnail_batch_queue.clear()
         if hasattr(self, "_active_thumbnail_batches"):
             self._active_thumbnail_batches.clear()
+        self.thumbnail_scheduler.cancel_all()
         stop_process_thumbnails(self.thumbnail_threads)
 
         panels = list(self.active_batch_panels.values()) + list(
@@ -673,7 +787,8 @@ class BulkPageLayout(QWidget):
         """Dipanggil ketika satu batch selesai memuat thumbnail 100% atau setelah 6 detik inactivity watchdog."""
         if hasattr(self, "_active_thumbnail_batches") and panel in self._active_thumbnail_batches:
             self._active_thumbnail_batches.remove(panel)
-        QTimer.singleShot(10, self._process_thumbnail_queue)
+        if self._view_active:
+            self._viewport_timer.start(0)
 
     # --- Event Handling ---
     def eventFilter(self, source, event: QEvent):
@@ -877,141 +992,72 @@ class BulkPageLayout(QWidget):
         """
         Mengumpulkan batch yang valid dan menampilkan dialog konfirmasi pemrosesan.
         """
-        # Bagian 1: Mengumpulkan dan memvalidasi panel yang akan diproses (sama seperti sebelumnya)
-        active_panels_list = list(self.active_batch_panels.values())
-        active_panels = []
-        for panel in active_panels_list:
-            try:
-                if (
-                    panel
-                    and hasattr(panel, "isWidgetType")
-                    and panel.isWidgetType()
-                    and (
-                        not hasattr(self, "animator")
-                        or not hasattr(self.animator, "_active_fade_outs")
-                        or panel not in self.animator._active_fade_outs
-                    )
-                ):
-                    active_panels.append(panel)
-            except RuntimeError:
-                print(f"RuntimeError: Panel {panel} has been deleted.")
-            except Exception as e:
-                print(f"Unexpected error while filtering panel {panel}: {e}")
-
-        candidate_panels = []
-        for panel in active_panels:
-            if (
-                hasattr(panel, "batch_id")
-                and panel.batch_id is not None
-                and hasattr(panel, "sequential_batch_number")
-            ):
-                candidate_panels.append(panel)
-
-        if not candidate_panels:
+        # Processing uses the DB index, independent of which panels are mounted.
+        batch_ids = self.database_manager.get_all_batch_ids()
+        if not batch_ids:
             self.show_toast_requested.emit(
                 language_config.UI_LABEL_BATCH_NO_PROCESS, 4000, False
             )
             return
 
-        # Bagian 2: Validasi akhir terhadap database (sama seperti sebelumnya)
-        panels_to_actually_process = []
-        for panel_candidate in candidate_panels:
-            try:
-                batch_id_to_check = str(panel_candidate.batch_id)
-                images_in_db_for_panel = self.database_manager.get_images_by_batch(
-                    batch_id_to_check
-                )
-                if images_in_db_for_panel:
-                    panels_to_actually_process.append(panel_candidate)
-            except Exception as db_val_e:
-                print(
-                    f"Error validating batch {panel_candidate.batch_id} against DB: {db_val_e}"
-                )
-
-        if not panels_to_actually_process:
-            self.show_toast_requested.emit(
-                language_config.UI_LABEL_BATCH_NO_PROCESS + " (after DB validation).",
-                4000,
-                False,
+        batches_wrapper = []
+        for number, batch_id in enumerate(batch_ids, 1):
+            panel = self._panel_cache.get(batch_id)
+            target = panel if panel is not None else SimpleNamespace(
+                batch_id=batch_id, database_manager=self.database_manager,
+                selected_algorithms={},
             )
-            return
-
-        # Bagian 3: Buat dan tampilkan dialog baru
-        # Alih-alih melanjutkan pemrosesan di sini, kita panggil dialog.
-        # Kita meneruskan 'self' (instance BatchPageLayout) agar dialog dapat mengakses
-        # fungsi-fungsi helper seperti _move_single_batch_result dan get_files_in_stack_folder
-        # Kita bungkus panel ke dalam class pembantu yang memaparkan properti name dan id (kompatibel dengan batch v2)
-        class BatchWrapper:
-            def __init__(self, panel):
-                self.original_panel = panel
-                self.id = panel.batch_id
-                self.batch_id = panel.batch_id
-                self.sequential_batch_number = getattr(
-                    panel, "sequential_batch_number", 1
-                )
-                self.name = f"Batch {self.sequential_batch_number}"
-
-            def process_all_batch(self, *args, **kwargs):
-                return self.original_panel.process_all_batch(*args, **kwargs)
-
-        batches_wrapper = [BatchWrapper(panel) for panel in panels_to_actually_process]
+            batches_wrapper.append(SimpleNamespace(
+                original_panel=target, id=batch_id, batch_id=batch_id,
+                sequential_batch_number=number, name=f"Batch {number}",
+            ))
         dialog = BatchProcessDialog(batches_wrapper, self, self)
         dialog.exec()
 
     def _move_single_batch_result(self, source_file_path, target_folder):
         """
-        Memindahkan file hasil ke folder target, hanya menggunakan nama file asli.
-        Jika file dengan nama yang sama sudah ada, tambahkan akhiran "_1", "_2", dst.
+        Move an exact result name without inventing numbered batch copies.
+        Worker callers receive the full error rather than opening a GUI dialog.
         """
+        self._last_result_export_detail = ""
         if not source_file_path or not os.path.exists(source_file_path):
             print(language_config.SOURCE_FILE_DOES_NOT_EXIST.format(source_file_path))
             return False
 
         if not target_folder or not os.path.isdir(target_folder):
-            print(language_config.TARGET_FOLDER_INVALID.format(target_folder))
-            QMessageBox.critical(
-                self,
-                language_config.BATCH_SAVE_ERROR_TITLE,
-                language_config.TARGET_FOLDER_NOT_ACCESSIBLE.format(target_folder),
-            )
+            self._last_result_export_detail = f"Target folder is not accessible: {target_folder}"
+            print(self._last_result_export_detail)
             return False
 
         original_file_name = os.path.basename(source_file_path)
         destination_path = os.path.join(target_folder, original_file_name)
 
         try:
-            # Jika file tujuan sudah ada, cari nama baru yang tersedia.
-            if os.path.exists(destination_path):
-                base, ext = os.path.splitext(original_file_name)
-                counter = 1
-                while os.path.exists(destination_path):
-                    new_file_name = f"{base}_{counter}{ext}"
-                    destination_path = os.path.join(target_folder, new_file_name)
-                    counter += 1
-
-            # Pindahkan file setelah nama tujuan yang valid ditemukan
-            shutil.move(source_file_path, destination_path)
+            # Pindahkan file; jika Windows menolak rename karena file masih
+            # dipegang pembaca, simpan salinan terverifikasi terlebih dahulu.
+            move_ok, move_detail = _move_file_with_verified_copy_fallback(
+                source_file_path, destination_path
+            )
+            self._last_result_export_detail = move_detail
+            if not move_ok:
+                raise OSError(move_detail)
 
             print(
                 language_config.LOG_MOVE_SUCCESS.format(
                     original_file_name, destination_path
                 )
             )
+            if move_detail != "moved":
+                print(f"[Bulk Save] {move_detail}")
             return True
 
         except Exception as e:
             error_detail_msg = str(e)
+            self._last_result_export_detail = error_detail_msg
             print(
                 language_config.LOG_MOVE_FAILED.format(
                     original_file_name, target_folder, error_detail_msg
                 )
-            )
-            QMessageBox.warning(
-                self,
-                language_config.MOVE_FILE_ERROR_TITLE,
-                language_config.COULD_NOT_SAVE_FILE_FOR_BATCH.format(
-                    original_file_name, error=error_detail_msg
-                ),
             )
             return False
 
@@ -1024,7 +1070,7 @@ class BulkPageLayout(QWidget):
 
         title, message = language_config.BATCH_DELETE_LABEL
         message = message.format(batch_id)
-        from resources.GenericUILibrary import modal_confirm
+        from UILibrary import modal_confirm
 
         reply = modal_confirm.question(self, message)
 
@@ -1073,7 +1119,7 @@ class BulkPageLayout(QWidget):
         message = language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(
             batch_defined_count
         )
-        from resources.GenericUILibrary import modal_confirm
+        from UILibrary import modal_confirm
 
         reply = modal_confirm.question(self, message)
 
@@ -1218,6 +1264,16 @@ class BulkPageLayout(QWidget):
         Saat user kembali ke bulk mode, update_batch_view() akan langsung menampilkan
         panel dari cache tanpa skeleton/delay (instant mode switching).
         """
+        self._view_active = False
+        self._view_generation += 1
+        self._materialize_timer.stop()
+        self._viewport_timer.stop()
+        self._scroll_timer.stop()
+        self.thumbnail_scheduler.cancel_all()
+        for preloader in self._active_preloaders:
+            preloader.requestInterruption()
+        for panel in list(self.active_batch_panels.values()):
+            panel.pause_thumbnail_loading()
         stop_process_thumbnails(self.thumbnail_threads)
 
         # Clear incremental loading and thumbnail batch queues

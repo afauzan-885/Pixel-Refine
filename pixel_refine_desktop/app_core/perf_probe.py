@@ -191,7 +191,7 @@ def diagnose_panel(panel) -> dict:
         data["qtimers"] = -1
 
     try:
-        from resources.GenericUILibrary import ImageCard
+        from UILibrary import ImageCard
 
         data["image_cards"] = len(panel.findChildren(ImageCard))
     except Exception:

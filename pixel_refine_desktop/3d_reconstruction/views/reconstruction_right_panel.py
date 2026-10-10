@@ -9,7 +9,7 @@ dengan enhance_stack tetapi konten spesifik 3D.
 from PySide6.QtWidgets import QVBoxLayout, QLabel
 from PySide6.QtCore import Signal
 
-from resources.GenericUILibrary import (
+from UILibrary import (
     ListGroup,
     Button,
     FormGroup,

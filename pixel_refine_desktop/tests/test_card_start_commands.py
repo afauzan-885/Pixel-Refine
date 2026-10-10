@@ -157,6 +157,7 @@ def test_card_shows_start_and_click_dispatches_selection(panels, qapp, card_attr
 
 def test_hdr_start_disappears_when_card_disabled(panels, qapp):
     left, right = panels
+    right.hdr_card.combo.setCurrentIndex(right.hdr_card.combo.findText("Weighted HDR"))
     right.hdr_card.setChecked(True, animate=False)
     assert left.display_panel.start_btn_ref.isVisible()
     right.hdr_card.setChecked(False, animate=False)

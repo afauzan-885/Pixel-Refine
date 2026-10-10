@@ -143,7 +143,7 @@ class GridManager:
                 )
             return
 
-        from resources.GenericUILibrary import ImageCard
+        from UILibrary import ImageCard
 
         for _ in range(chunk_size):
             if not self._populate_queue:

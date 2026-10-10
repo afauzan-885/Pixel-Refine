@@ -12,6 +12,7 @@ class AlgorithmType(Enum):
     ALIGNMENT = "alignment"
     DENOISING = "denoising"
     SUPER_RESOLUTION = "super_resolution"
+    HDR = "hdr"
 
 
 class AlgorithmConfig:

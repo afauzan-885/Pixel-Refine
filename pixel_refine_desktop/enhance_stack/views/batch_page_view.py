@@ -8,7 +8,7 @@ from PySide6.QtCore import Signal
 
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from pixel_refine_desktop.enhance_stack.components.bulk_page import BulkPageLayout # Legacy
-from resources.GenericUILibrary import live_update, Button
+from UILibrary import live_update, Button
 
 @live_update
 class BatchPageView(QWidget):
@@ -152,15 +152,14 @@ class BatchPageView(QWidget):
             self.process_all_btn.setFixedHeight(btn_h)
             font_size = 8.0 + f * 3.0
             
-            from resources.GenericUILibrary.theme import get_theme, create_button_style
+            from UILibrary.theme import get_theme, create_button_style, apply_style
             theme = get_theme()
-            base_style = create_button_style("primary", theme)
-            self.process_all_btn.setStyleSheet(base_style + f" QPushButton {{ padding: 4px 8px; font-size: {font_size:.1f}pt; }}")
+            apply_style(self.process_all_btn, create_button_style("primary", theme).with_overrides(padding="4px 8px", font_size=f"{font_size:.1f}pt"))
 
         # Update bulk_mode_btn
         if hasattr(self, "bulk_mode_btn") and self.bulk_mode_btn:
             font_size_bulk = 10.5 + f * 4.5
-            from resources.GenericUILibrary.theme import get_theme
+            from UILibrary.theme import get_theme
             theme = get_theme()
             if theme.bg_card == "#1E272C": # Dark Theme
                 self.bulk_mode_btn.setStyleSheet(f"""
@@ -195,7 +194,7 @@ class BatchPageView(QWidget):
 
     def update_theme(self):
         """Update stylesheets of bulk header elements dynamically on theme changes."""
-        from resources.GenericUILibrary.theme import get_theme
+        from UILibrary.theme import get_theme
         theme = get_theme()
 
         # Update header container background

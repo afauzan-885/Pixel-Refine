@@ -24,7 +24,7 @@ from PySide6.QtCore import (
 )
 
 # Generic UI Library
-from resources.GenericUILibrary.store import (
+from UILibrary.store import (
     get_store,
     DataStore,
 )
@@ -412,7 +412,7 @@ class BatchPageV2Layout(QWidget):
             QMessageBox.information(self, title, message)
             return
 
-        from resources.GenericUILibrary import modal_confirm
+        from UILibrary import modal_confirm
 
         confirmed = modal_confirm.question(
             self,
@@ -651,28 +651,28 @@ class BatchPageV2Layout(QWidget):
         ]
 
     def _move_single_batch_result(self, source_file, target_folder):
-        """Move a processed file to target folder, handling naming."""
+        """Use the same exact-name, verified export as the bulk layout."""
+        from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_result_service import (
+            move_result,
+        )
+        self._last_result_export_detail = ""
         if not os.path.exists(target_folder):
             try:
                 os.makedirs(target_folder)
-            except OSError:
+            except OSError as error:
+                self._last_result_export_detail = str(error)
                 return False
 
         filename = os.path.basename(source_file)
         target_path = os.path.join(target_folder, filename)
 
-        # Basic collision handling (append suffix)
-        if os.path.exists(target_path):
-            name, ext = os.path.splitext(filename)
-            counter = 1
-            while os.path.exists(target_path):
-                target_path = os.path.join(target_folder, f"{name}_{counter}{ext}")
-                counter += 1
-
         try:
-            shutil.move(source_file, target_path)
-            return True
+            success, detail = move_result(source_file, target_path)
+            self._last_result_export_detail = detail
+            print(f"[Bulk Save] {source_file} -> {target_path}: {detail}")
+            return success
         except Exception as e:
+            self._last_result_export_detail = str(e)
             print(f"Error moving file: {e}")
             return False
 

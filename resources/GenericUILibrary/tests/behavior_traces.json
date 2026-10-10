@@ -1,0 +1,38 @@
+{
+  "config_apply": {"method": "ORB"},
+  "selector": {
+    "selected": ["a", "First"],
+    "deleted": [["a"]],
+    "added": ["Third"],
+    "action_count": 1,
+    "selection_cleared": true
+  },
+  "viewer": {
+    "title": "Project",
+    "loading_text": "Working (0%)",
+    "items_before_clear": 1,
+    "items_after_clear": 0
+  },
+  "workspace": {
+    "initial_open": false,
+    "open": true,
+    "open_height": 250,
+    "closed": false,
+    "closed_height": 0
+  },
+  "feature_card": {
+    "fallback": "No Denoising",
+    "selected": "BM3D",
+    "checked_events": [true, false],
+    "value_events": ["BM3D", "No Denoising"]
+  },
+  "shared": {
+    "store": {"keys": ["alpha", "beta"], "values": [1, 2], "during_transaction": 0},
+    "list": {"selected": ["b"], "remaining": ["a", "c"]},
+    "tabs": {"current": [1, "Advanced"], "changed": [[1, "Advanced"]]},
+    "collapse": {"states": [false, true], "events": [true]},
+    "modal": {"results": [true, false]},
+    "comparison": {"positions": [0.0, 1.0]},
+    "progress": {"value": 75, "events": [75]}
+  }
+}

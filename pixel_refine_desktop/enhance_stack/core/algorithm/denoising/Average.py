@@ -7,17 +7,21 @@ Matches SpatialFusion and FusioNet pipeline architecture:
 - Output saved with AutoEnhance v2 tonemapping via save_image
 """
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import numpy as np
 
 from ._common_helpers import active_backend, restore_output_dtype
 
 
+
+
 class AverageDenoisingAlgorithm:
     """Simple average multi-frame denoising adapter."""
 
-    NAME = "Average"
-    KIND = "denoising"
-    DESCRIPTION = "Average all aligned frames."
+    SPEC = get_spec("denoising", "average")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     def run(self, ctx, frames=None, batch_plan=None):
         backend = active_backend()

@@ -1,3 +1,4 @@
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import json
 import os
 import time
@@ -95,10 +96,13 @@ def _allocate_float_buffer_like(taichi_aot, image, host_accessible=False):
     )
 
 
+
+
 class LucasKanade:
-    NAME = "Lucas Kanade Optical Flow"
-    KIND = "alignment"
-    DESCRIPTION = "Unified Taichi AOT Lucas-Kanade optical flow alignment for all backends."
+    SPEC = get_spec("alignment", "lucas_kanade")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
     GPU_MODULES = ("common", "lucas_kanade", "pyramid", "remap")
     DEVICE_RESERVATION = "lucas_kanade_frame"
     _gpu_remap_disabled = False

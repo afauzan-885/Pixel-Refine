@@ -18,7 +18,9 @@ scratch/
 .agent/
 .vscode/
 .commandcode/
-ai_governance/
+ai_governance/*
+!ai_governance/assistant_backup/**
+!ai_governance/CHANGELOG_20261010.md
 artifact_implementation_plan/
 .kunsdd/
 save_align_image/
@@ -61,3 +63,13 @@ taichi_vision/taichi_algorithm/aot_py/**/*.exp
 taichi_vision/taichi_algorithm/aot_py/**/*.lib
 taichi_vision/taichi_algorithm/aot_py/test_output*/
 taichi_vision/taichi_algorithm/aot_py/test_report.txt
+# Local backups, temporary work, and generated AOT caches
+backups/
+**/backups/
+tmp/
+**/tmp/
+**/.cpu_aot_cache/
+*.tmp
+*.temp
+*.bak
+*.backup

@@ -1,3 +1,4 @@
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import gc
 import json
 import os
@@ -105,10 +106,13 @@ def add_dll_to_path():
 add_dll_to_path()
 
 
+
+
 class LightGlueAlgorithm:
-    NAME = "Light Glue"
-    KIND = "alignment"
-    DESCRIPTION = "LightGlue feature alignment adapter."
+    SPEC = get_spec("alignment", "light_glue")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     def __init__(self):
         self.sess = None

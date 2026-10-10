@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PySide6.QtCore import Qt
 from typing import Optional, Callable
 from config import SUPPORTED_FORMATS
-from resources.GenericUILibrary import Button
+from UILibrary import Button
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from resources.animations.slide import slide
 from resources.animations.animation_manager import (

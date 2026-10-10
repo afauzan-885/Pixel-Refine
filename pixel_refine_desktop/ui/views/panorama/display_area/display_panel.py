@@ -23,7 +23,7 @@ import os
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.multiple_batch_delete_widget import (
     MultipleBatchDeleteWidget,
 )
-from resources.GenericUILibrary import (
+from UILibrary import (
     ImageCard,
     Button,
     Container,
@@ -31,8 +31,8 @@ from resources.GenericUILibrary import (
     OverlayPosition,
     ImageCompareItem,
 )
-from resources.GenericUILibrary.grids import GridContainer
-from resources.GenericUILibrary.forms import FormGroup
+from UILibrary.grids import GridContainer
+from UILibrary.forms import FormGroup
 from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 
 # Display logic

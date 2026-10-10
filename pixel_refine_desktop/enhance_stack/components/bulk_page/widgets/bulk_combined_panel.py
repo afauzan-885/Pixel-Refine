@@ -1,7 +1,6 @@
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow import (
     running_farneback_flow,
 )
-from resources.GenericUILibrary.skeleton import SkeletonLoader
 from resources.styles.stylesheet import CHECKBOX_SWITCH_STYLE
 from resources.styles.stylesheet import DROPDOWN_BOX
 from resources.animations.fade import fade_out
@@ -9,6 +8,10 @@ from resources.styles.stylesheet import SCROLL_AREA
 from resources.animations.animation_manager import StackedWidgetAnimator
 import json
 import os
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec, normalize_name, plan_stages, run_algorithm
+from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_result_service import (
+    batch_selections, returned_output_paths,
+)
 import config
 
 from PySide6.QtWidgets import (
@@ -106,12 +109,22 @@ class SkeletonCombinedPanel(QWidget):
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(10)
 
-        # Left side: parameter area skeleton
-        self.param_skeleton = SkeletonLoader(height=105, border_radius=4, parent=self)
+        # Static placeholders avoid keeping animations alive for offscreen rows.
+        self.param_skeleton = QWidget(self)
+        self.param_skeleton.setFixedHeight(105)
         self.param_skeleton.setMinimumWidth(430)
-
-        # Right side: image list area skeleton
-        self.list_skeleton = SkeletonLoader(height=105, border_radius=4, parent=self)
+        self.list_skeleton = QWidget(self)
+        self.list_skeleton.setFixedHeight(105)
+        for skeleton in (self.param_skeleton, self.list_skeleton):
+            skeleton.setObjectName("BulkBatchSkeleton")
+            skeleton.setStyleSheet(
+                "#BulkBatchSkeleton { background: #E8E8E8; border: 1px solid #D8D8D8; border-radius: 4px; }"
+            )
+        label_layout = QVBoxLayout(self.param_skeleton)
+        self.batch_label = QLabel(self.param_skeleton)
+        self.batch_label.setStyleSheet("color: #475569; background: transparent; border: none;")
+        label_layout.addWidget(self.batch_label)
+        label_layout.addStretch()
 
         main_layout.addWidget(self.param_skeleton, 1)
         main_layout.addWidget(self.list_skeleton, 2)
@@ -148,16 +161,17 @@ class CombinedPanel(QWidget):
         self.thumbnail_threads = (
             thumbnail_threads if thumbnail_threads is not None else []
         )
-        self.thumbnail_placeholders = (
-            thumbnail_placeholders
-            if thumbnail_placeholders is not None
-            else weakref.WeakValueDictionary()
-        )
+        # Each panel owns its placeholders, including when batches share an image.
+        self.thumbnail_placeholders = weakref.WeakValueDictionary()
+        self._thumbnail_scheduler = getattr(parent, "thumbnail_scheduler", None)
+        self._thumbnail_generation = 0
+        self._failed_thumbnail_paths = set()
+        self._owned_thumbnail_threads = []
         self.animator = StackedWidgetAnimator(self)
 
         _initial_state_passed = initial_state if initial_state is not None else {}
 
-        if self.batch_id is not None and not _initial_state_passed:
+        if self.batch_id is not None and initial_state is None:
             json_path_val = os.path.join("database", "align", "batch_parameter.json")
             all_saved_states = load_json_state(json_path_val)
             self.initial_state = all_saved_states.get(str(self.batch_id), {})
@@ -236,7 +250,15 @@ class CombinedPanel(QWidget):
 
     @Slot(bool)
     def _on_thumbnail_policy_changed(self, enabled):
-        if not enabled:
+        if enabled:
+            while self.list_layout.count():
+                widget = self.list_layout.takeAt(0).widget()
+                if widget is not None:
+                    widget.deleteLater()
+            self.thumbnail_placeholders.clear()
+            self._failed_thumbnail_paths.clear()
+            self.set_waiting_state()
+        else:
             self.disable_thumbnail_loading()
 
     def init_ui(self):
@@ -299,14 +321,7 @@ class CombinedPanel(QWidget):
             self.load_text_labels()
 
     def _normalize_alignment_ui_name(self, value):
-        mapping = {
-            "Farneback Optical Flow": "Farneback",
-            "Lucas Kanade Optical Flow": "Lucas Kanade",
-            "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
-            "Block Matching GPU Optical Flow": "Block Matching GPU",
-            "RAFT Optical Flow": "RAFT",
-        }
-        return mapping.get(str(value or "").strip(), value)
+        return normalize_name("alignment", value, default="No Alignment")
 
     @Slot(dict)
     def refresh_ui_from_broadcast(self, all_new_states):
@@ -412,20 +427,15 @@ class CombinedPanel(QWidget):
             self._inactivity_timer.setSingleShot(True)
             self._inactivity_timer.timeout.connect(self._on_inactivity_timeout)
 
-        if getattr(self, "preloaded_image_paths", None) is not None:
-            self.pending_thumbnail_paths = list(self.preloaded_image_paths)
-        else:
-            raw_paths = (
-                self.database_manager.get_images_by_batch(self.batch_id)
-                if self.batch_id is not None
-                else []
-            )
-            exists_flags = self._exists_flags(raw_paths)
-            self.pending_thumbnail_paths = [p for p, ok in zip(raw_paths, exists_flags) if ok]
+        self._thumbnail_generation += 1
+        self.pending_thumbnail_paths = [
+            path for path in self.image_paths_in_batch
+            if self.needs_thumbnail(path)
+        ]
         self.total_images = len(self.pending_thumbnail_paths)
         self.thumbnails_loaded = 0
         self.active_thumbnail_loaders = 0
-        self.max_concurrent_loaders = 4
+        self.max_concurrent_loaders = 2
         self.thumbnail_loader_queue = []
 
         if self.total_images == 0:
@@ -433,12 +443,17 @@ class CombinedPanel(QWidget):
             return
 
         self.progress_overlay.setText("Create thumbnail: 0%")
-        self.progress_overlay.resize(self.scroll_list_panel.viewport().size())
-        self.progress_overlay.show()
-        self.progress_overlay.raise_()
+        if self._thumbnail_scheduler is None:
+            self.progress_overlay.resize(self.scroll_list_panel.viewport().size())
+            self.progress_overlay.show()
+            self.progress_overlay.raise_()
+        else:
+            # Individual placeholders reveal completed previews immediately.
+            self.progress_overlay.hide()
 
         # Reset inactivity timer (6000ms = 6s of complete inactivity before safety handoff)
-        self._inactivity_timer.start(6000)
+        if self._thumbnail_scheduler is None:
+            self._inactivity_timer.start(6000)
         self._start_next_thumbnail_loaders()
 
     def _on_inactivity_timeout(self):
@@ -530,22 +545,86 @@ class CombinedPanel(QWidget):
             self.active_thumbnail_loaders += 1
             self._start_thumbnail_loader(path, self.animator)
 
+    def _thumbnail_displayed(self, path):
+        stacked = self.thumbnail_placeholders.get(path)
+        if stacked is None:
+            return False
+        for index in range(stacked.count()):
+            widget = stacked.widget(index)
+            if isinstance(widget, QLabel) and widget.pixmap() is not None and not widget.pixmap().isNull():
+                return True
+        return False
+
+    def needs_thumbnail(self, path):
+        return path not in self._failed_thumbnail_paths and not self._thumbnail_displayed(path)
+
+    def refresh_image_paths(self, paths):
+        """Apply an asynchronously prepared manifest without re-querying the DB."""
+        if list(paths) == self.image_paths_in_batch:
+            return
+        self.pause_thumbnail_loading()
+        self.image_paths_in_batch = list(paths)
+        self.image_count_in_batch = len(paths)
+        self._failed_thumbnail_paths.clear()
+        if self.sequential_batch_number is not None:
+            self.update_sequential_number(self.sequential_batch_number)
+        retained = set(paths)
+        for index in range(self.list_layout.count() - 1, -1, -1):
+            widget = self.list_layout.itemAt(index).widget()
+            if not self.get_thumbnail_setting() or getattr(widget, "image_path", None) not in retained:
+                self.thumbnail_placeholders.pop(getattr(widget, "image_path", None), None)
+                item = self.list_layout.takeAt(index)
+                if item.widget() is not None:
+                    item.widget().deleteLater()
+        if self.get_thumbnail_setting():
+            loading_text = getattr(language_config, "LOADING_THUMBNAIL", "Memuat....")
+            for index, path in enumerate(paths):
+                stacked = self.thumbnail_placeholders.get(path)
+                if stacked is None:
+                    stacked = thumbnail_placeholder(self.list_layout, path, self.thumbnail_placeholders, text=loading_text)
+                if stacked is not None:
+                    self.list_layout.removeWidget(stacked)
+                    self.list_layout.insertWidget(index, stacked)
+        else:
+            self.load_text_labels()
+
+    def pause_thumbnail_loading(self):
+        """Drop obsolete viewport requests; completed previews remain visible/cached."""
+        self._thumbnail_generation += 1
+        if self._thumbnail_scheduler is not None:
+            self._thumbnail_scheduler.cancel(self)
+        self.pending_thumbnail_paths = []
+        self._finish_thumbnail_loading()
+        self.active_thumbnail_loaders = 0
+
     def _start_thumbnail_loader(self, image_path, animator_ref):
-        """Start one loader while keeping the queue slot alive across retries."""
+        callback = self._make_loader_callback(animator_ref)
+        if self._thumbnail_scheduler is not None:
+            self._thumbnail_scheduler.request(self, image_path, callback)
+            return
         loader = ThumbnailLoader(image_path)
-        loader.thumbnail_ready.connect(self._make_loader_callback(animator_ref))
-        loader.start()
+        loader.thumbnail_ready.connect(callback)
         self.thumbnail_threads.append(loader)
+        self._owned_thumbnail_threads.append(loader)
+        loader.finished.connect(lambda loader=loader: self._release_thumbnail_loader(loader))
+        loader.start()
+
+    def _release_thumbnail_loader(self, loader):
+        for threads in (self.thumbnail_threads, self._owned_thumbnail_threads):
+            if loader in threads:
+                threads.remove(loader)
+        loader.deleteLater()
 
     def _retry_thumbnail_later(self, image_path, animator_ref):
         """Retry a failed thumbnail without advancing the batch queue."""
         if self._loading_finished or not self.get_thumbnail_setting():
             return
+        generation = self._thumbnail_generation
         QTimer.singleShot(
             THUMBNAIL_RETRY_DELAY_MS,
             lambda: (
                 self._start_thumbnail_loader(image_path, animator_ref)
-                if not self._loading_finished and self.get_thumbnail_setting()
+                if generation == self._thumbnail_generation and not self._loading_finished and self.get_thumbnail_setting()
                 else None
             ),
         )
@@ -556,9 +635,11 @@ class CombinedPanel(QWidget):
         apakah overlay masih 'alive' sebelum setText(...).
         """
 
+        generation = self._thumbnail_generation
+
         @Slot(object, str)
         def on_ready(image, image_path):
-            if not self.get_thumbnail_setting():
+            if generation != self._thumbnail_generation or self._loading_finished or not self.get_thumbnail_setting():
                 return
 
             displayed = False
@@ -567,7 +648,7 @@ class CombinedPanel(QWidget):
                     weakref.ref(self.list_layout),
                     image,
                     image_path,
-                    animator_ref,
+                    animator_ref if self._thumbnail_scheduler is None else None,
                     placeholders=self.thumbnail_placeholders,
                 )
             except Exception as e:
@@ -580,6 +661,11 @@ class CombinedPanel(QWidget):
                     self._retry_thumbnail_later(image_path, animator_ref)
                     return
                 self._thumbnail_retry_counts.pop(image_path, None)
+                self._failed_thumbnail_paths.add(image_path)
+                placeholder = self.thumbnail_placeholders.get(image_path)
+                if placeholder is not None:
+                    placeholder.placeholder_label.setText(os.path.basename(image_path))
+                    placeholder.setToolTip(f"Thumbnail unavailable: {image_path}")
             else:
                 self._thumbnail_retry_counts.pop(image_path, None)
 
@@ -604,16 +690,6 @@ class CombinedPanel(QWidget):
                 percent = int((self.thumbnails_loaded / self.total_images) * 100)
                 try:
                     self.progress_overlay.setText(f"Create thumbnail: {percent}%")
-                    self.progress_overlay.setStyleSheet(
-                        """
-                        background-color: rgba(0, 0, 0, 150);
-                        color: white;
-                        font-size: 16px;
-                        font-weight: bold;
-                        padding: 10px;
-                    """
-                    )
-                    self.progress_overlay.adjustSize()
                 except RuntimeError:
                     pass
 
@@ -631,6 +707,10 @@ class CombinedPanel(QWidget):
         if hasattr(self, "_inactivity_timer") and self._inactivity_timer.isActive():
             self._inactivity_timer.stop()
 
+        self._thumbnail_generation += 1
+        self._failed_thumbnail_paths.clear()
+        if self._thumbnail_scheduler is not None:
+            self._thumbnail_scheduler.cancel(self)
         self.pending_thumbnail_paths = []
         self.thumbnail_loader_queue = []
         self.active_thumbnail_loaders = 0
@@ -649,28 +729,13 @@ class CombinedPanel(QWidget):
         self.load_text_labels()
 
     def closeEvent(self, event):
-        """
-        Override closeEvent agar kita bisa disconnect semua ThumbnailLoader
-        sebelum widget ini benar-benar di-destroy.
-        """
-        # 1) Abort semua thread/loader yang masih berjalan dan disconnect signal
-        for loader in getattr(self, "thumbnail_threads", []):
-            try:
-                loader.thumbnail_ready.disconnect()
-            except Exception:
-                pass
-            try:
-                # Jika ThumbnailLoader punya method untuk menghentikan thread, panggil
-                loader.requestInterruption()
-            except Exception:
-                pass
-        self.thumbnail_threads.clear()
-
-        # 2) Terakhir, biarkan Qt memproses close seperti biasa
+        self.pause_thumbnail_loading()
+        from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_thumbnail_service import stop_process_thumbnails
+        stop_process_thumbnails(self._owned_thumbnail_threads)
         super().closeEvent(event)
 
     def load_text_labels(self):
-        image_paths = self.database_manager.get_images_by_batch(self.batch_id)
+        image_paths = self.image_paths_in_batch
         for path in image_paths:
             label = QLabel(os.path.basename(path))
             label.setFixedSize(80, 80)
@@ -809,7 +874,7 @@ class CombinedPanel(QWidget):
 
     def process_and_preview(self):
         """Jalankan semua algoritma batch secara asynchronous (background thread) dengan ProgressModal, lalu tampilkan preview gambar."""
-        from resources.GenericUILibrary import ProgressModal, AlertModal
+        from UILibrary import ProgressModal, AlertModal
         from pixel_refine_desktop.enhance_stack.core.logic.algorithm_processor import (
             AlgorithmProcessorThread,
         )
@@ -860,7 +925,7 @@ class CombinedPanel(QWidget):
 
     def handle_preview_button(self):
         """Menampilkan gambar terbaru setelah batch diproses."""
-        from resources.GenericUILibrary import AlertModal
+        from UILibrary import AlertModal
 
         latest_image_path = get_last_image("database/stack")
         if latest_image_path:
@@ -875,7 +940,7 @@ class CombinedPanel(QWidget):
             )
 
     def dropdown_box_control(self):
-        from resources.GenericUILibrary.theme import get_theme
+        from UILibrary.theme import get_theme
 
         theme = get_theme()
         override_style = f"""
@@ -1124,26 +1189,10 @@ class CombinedPanel(QWidget):
             keep_edge_cb.setEnabled(is_alignment_checked and not is_crop_edge_checked)
 
     def _normalize_alignment_name(self, name: str) -> str:
-        mapping = {
-            "Farneback Optical Flow": "Farneback",
-            "Lucas Kanade Optical Flow": "Lucas Kanade",
-            "Lucas Kanade GPU Optical Flow": "Lucas Kanade",
-            "Block Matching GPU Optical Flow": "Block Matching GPU",
-            "RAFT Optical Flow": "RAFT",
-        }
-        return mapping.get(str(name or "").strip(), str(name or ""))
+        return normalize_name("alignment", name)
 
     def _normalize_denoising_name(self, name: str) -> str:
-        mapping = {
-            "Average Denoising": "Average",
-            "Median Filter": "Median",
-            "Similarity Denoising": "Similarity",
-            "Similarity Fusion": "FusionNet",
-            "Spatial AI Denoising": "Spatial AI",
-            "FusionNet Denoising": "FusionNet",
-            "WeightNet": "FusionNet",
-        }
-        return mapping.get(str(name or "").strip(), str(name or ""))
+        return normalize_name("denoising", name)
 
     def process_all_batch(self, progress_callback=None, stop_callback=None):
         """
@@ -1210,185 +1259,31 @@ class CombinedPanel(QWidget):
                 )
                 return
 
-        is_align_checked = config_from_json.get(config.KEY_CHECKBOX_ALIGN, True)
-        is_denoise_checked = config_from_json.get(config.KEY_CHECKBOX_DENOISING, False)
+        selections = batch_selections(config_from_json, self.selected_algorithms)
+        align_algo = normalize_name("alignment", selections["alignment"])
+        stages = plan_stages(selections)
+        output_paths = []
+        for spec in stages:
+            if stop_callback and stop_callback():
+                return
+            print(f"[process_all_batch] Executing {spec.category} '{spec.name}'...")
+            kwargs = {
+                "single_process": False,
+                "batch_id": self.batch_id,
+                "progress_callback": progress_callback,
+                "stop_callback": stop_callback,
+            }
+            if spec.category == "denoising" and spec.owns_alignment:
+                kwargs["alignment_backend"] = align_algo
+            if spec.category == "hdr":
+                kwargs["db_path"] = getattr(self.database_manager, "db_path", None)
+            entrypoint = globals().get(spec.entrypoint.rsplit(":", 1)[-1])
+            result = run_algorithm(spec.category, spec.key, self, executor=entrypoint, **kwargs)
+            output_paths.extend(returned_output_paths(result))
 
-        raw_align = (
-            config_from_json.get(config.KEY_ALIGNMENT)
-            or config_from_json.get(config.KEY_ALIGNMENT_ALGO)
-            or self.selected_algorithms.get("alignment", "No Alignment")
-        )
-        align_algo = (
-            self._normalize_alignment_name(raw_align)
-            if (is_align_checked and raw_align not in ("", "None"))
-            else "No Alignment"
-        )
-
-        raw_denoise = (
-            config_from_json.get(config.KEY_DENOISING)
-            or config_from_json.get(config.KEY_DENOISING_ALGO)
-            or self.selected_algorithms.get("denoising", "No Denoising")
-        )
-        denoise_algo = (
-            self._normalize_denoising_name(raw_denoise)
-            if (is_denoise_checked and raw_denoise not in ("", "None"))
-            else "No Denoising"
-        )
-
-        # --- Langkah 3: Definisikan Aksi Algoritma ---
-        actions = {
-            "alignment": {
-                "Farneback": lambda: running_farneback_flow(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                ),
-                "Lucas Kanade": lambda: running_mf_denoiser(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                    alignment_backend="Lucas Kanade",
-                    merging_mode="none",
-                ),
-                "Block Matching GPU": lambda: running_mf_denoiser(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                    alignment_backend="Block Matching GPU",
-                    merging_mode="none",
-                ),
-                "RAFT": lambda: running_mf_denoiser(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                    alignment_backend="RAFT",
-                    merging_mode="none",
-                ),
-                "AKAZE": lambda: running_akaze(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                ),
-                "OFB": lambda: running_mf_denoiser(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                    alignment_backend="OFB",
-                    merging_mode="none",
-                ),
-                "Light Glue": lambda: running_light_glue(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                ),
-                "No Alignment": lambda: None,
-                "None": lambda: None,
-            },
-            "super_resolution": {
-                "No Super Resolution": lambda: None,
-                "None": lambda: None,
-            },
-            "denoising": {
-                "Average": lambda: running_mf_denoiser(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                    merging_mode="average",
-                    output_suffix="average",
-                    alignment_backend=align_algo,
-                ),
-                "Median": lambda: running_median(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                ),
-                "Similarity": lambda: running_mf_denoiser(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                    merging_mode="Similarity",
-                    output_suffix="similarity",
-                    alignment_backend=align_algo,
-                ),
-                "Spatial AI": lambda: running_mf_denoiser(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                    merging_mode="FusionNet",
-                    output_suffix="fusionet",
-                    alignment_backend=align_algo,
-                ),
-                "FusionNet": lambda: running_mf_denoiser(
-                    self,
-                    single_process=False,
-                    batch_id=self.batch_id,
-                    progress_callback=progress_callback,
-                    stop_callback=stop_callback,
-                    merging_mode="FusionNet",
-                    output_suffix="fusionet",
-                    alignment_backend=align_algo,
-                ),
-                "No Denoising": lambda: None,
-                "None": lambda: None,
-            },
-        }
-
-        # --- Langkah 4: Jalankan Algoritma Berdasarkan Konfigurasi JSON ---
-        any_algorithm_executed = False
-        denoising_owns_alignment = denoise_algo in (
-            "Average",
-            "Similarity",
-            "Spatial AI",
-            "FusionNet",
-        )
-
-        if denoising_owns_alignment:
-            if denoise_algo in actions["denoising"]:
-                print(
-                    f"[process_all_batch] Executing Denoising '{denoise_algo}' with Alignment '{align_algo}'..."
-                )
-                actions["denoising"][denoise_algo]()
-                any_algorithm_executed = True
-        else:
-            if is_align_checked and align_algo in actions["alignment"]:
-                print(
-                    f"[process_all_batch] Executing Standalone Alignment '{align_algo}'..."
-                )
-                actions["alignment"][align_algo]()
-                any_algorithm_executed = True
-
-            if is_denoise_checked and denoise_algo in actions["denoising"]:
-                print(f"[process_all_batch] Executing Denoising '{denoise_algo}'...")
-                actions["denoising"][denoise_algo]()
-                any_algorithm_executed = True
-
-        if not any_algorithm_executed:
-            print(
-                f"[INFO] No algorithms were executed for batch_id: {self.batch_id} based on config."
-            )
-            pass
+        if not stages:
+            print(f"[INFO] No algorithms were executed for batch_id: {self.batch_id} based on config.")
+        return output_paths
 
     def create_parameter_panel(self):
         """
@@ -1526,7 +1421,7 @@ class CombinedPanel(QWidget):
             SCROLL_AREA,
         )
         from PySide6.QtWidgets import QCheckBox, QComboBox, QScrollArea, QPushButton
-        from resources.GenericUILibrary.theme import get_theme, create_button_style
+        from UILibrary.theme import get_theme, create_button_style, apply_style
 
         theme = get_theme()
 
@@ -1558,7 +1453,7 @@ class CombinedPanel(QWidget):
                     "importButton": "info",
                 }
                 variant = variant_map.get(btn.objectName(), "secondary")
-                btn.setStyleSheet(create_button_style(variant, theme))
+                apply_style(btn, create_button_style(variant, theme))
 
     def retranslate_ui(self):
         """Translate all UI texts inside this batch panel dynamically."""

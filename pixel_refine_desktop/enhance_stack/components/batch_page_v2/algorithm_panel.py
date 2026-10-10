@@ -17,16 +17,17 @@ from PySide6.QtCore import QThread, Qt, Signal, QTimer
 import config
 
 # Generic UI Library
-from resources.GenericUILibrary import (
+from UILibrary import (
     FormGroup,
     Button,
     ProgressBar as ModernProgressBar,
 )
-from resources.GenericUILibrary.mixins import SyncMixin
+from UILibrary.mixins import SyncMixin
 
 # Algorithm logic
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_logic import AlgorithmLogic
-from pixel_refine_desktop.enhance_stack.core.logic.card_process_command import build_start_command
+from pixel_refine_desktop.enhance_stack.core.logic.card_process_command import build_start_command, StartProcessCommand
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import CATEGORIES
 
 # Animation support
 from resources.animations.animation_manager import (
@@ -42,7 +43,7 @@ from pixel_refine_desktop.enhance_stack.core.logic.algorithm_processor import (
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 
-from resources.GenericUILibrary import live_update
+from UILibrary import live_update
 
 
 @live_update
@@ -216,17 +217,9 @@ class AlgorithmPanel(QWidget, SyncMixin):
         )
         self.process_btn.setFixedWidth(180)  # Make it smaller and elegant
         
-        from resources.GenericUILibrary.theme import get_theme, create_button_style
+        from UILibrary.theme import get_theme, create_button_style, apply_style
         theme = get_theme()
-        self.process_btn.setStyleSheet(
-            create_button_style(self.process_btn.variant, theme)
-            + """
-            QPushButton {
-                padding: 6px 12px;
-                font-size: 10pt;
-            }
-        """
-        )
+        apply_style(self.process_btn, create_button_style(self.process_btn.variant, theme).with_overrides(padding="6px 12px", font_size="10pt"))
 
         self.process_btn.clicked.connect(self._on_process_clicked)
         btn_layout.addWidget(self.process_btn)
@@ -245,11 +238,27 @@ class AlgorithmPanel(QWidget, SyncMixin):
             self._on_cancel_requested()
             return
 
-        command = self._start_command
+        right_panel = getattr(
+            getattr(self, "display_panel", None), "right_panel", None
+        )
+        if right_panel is not None and hasattr(
+            right_panel, "snapshot_settings_for_start"
+        ):
+            settings = right_panel.snapshot_settings_for_start()
+        else:
+            settings = self.logic.get_settings()
+
+        if self._start_command is not None and any(
+            stage.category not in CATEGORIES for stage in self._start_command.stages
+        ):
+            command = StartProcessCommand(settings, self._start_command.stages)
+        else:
+            command = build_start_command(settings)
+        self._start_command = command
         if command is not None:
             command.dispatch(self._start_processing)
         else:
-            self._start_processing(self.logic.get_settings())
+            self._start_processing(settings)
 
     def _start_processing(self, settings):
         """Run the settings supplied by any card through the shared executor."""
@@ -319,7 +328,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self, enabled=None, text=None, variant=None, bg=None, hover=None
     ):
         """Helper to sync all process button instances."""
-        from resources.GenericUILibrary.theme import get_theme
+        from UILibrary.theme import get_theme
         theme = get_theme()
         for btn in self._all_process_buttons:
             try:
@@ -331,19 +340,11 @@ class AlgorithmPanel(QWidget, SyncMixin):
                     btn.variant = variant
                     # Update objectName to match the correct QSS selector for dynamic styling
                     btn.setObjectName("deleteButton" if variant == "danger" else "processButton")
-                    from resources.GenericUILibrary.theme import get_theme, create_button_style
+                    from UILibrary.theme import get_theme, create_button_style, apply_style
                     theme = get_theme()
                     is_display_start = hasattr(self, "display_panel") and self.display_panel and btn == self.display_panel.start_btn_ref
                     padding_val = "5px" if is_display_start else "6px 12px"
-                    btn.setStyleSheet(
-                        create_button_style(btn.variant, theme)
-                        + f"""
-                        QPushButton {{
-                            padding: {padding_val};
-                            font-size: 10pt;
-                        }}
-                        """
-                    )
+                    apply_style(btn, create_button_style(btn.variant, theme).with_overrides(padding=padding_val, font_size="10pt"))
                     btn.style().unpolish(btn)
                     btn.style().polish(btn)
                 if bg or hover:

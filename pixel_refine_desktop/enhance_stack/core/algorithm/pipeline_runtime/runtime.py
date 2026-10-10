@@ -24,6 +24,9 @@ from .contracts import (
 PREFETCH_SETTING_KEY = "pipeline_prefetch_depth"
 PREFETCH_MIN = 0
 PREFETCH_MAX = 4
+IN_PROCESSING_SETTING_KEY = "pipeline_in_processing_depth"
+IN_PROCESSING_MIN = 1
+IN_PROCESSING_MAX = 4
 _MISSING = object()
 _DONE = object()
 
@@ -42,6 +45,22 @@ def normalize_prefetch_depth(value: Any) -> int:
     except (TypeError, ValueError, OverflowError):
         return 0
     return depth if PREFETCH_MIN <= depth <= PREFETCH_MAX else 0
+
+
+def normalize_in_processing_depth(value: Any) -> int:
+    """Return a valid 1..4 in-processing capacity; invalid values use 1."""
+    if isinstance(value, bool) or value is None:
+        return IN_PROCESSING_MIN
+    try:
+        if isinstance(value, float) and not value.is_integer():
+            return IN_PROCESSING_MIN
+        text = str(value).strip()
+        if not text:
+            return IN_PROCESSING_MIN
+        depth = int(text, 10)
+    except (TypeError, ValueError, OverflowError):
+        return IN_PROCESSING_MIN
+    return depth if IN_PROCESSING_MIN <= depth <= IN_PROCESSING_MAX else IN_PROCESSING_MIN
 
 
 def resolve_prefetch_depth(
@@ -76,6 +95,24 @@ def resolve_prefetch_depth(
     return normalize_prefetch_depth(legacy_fallback)
 
 
+def resolve_in_processing_depth(requested: Any = None) -> int:
+    """Read the persisted in-processing capacity, falling back to one frame."""
+    if requested is not None:
+        return normalize_in_processing_depth(requested)
+    try:
+        from config import GENERAL_SETTINGS_FILE
+
+        with open(GENERAL_SETTINGS_FILE, "r", encoding="utf-8") as handle:
+            persisted = json.load(handle)
+        if isinstance(persisted, dict) and IN_PROCESSING_SETTING_KEY in persisted:
+            return normalize_in_processing_depth(
+                persisted[IN_PROCESSING_SETTING_KEY]
+            )
+    except Exception:
+        pass
+    return IN_PROCESSING_MIN
+
+
 def _event_is_set(event: Any) -> bool:
     if event is None:
         return False
@@ -107,6 +144,32 @@ class _Failed:
     error: BaseException
 
 
+class InProcessingLease:
+    """Idempotent ownership token for one admitted in-processing frame."""
+
+    __slots__ = ("_runtime", "_token", "_lock", "_released")
+
+    def __init__(self, runtime: PipelineRuntime, token: object):
+        self._runtime = runtime
+        self._token = token
+        self._lock = threading.Lock()
+        self._released = False
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        self._runtime._release_in_processing_token(self._token)
+
+    def __enter__(self) -> InProcessingLease:
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.release()
+        return False
+
+
 class _BoundedSupportStream(Iterator[tuple[int, Any]]):
     """One ordered loader with a bounded host queue and deterministic cleanup."""
 
@@ -134,8 +197,9 @@ class _BoundedSupportStream(Iterator[tuple[int, Any]]):
         self._queue: queue.Queue[Any] | None = (
             queue.Queue(maxsize=self._depth) if self._depth > 0 else None
         )
-        # Reserve a slot BEFORE decoding. A full queue must not retain an
-        # additional decoded frame in the producer's local variable.
+        # Reserve a slot before loading so the producer cannot hold an extra
+        # payload outside the bounded queue. Resident denoising loaders put
+        # unchanged source-file bytes here and decode only after admission.
         self._slots = threading.BoundedSemaphore(self._depth) if self._depth else None
         self.peak_buffered_frames = 0
         self._thread: threading.Thread | None = None
@@ -276,12 +340,20 @@ class PipelineRuntime:
         self,
         *,
         prefetch_depth: Any = 0,
+        in_processing_depth: Any = 1,
         stop_event: Any = None,
         progress_callback: Callable[..., None] | None = None,
         session: Any = None,
         session_factory: Callable[[Any], Any] | None = None,
     ):
         self.prefetch_depth = normalize_prefetch_depth(prefetch_depth)
+        self.in_processing_depth = normalize_in_processing_depth(in_processing_depth)
+        self.peak_in_processing_frames = 0
+        self._in_processing_live = 0
+        self._in_processing_slots = threading.BoundedSemaphore(
+            self.in_processing_depth
+        )
+        self._in_processing_tokens: set[object] = set()
         self.stop_event = stop_event
         self.progress_callback = progress_callback
         self._session = session
@@ -301,6 +373,50 @@ class PipelineRuntime:
     @property
     def worker_stop_requested(self) -> bool:
         return self._worker_stop.is_set()
+
+    @property
+    def in_processing_frames(self) -> int:
+        with self._lock:
+            return self._in_processing_live
+
+    def acquire_in_processing_slot(
+        self, *, stop_when: Callable[[], bool] | None = None
+    ) -> InProcessingLease | None:
+        """Reserve one shared in-processing slot, observing cancellation."""
+
+        while True:
+            with self._lock:
+                if self._closed:
+                    return None
+            if self._worker_stop.is_set() or _event_is_set(self.stop_event):
+                return None
+            if stop_when is not None:
+                try:
+                    if stop_when():
+                        return None
+                except Exception:
+                    return None
+            if not self._in_processing_slots.acquire(timeout=0.05):
+                continue
+            with self._lock:
+                if self._closed:
+                    self._in_processing_slots.release()
+                    return None
+                token = object()
+                self._in_processing_tokens.add(token)
+                self._in_processing_live = len(self._in_processing_tokens)
+                self.peak_in_processing_frames = max(
+                    self.peak_in_processing_frames, self._in_processing_live
+                )
+            return InProcessingLease(self, token)
+
+    def _release_in_processing_token(self, token: object) -> None:
+        with self._lock:
+            if token not in self._in_processing_tokens:
+                return
+            self._in_processing_tokens.remove(token)
+            self._in_processing_live = len(self._in_processing_tokens)
+        self._in_processing_slots.release()
 
     def start_worker(self, *, target, name):
         """Start a stage with this job's context, never a global API patch."""
@@ -401,6 +517,194 @@ class PipelineRuntime:
             with self._lock:
                 self._streams.discard(stream)
 
+    def iter_prepared_supports(
+        self,
+        indices: Iterable[int],
+        loader: Callable[[int], Any],
+        prepare: Callable[[int, Any], Any],
+        *,
+        stop_when: Callable[[], bool] | None = None,
+        raise_on_cancel: bool = False,
+        source_disposer: Callable[[Any], None] | None = None,
+        prepared_disposer: Callable[[Any], None] | None = None,
+    ) -> Iterator[tuple[int, Any]]:
+        """Prepare bounded host frames ahead while the consumer uses its current item.
+
+        The in-processing limit includes the currently yielded item and frames
+        being loaded/prepared. The loader's separate RAM queue continues to be
+        bounded by ``prefetch_depth``. Preparation stays on a host worker; this
+        API does not make GPU kernel execution concurrent.
+        """
+        if self._closed:
+            raise RuntimeError("PipelineRuntime is closed")
+
+        def own_prepared(value):
+            session = self._session
+            if session is not None and hasattr(session, "own"):
+                session.own(value, releaser=prepared_disposer)
+                return value, session.release_buffer
+            return value, prepared_disposer
+
+        if self.in_processing_depth <= 1:
+            source_stream = iter(self.iter_supports(
+                indices,
+                loader,
+                stop_when=stop_when,
+                raise_on_cancel=raise_on_cancel,
+                disposer=source_disposer,
+            ))
+            try:
+                while True:
+                    lease = self.acquire_in_processing_slot(stop_when=stop_when)
+                    if lease is None:
+                        if raise_on_cancel and _event_is_set(self.stop_event):
+                            raise PipelineCancelledError(
+                                "Pipeline in-processing queue cancelled"
+                            )
+                        break
+                    try:
+                        index, source = next(source_stream)
+                    except StopIteration:
+                        lease.release()
+                        break
+                    except BaseException:
+                        lease.release()
+                        raise
+
+                    prepared = None
+                    release = None
+                    try:
+                        prepared = prepare(index, source)
+                        prepared, release = own_prepared(prepared)
+                        yield index, prepared
+                    finally:
+                        if prepared is not None:
+                            _dispose(prepared, release or prepared_disposer)
+                        lease.release()
+            finally:
+                try:
+                    source_stream.close()
+                except Exception:
+                    pass
+            return
+
+        output: queue.Queue[Any] = queue.Queue(maxsize=self.in_processing_depth)
+        local_stop = threading.Event()
+
+        def stopped() -> bool:
+            if local_stop.is_set() or self.worker_stop_requested:
+                return True
+            if _event_is_set(self.stop_event):
+                return True
+            if stop_when is not None:
+                try:
+                    return bool(stop_when())
+                except Exception:
+                    return True
+            return False
+
+        def put(item: Any) -> bool:
+            while not local_stop.is_set() and not self.worker_stop_requested:
+                try:
+                    output.put(item, timeout=0.05)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
+        def produce() -> None:
+            source_stream = self.iter_supports(
+                indices,
+                loader,
+                stop_when=lambda: local_stop.is_set()
+                or self.worker_stop_requested
+                or (stop_when is not None and stop_when()),
+                raise_on_cancel=raise_on_cancel,
+                disposer=source_disposer,
+            )
+            try:
+                while not stopped():
+                    lease = self.acquire_in_processing_slot(stop_when=stopped)
+                    if lease is None:
+                        break
+                    try:
+                        index, source = next(source_stream)
+                    except StopIteration:
+                        lease.release()
+                        break
+                    except BaseException:
+                        lease.release()
+                        raise
+
+                    prepared = None
+                    release = None
+                    try:
+                        prepared = prepare(index, source)
+                        prepared, release = own_prepared(prepared)
+                        if not put(_Loaded(index, (prepared, release, lease))):
+                            _dispose(prepared, release or prepared_disposer)
+                            lease.release()
+                            break
+                        prepared = None  # Ownership moves to the consumer queue.
+                        lease = None
+                    except BaseException as exc:
+                        if prepared is not None:
+                            _dispose(prepared, release or prepared_disposer)
+                        if lease is not None:
+                            lease.release()
+                        if not stopped():
+                            put(_Failed(exc))
+                        break
+            except BaseException as exc:
+                if not stopped():
+                    put(_Failed(exc))
+            finally:
+                try:
+                    source_stream.close()
+                except Exception:
+                    pass
+                put(_DONE)
+
+        worker = self.start_worker(target=produce, name="PipelineInProcessing")
+        try:
+            while True:
+                if stopped():
+                    if raise_on_cancel and _event_is_set(self.stop_event):
+                        raise PipelineCancelledError(
+                            "Pipeline in-processing queue cancelled"
+                        )
+                    break
+                try:
+                    item = output.get(timeout=0.05)
+                except queue.Empty:
+                    if not worker.is_alive():
+                        break
+                    continue
+                if item is _DONE:
+                    break
+                if isinstance(item, _Failed):
+                    raise item.error
+                assert isinstance(item, _Loaded)
+                prepared, release, lease = item.value
+                try:
+                    yield item.index, prepared
+                finally:
+                    _dispose(prepared, release or prepared_disposer)
+                    lease.release()
+        finally:
+            local_stop.set()
+            if worker is not threading.current_thread():
+                worker.join()
+            while True:
+                try:
+                    item = output.get_nowait()
+                except queue.Empty:
+                    break
+                if isinstance(item, _Loaded):
+                    prepared, release, lease = item.value
+                    _dispose(prepared, release or prepared_disposer)
+                    lease.release()
+
     def execute(
         self,
         source: PipelineSource,
@@ -417,6 +721,7 @@ class PipelineRuntime:
                 session=session,
                 options=PipelineOptions(
                     prefetch_depth=self.prefetch_depth,
+                    in_processing_depth=self.in_processing_depth,
                     values=dict(options or {}),
                 ),
                 stop_event=self.stop_event,
@@ -503,6 +808,7 @@ def runtime_entrypoint(function: Callable[..., Any]) -> Callable[..., Any]:
         depth = resolve_prefetch_depth(requested)
         runtime = PipelineRuntime(
             prefetch_depth=depth,
+            in_processing_depth=resolve_in_processing_depth(),
             stop_event=bound.arguments.get("stop_event"),
             progress_callback=bound.arguments.get("progress_callback"),
         )
@@ -523,12 +829,17 @@ def runtime_entrypoint(function: Callable[..., Any]) -> Callable[..., Any]:
 
 
 __all__ = [
+    "IN_PROCESSING_MAX",
+    "IN_PROCESSING_MIN",
+    "IN_PROCESSING_SETTING_KEY",
     "PREFETCH_MAX",
     "PREFETCH_MIN",
     "PREFETCH_SETTING_KEY",
     "PipelineRuntime",
     "current_pipeline_runtime",
     "normalize_prefetch_depth",
+    "normalize_in_processing_depth",
+    "resolve_in_processing_depth",
     "resolve_prefetch_depth",
     "runtime_entrypoint",
 ]

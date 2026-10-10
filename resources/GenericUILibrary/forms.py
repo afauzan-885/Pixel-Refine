@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, Qt, Slot
 from .mixins import RealtimeMixin
-from .theme import create_checkbox_style
+from .theme import create_checkbox_style, apply_style
 
 
 def _numeric_spinbox_style():
@@ -365,7 +365,7 @@ class Checkbox(QWidget, RealtimeMixin):
         self.checkbox.setChecked(checked)
         self.checkbox.toggled.connect(self._on_internal_toggle)
 
-        self.checkbox.setStyleSheet(create_checkbox_style())
+        apply_style(self.checkbox, create_checkbox_style())
 
         layout.addWidget(self.checkbox)
         layout.addStretch()

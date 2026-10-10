@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QFileDialog
 from resources.animations.toast.toast_manager import (
     ToastPosition,
 )
-from resources.GenericUILibrary import ImageCard
+from UILibrary import ImageCard
 from config import SUPPORTED_FORMATS
 
 

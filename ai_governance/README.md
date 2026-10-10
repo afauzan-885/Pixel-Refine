@@ -12,6 +12,20 @@ Governance ini adalah sumber aturan portabel untuk Codex, DeepSeek, dan agent la
 
 ## Dokumen aktif
 
+- CHANGELOG_20261010.md: ringkasan perubahan working tree untuk commit 2026-10-10.
+
+- `assistant_backup/20261010/README.md`: snapshot lokal registry memori assistant, aturan kerja, dan skill; diabaikan Git dan bukan sumber normatif pengganti governance aktif.
+
+- BULK_VIEWPORT_THUMBNAILS_HANDOFF_20261005.md: skeleton bulk, metadata asinkron, prioritas viewport, dua decoder, cache thumbnail fingerprint, embedded RAW preview, eviction panel dan batas bukti statis.
+
+- BATCH_PROCESS_RESPONSIVENESS_HANDOFF_20261005.md: batch memakai worker subprocess termasuk save, ETA durasi batch sampai export, cancel/close asinkron, Details native/elipsis dan Status tetap autoresize; bukti heartbeat dan geometri Qt serta batas repro foto asli.
+
+- BULK_RESULT_EXPORT_HANDOFF_20261005.md: exact nama referensi+proses, reuse hasil tanpa stacking ulang, export copy terverifikasi/move fallback bersama, source lock dan batas cache nama-only.
+
+- ALGORITHM_CATALOG_HANDOFF_20261005.md: katalog tunggal empat kategori, alias/factory/entrypoint/parameter provider, pembatasan menurut konteks/denoiser, selector Bulk Edit dan dispatch bersama.
+
+- BLOCK_FLOW_MX150_FIX_HANDOFF_20261005.md: fix metadata RGB prefilter, import reference noise filter, canonical worker fallback; parity CPU/CUDA/Vulkan dan smoke dua DNG asli 12 MP, tanpa perubahan engine/TCM/model.
+- RESIDENT_BILINEAR_QUALITY_HANDOFF_20261005.md: analisis RAW Native bilinear full-res, kebijakan SpatialFusion RGB/CFA bersama, reuse warp dengan parity nol, probe burst sintetis 4 DNG CPU/CUDA/DirectML, trade-off deghost/denoise dan bilinear 12 MP yang belum lebih cepat.
 - GLOBAL_RULES.md: barrier teknis, evidence, penghapusan, dan Git.
 - OPERATING_PROTOCOL.md: alur kerja inspeksi dan validasi.
 - MULTI_AGENT_PROTOCOL.md: aturan delegasi agent.
@@ -36,7 +50,7 @@ Governance ini adalah sumber aturan portabel untuk Codex, DeepSeek, dan agent la
 - WEIGHTNET_OPTIMIZED_BUNDLES_HANDOFF_20260927.md: Bundle V2 eksperimen dan promosi bundle aktif V3 grayscale CPU/DirectML patch 512/1024, backup terverifikasi, model unified 256 dipertahankan untuk kompatibilitas, serta parity loader produksi.
 - WEIGHTED_HDR_FOUNDATION_HANDOFF.md: streaming Weighted HDR dan SPDE-MR, histogram/reference fallback, MTB/AOT dispatch, output LDR/radiance relatif, perintah Start umum dari card, serta batas bukti runtime yang masih diperlukan.
 - skills/taichi-aot-dev/SKILL.md: workflow kompilasi dan validasi Taichi AOT.
-- RIGHT_PANEL_CARDS_HANDOFF_20260927.md: pembagian tinggi panel kanan, jarak kartu 5 px, isi kartu rapat, pemilihan SR/HDR/denoising eksklusif, serta bukti Qt offscreen dan batas validasi aplikasi.
+- RIGHT_PANEL_CARDS_HANDOFF_20260927.md: layout panel kanan, kartu 2x1 dengan jarak 4 px dan tooltip bantuan, snapshot Start dari UI, Block Flow di pemilih alignment, fallback worker sesuai rantai backend, serta batas validasi visual/runtime.
 
 ## Aturan kerja singkat
 

@@ -104,7 +104,7 @@ def _clean_device_cache():
 
 
 def _bound_store(tmp_path, state):
-    from resources.GenericUILibrary.store import DataStore
+    from UILibrary.store import DataStore
 
     path = tmp_path / "app_setting.json"
     path.write_text(json.dumps(state, indent=4), encoding="utf-8")

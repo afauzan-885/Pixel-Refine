@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
 )
 from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve, QTimer
-from resources.GenericUILibrary.store import get_store
+from UILibrary.store import get_store
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:

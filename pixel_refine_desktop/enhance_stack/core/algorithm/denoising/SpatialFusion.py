@@ -5,6 +5,7 @@ Settings selects the native Taichi backend; this adapter only translates that
 selection into the CPU or GPU execution lane of ``SpatialFusionProcessor``.
 """
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import os
 from contextlib import contextmanager
 
@@ -35,10 +36,13 @@ def _synchronous_aot_execution():
             os.environ["PIXEL_REFINE_AOT_MODE"] = previous
 
 
+
+
 class SpatialFusionDenoisingAlgorithm:
-    NAME = "Similarity"
-    KIND = "denoising"
-    DESCRIPTION = "Backend-neutral similarity-weighted spatial fusion."
+    SPEC = get_spec("denoising", "similarity")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
 
     @staticmethod
     def load_config():
