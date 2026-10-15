@@ -1,6 +1,6 @@
 {
   "goal_id": "apap-native-tcm",
-  "status": "building",
+  "status": "inspecting",
   "iteration": 2,
   "builder_model": "supported worker substitute (Goal Builder model unavailable)",
   "inspector_model": "supported explorer substitute (Goal Inspector model unavailable)",
@@ -26,6 +26,16 @@
       "iteration": 2,
       "event": "building",
       "summary": "Fix Inspector iteration 1 findings: weighted-DLT parity, native TPS/default compatibility, remaining apap.py fallback, target-qualified manifest/runtime integration, then execute full app/backend/performance/memory gates before promotion."
+    },
+    {
+      "iteration": 2,
+      "event": "builder_partial",
+      "summary": "Removed the broad warp_image fallback and restored the TPS-enabled default; TPS-enabled native calls now fail explicitly because no native TPS graph exists. Weighted native fit remains max 0.4699 px from the oracle; no tests/app/backend/performance/memory gates or artifact promotion."
+    },
+    {
+      "iteration": 2,
+      "event": "inspector_verdict",
+      "summary": "FAIL. warp_image(use_sparse_mesh=true) now propagates native errors and explicit use_sparse_mesh=false CPU reference warp still passes the small identity smoke. However default fit_apap(enable_residual_spline=true) immediately raises because native TPS is absent; warp_apap and resident APAP callers do not override it, so production default APAP does not run. Weighted DLT parity remains unresolved at max 0.4699 px from iteration 1; runtime tree still has no apap_native TCM/manifest. No iteration 2 pytest, headless app, backend, performance, or memory gates passed/evidenced."
     }
   ]
 }
