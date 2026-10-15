@@ -1,0 +1,31 @@
+{
+  "goal_id": "apap-native-tcm",
+  "status": "building",
+  "iteration": 2,
+  "builder_model": "supported worker substitute (Goal Builder model unavailable)",
+  "inspector_model": "supported explorer substitute (Goal Inspector model unavailable)",
+  "initial_sha": "7bde21c30b4f572475373089b76e3a532267e954",
+  "created_at": "2026-10-16T00:50:19+07:00",
+  "history": [
+    {
+      "iteration": 0,
+      "event": "interview_and_discovery",
+      "summary": "User set max 2 agents, keep API facades, and verify all available backends with parity/performance/memory gates. Read-only discovery completed. The Goal Builder model dispatch failed before execution because that model is unsupported in this account; switched to supported worker/explorer roles."
+    },
+    {
+      "iteration": 1,
+      "event": "builder_partial",
+      "summary": "CPU APAP TCM fit/map graph compiles and dispatches from isolated staging, but native-vs-NumPy mapped points differ by up to 0.3735 px and TPS residual is not implemented; no pytest/full app/backend/memory gate passed and no artifact was promoted."
+    },
+    {
+      "iteration": 1,
+      "event": "inspector_verdict",
+      "summary": "FAIL. Independent CPU candidate TCM dispatch succeeded, but fixed synthetic parity differed by max 0.4699 px; focused APAP pytest was 4 failed/1 passed because candidate was not integrated into the runtime TCM root. Candidate has no tcm_manifest; TPS default changed and native TPS is unsupported; apap.py warp_image still falls back to NumPy/OpenCV. Nine original APAP TCM hashes match baseline. No CUDA/Vulkan/OpenGL, headless app, end-to-end, latency, or memory gates were evidenced."
+    },
+    {
+      "iteration": 2,
+      "event": "building",
+      "summary": "Fix Inspector iteration 1 findings: weighted-DLT parity, native TPS/default compatibility, remaining apap.py fallback, target-qualified manifest/runtime integration, then execute full app/backend/performance/memory gates before promotion."
+    }
+  ]
+}
