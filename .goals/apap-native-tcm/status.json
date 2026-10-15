@@ -1,7 +1,7 @@
 {
   "goal_id": "apap-native-tcm",
   "status": "inspecting",
-  "iteration": 2,
+  "iteration": 3,
   "builder_model": "supported worker substitute (Goal Builder model unavailable)",
   "inspector_model": "supported explorer substitute (Goal Inspector model unavailable)",
   "initial_sha": "7bde21c30b4f572475373089b76e3a532267e954",
@@ -36,6 +36,26 @@
       "iteration": 2,
       "event": "inspector_verdict",
       "summary": "FAIL. warp_image(use_sparse_mesh=true) now propagates native errors and explicit use_sparse_mesh=false CPU reference warp still passes the small identity smoke. However default fit_apap(enable_residual_spline=true) immediately raises because native TPS is absent; warp_apap and resident APAP callers do not override it, so production default APAP does not run. Weighted DLT parity remains unresolved at max 0.4699 px from iteration 1; runtime tree still has no apap_native TCM/manifest. No iteration 2 pytest, headless app, backend, performance, or memory gates passed/evidenced."
+    },
+    {
+      "iteration": 2,
+      "event": "blocked",
+      "summary": "The same two blockers recurred through three goal continuations: native weighted-DLT parity is outside existing tolerance, and full default APAP/TPS cannot be executed natively. Proceeding requires a user decision whether to preserve TPS/full parity at longer implementation scope or redefine native APAP without TPS residual/accept output changes."
+    },
+    {
+      "iteration": 3,
+      "event": "user_resumed",
+      "summary": "User explicitly chose to preserve TPS residual behavior and continue the full native fidelity goal. No TPS-off or CPU-fit-only scope change is authorized."
+    },
+    {
+      "iteration": 3,
+      "event": "builder_partial",
+      "summary": "Replaced the 8-unknown normal-equation solver with a weighted 9D DLT/Jacobi eigensolver to improve oracle fidelity, but the CPU AOT compile exceeded ~169.7 CPU seconds and emitted no TCM. No graph execution, parity, TPS, runtime, backend, application, performance or memory gate was completed."
+    },
+    {
+      "iteration": 3,
+      "event": "inspector_verdict",
+      "summary": "FAIL. Source contains a 9x9 weighted homogeneous DLT/Jacobi kernel and compiler registers algn_apap_fit_weighted_f32, but compile timed out at ~169.7 CPU seconds and emitted no TCM. Runtime artifact tree has zero apap_native TCMs; the only temp candidate is the prior 8D archive. No graph execution/parity/tests/backend/app/perf/memory evidence. Native TPS graph remains absent while fit_apap defaults enable_residual_spline=True and raises, so default production APAP still cannot complete."
     }
   ]
 }
