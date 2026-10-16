@@ -72,6 +72,37 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser impo
 
 ANALYSIS_AUTO_ENHANCE_MODE = "natural"
 
+def _select_ransac_inlier_correspondences(source, target, inlier_mask):
+    """Apply one RANSAC mask while preserving the selected rows' input order."""
+    src = np.ascontiguousarray(source)
+    dst = np.ascontiguousarray(target)
+    if src.ndim != 2 or src.shape[1:] != (2,) or dst.shape != src.shape:
+        raise ValueError(
+            f"RANSAC correspondences must be matching Nx2 arrays, got {src.shape} and {dst.shape}"
+        )
+    if inlier_mask is None:
+        selected = np.ones((len(src),), dtype=bool)
+    else:
+        if isinstance(inlier_mask, TaichiGPUBuffer):
+            get_engine().sync()
+            mask_values = inlier_mask.to_numpy()
+        else:
+            mask_values = np.asarray(inlier_mask)
+        mask_values = np.asarray(mask_values).reshape(-1)
+        if len(mask_values) != len(src):
+            raise ValueError(
+                f"RANSAC inlier mask has {len(mask_values)} rows for {len(src)} correspondences"
+            )
+        selected = mask_values.astype(bool, copy=False)
+    if int(selected.sum()) < 4:
+        raise RuntimeError(
+            f"RANSAC selected only {int(selected.sum())} APAP correspondences; at least four are required"
+        )
+    return (
+        np.ascontiguousarray(src[selected]),
+        np.ascontiguousarray(dst[selected]),
+    )
+
 
 def _resolve_spatial_analysis_config(
     config, *, tile_size, overlap, work_shape, noise_score, is_raw

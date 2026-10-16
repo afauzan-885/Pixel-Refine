@@ -896,50 +896,6 @@ def _normalize_tps_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, f
     return np.ascontiguousarray(normalized), np.asarray(center), scale
 
 
-def _sample_tps_control_indices(
-    source: np.ndarray, target: np.ndarray, limit: int
-) -> np.ndarray:
-    """Legacy diagnostic sampler; production fitting must use every control."""
-    points = np.ascontiguousarray(source, dtype=np.float64)
-    target = np.ascontiguousarray(target, dtype=np.float64)
-    count = len(points)
-    if count <= limit:
-        return np.arange(count, dtype=np.int64)
-    lo = np.min(points, axis=0)
-    span = np.maximum(np.max(points, axis=0) - lo, 1.0e-12)
-    normalized = (points - lo[None, :]) / span[None, :]
-    center = np.mean(normalized, axis=0)
-    first = int(np.argmin(np.sum((normalized - center[None, :]) ** 2, axis=1)))
-    spatial_count = limit - max(4, limit // 4)
-    selected = np.empty(spatial_count, dtype=np.int64)
-    selected[0] = first
-    min_distance_sq = np.sum((normalized - normalized[first][None, :]) ** 2, axis=1)
-    min_distance_sq[first] = -1.0
-    for index in range(1, spatial_count):
-        next_index = int(np.argmax(min_distance_sq))
-        selected[index] = next_index
-        distance_sq = np.sum((normalized - normalized[next_index][None, :]) ** 2, axis=1)
-        min_distance_sq = np.minimum(min_distance_sq, distance_sq)
-        min_distance_sq[selected[: index + 1]] = -1.0
-
-    # Keep a quarter of the controls near the strongest residual motion so a
-    # localized deformation is not averaged away by uniform spatial coverage.
-    motion = target - points
-    motion -= np.median(motion, axis=0, keepdims=True)
-    motion_strength = np.linalg.norm(motion, axis=1)
-    motion_order = np.argsort(-motion_strength, kind="stable")
-    output = selected.tolist()
-    selected_set = set(output)
-    for candidate in motion_order:
-        candidate_index = int(candidate)
-        if candidate_index not in selected_set:
-            output.append(candidate_index)
-            selected_set.add(candidate_index)
-            if len(output) == limit:
-                break
-    return np.asarray(output, dtype=np.int64)
-
-
 def _map_apap_points_native(warp: APAPWarp, points: np.ndarray) -> np.ndarray:
     from taichi_vision.taichi_algorithm import aot_api
 

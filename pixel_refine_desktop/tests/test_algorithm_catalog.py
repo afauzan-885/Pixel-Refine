@@ -291,14 +291,10 @@ def test_start_flushes_active_batch_warp_settings_before_runtime_snapshot(
     assert process_all_observations == [{"warp_method": "apap", "mode": "balance"}]
 
 
-def test_apap_tps_control_sampling_keeps_local_motion_within_one_pixel():
+def test_apap_full_input_keeps_all_841_control_rows_without_sampling():
     import numpy as np
 
-    from taichi_vision.taichi_algorithm.alignment.apap import (
-        MAX_NATIVE_TPS_CONTROLS,
-        _sample_tps_control_indices,
-    )
-    from taichi_vision.taichi_algorithm.alignment.tps import fit_tps_checked
+    from taichi_vision.taichi_algorithm.alignment import apap
 
     rows = cols = 29
     xx, yy = np.meshgrid(np.linspace(0, 4095, cols), np.linspace(0, 3071, rows))
@@ -310,20 +306,65 @@ def test_apap_tps_control_sampling_keeps_local_motion_within_one_pixel():
     target[:, 0] += 8.0 * bump + 1.1 * np.sin(y * 2 * np.pi)
     target[:, 1] += 5.5 * bump + 0.8 * np.sin(x * 2 * np.pi)
 
-    indices = _sample_tps_control_indices(source, target, MAX_NATIVE_TPS_CONTROLS)
-    assert len(indices) == MAX_NATIVE_TPS_CONTROLS
-    assert len(np.unique(indices)) == MAX_NATIVE_TPS_CONTROLS
-
-    qx, qy = np.meshgrid(np.linspace(0, 4095, 33), np.linspace(0, 3071, 33))
-    query = np.column_stack((qx.ravel(), qy.ravel()))
-    full, _ = fit_tps_checked(source, target, regularization=1e-5)
-    sampled, _ = fit_tps_checked(
-        source[indices], target[indices], regularization=1e-5
+    assert not hasattr(apap, "_sample_tps_control_indices")
+    assert not hasattr(apap, "MAX_NATIVE_TPS_CONTROLS")
+    warp = apap.fit_apap_reference(
+        source,
+        target,
+        grid_shape=(2, 2),
+        max_controls_per_node=16,
+        enable_residual_spline=False,
     )
-    error = np.linalg.norm(full.map_points(query) - sampled.map_points(query), axis=1)
+    assert len(warp.source_points) == len(source) == 841
+    assert len(warp.target_points) == len(target) == 841
+    np.testing.assert_array_equal(warp.source_points, source)
+    np.testing.assert_array_equal(warp.target_points, target)
 
-    assert float(error.max()) <= 1.0
-    assert float(error.mean()) < 0.15
+
+def test_apap_caller_applies_ransac_mask_once_and_preserves_order():
+    import numpy as np
+
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.resident_pipeline import (
+        _select_ransac_inlier_correspondences,
+    )
+
+    source = np.arange(16, dtype=np.float32).reshape(8, 2)
+    target = source + np.array([2.0, -3.0], dtype=np.float32)
+    mask = np.array([[0], [1], [0], [1], [1], [0], [1], [0]], dtype=np.uint8)
+    selected_source, selected_target = _select_ransac_inlier_correspondences(
+        source, target, mask
+    )
+    np.testing.assert_array_equal(selected_source, source[[1, 3, 4, 6]])
+    np.testing.assert_array_equal(selected_target, target[[1, 3, 4, 6]])
+
+    unfiltered_source, unfiltered_target = _select_ransac_inlier_correspondences(
+        source, target, None
+    )
+    np.testing.assert_array_equal(unfiltered_source, source)
+    np.testing.assert_array_equal(unfiltered_target, target)
+    with pytest.raises(ValueError, match="mask has 7 rows for 8 correspondences"):
+        _select_ransac_inlier_correspondences(source, target, mask[:7])
+
+
+def test_apap_caller_reads_gpu_ransac_mask_before_cleanup():
+    import numpy as np
+
+    from taichi_vision.taichi_aot import upload
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.resident_pipeline import (
+        _select_ransac_inlier_correspondences,
+    )
+
+    source = np.arange(16, dtype=np.float32).reshape(8, 2)
+    target = source + np.array([-1.0, 4.0], dtype=np.float32)
+    mask_gpu = upload(np.array([1, 0, 1, 0, 0, 1, 0, 1], dtype=np.uint8))
+    try:
+        selected_source, selected_target = _select_ransac_inlier_correspondences(
+            source, target, mask_gpu
+        )
+    finally:
+        mask_gpu.destroy()
+    np.testing.assert_array_equal(selected_source, source[[0, 2, 5, 7]])
+    np.testing.assert_array_equal(selected_target, target[[0, 2, 5, 7]])
 
 
 @pytest.mark.parametrize("key", ("block_matching_gpu_params", "block_matching_params"))
