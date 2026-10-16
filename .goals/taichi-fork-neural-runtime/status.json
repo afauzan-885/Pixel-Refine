@@ -1,7 +1,7 @@
 {
   "goal_id": "taichi-fork-neural-runtime",
   "status": "blocked",
-  "iteration": 1,
+  "iteration": 2,
   "builder_model": "GPT-6 provider-default worker (Goal: Builder model unsupported)",
   "inspector_model": "GPT-6 independent fallback reviewer",
   "initial_sha": "7bde21c30b4f572475373089b76e3a532267e954",
@@ -10,9 +10,8 @@
     "fork_taichi": "92bfb3ab88805872faa727a6521a3da8c37c2039"
   },
   "created_at": "2026-10-16T00:44:41+07:00",
-  "builder_status": "BLOCKED at Phase 0: source-matched toolchain/provenance unavailable; no build/tests/source edits performed.",
-  "inspector_verdict": "BLOCKED at Phase 0",
-  "inspector_status": "The first acceptance gate is unmet: no source-matched fork core build or required per-backend baseline report is evidenced. The extracted Windows SDK is present, but the inspected toolchain payload lacks the MSVC compiler/runtime prerequisites.",
+  "inspector_verdict": "BLOCKED at Phase 0 (iteration 2 static review)",
+  "inspector_status": "The build_wheel.bat patch is in Phase 0 scope and its explicit D-drive VS and extracted SDK paths match the supplied filesystem layout. Static review cannot qualify its build behavior without execution, which user steering currently forbids. The script also targets an existing default wheel output and retains TI_CLEAN deletion of the existing _skbuild directory.",
   "inspected_at": "2026-10-16",
   "history": [
     {
@@ -24,6 +23,19 @@
       "iteration": 1,
       "event": "inspector_blocked",
       "summary": "Independent read-only review confirmed the Phase 0 gate is unmet. Current repository HEADs match the handoffs; Windows SDK headers/libs are extracted, but no MSVC compiler/runtime payload was found in the inspected tool locations. No build or tests were run. See inspector-feedback-1.md."
+    },
+    {
+      "iteration": 2,
+      "event": "resume_after_user_toolchain_path",
+      "summary": "User provided D:\\Program Files\\Microsoft Visual Studio. Coordinator verified VS 2022 BuildTools 14.42.34433, cl.exe/link.exe, MSVC headers/libs, and VsDevCmd.bat; extracted SDK 10.0.26100 remains outside standard SDK registration, and build_wheel.bat still hard-codes C: paths."
+    },
+    {
+      "iteration": 2,
+      "event": "inspector_blocked",
+      "summary": "Static review found the patch in Phase 0 scope; explicit D-drive VS and SDK overrides match observed paths, and the revised subst logic avoids deleting an existing mapping. Build/runtime behavior remains unverified by user direction. Existing dist wheel and _skbuild outputs make the current output/cleanup behavior unsafe to qualify without isolation or explicit protection. See inspector-feedback-2.md."
     }
-  ]
+  ],
+  "current_phase": 0,
+  "builder_status": "Iteration 2: a portable build_wheel.bat override patch is present but untested; no staging copy/build was made. User directed no compilation yet; JIT test boundary is awaiting clarification.",
+  "user_steering": "Do not compile yet; perform static implementation and accuracy/performance testing first on Taichi fork. Clarify whether runtime JIT is allowed for those tests."
 }
