@@ -21,13 +21,11 @@ from taichi_vision.taichi_algorithm.alignment.mesh_warp import (
     _adaptive_refine_2d_kernel,
 )
 from taichi_vision.taichi_algorithm.alignment.apap import (
-    NATIVE_TPS_ITERATION_BUCKETS,
     _build_tps_system_kernel,
     _fit_apap_weighted_nodes_kernel,
-    _initialize_tps_minres_kernel,
     _map_apap_points_kernel,
     _map_tps_points_kernel,
-    _tps_minres_step_kernel,
+    _solve_tps_pivoted_kernel,
 )
 from taichi_vision.taichi_aot.artifact_targets import detect_target
 from taichi_vision.taichi_aot.tcm_contract import (
@@ -178,48 +176,24 @@ def compile_mesh_warp_aot(arch, save_path: str):
     tps_rhs = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "rhs", ti.f32, ndim=2)
     tps_regularization = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "regularization", ti.f32)
     tps_solution = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "solution", ti.f32, ndim=2)
-    tps_residuals = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "residuals", ti.f32, ndim=2)
-    tps_directions = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "directions", ti.f32, ndim=2)
-    tps_products = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "products", ti.f32, ndim=2)
-    tps_state = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "state", ti.f32, ndim=2)
-    tps_reductions = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "reductions", ti.f32, ndim=2)
-    tps_tolerance = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "tolerance", ti.f32)
-    for iteration_bucket in NATIVE_TPS_ITERATION_BUCKETS:
-        tps_graph = ti.graph.GraphBuilder()
-        tps_graph.dispatch(
-            _build_tps_system_kernel,
-            tps_source,
-            tps_target,
-            tps_system,
-            tps_rhs,
-            tps_regularization,
-        )
-        tps_graph.dispatch(
-            _initialize_tps_minres_kernel,
-            tps_system,
-            tps_rhs,
-            tps_solution,
-            tps_residuals,
-            tps_directions,
-            tps_state,
-            tps_reductions,
-        )
-        for _ in range(iteration_bucket):
-            tps_graph.dispatch(
-                _tps_minres_step_kernel,
-                tps_system,
-                tps_rhs,
-                tps_solution,
-                tps_residuals,
-                tps_directions,
-                tps_products,
-                tps_state,
-                tps_reductions,
-                tps_tolerance,
-            )
-        module.add_graph(
-            f"algn_apap_tps_minres_{iteration_bucket}_f32", tps_graph.compile()
-        )
+    tps_status = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "status", ti.i32, ndim=1)
+    tps_graph = ti.graph.GraphBuilder()
+    tps_graph.dispatch(
+        _build_tps_system_kernel,
+        tps_source,
+        tps_target,
+        tps_system,
+        tps_rhs,
+        tps_regularization,
+    )
+    tps_graph.dispatch(
+        _solve_tps_pivoted_kernel,
+        tps_system,
+        tps_rhs,
+        tps_solution,
+        tps_status,
+    )
+    module.add_graph("algn_apap_tps_pivoted_f32", tps_graph.compile())
 
     tps_query = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "query", ti.f32, ndim=2)
     tps_controls = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "controls", ti.f32, ndim=2)
@@ -261,7 +235,7 @@ def compile_mesh_warp_aot(arch, save_path: str):
             "adaptive_refine_2d_f32",
             "algn_apap_fit_weighted_f32",
             "algn_apap_map_points_f32",
-            *(f"algn_apap_tps_minres_{bucket}_f32" for bucket in NATIVE_TPS_ITERATION_BUCKETS),
+            "algn_apap_tps_pivoted_f32",
             "algn_apap_tps_map_f32",
         ]
         manifest = build_manifest_from_archive(

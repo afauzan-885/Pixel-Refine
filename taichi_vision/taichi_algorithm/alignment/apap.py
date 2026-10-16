@@ -20,6 +20,66 @@ NATIVE_TPS_ITERATION_BUCKETS = (32, 64, 128, 256, 512, 1024, 2048)
 
 
 @ti.kernel
+def _solve_tps_pivoted_kernel(
+    system: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    rhs: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    solution: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    status: ti.types.ndarray(dtype=ti.i32, ndim=1),
+):
+    """Solve the TPS KKT system with one target-side partial-pivot pass.
+
+    Keeping the pivot sequence inside one kernel avoids constructing an AOT
+    graph with one dispatch per elimination step. The loops are deliberately
+    serialized because each pivot depends on the preceding matrix update.
+    """
+    size = system.shape[0]
+    status[0] = 1
+    for pivot in range(size):
+        ti.loop_config(serialize=True)
+        pivot_row = pivot
+        pivot_abs = ti.abs(system[pivot, pivot])
+        for row in range(pivot + 1, size):
+            value = ti.abs(system[row, pivot])
+            if value > pivot_abs:
+                pivot_abs = value
+                pivot_row = row
+        if pivot_abs <= 1.0e-12 or pivot_abs != pivot_abs:
+            status[0] = 0
+        else:
+            if pivot_row != pivot:
+                for col in range(size):
+                    ti.loop_config(serialize=True)
+                    value = system[pivot, col]
+                    system[pivot, col] = system[pivot_row, col]
+                    system[pivot_row, col] = value
+                for channel in ti.static(range(2)):
+                    value = rhs[pivot, channel]
+                    rhs[pivot, channel] = rhs[pivot_row, channel]
+                    rhs[pivot_row, channel] = value
+
+            diagonal = system[pivot, pivot]
+            for col in range(pivot + 1, size):
+                ti.loop_config(serialize=True)
+                system[pivot, col] /= diagonal
+            for channel in ti.static(range(2)):
+                rhs[pivot, channel] /= diagonal
+            system[pivot, pivot] = 1.0
+
+            for row in range(size):
+                ti.loop_config(serialize=True)
+                if row != pivot:
+                    factor = system[row, pivot]
+                    system[row, pivot] = 0.0
+                    for col in range(pivot + 1, size):
+                        system[row, col] -= factor * system[pivot, col]
+                    for channel in ti.static(range(2)):
+                        rhs[row, channel] -= factor * rhs[pivot, channel]
+
+    for row, channel in ti.ndrange(size, 2):
+        solution[row, channel] = rhs[row, channel]
+
+
+@ti.kernel
 def _fit_apap_weighted_nodes_kernel(
     source: ti.types.ndarray(dtype=ti.f32, ndim=2),
     target: ti.types.ndarray(dtype=ti.f32, ndim=2),
@@ -915,39 +975,20 @@ def _fit_apap_tps_native(
     system = aot_api.upload(np.zeros((size, size), dtype=np.float32))
     rhs = aot_api.upload(np.zeros((size, 2), dtype=np.float32))
     solution = aot_api.upload(np.zeros((size, 2), dtype=np.float32))
-    residuals = aot_api.upload(np.zeros((size, 4), dtype=np.float32))
-    directions = aot_api.upload(np.zeros((size, 4), dtype=np.float32))
-    products = aot_api.upload(np.zeros((size, 2), dtype=np.float32))
-    state = aot_api.upload(np.zeros((2, 14), dtype=np.float32))
-    reductions = aot_api.upload(np.zeros((2, 2), dtype=np.float32))
-    if size > 512:
-        iteration_bucket = max(NATIVE_TPS_ITERATION_BUCKETS)
-    else:
-        iteration_bucket = next(
-            (bucket for bucket in NATIVE_TPS_ITERATION_BUCKETS if bucket >= size), None
-        )
-    if iteration_bucket is None:
-        raise RuntimeError(
-            f"No target-native TPS MINRES graph is available for system size {size}."
-        )
+    status = aot_api.upload(np.zeros((1,), dtype=np.int32))
     try:
         module.run(
-            f"algn_apap_tps_minres_{iteration_bucket}_f32",
+            "algn_apap_tps_pivoted_f32",
             source=source_buffer,
             target=target_buffer,
             system=system,
             rhs=rhs,
             solution=solution,
-            residuals=residuals,
-            directions=directions,
-            products=products,
-            state=state,
-            reductions=reductions,
+            status=status,
             regularization=float(regularization),
-            tolerance=1.0e-6,
         )
         coefficients = solution.to_numpy().astype(np.float64)
-        solver_state = state.to_numpy().astype(np.float64)
+        solver_status = status.to_numpy()
         system_np = system.to_numpy().astype(np.float64)
     except Exception as exc:
         raise RuntimeError(
@@ -955,11 +996,10 @@ def _fit_apap_tps_native(
             "no NumPy/CPU fitting fallback was used."
         ) from exc
 
-    residual_ratio = np.abs(solver_state[:, 4]) / np.maximum(solver_state[:, 7], 1.0e-20)
-    if np.any(solver_state[:, 9] > 0.5):
+    if int(solver_status[0]) == 0:
         raise RuntimeError(
-            "Native APAP TPS MINRES did not converge within "
-            f"{iteration_bucket} iterations; residual ratios={residual_ratio.tolist()}."
+            "Native APAP TPS pivoted solve found a singular KKT pivot; "
+            "the requested TPS residual was not dropped."
         )
     condition_estimate = float(np.linalg.cond(system_np))
     if not np.isfinite(coefficients).all() or not np.isfinite(condition_estimate):
