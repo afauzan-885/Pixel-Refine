@@ -1,6 +1,6 @@
 ﻿{
     "goal_id":  "apap-native-tcm",
-    "status":  "building",
+    "status":  "blocked",
     "iteration":  17,
     "builder_model":  "supported worker substitute (Goal Builder model unavailable)",
     "inspector_model":  "supported explorer substitute (Goal Inspector model unavailable)",
@@ -281,6 +281,21 @@
                         "iteration":  17,
                         "event":  "building",
                         "summary":  "Bounded CPU reference-only pure canonical Moving DLT experiment using EadCat-style spatial cross-validation to select sigma/gamma from correspondence match data only. Candidate grid and tolerance must be explicit and adapted to the canonical squared-distance kernel; do not copy EadCat radial kernel or raw sigma values. CV folds are temporary parameter-selection fits; after selection, final solve/map must use every N correspondence in original order with count/order assertions. No ground-truth or motion-label tuning, no TPS/global-to-local, and no PRD threshold changes. If CV support is insufficient, emit no-selection diagnostic; no hidden fallback. No product/native/TCM build until the full PRD reference gate passes."
+                    },
+                    {
+                        "iteration": 17,
+                        "event": "builder_partial",
+                        "summary": "Pure canonical Moving DLT i17 with 4-fold spatial CV (CV-only parameter selection): 86/420 PRD fixtures pass, 334 fail; CPU reference only; no product change or TCM build."
+                    },
+                    {
+                        "iteration": 17,
+                        "event": "inspector_verdict",
+                        "summary": "FAIL. Independent JSON recount confirms 86/420 pass, with no pass-flag mismatch, CV-unavailable row, exception, or selected-map Jacobian foldover. All final fits retain N rows and order. CV-selected maps match the corresponding i16 fixed config, but pass count is 10 below the best fixed configuration (86 vs 96). See inspector-feedback-17.md."
+                    },
+                    {
+                        "iteration": 17,
+                        "event": "blocked",
+                        "summary": "Pure Moving DLT reference screens in iterations 15-17 all fail the unchanged PRD max/mean accuracy gate; CV did not improve the best fixed pass count. No evidence proves mathematical impossibility, but further algorithm/scope work needs user steering on preserving pure MDLT and thresholds versus changing model or acceptance scope. Keep PRD unchanged; no native or production build."
                     }
                 ]
 }
