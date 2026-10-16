@@ -1,7 +1,7 @@
 ﻿{
     "goal_id":  "apap-native-tcm",
     "status":  "inspecting",
-    "iteration":  10,
+    "iteration":  11,
     "builder_model":  "supported worker substitute (Goal Builder model unavailable)",
     "inspector_model":  "supported explorer substitute (Goal Inspector model unavailable)",
     "initial_sha":  "7bde21c30b4f572475373089b76e3a532267e954",
@@ -191,6 +191,26 @@
                         "iteration":  10,
                         "event":  "inspector_verdict",
                         "summary":  "FAIL. Source removes active APAP/TPS in-fit sampling/caps, but resident_pipeline.py still filters correspondences before fit. CUDA N=841 runtime is 105.783s without paired baseline; required speed gate is unmet. Runtime has no promoted apap_native TCM; manifest/hash not independently verified. Focused alignment suite: 9 failed, 5 passed, 4 subtests passed. py_compile, headless import without QApplication, and diff-check passed; GPU matrix, RAM, DNG/app execution remain unverified. No expensive workload rerun."
+                    },
+                    {
+                        "iteration":  11,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Full-row input is partly implemented but resident caller still applies filter_apap_correspondences before fit. CUDA N=841 solve takes 105.783s without paired baseline; no runtime TCM promotion. Inspector alignment suite reports 9 failed/5 passed due missing staged runtime apap_native and other failures; backend/memory/DNG gates remain unverified."
+                    },
+                    {
+                        "iteration":  11,
+                        "event":  "building",
+                        "summary":  "Remove second caller-side correspondence filter and ensure RANSAC-selected full rows reach APAP. Delete stale TPS sampling helper/cap and update legacy test. Optimize full-row native solve; run alignment tests against isolated staged TCM root, add adversarial native tests, and measure paired performance without touching runtime artifacts."
+                    },
+                    {
+                        "iteration":  11,
+                        "event":  "builder_partial",
+                        "summary":  "Commit d78f5c0 deletes the active TPS sampler/cap and adds RANSAC mask helper/tests. The resident caller applies RANSAC mask once and removes residual filter in an uncommitted scoped hunk because resident_pipeline.py has unrelated user modifications. Focused tests 3 passed/11.46s and catalog 55 passed/6.75s using CPU candidate root; headless import, py_compile and diff-check pass. APAP/TPS full-row N=841 CUDA remains 105.783s from prior candidate; no solver optimization in this iteration and no artifact promotion."
+                    },
+                    {
+                        "iteration":  11,
+                        "event":  "inspector_recheck",
+                        "summary":  "FAIL. Independently verified the second filter is absent: filter_apap_correspondences is definition-only, and the two resident mask call sites are alternate input branches. APAP production path has no active sampling/cap. Isolated CPU candidate focused pytest passed 4 tests/4 subtests in 4.99s; these do not prove native 841-row count/order or other backend qualification. CUDA N=841 remains 105.783s with no paired baseline, so performance gate fails. No production TCM promoted; remaining performance, memory, backend matrix and DNG/app gates are unverified."
                     }
                 ]
 }
