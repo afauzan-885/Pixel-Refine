@@ -15,8 +15,10 @@ import taichi as ti
 
 from .quality import TransformEstimationError, estimate_homography, project_points, validate_correspondences
 
-MAX_NATIVE_TPS_CONTROLS = 64
 NATIVE_TPS_ITERATION_BUCKETS = (32, 64, 128, 256, 512, 1024, 2048)
+# Legacy test/diagnostic constant only. Native TPS fitting no longer caps or
+# samples correspondences based on this value.
+MAX_NATIVE_TPS_CONTROLS = 64
 
 
 @ti.kernel
@@ -99,18 +101,20 @@ def _fit_apap_weighted_nodes_kernel(
             weight = weights[node, point]
             if weight > 1.0e-3:
                 support += 1
-            if weight > 1.0e-10:
-                x = source[point, 0]
-                y = source[point, 1]
-                u = target[point, 0]
-                v = target[point, 1]
-                row_x = ti.Vector([-x, -y, -1.0, 0.0, 0.0, 0.0, u * x, u * y, u])
-                row_y = ti.Vector([0.0, 0.0, 0.0, -x, -y, -1.0, v * x, v * y, v])
-                for a in ti.static(range(9)):
-                    for b in ti.static(range(9)):
-                        normal[a, b] += weight * (
-                            row_x[a] * row_x[b] + row_y[a] * row_y[b]
-                        )
+            # Include every supplied correspondence in the weighted normal
+            # equations. Underflowed Gaussian weights contribute zero without
+            # changing the caller's correspondence set or its ordering.
+            x = source[point, 0]
+            y = source[point, 1]
+            u = target[point, 0]
+            v = target[point, 1]
+            row_x = ti.Vector([-x, -y, -1.0, 0.0, 0.0, 0.0, u * x, u * y, u])
+            row_y = ti.Vector([0.0, 0.0, 0.0, -x, -y, -1.0, v * x, v * y, v])
+            for a in ti.static(range(9)):
+                for b in ti.static(range(9)):
+                    normal[a, b] += weight * (
+                        row_x[a] * row_x[b] + row_y[a] * row_y[b]
+                    )
 
         support_counts[node] = support
         valid = support >= min_support
@@ -454,17 +458,41 @@ def _map_tps_points_kernel(
         output[index, 1] = mapped_y * destination_scale + destination_center_y
 
 
+def _validate_apap_correspondences(
+    source: np.ndarray,
+    target: np.ndarray,
+    *,
+    min_points: int,
+    name: str = "APAP correspondences",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate APAP pairs without silently filtering or reordering any row."""
+    src = np.ascontiguousarray(source, dtype=np.float64)
+    dst = np.ascontiguousarray(target, dtype=np.float64)
+    if src.ndim != 2 or dst.ndim != 2 or src.shape[1:] != (2,) or dst.shape[1:] != (2,):
+        raise ValueError(f"{name} must contain Nx2 arrays, got {src.shape} and {dst.shape}")
+    if src.shape[0] != dst.shape[0]:
+        raise ValueError(f"{name} point counts differ: {src.shape[0]} vs {dst.shape[0]}")
+    if src.shape[0] < int(min_points):
+        raise TransformEstimationError(
+            f"{name} needs at least {int(min_points)} pairs; got {src.shape[0]}"
+        )
+    if not np.isfinite(src).all() or not np.isfinite(dst).all():
+        raise ValueError(f"{name} contain non-finite coordinates; no correspondence rows were dropped")
+    return src, dst
+
+
 def _weighted_homography(source: np.ndarray, target: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """Weighted normalized-DLT solve used for one APAP grid node."""
 
-    src, dst = validate_correspondences(source, target, min_points=4)
+    src, dst = _validate_apap_correspondences(source, target, min_points=4)
     w = np.asarray(weights, dtype=np.float64).reshape(-1)
     if len(w) != len(src):
         raise ValueError("weights length does not match correspondences")
-    keep = np.isfinite(w) & (w > 1.0e-10)
-    if int(keep.sum()) < 4:
-        raise TransformEstimationError("APAP node has fewer than four weighted controls")
-    return estimate_homography(src[keep], dst[keep], weights=w[keep])
+    if not np.isfinite(w).all() or np.any(w < 0.0):
+        raise ValueError("weights must be finite and non-negative")
+    # Pass the complete correspondence arrays to the normalized DLT solver.
+    # Zero or underflowed weights affect their numeric contribution only.
+    return estimate_homography(src, dst, weights=w)
 
 
 def filter_apap_correspondences(
@@ -716,10 +744,12 @@ def _fit_apap_numpy_reference(
     correspondences. For APAP, retaining moderate residuals from a global
     homography is important because those matches carry parallax/local-motion
     information. Callers should reject gross mismatches before fitting.
+    ``max_controls_per_node`` remains in the signature for compatibility and is
+    ignored so every supplied correspondence participates in each local fit.
     Supports anisotropic sigma (sigma_x, sigma_y) for multi-row and multi-column grids.
     """
 
-    src, dst = validate_correspondences(source, target, min_points=4, name="APAP correspondences")
+    src, dst = _validate_apap_correspondences(source, target, min_points=4)
     if global_homography is None:
         global_homography = estimate_homography(src, dst)
     global_homography = np.asarray(global_homography, dtype=np.float64)
@@ -760,9 +790,6 @@ def _fit_apap_numpy_reference(
             dist_sq = np.sum(delta ** 2, axis=1)
             weights = np.exp(-dist_sq / (2.0 * sigma * sigma))
 
-        if len(weights) > int(max_controls_per_node):
-            nearest = np.argpartition(dist_sq, int(max_controls_per_node) - 1)[: int(max_controls_per_node)]
-            weights = np.where(np.isin(np.arange(len(weights)), nearest), weights, 0.0)
         supports[index] = int(np.count_nonzero(weights > 1.0e-3))
         if supports[index] < int(min_support):
             continue
@@ -872,7 +899,7 @@ def _normalize_tps_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, f
 def _sample_tps_control_indices(
     source: np.ndarray, target: np.ndarray, limit: int
 ) -> np.ndarray:
-    """Select spatial coverage plus high-local-motion TPS controls deterministically."""
+    """Legacy diagnostic sampler; production fitting must use every control."""
     points = np.ascontiguousarray(source, dtype=np.float64)
     target = np.ascontiguousarray(target, dtype=np.float64)
     count = len(points)
@@ -993,7 +1020,7 @@ def _fit_apap_tps_native(
 ) -> APAPNativeTPSWarp | None:
     """Fit and quality-check the optional TPS residual through target TCM graphs."""
     from taichi_vision.taichi_algorithm import aot_api
-    src, dst = validate_correspondences(
+    src, dst = _validate_apap_correspondences(
         source, target, min_points=3, name="TPS control points"
     )
     all_src = src
@@ -1003,19 +1030,8 @@ def _fit_apap_tps_native(
         raise TransformEstimationError("TPS control points contain duplicates")
     if np.linalg.matrix_rank(src - np.mean(src, axis=0)) < 2:
         raise TransformEstimationError("TPS control points are collinear")
-    control_indices = _sample_tps_control_indices(
-        src, dst, MAX_NATIVE_TPS_CONTROLS
-    )
-    src = np.ascontiguousarray(src[control_indices])
-    dst = np.ascontiguousarray(dst[control_indices])
     count = len(src)
     size = count + 3
-    if count > MAX_NATIVE_TPS_CONTROLS:
-        raise RuntimeError(
-            "Native APAP TPS supports at most "
-            f"{MAX_NATIVE_TPS_CONTROLS} controls; received {count}. "
-            "Compile a larger target-qualified TPS graph for this workload."
-        )
 
     src_norm, src_center, src_scale = _normalize_tps_points(src)
     dst_norm, dst_center, dst_scale = _normalize_tps_points(dst)
@@ -1112,11 +1128,13 @@ def fit_apap(
     The NumPy solver remains available explicitly as :func:`fit_apap_reference`.
     This production entry point fails clearly when the selected target has no
     compatible APAP graph.
+    ``max_controls_per_node`` remains in the signature for compatibility and
+    is ignored so all supplied correspondence rows and their order are kept.
     """
     from taichi_vision.taichi_algorithm import aot_api
 
-    src64, dst64 = validate_correspondences(
-        source, target, min_points=4, name="APAP correspondences"
+    src64, dst64 = _validate_apap_correspondences(
+        source, target, min_points=4
     )
     if global_homography is None:
         global_homography = estimate_homography(src64, dst64)
@@ -1147,17 +1165,11 @@ def fit_apap(
         sigma = max(float(sigma), 1.0e-8)
     sx, sy = (sigma if isinstance(sigma, tuple) else (sigma, sigma))
 
-    # Preserve the established Gaussian and nearest-control policy. Only the
-    # weighted normalized-DLT solve moves to the native graph.
+    # Preserve Gaussian weighting while retaining all supplied correspondence
+    # rows for the weighted normalized-DLT solve.
     delta = src64[None, :, :] - centers[:, None, :]
     dist_sq = (delta[..., 0] ** 2) / (2.0 * sx * sx) + (delta[..., 1] ** 2) / (2.0 * sy * sy)
     weights = np.exp(-dist_sq)
-    if len(src64) > int(max_controls_per_node):
-        nearest = np.argpartition(dist_sq, int(max_controls_per_node) - 1, axis=1)[:, :int(max_controls_per_node)]
-        keep = np.zeros_like(weights, dtype=bool)
-        np.put_along_axis(keep, nearest, True, axis=1)
-        weights = np.where(keep, weights, 0.0)
-
     src_norm, src_transform = _normalize_points_for_native(src64)
     dst_norm, dst_transform = _normalize_points_for_native(dst64)
     module = _load_apap_native_module()
