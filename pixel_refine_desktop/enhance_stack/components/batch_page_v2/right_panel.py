@@ -530,6 +530,24 @@ class RightPanel(QWidget, SyncMixin):
         if callable(save_to_file):
             save_to_file()
 
+        if self.current_batch_id is not None:
+            store_path = getattr(store, "_file_path", None)
+            if not store_path:
+                raise RuntimeError(
+                    "Cannot start batch processing because batch settings are not bound to a JSON file."
+                )
+            try:
+                persisted = batch_parameter_manager.load_json_state(path=store_path)
+                expected = json.loads(json.dumps(store.get(None)))
+            except Exception as exc:
+                raise RuntimeError(
+                    "Cannot start batch processing because batch settings could not be verified after saving."
+                ) from exc
+            if persisted != expected:
+                raise RuntimeError(
+                    "Cannot start batch processing because batch settings were not fully written to JSON."
+                )
+
     def get_current_settings(self):
         """Public accessor for settings."""
         return self.logic.get_settings()
@@ -571,6 +589,8 @@ class RightPanel(QWidget, SyncMixin):
 
     def select_batch_sync(self, batch_id):
         """Select a batch synchronously and cancel any pending debounced selection."""
+        if self.current_batch_id is not None and int(self.current_batch_id) != int(batch_id):
+            self.flush_pending_batch_settings()
         self._selection_timer.stop()
         self._pending_selection = None
 

@@ -44,6 +44,13 @@ class BatchSelectionHandler(QObject):
             self.right_panel.set_collapsed_state(False)
 
             batch_id = int(selected_values[0])
+            previous_batch_id = getattr(self.right_panel, "current_batch_id", None)
+            if (
+                previous_batch_id is not None
+                and int(previous_batch_id) != batch_id
+                and hasattr(self.right_panel, "flush_pending_batch_settings")
+            ):
+                self.right_panel.flush_pending_batch_settings()
             self.right_panel.current_batch_id = batch_id
 
             # Emit signal immediately to load batch content without latency
