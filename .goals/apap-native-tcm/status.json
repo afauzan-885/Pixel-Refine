@@ -1,7 +1,7 @@
 ﻿{
     "goal_id":  "apap-native-tcm",
     "status":  "inspecting",
-    "iteration":  9,
+    "iteration":  10,
     "builder_model":  "supported worker substitute (Goal Builder model unavailable)",
     "inspector_model":  "supported explorer substitute (Goal Inspector model unavailable)",
     "initial_sha":  "7bde21c30b4f572475373089b76e3a532267e954",
@@ -165,7 +165,32 @@
                     {
                         "iteration":  9,
                         "event":  "inspector_verdict",
-                        "summary":  "FAIL. Diagnostic-only real-data metrics miss revised approximation quality by orders of magnitude and contain foldovers: OFB local-only max error 12341.143px/8.17% negative Jacobians; AKAZE max error 231.485px/11.85% foldovers; TPS-enabled excursions also pathological. No production code or APAP TCM promoted; runtime still lacks apap_native. Per-batch OFB/AKAZE flush UI passed iteration 8's focused actual-QComboBox and headless checks, but APAP quality, real 841-control paired performance/memory, backend matrix, and DNG output remain failed/unverified. No APAP/DNG workload rerun."
+                        "summary":  "FAIL. Diagnostic-only real-data metrics miss revised approximation quality by orders of magnitude and contain foldovers: OFB local-only max error 12341.143px/8.17% negative Jacobians; AKAZE max error 231.485px/11.85% foldovers; TPS-enabled excursions also pathological. No production code or APAP TCM promoted; runtime still lacks apap_native. Per-batch OFB/AKAZE flush UI passed iteration 8\u0027s focused actual-QComboBox and headless checks, but APAP quality, real 841-control paired performance/memory, backend matrix, and DNG output remain failed/unverified. No APAP/DNG workload rerun."
+                    },
+                    {
+                        "iteration":  9,
+                        "event":  "blocked",
+                        "summary":  "The same production blocker recurred across three resumed iterations: approximate native APAP can be fast on synthetic inputs but fails badly on real DNG correspondences through field error, foldovers, or slower runtime. Current real local-only OFB/AKAZE outputs are pathological; TPS residual increases excursions. No acceptable real-data quality/performance point or production apap_native TCM exists. Further work requires user decision on whether to redesign/regularize local APAP and change output behavior, or preserve current TPS contract and pause."
+                    },
+                    {
+                        "iteration":  10,
+                        "event":  "user_resumed_with_robustness_requirements",
+                        "summary":  "User resumed blocked APAP goal: improve the algorithm itself, trust incoming RANSAC-selected correspondences, do not filter/sample again inside APAP, and validate high/medium/low/extreme synthetic spatial distributions for robustness, high speed and low error. PRD authored in prd-robust-apap-iteration10.md; previous app decision keeping OFB/AKAZE Homography remains."
+                    },
+                    {
+                        "iteration":  10,
+                        "event":  "building",
+                        "summary":  "Implement robust APAP/APAP TCM according to PRD, with full correspondence preservation, difficult synthetic distribution tests, performance/error gates, headless integration and strict target provenance."
+                    },
+                    {
+                        "iteration":  10,
+                        "event":  "builder_partial",
+                        "summary":  "All input correspondences now survive APAP local fitting and TPS; legacy max_controls_per_node is retained but ignored. Adversarial NumPy reference tests pass (14 tests, 4 subtests). Native CPU N=122 paired warm median 6.614ms vs NumPy42.471ms; max error0.000756px, mean0.000154px, all122 rows reach APAP/TPS. CUDA N=841 target NVIDIA all841 rows, finite output, error max0.076944px/mean0.022544px, but fit runtime105.783s, no paired baseline and misses speed gate. Candidates remain Temp, no TCM promoted."
+                    },
+                    {
+                        "iteration":  10,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Source removes active APAP/TPS in-fit sampling/caps, but resident_pipeline.py still filters correspondences before fit. CUDA N=841 runtime is 105.783s without paired baseline; required speed gate is unmet. Runtime has no promoted apap_native TCM; manifest/hash not independently verified. Focused alignment suite: 9 failed, 5 passed, 4 subtests passed. py_compile, headless import without QApplication, and diff-check passed; GPU matrix, RAM, DNG/app execution remain unverified. No expensive workload rerun."
                     }
                 ]
 }
