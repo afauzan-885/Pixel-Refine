@@ -1,7 +1,7 @@
 ﻿{
     "goal_id":  "apap-native-tcm",
     "status":  "inspecting",
-    "iteration":  5,
+    "iteration":  6,
     "builder_model":  "supported worker substitute (Goal Builder model unavailable)",
     "inspector_model":  "supported explorer substitute (Goal Inspector model unavailable)",
     "initial_sha":  "7bde21c30b4f572475373089b76e3a532267e954",
@@ -86,6 +86,21 @@
                         "iteration":  5,
                         "event":  "inspector_verdict",
                         "summary":  "FAIL. Inspected MINRES CPU/CUDA staging candidates and graph manifests; candidate archives remain outside runtime. CPU small fixtures are Builder-reported only. CUDA MX150 841-control TPS solve did not converge after 2048 iterations (residual ratios 5.0114e-4, 2.0791e-3), so there is no RAW flow parity. Reported CPU time 1.894 s vs NumPy 1.427 s is slower and has no paired memory measurement. No app/backend matrix or runtime APAP TCM promotion; compiler manifest only identifies Taichi (1,7,4), not LLVM/bridge build. No expensive workload rerun."
+                    },
+                    {
+                        "iteration":  6,
+                        "event":  "building",
+                        "summary":  "Try a bounded-block pivoted native TPS solve to reduce repeated AOT dispatches while preserving full KKT/TPS parity; establish compile/runtime viability before any large fixture. Do not relax residual thresholds, disable TPS, fall back to CPU/NumPy, or promote artifacts without all acceptance gates."
+                    },
+                    {
+                        "iteration":  6,
+                        "event":  "builder_partial",
+                        "summary":  "Builder committed a single-kernel pivoted TPS prototype. CPU target staging compile 9.8s; 16-control/128-query CPU parity max error 7.038e-5 px, but warm fit median 3.133ms vs NumPy 1.277ms (2.45x slower); RSS 109.09 MiB single-run, no paired baseline. No 841/backend/app tests or TCM promotion. Candidate remains Temp."
+                    },
+                    {
+                        "iteration":  6,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. AOT graph algn_apap_tps_pivoted_f32 is one graph with two native dispatches: KKT build and pivoted solve; solver itself is one kernel. Staged CPU candidate hash 3157dbb7... has CPU target manifest but only generic Taichi version, no LLVM/bridge identity; it remains outside runtime and no APAP TCM was promoted. Builder-reported small CPU parity is 7.038e-5 px, but median is 3.133ms vs NumPy 1.277ms (2.45x slower) with no paired memory baseline. No CUDA build/execution for pivoted graph, 841-control flow parity, app/full gates, or backend matrix. No expensive rerun."
                     }
                 ]
 }
