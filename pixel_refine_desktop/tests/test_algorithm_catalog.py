@@ -150,6 +150,182 @@ def test_saved_block_flow_parameters_are_selected_through_catalog(monkeypatch, a
     assert result["params"] == {"smooth": False}
 
 
+def test_start_flushes_active_batch_warp_settings_before_runtime_snapshot(
+    monkeypatch, qapp, tmp_path
+):
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.right_panel import (
+        RightPanel,
+    )
+    from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
+    from UILibrary import DataStore
+
+    parameter_path = tmp_path / "batch_parameter.json"
+    store = DataStore()
+    store.bind_to_file(str(parameter_path))
+    store.update_bulk(
+        {
+            "7.alignment_algo": "OFB",
+            "7.checkbox_align_images": True,
+            "7.ofb_params": {"warp_method": "homography", "mode": "fast"},
+            "8.alignment_algo": "OFB",
+            "8.checkbox_align_images": True,
+            "8.ofb_params": {"warp_method": "homography", "mode": "fast"},
+        },
+        save=False,
+    )
+
+    class ParameterPage:
+        def flush_pending_config(self):
+            store.update_bulk(
+                {"7.ofb_params": {"warp_method": "apap", "mode": "balance"}},
+                save=True,
+            )
+
+    parameter_page = ParameterPage()
+    parameter_panel = SimpleNamespace(
+        alignment_pages={"OFB": SimpleNamespace(widget=lambda: parameter_page)}
+    )
+
+    class Card:
+        is_checked = False
+
+        def get_value(self):
+            return "No Denoising"
+
+    class StartHarness:
+        snapshot_settings_for_start = RightPanel.snapshot_settings_for_start
+        flush_pending_batch_settings = RightPanel.flush_pending_batch_settings
+        _flush_active_alignment_parameter_page = (
+            RightPanel._flush_active_alignment_parameter_page
+        )
+
+        current_batch_id = 7
+        _store = store
+        _sync_store_timer = SimpleNamespace(stop=lambda: None)
+        _is_syncing = False
+        left_panel = SimpleNamespace(
+            display_panel=SimpleNamespace(param_panel=parameter_panel)
+        )
+        align_form = SimpleNamespace(get_value=lambda: "OFB")
+        sr_card = Card()
+        hdr_card = Card()
+        denoise_card = Card()
+        _last_emitted_settings = None
+
+        def _collect_ui_settings(self):
+            return {
+                config.KEY_ALIGNMENT: "OFB",
+                config.KEY_SUPER_RESOLUTION: "No Super Resolution",
+                config.KEY_DENOISING: "No Denoising",
+                config.KEY_HDR: "No HDR",
+                config.KEY_CHECKBOX_ALIGN: True,
+                config.KEY_CHECKBOX_SUPER_RES: False,
+                config.KEY_CHECKBOX_DENOISING: False,
+                config.KEY_CHECKBOX_HDR: False,
+            }
+
+        def _publish_settings(self, settings):
+            self._last_emitted_settings = dict(settings)
+
+        def _save_batch_settings(self):
+            store.update_bulk(
+                {
+                    "7.alignment_algo": "OFB",
+                    "7.checkbox_align_images": True,
+                },
+                save=True,
+            )
+
+    monkeypatch.setattr(batch_parameter_manager, "BATCH_PARAMETER_PATH", str(parameter_path))
+    snapshot = StartHarness().snapshot_settings_for_start()
+    saved = batch_parameter_manager.get_batch_alignment_runtime_snapshot(7)
+    other_batch = batch_parameter_manager.get_batch_alignment_runtime_snapshot(8)
+
+    assert snapshot[config.KEY_ALIGNMENT] == "OFB"
+    assert saved["params"] == {"warp_method": "apap", "mode": "balance"}
+    assert other_batch["params"] == {"warp_method": "homography", "mode": "fast"}
+
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2 import (
+        right_panel as right_panel_module,
+    )
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.MFDenoiser_parameter_settings import (
+        AlignmentParameterPage,
+    )
+
+    reload_page = AlignmentParameterPage("OFB")
+    try:
+        reload_page._active_batch_id = lambda: 8
+        reload_page.reload_from_active_batch()
+        assert reload_page.controls["warp_method"][1].input.currentText() == "Homography"
+        reload_page._active_batch_id = lambda: 7
+        reload_page.reload_from_active_batch()
+        assert reload_page.controls["warp_method"][1].input.currentText() == "APAP"
+    finally:
+        reload_page.close()
+        reload_page.deleteLater()
+
+    process_all_observations = []
+
+    class ProcessDialog:
+        def __init__(self, batches, parent, owner):
+            self.panels_to_process_with_rows = []
+
+        def exec(self):
+            process_all_observations.append(
+                batch_parameter_manager.get_batch_alignment_runtime_snapshot(7)[
+                    "params"
+                ]
+            )
+            return 0
+
+    class ProcessAllHarness(StartHarness):
+        _on_process_all_clicked = RightPanel._on_process_all_clicked
+        controller = SimpleNamespace(get_all_batches=lambda: [SimpleNamespace(id=7)])
+        _active_process_dialog = None
+        parent = lambda self: None
+        _sync_batch_queue_rows = lambda self: None
+        _remember_successful_batch_rows = lambda self, dialog: None
+
+    monkeypatch.setattr(right_panel_module, "BatchProcessDialog", ProcessDialog)
+    ProcessAllHarness()._on_process_all_clicked()
+    assert process_all_observations == [{"warp_method": "apap", "mode": "balance"}]
+
+
+def test_apap_tps_control_sampling_keeps_local_motion_within_one_pixel():
+    import numpy as np
+
+    from taichi_vision.taichi_algorithm.alignment.apap import (
+        MAX_NATIVE_TPS_CONTROLS,
+        _sample_tps_control_indices,
+    )
+    from taichi_vision.taichi_algorithm.alignment.tps import fit_tps_checked
+
+    rows = cols = 29
+    xx, yy = np.meshgrid(np.linspace(0, 4095, cols), np.linspace(0, 3071, rows))
+    source = np.column_stack((xx.ravel(), yy.ravel()))
+    x = source[:, 0] / 4095.0
+    y = source[:, 1] / 3071.0
+    bump = np.exp(-(((x - 0.63) ** 2 + (y - 0.52) ** 2) / 0.018))
+    target = source.copy()
+    target[:, 0] += 8.0 * bump + 1.1 * np.sin(y * 2 * np.pi)
+    target[:, 1] += 5.5 * bump + 0.8 * np.sin(x * 2 * np.pi)
+
+    indices = _sample_tps_control_indices(source, target, MAX_NATIVE_TPS_CONTROLS)
+    assert len(indices) == MAX_NATIVE_TPS_CONTROLS
+    assert len(np.unique(indices)) == MAX_NATIVE_TPS_CONTROLS
+
+    qx, qy = np.meshgrid(np.linspace(0, 4095, 33), np.linspace(0, 3071, 33))
+    query = np.column_stack((qx.ravel(), qy.ravel()))
+    full, _ = fit_tps_checked(source, target, regularization=1e-5)
+    sampled, _ = fit_tps_checked(
+        source[indices], target[indices], regularization=1e-5
+    )
+    error = np.linalg.norm(full.map_points(query) - sampled.map_points(query), axis=1)
+
+    assert float(error.max()) <= 1.0
+    assert float(error.mean()) < 0.15
+
+
 @pytest.mark.parametrize("key", ("block_matching_gpu_params", "block_matching_params"))
 def test_block_matching_parameter_storage_aliases_are_retained(monkeypatch, key):
     from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager as params

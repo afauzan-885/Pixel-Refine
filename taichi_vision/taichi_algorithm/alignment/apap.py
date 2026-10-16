@@ -15,7 +15,7 @@ import taichi as ti
 
 from .quality import TransformEstimationError, estimate_homography, project_points, validate_correspondences
 
-MAX_NATIVE_TPS_CONTROLS = 1024
+MAX_NATIVE_TPS_CONTROLS = 64
 NATIVE_TPS_ITERATION_BUCKETS = (32, 64, 128, 256, 512, 1024, 2048)
 
 
@@ -34,10 +34,11 @@ def _solve_tps_pivoted_kernel(
     """
     size = system.shape[0]
     status[0] = 1
+    ti.loop_config(serialize=True)
     for pivot in range(size):
-        ti.loop_config(serialize=True)
         pivot_row = pivot
         pivot_abs = ti.abs(system[pivot, pivot])
+        ti.loop_config(serialize=True)
         for row in range(pivot + 1, size):
             value = ti.abs(system[row, pivot])
             if value > pivot_abs:
@@ -66,7 +67,6 @@ def _solve_tps_pivoted_kernel(
             system[pivot, pivot] = 1.0
 
             for row in range(size):
-                ti.loop_config(serialize=True)
                 if row != pivot:
                     factor = system[row, pivot]
                     system[row, pivot] = 0.0
@@ -869,6 +869,50 @@ def _normalize_tps_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, f
     return np.ascontiguousarray(normalized), np.asarray(center), scale
 
 
+def _sample_tps_control_indices(
+    source: np.ndarray, target: np.ndarray, limit: int
+) -> np.ndarray:
+    """Select spatial coverage plus high-local-motion TPS controls deterministically."""
+    points = np.ascontiguousarray(source, dtype=np.float64)
+    target = np.ascontiguousarray(target, dtype=np.float64)
+    count = len(points)
+    if count <= limit:
+        return np.arange(count, dtype=np.int64)
+    lo = np.min(points, axis=0)
+    span = np.maximum(np.max(points, axis=0) - lo, 1.0e-12)
+    normalized = (points - lo[None, :]) / span[None, :]
+    center = np.mean(normalized, axis=0)
+    first = int(np.argmin(np.sum((normalized - center[None, :]) ** 2, axis=1)))
+    spatial_count = limit - max(4, limit // 4)
+    selected = np.empty(spatial_count, dtype=np.int64)
+    selected[0] = first
+    min_distance_sq = np.sum((normalized - normalized[first][None, :]) ** 2, axis=1)
+    min_distance_sq[first] = -1.0
+    for index in range(1, spatial_count):
+        next_index = int(np.argmax(min_distance_sq))
+        selected[index] = next_index
+        distance_sq = np.sum((normalized - normalized[next_index][None, :]) ** 2, axis=1)
+        min_distance_sq = np.minimum(min_distance_sq, distance_sq)
+        min_distance_sq[selected[: index + 1]] = -1.0
+
+    # Keep a quarter of the controls near the strongest residual motion so a
+    # localized deformation is not averaged away by uniform spatial coverage.
+    motion = target - points
+    motion -= np.median(motion, axis=0, keepdims=True)
+    motion_strength = np.linalg.norm(motion, axis=1)
+    motion_order = np.argsort(-motion_strength, kind="stable")
+    output = selected.tolist()
+    selected_set = set(output)
+    for candidate in motion_order:
+        candidate_index = int(candidate)
+        if candidate_index not in selected_set:
+            output.append(candidate_index)
+            selected_set.add(candidate_index)
+            if len(output) == limit:
+                break
+    return np.asarray(output, dtype=np.int64)
+
+
 def _map_apap_points_native(warp: APAPWarp, points: np.ndarray) -> np.ndarray:
     from taichi_vision.taichi_algorithm import aot_api
 
@@ -952,12 +996,18 @@ def _fit_apap_tps_native(
     src, dst = validate_correspondences(
         source, target, min_points=3, name="TPS control points"
     )
+    all_src = src
     if float(regularization) < 0.0:
         raise ValueError("regularization must be non-negative")
     if np.unique(src, axis=0).shape[0] < 3:
         raise TransformEstimationError("TPS control points contain duplicates")
     if np.linalg.matrix_rank(src - np.mean(src, axis=0)) < 2:
         raise TransformEstimationError("TPS control points are collinear")
+    control_indices = _sample_tps_control_indices(
+        src, dst, MAX_NATIVE_TPS_CONTROLS
+    )
+    src = np.ascontiguousarray(src[control_indices])
+    dst = np.ascontiguousarray(dst[control_indices])
     count = len(src)
     size = count + 3
     if count > MAX_NATIVE_TPS_CONTROLS:
@@ -1025,8 +1075,8 @@ def _fit_apap_tps_native(
 
     # Match the existing TPS fold-over quality gate. Coordinate evaluation
     # remains on the selected TCM; only the small 8x8 Jacobian check is host-side.
-    lo = np.min(src, axis=0)
-    hi = np.max(src, axis=0)
+    lo = np.min(all_src, axis=0)
+    hi = np.max(all_src, axis=0)
     if np.any(hi <= lo):
         raise TransformEstimationError("TPS source bounds are degenerate")
     xs = np.linspace(lo[0], hi[0], 8)

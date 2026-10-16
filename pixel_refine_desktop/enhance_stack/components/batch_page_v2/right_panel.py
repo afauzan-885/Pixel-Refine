@@ -476,40 +476,8 @@ class RightPanel(QWidget, SyncMixin):
         self.algorithm_settings_changed.emit(settings)
         self.process_command_changed.emit(build_start_command(settings))
 
-    def _collect_store_settings(self):
-        """Read this batch's persisted values for the delayed-save comparison."""
-        if not getattr(self, "_store", None) or self.current_batch_id is None:
-            return None
-
-        prefix = str(self.current_batch_id)
-
-        def stored(key, fallback):
-            return self._store.get(f"{prefix}.{key}", fallback)
-
-        alignment = stored(config.KEY_ALIGNMENT_ALGO, "No Alignment") or "No Alignment"
-        return {
-            config.KEY_ALIGNMENT: alignment,
-            config.KEY_SUPER_RESOLUTION: stored(
-                config.KEY_SUPER_RESOLUTION_ALGO, "No Super Resolution"
-            ) or "No Super Resolution",
-            config.KEY_DENOISING: stored(
-                config.KEY_DENOISING_ALGO, "No Denoising"
-            ) or "No Denoising",
-            config.KEY_HDR: stored(config.KEY_HDR_ALGO, "No HDR") or "No HDR",
-            config.KEY_CHECKBOX_ALIGN: bool(
-                stored(config.KEY_CHECKBOX_ALIGN, alignment != "No Alignment")
-            ),
-            config.KEY_CHECKBOX_SUPER_RES: bool(
-                stored(config.KEY_CHECKBOX_SUPER_RES, False)
-            ),
-            config.KEY_CHECKBOX_DENOISING: bool(
-                stored(config.KEY_CHECKBOX_DENOISING, False)
-            ),
-            config.KEY_CHECKBOX_HDR: bool(stored(config.KEY_CHECKBOX_HDR, False)),
-        }
-
     def snapshot_settings_for_start(self):
-        """Use visible controls immediately and queue persistence only if stale."""
+        """Flush this batch's visible settings before the worker reads JSON."""
         checked_cards = [
             card for card in (self.sr_card, self.hdr_card, self.denoise_card)
             if card.is_checked
@@ -523,11 +491,44 @@ class RightPanel(QWidget, SyncMixin):
         else:
             self.logic.set_settings(settings)
 
-        if self._collect_store_settings() != settings:
-            self._sync_store_timer.start()
-        else:
-            self._sync_store_timer.stop()
+        self.flush_pending_batch_settings()
         return settings.copy()
+
+    def _flush_active_alignment_parameter_page(self):
+        """Write the active alignment page's current controls into the store."""
+        display_panel = getattr(self.left_panel, "display_panel", None)
+        parameter_panel = getattr(display_panel, "param_panel", None)
+        if parameter_panel is None:
+            return
+
+        alignment_name = normalize_name("alignment", self.align_form.get_value())
+        page_container = getattr(parameter_panel, "alignment_pages", {}).get(
+            alignment_name
+        )
+        page = (
+            page_container.widget()
+            if hasattr(page_container, "widget")
+            else page_container
+        )
+        flush = getattr(page, "flush_pending_config", None)
+        if callable(flush):
+            flush()
+
+    def flush_pending_batch_settings(self):
+        """Synchronously persist card and algorithm settings for the active batch."""
+        self._sync_store_timer.stop()
+        was_syncing = self._is_syncing
+        self._is_syncing = True
+        try:
+            self._flush_active_alignment_parameter_page()
+            self._save_batch_settings()
+        finally:
+            self._is_syncing = was_syncing
+
+        store = getattr(self, "_store", None)
+        save_to_file = getattr(store, "save_to_file", None)
+        if callable(save_to_file):
+            save_to_file()
 
     def get_current_settings(self):
         """Public accessor for settings."""
@@ -854,10 +855,9 @@ class RightPanel(QWidget, SyncMixin):
         if not self.controller:
             return
 
-        # Flush the selected batch's card state before the dialog snapshots
-        # per-batch algorithm configuration for Process All Batch.
-        self._sync_store_timer.stop()
-        self._save_batch_settings()
+        # Flush in-memory/debounced parameter and card values before workers
+        # snapshot the per-batch JSON configuration.
+        self.flush_pending_batch_settings()
 
         # # Import here to avoid circular imports
         # from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (

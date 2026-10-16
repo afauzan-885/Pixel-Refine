@@ -741,6 +741,10 @@ class AlignmentParameterPage(QWidget):
         self.provider["save"](config)
         self.provider["save_batch"](config)
 
+    def flush_pending_config(self):
+        """Persist the visible parameter values before a batch is dispatched."""
+        self._save_current_config()
+
     def _reset_to_defaults(self):
         if not self.provider:
             return
