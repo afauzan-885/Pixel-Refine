@@ -1,7 +1,7 @@
 ﻿{
     "goal_id":  "apap-native-tcm",
     "status":  "building",
-    "iteration":  16,
+    "iteration":  17,
     "builder_model":  "supported worker substitute (Goal Builder model unavailable)",
     "inspector_model":  "supported explorer substitute (Goal Inspector model unavailable)",
     "initial_sha":  "7bde21c30b4f572475373089b76e3a532267e954",
@@ -266,6 +266,21 @@
                         "iteration":  16,
                         "event":  "building",
                         "summary":  "Latest user steering: pure canonical Moving DLT only. Run a bounded CPU reference-only screen using paper weights w=max(exp(-||x*-x_i||^2/sigma^2), gamma), with sigma/gamma, source domain, centers, and smooth full-frame field evaluation explicit; preserve all correspondence rows and order. No TPS residual, no global-to-local prior, and no PRD threshold change. No product/native build or promotion until the full reference gate passes; if support is non-identifiable or accuracy still fails, report and ask before changing scope."
+                    },
+                    {
+                        "iteration":  16,
+                        "event":  "builder_partial",
+                        "summary":  "Pure canonical direct per-query Moving DLT CPU float64 screen over 420 fixtures and six fixed sigma/gamma configurations. Best fixed configuration passes 96/420 (84 homography, 12 non-homography), with 4 sampled candidate Jacobian foldovers across other configurations. No product/native build or promotion."
+                    },
+                    {
+                        "iteration":  16,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Independent recount of 2,520 JSON rows matches every pass flag; best fixed configuration 96/420 and 324/336 non-homography cases fail. All N rows/order verified structurally; GT Jacobian is positive on the 420-fixture sampled grid, but four candidate foldovers appear in other configurations. CPU reference only; see inspector-feedback-16.md."
+                    },
+                    {
+                        "iteration":  17,
+                        "event":  "building",
+                        "summary":  "Bounded CPU reference-only pure canonical Moving DLT experiment using EadCat-style spatial cross-validation to select sigma/gamma from correspondence match data only. Candidate grid and tolerance must be explicit and adapted to the canonical squared-distance kernel; do not copy EadCat radial kernel or raw sigma values. CV folds are temporary parameter-selection fits; after selection, final solve/map must use every N correspondence in original order with count/order assertions. No ground-truth or motion-label tuning, no TPS/global-to-local, and no PRD threshold changes. If CV support is insufficient, emit no-selection diagnostic; no hidden fallback. No product/native/TCM build until the full PRD reference gate passes."
                     }
                 ]
 }
