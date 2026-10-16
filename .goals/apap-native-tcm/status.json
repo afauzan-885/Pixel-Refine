@@ -1,7 +1,7 @@
 ﻿{
     "goal_id":  "apap-native-tcm",
     "status":  "inspecting",
-    "iteration":  8,
+    "iteration":  9,
     "builder_model":  "supported worker substitute (Goal Builder model unavailable)",
     "inspector_model":  "supported explorer substitute (Goal Inspector model unavailable)",
     "initial_sha":  "7bde21c30b4f572475373089b76e3a532267e954",
@@ -146,6 +146,26 @@
                         "iteration":  8,
                         "event":  "inspector_verdict",
                         "summary":  "FAIL. Focused actual OFB/AKAZE combo per-batch switch/reload/Start/ProcessAll test passed 2/2, headless main_desktop import and scoped diff-check passed. Real DNG B001/B002 report shows approximate APAP field error max 74.936px / mean 9.768px and native 1.116s vs NumPy 0.789s, failing \u003c=1px and \u003e=2x gates. Failed APAP grid experiments were restored. Runtime has no apap_native TCM; no TCM was promoted. Full worker/DNG output, production feature extraction, Vulkan/OpenGL, VRAM and exact bridge ABI remain unverified."
+                    },
+                    {
+                        "iteration":  9,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Real-data APAP candidate misses the revised approximation/speed gate. Batch JSON QComboBox switch/reload/Start/ProcessAll tests pass 2/2; headless import and diff check pass. No production apap_native TCM is installed."
+                    },
+                    {
+                        "iteration":  9,
+                        "event":  "building",
+                        "summary":  "Diagnostic only: evaluate local APAP moving-homography without optional TPS residual on real OFB correspondence to quantify speed and local deformation, without changing production semantics pending user decision. Also run real AKAZE candidate-only smoke if enough inliers; avoid silent fallback and keep TCM isolated."
+                    },
+                    {
+                        "iteration":  9,
+                        "event":  "builder_diagnostic",
+                        "summary":  "No product code changed. Native local APAP without TPS was faster on real OFB (371.576ms vs NumPy 1854.026ms) but field max error 12341.143px, 8.17% negative-Jacobian grid; AKAZE max error 231.485px and 11.85% foldovers. TPS-enabled excursions are also pathological. Failed residual-grid and APAP experiments restored; no artifact promoted. User decision needed on revised algorithm/quality contract."
+                    },
+                    {
+                        "iteration":  9,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Diagnostic-only real-data metrics miss revised approximation quality by orders of magnitude and contain foldovers: OFB local-only max error 12341.143px/8.17% negative Jacobians; AKAZE max error 231.485px/11.85% foldovers; TPS-enabled excursions also pathological. No production code or APAP TCM promoted; runtime still lacks apap_native. Per-batch OFB/AKAZE flush UI passed iteration 8's focused actual-QComboBox and headless checks, but APAP quality, real 841-control paired performance/memory, backend matrix, and DNG output remain failed/unverified. No APAP/DNG workload rerun."
                     }
                 ]
 }
