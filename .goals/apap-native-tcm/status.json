@@ -1,7 +1,7 @@
 ﻿{
     "goal_id":  "apap-native-tcm",
     "status":  "building",
-    "iteration":  14,
+    "iteration":  15,
     "builder_model":  "supported worker substitute (Goal Builder model unavailable)",
     "inspector_model":  "supported explorer substitute (Goal Inspector model unavailable)",
     "initial_sha":  "7bde21c30b4f572475373089b76e3a532267e954",
@@ -241,6 +241,16 @@
                         "iteration":  14,
                         "event":  "building",
                         "summary":  "Satu eksperimen CPU reference-only terbatas untuk adaptive local-support/partition-of-unity pada matrix 420 fixture, mempertahankan semua baris dan gate yang sama, serta menambahkan assertion count/order dan Jacobian output. Jangan build native sebelum semua fixture non-degenerate lolos. Jika kualitas di luar support bergantung pada prior deformasi yang belum disetujui atau model tetap gagal, minta keputusan pengguna sambil mempertahankan threshold saat ini; jangan mengubah PRD diam-diam."
+                    },
+                    {
+                        "iteration":  14,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Inspeksi commit Builder 8adb987c dan matrix CPU float64 420 fixture. Threshold dihitung ulang 84/420, seluruhnya homography; setiap motion non-homography 0/84. Count/order dan N² weight assertions lolos 420/420. GT Jacobian positif 420/420, tetapi kandidat hanya 412/420 dengan 8 foldover; max error 3129.646 px. Tidak ada build/native/performance evidence. Lihat inspector-feedback-14.md."
+                    },
+                    {
+                        "iteration":  15,
+                        "event":  "building",
+                        "summary":  "Steering: CPU reference-only eksperimen global coarse homography diikuti local residual deformation (global-to-local APAP variant). Pertahankan seluruh correspondence rows; compose coordinate maps untuk satu final image resampling; keluarkan diagnostic error eksplisit jika local support tidak memadai. Max/mean accuracy gate tidak berubah. Jangan ubah PRD diam-diam dan jangan ubah product/build native sebelum reference gate lulus."
                     }
                 ]
 }
