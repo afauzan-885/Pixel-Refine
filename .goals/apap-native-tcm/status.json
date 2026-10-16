@@ -1,76 +1,91 @@
-{
-  "goal_id": "apap-native-tcm",
-  "status": "inspecting",
-  "iteration": 4,
-  "builder_model": "supported worker substitute (Goal Builder model unavailable)",
-  "inspector_model": "supported explorer substitute (Goal Inspector model unavailable)",
-  "initial_sha": "7bde21c30b4f572475373089b76e3a532267e954",
-  "created_at": "2026-10-16T00:50:19+07:00",
-  "history": [
-    {
-      "iteration": 0,
-      "event": "interview_and_discovery",
-      "summary": "User set max 2 agents, keep API facades, and verify all available backends with parity/performance/memory gates. Read-only discovery completed. The Goal Builder model dispatch failed before execution because that model is unsupported in this account; switched to supported worker/explorer roles."
-    },
-    {
-      "iteration": 1,
-      "event": "builder_partial",
-      "summary": "CPU APAP TCM fit/map graph compiles and dispatches from isolated staging, but native-vs-NumPy mapped points differ by up to 0.3735 px and TPS residual is not implemented; no pytest/full app/backend/memory gate passed and no artifact was promoted."
-    },
-    {
-      "iteration": 1,
-      "event": "inspector_verdict",
-      "summary": "FAIL. Independent CPU candidate TCM dispatch succeeded, but fixed synthetic parity differed by max 0.4699 px; focused APAP pytest was 4 failed/1 passed because candidate was not integrated into the runtime TCM root. Candidate has no tcm_manifest; TPS default changed and native TPS is unsupported; apap.py warp_image still falls back to NumPy/OpenCV. Nine original APAP TCM hashes match baseline. No CUDA/Vulkan/OpenGL, headless app, end-to-end, latency, or memory gates were evidenced."
-    },
-    {
-      "iteration": 2,
-      "event": "building",
-      "summary": "Fix Inspector iteration 1 findings: weighted-DLT parity, native TPS/default compatibility, remaining apap.py fallback, target-qualified manifest/runtime integration, then execute full app/backend/performance/memory gates before promotion."
-    },
-    {
-      "iteration": 2,
-      "event": "builder_partial",
-      "summary": "Removed the broad warp_image fallback and restored the TPS-enabled default; TPS-enabled native calls now fail explicitly because no native TPS graph exists. Weighted native fit remains max 0.4699 px from the oracle; no tests/app/backend/performance/memory gates or artifact promotion."
-    },
-    {
-      "iteration": 2,
-      "event": "inspector_verdict",
-      "summary": "FAIL. warp_image(use_sparse_mesh=true) now propagates native errors and explicit use_sparse_mesh=false CPU reference warp still passes the small identity smoke. However default fit_apap(enable_residual_spline=true) immediately raises because native TPS is absent; warp_apap and resident APAP callers do not override it, so production default APAP does not run. Weighted DLT parity remains unresolved at max 0.4699 px from iteration 1; runtime tree still has no apap_native TCM/manifest. No iteration 2 pytest, headless app, backend, performance, or memory gates passed/evidenced."
-    },
-    {
-      "iteration": 2,
-      "event": "blocked",
-      "summary": "The same two blockers recurred through three goal continuations: native weighted-DLT parity is outside existing tolerance, and full default APAP/TPS cannot be executed natively. Proceeding requires a user decision whether to preserve TPS/full parity at longer implementation scope or redefine native APAP without TPS residual/accept output changes."
-    },
-    {
-      "iteration": 3,
-      "event": "user_resumed",
-      "summary": "User explicitly chose to preserve TPS residual behavior and continue the full native fidelity goal. No TPS-off or CPU-fit-only scope change is authorized."
-    },
-    {
-      "iteration": 3,
-      "event": "builder_partial",
-      "summary": "Replaced the 8-unknown normal-equation solver with a weighted 9D DLT/Jacobi eigensolver to improve oracle fidelity, but the CPU AOT compile exceeded ~169.7 CPU seconds and emitted no TCM. No graph execution, parity, TPS, runtime, backend, application, performance or memory gate was completed."
-    },
-    {
-      "iteration": 3,
-      "event": "inspector_verdict",
-      "summary": "FAIL. Source contains a 9x9 weighted homogeneous DLT/Jacobi kernel and compiler registers algn_apap_fit_weighted_f32, but compile timed out at ~169.7 CPU seconds and emitted no TCM. Runtime artifact tree has zero apap_native TCMs; the only temp candidate is the prior 8D archive. No graph execution/parity/tests/backend/app/perf/memory evidence. Native TPS graph remains absent while fit_apap defaults enable_residual_spline=True and raises, so default production APAP still cannot complete."
-    },
-    {
-      "iteration": 4,
-      "event": "building",
-      "summary": "User reaffirmed TPS must remain; next solver iteration must compile in bounded time, pass native-vs-oracle parity, and proceed to a native TPS graph before any production integration or artifact promotion."
-    },
-    {
-      "iteration": 4,
-      "event": "builder_partial",
-      "summary": "Bucketed TPS graph compiles and dispatches on CPU/CUDA staging; exact-target CUDA manifest loads on MX150. On the 841-control RAW fixture default native fit did not activate TPS and flow differed by max 0.8704 px. Builder reports native latency 8491 s versus NumPy 3.10 s (extreme regression); process RSS 348.91 MiB and sampled peak VRAM 77 MiB. No artifact promoted."
-    },
-    {
-      "iteration": 4,
-      "event": "inspector_verdict",
-      "summary": "FAIL. Inspected bucketed CUDA candidate hash ae156079...; manifest target cuda_x86_64_windows_nvidia and graph inventory includes APAP/TPS. Builder-reported MX150 841-control RAW execution did not activate TPS and flow differs by max 0.8704 px. CPU parity is reported only on two narrow fixtures. Reported 8491 s vs 3.10 s is an extreme regression with unclear units/raw command; RSS 348.91 MiB and VRAM 77 MiB lack paired baseline. No DNG/application output or full tests/backend matrix. All nine original APAP TCM hashes match baseline; candidate remains staged and no runtime apap_native is installed. No expensive CUDA workload rerun."
-    }
-  ]
+﻿{
+    "goal_id":  "apap-native-tcm",
+    "status":  "inspecting",
+    "iteration":  5,
+    "builder_model":  "supported worker substitute (Goal Builder model unavailable)",
+    "inspector_model":  "supported explorer substitute (Goal Inspector model unavailable)",
+    "initial_sha":  "7bde21c30b4f572475373089b76e3a532267e954",
+    "created_at":  "2026-10-16T00:50:19+07:00",
+    "history":  [
+                    {
+                        "iteration":  0,
+                        "event":  "interview_and_discovery",
+                        "summary":  "User set max 2 agents, keep API facades, and verify all available backends with parity/performance/memory gates. Read-only discovery completed. The Goal Builder model dispatch failed before execution because that model is unsupported in this account; switched to supported worker/explorer roles."
+                    },
+                    {
+                        "iteration":  1,
+                        "event":  "builder_partial",
+                        "summary":  "CPU APAP TCM fit/map graph compiles and dispatches from isolated staging, but native-vs-NumPy mapped points differ by up to 0.3735 px and TPS residual is not implemented; no pytest/full app/backend/memory gate passed and no artifact was promoted."
+                    },
+                    {
+                        "iteration":  1,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Independent CPU candidate TCM dispatch succeeded, but fixed synthetic parity differed by max 0.4699 px; focused APAP pytest was 4 failed/1 passed because candidate was not integrated into the runtime TCM root. Candidate has no tcm_manifest; TPS default changed and native TPS is unsupported; apap.py warp_image still falls back to NumPy/OpenCV. Nine original APAP TCM hashes match baseline. No CUDA/Vulkan/OpenGL, headless app, end-to-end, latency, or memory gates were evidenced."
+                    },
+                    {
+                        "iteration":  2,
+                        "event":  "building",
+                        "summary":  "Fix Inspector iteration 1 findings: weighted-DLT parity, native TPS/default compatibility, remaining apap.py fallback, target-qualified manifest/runtime integration, then execute full app/backend/performance/memory gates before promotion."
+                    },
+                    {
+                        "iteration":  2,
+                        "event":  "builder_partial",
+                        "summary":  "Removed the broad warp_image fallback and restored the TPS-enabled default; TPS-enabled native calls now fail explicitly because no native TPS graph exists. Weighted native fit remains max 0.4699 px from the oracle; no tests/app/backend/performance/memory gates or artifact promotion."
+                    },
+                    {
+                        "iteration":  2,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. warp_image(use_sparse_mesh=true) now propagates native errors and explicit use_sparse_mesh=false CPU reference warp still passes the small identity smoke. However default fit_apap(enable_residual_spline=true) immediately raises because native TPS is absent; warp_apap and resident APAP callers do not override it, so production default APAP does not run. Weighted DLT parity remains unresolved at max 0.4699 px from iteration 1; runtime tree still has no apap_native TCM/manifest. No iteration 2 pytest, headless app, backend, performance, or memory gates passed/evidenced."
+                    },
+                    {
+                        "iteration":  2,
+                        "event":  "blocked",
+                        "summary":  "The same two blockers recurred through three goal continuations: native weighted-DLT parity is outside existing tolerance, and full default APAP/TPS cannot be executed natively. Proceeding requires a user decision whether to preserve TPS/full parity at longer implementation scope or redefine native APAP without TPS residual/accept output changes."
+                    },
+                    {
+                        "iteration":  3,
+                        "event":  "user_resumed",
+                        "summary":  "User explicitly chose to preserve TPS residual behavior and continue the full native fidelity goal. No TPS-off or CPU-fit-only scope change is authorized."
+                    },
+                    {
+                        "iteration":  3,
+                        "event":  "builder_partial",
+                        "summary":  "Replaced the 8-unknown normal-equation solver with a weighted 9D DLT/Jacobi eigensolver to improve oracle fidelity, but the CPU AOT compile exceeded ~169.7 CPU seconds and emitted no TCM. No graph execution, parity, TPS, runtime, backend, application, performance or memory gate was completed."
+                    },
+                    {
+                        "iteration":  3,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Source contains a 9x9 weighted homogeneous DLT/Jacobi kernel and compiler registers algn_apap_fit_weighted_f32, but compile timed out at ~169.7 CPU seconds and emitted no TCM. Runtime artifact tree has zero apap_native TCMs; the only temp candidate is the prior 8D archive. No graph execution/parity/tests/backend/app/perf/memory evidence. Native TPS graph remains absent while fit_apap defaults enable_residual_spline=True and raises, so default production APAP still cannot complete."
+                    },
+                    {
+                        "iteration":  4,
+                        "event":  "building",
+                        "summary":  "User reaffirmed TPS must remain; next solver iteration must compile in bounded time, pass native-vs-oracle parity, and proceed to a native TPS graph before any production integration or artifact promotion."
+                    },
+                    {
+                        "iteration":  4,
+                        "event":  "builder_partial",
+                        "summary":  "Bucketed TPS graph compiles and dispatches on CPU/CUDA staging; exact-target CUDA manifest loads on MX150. On the 841-control RAW fixture default native fit did not activate TPS and flow differed by max 0.8704 px. Builder reports native latency 8491 s versus NumPy 3.10 s (extreme regression); process RSS 348.91 MiB and sampled peak VRAM 77 MiB. No artifact promoted."
+                    },
+                    {
+                        "iteration":  4,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Inspected bucketed CUDA candidate hash ae156079...; manifest target cuda_x86_64_windows_nvidia and graph inventory includes APAP/TPS. Builder-reported MX150 841-control RAW execution did not activate TPS and flow differs by max 0.8704 px. CPU parity is reported only on two narrow fixtures. Reported 8491 s vs 3.10 s is an extreme regression with unclear units/raw command; RSS 348.91 MiB and VRAM 77 MiB lack paired baseline. No DNG/application output or full tests/backend matrix. All nine original APAP TCM hashes match baseline; candidate remains staged and no runtime apap_native is installed. No expensive CUDA workload rerun."
+                    },
+                    {
+                        "iteration":  5,
+                        "event":  "building",
+                        "summary":  "Fix iteration 4 failures: TPS must activate when required by current APAP residual semantics; make full control-count fit native, parity-compatible, and performant; report raw benchmark commands and units. Do not promote any artifact until all goal gates pass."
+                    },
+                    {
+                        "iteration":  5,
+                        "event":  "builder_partial",
+                        "summary":  "Builder committed native MINRES prototype. CPU weighted-DLT parallax fixture max error 0.02030 px; CPU TPS 16-control fixture max error 6.15e-5 px; CUDA MX150 841-control full TPS KKT solve did not converge after 2048 iterations (residual ratios 5.0114e-4 and 2.0791e-3), so no flow parity. Native time 1.894 s vs NumPy oracle 1.427 s; no app/backend matrix or promotion. Candidate stays in temp."
+                    },
+                    {
+                        "iteration":  5,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Inspected MINRES CPU/CUDA staging candidates and graph manifests; candidate archives remain outside runtime. CPU small fixtures are Builder-reported only. CUDA MX150 841-control TPS solve did not converge after 2048 iterations (residual ratios 5.0114e-4, 2.0791e-3), so there is no RAW flow parity. Reported CPU time 1.894 s vs NumPy 1.427 s is slower and has no paired memory measurement. No app/backend matrix or runtime APAP TCM promotion; compiler manifest only identifies Taichi (1,7,4), not LLVM/bridge build. No expensive workload rerun."
+                    }
+                ]
 }
