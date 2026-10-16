@@ -1,7 +1,7 @@
 ﻿{
     "goal_id":  "apap-native-tcm",
     "status":  "inspecting",
-    "iteration":  6,
+    "iteration":  7,
     "builder_model":  "supported worker substitute (Goal Builder model unavailable)",
     "inspector_model":  "supported explorer substitute (Goal Inspector model unavailable)",
     "initial_sha":  "7bde21c30b4f572475373089b76e3a532267e954",
@@ -101,6 +101,31 @@
                         "iteration":  6,
                         "event":  "inspector_verdict",
                         "summary":  "FAIL. AOT graph algn_apap_tps_pivoted_f32 is one graph with two native dispatches: KKT build and pivoted solve; solver itself is one kernel. Staged CPU candidate hash 3157dbb7... has CPU target manifest but only generic Taichi version, no LLVM/bridge identity; it remains outside runtime and no APAP TCM was promoted. Builder-reported small CPU parity is 7.038e-5 px, but median is 3.133ms vs NumPy 1.277ms (2.45x slower) with no paired memory baseline. No CUDA build/execution for pivoted graph, 841-control flow parity, app/full gates, or backend matrix. No expensive rerun."
+                    },
+                    {
+                        "iteration":  6,
+                        "event":  "blocked",
+                        "summary":  "After three consecutive implementation iterations since the user resumed the goal, native TPS fitting for the real 841-control workload still cannot satisfy convergence/parity and latency together. Iteration 4 missed TPS/parity and reported severe latency; iteration 5 MINRES failed convergence; iteration 6 single-kernel pivoted solve remained 2.45x slower on a small CPU fixture. All candidates remain isolated in Temp; no production TCM promoted. Requires a design/scope decision before further implementation."
+                    },
+                    {
+                        "iteration":  7,
+                        "event":  "user_resumed_with_revised_acceptance",
+                        "summary":  "User permits approximate APAP accuracy in exchange for a much faster native path and requires OFB/AKAZE warp_method to persist per batch in JSON like preset. Addendum defines initial gate: max displacement error \u003c=1px, at least 2x median speedup on same 841-control workload, no peak RAM increase, retain local non-rigid TPS effect and explicit no-fallback target errors."
+                    },
+                    {
+                        "iteration":  7,
+                        "event":  "building",
+                        "summary":  "Implement approximate fast native APAP plus per-batch OFB/AKAZE JSON persistence; independently inspect persistence flow first."
+                    },
+                    {
+                        "iteration":  7,
+                        "event":  "builder_partial",
+                        "summary":  "Approximate APAP uses 48 spatially distributed + 16 high-residual TPS controls. CUDA MX150 synthetic 841-control, 1089-query paired subprocess benchmark: NumPy full TPS median 1186.728ms / RSS 282.40MiB; candidate TCM median 71.714ms / RSS 214.62MiB (16.55x, -67.78MiB); field error max 0.819924px, mean 0.093663px, max TPS displacement 9.159710px. Headless OFB/AKAZE synthetic adapter smoke on 96x128x3 float32 uses APAP/TPS/sparse warp graphs. Per-batch JSON flush/reload regression and suite (49 tests), py_compile, headless main_desktop import pass. Real DNG, production feature extraction, VRAM, CPU/Vulkan/OpenGL, full ABI provenance remain unverified; no TCM promoted."
+                    },
+                    {
+                        "iteration":  7,
+                        "event":  "inspector_verdict",
+                        "summary":  "FAIL. Focused per-batch flush test passed (1), headless main_desktop import passed, and diff-check had no whitespace diagnostics. However per-batch flush test uses a fake parameter page/dialog; no actual widget-to-worker test. Approximation/speed/RSS thresholds pass only on synthetic CUDA 841-control data; CPU native 0.886s vs NumPy 0.426s fails speedup. OFB/AKAZE smoke injected synthetic correspondences and bypassed feature extraction; real DNG/app flow unverified. CPU/CUDA TCM candidates remain in Temp with target manifests but compiler_version lacks LLVM/bridge identity; runtime has no apap_native TCM. Vulkan/OpenGL/VRAM/full app gates unverified."
                     }
                 ]
 }
