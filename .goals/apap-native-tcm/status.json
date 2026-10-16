@@ -1,7 +1,7 @@
 {
   "goal_id": "apap-native-tcm",
   "status": "inspecting",
-  "iteration": 3,
+  "iteration": 4,
   "builder_model": "supported worker substitute (Goal Builder model unavailable)",
   "inspector_model": "supported explorer substitute (Goal Inspector model unavailable)",
   "initial_sha": "7bde21c30b4f572475373089b76e3a532267e954",
@@ -56,6 +56,21 @@
       "iteration": 3,
       "event": "inspector_verdict",
       "summary": "FAIL. Source contains a 9x9 weighted homogeneous DLT/Jacobi kernel and compiler registers algn_apap_fit_weighted_f32, but compile timed out at ~169.7 CPU seconds and emitted no TCM. Runtime artifact tree has zero apap_native TCMs; the only temp candidate is the prior 8D archive. No graph execution/parity/tests/backend/app/perf/memory evidence. Native TPS graph remains absent while fit_apap defaults enable_residual_spline=True and raises, so default production APAP still cannot complete."
+    },
+    {
+      "iteration": 4,
+      "event": "building",
+      "summary": "User reaffirmed TPS must remain; next solver iteration must compile in bounded time, pass native-vs-oracle parity, and proceed to a native TPS graph before any production integration or artifact promotion."
+    },
+    {
+      "iteration": 4,
+      "event": "builder_partial",
+      "summary": "Bucketed TPS graph compiles and dispatches on CPU/CUDA staging; exact-target CUDA manifest loads on MX150. On the 841-control RAW fixture default native fit did not activate TPS and flow differed by max 0.8704 px. Builder reports native latency 8491 s versus NumPy 3.10 s (extreme regression); process RSS 348.91 MiB and sampled peak VRAM 77 MiB. No artifact promoted."
+    },
+    {
+      "iteration": 4,
+      "event": "inspector_verdict",
+      "summary": "FAIL. Inspected bucketed CUDA candidate hash ae156079...; manifest target cuda_x86_64_windows_nvidia and graph inventory includes APAP/TPS. Builder-reported MX150 841-control RAW execution did not activate TPS and flow differs by max 0.8704 px. CPU parity is reported only on two narrow fixtures. Reported 8491 s vs 3.10 s is an extreme regression with unclear units/raw command; RSS 348.91 MiB and VRAM 77 MiB lack paired baseline. No DNG/application output or full tests/backend matrix. All nine original APAP TCM hashes match baseline; candidate remains staged and no runtime apap_native is installed. No expensive CUDA workload rerun."
     }
   ]
 }
