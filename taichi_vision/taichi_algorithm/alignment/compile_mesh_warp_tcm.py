@@ -22,6 +22,11 @@ from taichi_vision.taichi_algorithm.alignment.mesh_warp import (
 )
 from taichi_vision.taichi_algorithm.alignment.apap import (
     _build_tps_system_kernel,
+    _build_tps_grid_basis_kernel,
+    _normalize_tps_grid_design_kernel,
+    _build_tps_grid_normal_kernel,
+    _copy_tps_system_kernel,
+    _denormalize_tps_grid_coeff_kernel,
     _fit_apap_weighted_nodes_kernel,
     _map_apap_points_kernel,
     _map_tps_points_kernel,
@@ -195,6 +200,60 @@ def compile_mesh_warp_aot(arch, save_path: str):
     )
     module.add_graph("algn_apap_tps_pivoted_f32", tps_graph.compile())
 
+    tps_grid_source = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=2)
+    tps_grid_target = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "target", ti.f32, ndim=2)
+    tps_grid_centers = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "centers", ti.f32, ndim=2)
+    tps_grid_design = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "design", ti.f32, ndim=2)
+    tps_grid_scales = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "column_scales", ti.f32, ndim=1)
+    tps_grid_system = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "system", ti.f32, ndim=2)
+    tps_grid_system_copy = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "system_copy", ti.f32, ndim=2)
+    tps_grid_rhs = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "rhs", ti.f32, ndim=2)
+    tps_grid_solution = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "solution", ti.f32, ndim=2)
+    tps_grid_status = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "status", ti.i32, ndim=1)
+    tps_grid_basis_count = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "basis_count", ti.i32)
+    tps_grid_regularization = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "regularization", ti.f32
+    )
+    tps_grid_graph = ti.graph.GraphBuilder()
+    tps_grid_graph.dispatch(
+        _build_tps_grid_basis_kernel,
+        tps_grid_source,
+        tps_grid_centers,
+        tps_grid_design,
+    )
+    tps_grid_graph.dispatch(
+        _normalize_tps_grid_design_kernel,
+        tps_grid_design,
+        tps_grid_scales,
+    )
+    tps_grid_graph.dispatch(
+        _build_tps_grid_normal_kernel,
+        tps_grid_design,
+        tps_grid_target,
+        tps_grid_system,
+        tps_grid_rhs,
+        tps_grid_basis_count,
+        tps_grid_regularization,
+    )
+    tps_grid_graph.dispatch(
+        _copy_tps_system_kernel,
+        tps_grid_system,
+        tps_grid_system_copy,
+    )
+    tps_grid_graph.dispatch(
+        _solve_tps_pivoted_kernel,
+        tps_grid_system,
+        tps_grid_rhs,
+        tps_grid_solution,
+        tps_grid_status,
+    )
+    tps_grid_graph.dispatch(
+        _denormalize_tps_grid_coeff_kernel,
+        tps_grid_solution,
+        tps_grid_scales,
+    )
+    module.add_graph("algn_apap_tps_lowrank_f32", tps_grid_graph.compile())
+
     tps_query = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "query", ti.f32, ndim=2)
     tps_controls = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "controls", ti.f32, ndim=2)
     tps_weights = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "weights", ti.f32, ndim=2)
@@ -236,6 +295,7 @@ def compile_mesh_warp_aot(arch, save_path: str):
             "algn_apap_fit_weighted_f32",
             "algn_apap_map_points_f32",
             "algn_apap_tps_pivoted_f32",
+            "algn_apap_tps_lowrank_f32",
             "algn_apap_tps_map_f32",
         ]
         manifest = build_manifest_from_archive(

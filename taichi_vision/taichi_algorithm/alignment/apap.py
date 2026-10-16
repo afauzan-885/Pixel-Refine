@@ -15,12 +15,6 @@ import taichi as ti
 
 from .quality import TransformEstimationError, estimate_homography, project_points, validate_correspondences
 
-NATIVE_TPS_ITERATION_BUCKETS = (32, 64, 128, 256, 512, 1024, 2048)
-# Legacy test/diagnostic constant only. Native TPS fitting no longer caps or
-# samples correspondences based on this value.
-MAX_NATIVE_TPS_CONTROLS = 64
-
-
 @ti.kernel
 def _solve_tps_pivoted_kernel(
     system: ti.types.ndarray(dtype=ti.f32, ndim=2),
@@ -269,6 +263,87 @@ def _build_tps_system_kernel(
 
     for row, col in ti.ndrange(size, 2):
         rhs[row, col] = target[row, col] if row < count else 0.0
+
+
+@ti.kernel
+def _build_tps_grid_basis_kernel(
+    source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    centers: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    design: ti.types.ndarray(dtype=ti.f32, ndim=2),
+):
+    """Build fixed-domain TPS basis rows without selecting input controls."""
+    basis_count = centers.shape[0]
+    for point, basis in ti.ndrange(source.shape[0], basis_count):
+        dx = source[point, 0] - centers[basis, 0]
+        dy = source[point, 1] - centers[basis, 1]
+        radius_sq = dx * dx + dy * dy
+        design[point, basis] = radius_sq * ti.log(ti.max(radius_sq, 1.0e-20))
+    for point in range(source.shape[0]):
+        design[point, basis_count] = source[point, 0]
+        design[point, basis_count + 1] = source[point, 1]
+        design[point, basis_count + 2] = 1.0
+
+
+@ti.kernel
+def _normalize_tps_grid_design_kernel(
+    design: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    column_scales: ti.types.ndarray(dtype=ti.f32, ndim=1),
+):
+    """Scale each design column to unit norm for stable normal equations."""
+    for col in range(design.shape[1]):
+        norm_sq = 0.0
+        for row in range(design.shape[0]):
+            value = design[row, col]
+            norm_sq += value * value
+        scale = ti.sqrt(ti.max(norm_sq, 1.0e-20))
+        column_scales[col] = scale
+        for row in range(design.shape[0]):
+            design[row, col] /= scale
+
+
+@ti.kernel
+def _build_tps_grid_normal_kernel(
+    design: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    target: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    system: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    rhs: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    basis_count: ti.i32,
+    regularization: ti.f32,
+):
+    """Accumulate normal equations from every supplied residual row."""
+    count = design.shape[0]
+    size = design.shape[1]
+    for row, col in ti.ndrange(size, size):
+        value = 0.0
+        for point in range(count):
+            value += design[point, row] * design[point, col]
+        if row == col and row < basis_count:
+            value += regularization
+        system[row, col] = value
+    for row, channel in ti.ndrange(size, 2):
+        value = 0.0
+        for point in range(count):
+            value += design[point, row] * target[point, channel]
+        rhs[row, channel] = value
+
+
+@ti.kernel
+def _denormalize_tps_grid_coeff_kernel(
+    solution: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    column_scales: ti.types.ndarray(dtype=ti.f32, ndim=1),
+):
+    """Restore coefficients for the unscaled TPS basis used by the map graph."""
+    for row, channel in ti.ndrange(solution.shape[0], solution.shape[1]):
+        solution[row, channel] /= column_scales[row]
+
+
+@ti.kernel
+def _copy_tps_system_kernel(
+    system: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    system_copy: ti.types.ndarray(dtype=ti.f32, ndim=2),
+):
+    for row, col in ti.ndrange(system.shape[0], system.shape[1]):
+        system_copy[row, col] = system[row, col]
 
 
 @ti.kernel
@@ -643,6 +718,7 @@ class APAPNativeTPSWarp:
     destination_scale: float
     regularization: float
     condition_estimate: float
+    input_count: int = 0
 
     def map_points(self, points: np.ndarray) -> np.ndarray:
         query = np.ascontiguousarray(points, dtype=np.float64)
@@ -653,6 +729,30 @@ class APAPNativeTPSWarp:
         return _map_apap_tps_points_native(self, query)
 
     __call__ = map_points
+
+
+@dataclass
+class APAPGridTPSReference:
+    """NumPy test oracle for a fixed-domain, all-observation TPS basis fit."""
+
+    control_points: np.ndarray
+    weights: np.ndarray
+    affine: np.ndarray
+    source_center: np.ndarray
+    source_scale: float
+    destination_center: np.ndarray
+    destination_scale: float
+    input_count: int
+
+    def map_points(self, points: np.ndarray) -> np.ndarray:
+        query = np.ascontiguousarray(points, dtype=np.float64)
+        normalized = (query - self.source_center[None, :]) / self.source_scale
+        delta = normalized[:, None, :] - self.control_points[None, :, :]
+        radius_sq = np.sum(delta * delta, axis=2)
+        basis = radius_sq * np.log(np.maximum(radius_sq, 1.0e-20))
+        mapped = np.column_stack((normalized, np.ones(len(normalized)))) @ self.affine
+        mapped += basis @ self.weights
+        return mapped * self.destination_scale + self.destination_center[None, :]
 
 
 def _estimate_similarity(source: np.ndarray, target: np.ndarray, *, weights: np.ndarray | None = None) -> np.ndarray:
@@ -896,6 +996,58 @@ def _normalize_tps_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, f
     return np.ascontiguousarray(normalized), np.asarray(center), scale
 
 
+def _fixed_tps_grid_centers(source_normalized: np.ndarray, grid_size: int) -> np.ndarray:
+    """Generate RBF centers from a regular domain grid, never from input rows."""
+    lo = np.min(source_normalized, axis=0)
+    hi = np.max(source_normalized, axis=0)
+    if np.any(hi <= lo):
+        raise TransformEstimationError("TPS source bounds are degenerate")
+    xs = np.linspace(lo[0], hi[0], int(grid_size), dtype=np.float64)
+    ys = np.linspace(lo[1], hi[1], int(grid_size), dtype=np.float64)
+    xx, yy = np.meshgrid(xs, ys)
+    return np.ascontiguousarray(np.column_stack((xx.ravel(), yy.ravel())))
+
+
+def fit_apap_tps_grid_reference(
+    source: np.ndarray,
+    target: np.ndarray,
+    *,
+    grid_size: int = 8,
+    regularization: float = 1.0e-4,
+) -> APAPGridTPSReference:
+    """Fit the all-row fixed-grid RBF oracle used by native solver tests only."""
+    src, dst = _validate_apap_correspondences(
+        source, target, min_points=4, name="TPS correspondences"
+    )
+    if int(grid_size) < 2:
+        raise ValueError("TPS grid_size must be at least two")
+    src_norm, src_center, src_scale = _normalize_tps_points(src)
+    dst_norm, dst_center, dst_scale = _normalize_tps_points(dst)
+    centers = _fixed_tps_grid_centers(src_norm, grid_size)
+    delta = src_norm[:, None, :] - centers[None, :, :]
+    radius_sq = np.sum(delta * delta, axis=2)
+    radial = radius_sq * np.log(np.maximum(radius_sq, 1.0e-20))
+    design = np.column_stack((radial, src_norm, np.ones(len(src_norm))))
+    column_scales = np.maximum(
+        np.linalg.norm(design, axis=0), np.finfo(np.float64).tiny
+    )
+    design /= column_scales[None, :]
+    basis_count = len(centers)
+    system = design.T @ design
+    system[:basis_count, :basis_count] += np.eye(basis_count) * float(regularization)
+    coefficients = np.linalg.solve(system, design.T @ dst_norm) / column_scales[:, None]
+    return APAPGridTPSReference(
+        control_points=centers,
+        weights=np.ascontiguousarray(coefficients[:basis_count]),
+        affine=np.ascontiguousarray(coefficients[basis_count:]),
+        source_center=np.asarray(src_center, dtype=np.float64),
+        source_scale=float(src_scale),
+        destination_center=np.asarray(dst_center, dtype=np.float64),
+        destination_scale=float(dst_scale),
+        input_count=len(src),
+    )
+
+
 def _map_apap_points_native(warp: APAPWarp, points: np.ndarray) -> np.ndarray:
     from taichi_vision.taichi_algorithm import aot_api
 
@@ -971,10 +1123,11 @@ def _fit_apap_tps_native(
     source: np.ndarray,
     target: np.ndarray,
     *,
-    regularization: float = 1.0e-5,
+    regularization: float = 1.0e-4,
     max_condition_number: float = 1.0e12,
+    grid_size: int = 8,
 ) -> APAPNativeTPSWarp | None:
-    """Fit and quality-check the optional TPS residual through target TCM graphs."""
+    """Fit an all-row fixed-grid TPS/RBF residual through target TCM graphs."""
     from taichi_vision.taichi_algorithm import aot_api
     src, dst = _validate_apap_correspondences(
         source, target, min_points=3, name="TPS control points"
@@ -987,31 +1140,44 @@ def _fit_apap_tps_native(
     if np.linalg.matrix_rank(src - np.mean(src, axis=0)) < 2:
         raise TransformEstimationError("TPS control points are collinear")
     count = len(src)
-    size = count + 3
 
     src_norm, src_center, src_scale = _normalize_tps_points(src)
     dst_norm, dst_center, dst_scale = _normalize_tps_points(dst)
+    centers = _fixed_tps_grid_centers(src_norm, grid_size)
+    basis_count = len(centers)
+    design_size = basis_count + 3
     module = _load_apap_native_module()
     source_buffer = aot_api.upload(np.ascontiguousarray(src_norm, dtype=np.float32))
     target_buffer = aot_api.upload(np.ascontiguousarray(dst_norm, dtype=np.float32))
-    system = aot_api.upload(np.zeros((size, size), dtype=np.float32))
-    rhs = aot_api.upload(np.zeros((size, 2), dtype=np.float32))
-    solution = aot_api.upload(np.zeros((size, 2), dtype=np.float32))
+    centers_buffer = aot_api.upload(np.ascontiguousarray(centers, dtype=np.float32))
+    design_buffer = aot_api.upload(
+        np.zeros((count, design_size), dtype=np.float32)
+    )
+    column_scales = aot_api.upload(np.zeros((design_size,), dtype=np.float32))
+    system = aot_api.upload(np.zeros((design_size, design_size), dtype=np.float32))
+    system_copy = aot_api.upload(np.zeros((design_size, design_size), dtype=np.float32))
+    rhs = aot_api.upload(np.zeros((design_size, 2), dtype=np.float32))
+    solution = aot_api.upload(np.zeros((design_size, 2), dtype=np.float32))
     status = aot_api.upload(np.zeros((1,), dtype=np.int32))
     try:
         module.run(
-            "algn_apap_tps_pivoted_f32",
+            "algn_apap_tps_lowrank_f32",
             source=source_buffer,
             target=target_buffer,
+            centers=centers_buffer,
+            design=design_buffer,
+            column_scales=column_scales,
             system=system,
+            system_copy=system_copy,
             rhs=rhs,
             solution=solution,
             status=status,
+            basis_count=int(basis_count),
             regularization=float(regularization),
         )
         coefficients = solution.to_numpy().astype(np.float64)
         solver_status = status.to_numpy()
-        system_np = system.to_numpy().astype(np.float64)
+        system_np = system_copy.to_numpy().astype(np.float64)
     except Exception as exc:
         raise RuntimeError(
             "APAP native TPS fitting failed on the selected backend/device; "
@@ -1020,8 +1186,8 @@ def _fit_apap_tps_native(
 
     if int(solver_status[0]) == 0:
         raise RuntimeError(
-            "Native APAP TPS pivoted solve found a singular KKT pivot; "
-            "the requested TPS residual was not dropped."
+            "Native APAP fixed-grid TPS solve found a singular normal-equation pivot; "
+            "the requested residual was not dropped."
         )
     condition_estimate = float(np.linalg.cond(system_np))
     if not np.isfinite(coefficients).all() or not np.isfinite(condition_estimate):
@@ -1034,15 +1200,16 @@ def _fit_apap_tps_native(
         )
 
     warp = APAPNativeTPSWarp(
-        control_points=np.ascontiguousarray(src_norm, dtype=np.float32),
-        weights=np.ascontiguousarray(coefficients[:count], dtype=np.float32),
-        affine=np.ascontiguousarray(coefficients[count : count + 3], dtype=np.float32),
+        control_points=np.ascontiguousarray(centers, dtype=np.float32),
+        weights=np.ascontiguousarray(coefficients[:basis_count], dtype=np.float32),
+        affine=np.ascontiguousarray(coefficients[basis_count : basis_count + 3], dtype=np.float32),
         source_center=np.asarray(src_center, dtype=np.float64),
         source_scale=float(src_scale),
         destination_center=np.asarray(dst_center, dtype=np.float64),
         destination_scale=float(dst_scale),
         regularization=float(regularization),
         condition_estimate=condition_estimate,
+        input_count=count,
     )
 
     # Match the existing TPS fold-over quality gate. Coordinate evaluation
@@ -1188,7 +1355,7 @@ def fit_apap(
                 warp.residual_field = _fit_apap_tps_native(
                     src64,
                     dst64,
-                    regularization=1.0e-5,
+                    regularization=1.0e-4,
                 )
             except TransformEstimationError:
                 # Match the existing algorithmic policy for degenerate TPS

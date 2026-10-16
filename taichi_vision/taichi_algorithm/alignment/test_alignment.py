@@ -141,6 +141,82 @@ class TestAlignment(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no correspondence rows were dropped"):
             _validate_apap_correspondences(source, target, min_points=4)
 
+    def test_apap_fixed_grid_residual_uses_all_122_rows_across_layouts(self):
+        from taichi_vision.taichi_algorithm.alignment.apap import fit_apap_tps_grid_reference
+
+        rng = np.random.default_rng(20261016)
+        uniform = rng.uniform(4.0, 252.0, (122, 2))
+        medium_x, medium_y = np.meshgrid(
+            np.linspace(8.0, 248.0, 10), np.linspace(8.0, 248.0, 12)
+        )
+        medium = np.vstack(
+            [
+                np.column_stack((medium_x.ravel(), medium_y.ravel())),
+                [[42.0, 219.0], [218.0, 39.0]],
+            ]
+        )
+        clustered = np.vstack(
+            [
+                rng.normal((48.0, 48.0), (15.0, 15.0), (56, 2)),
+                rng.normal((208.0, 208.0), (15.0, 15.0), (56, 2)),
+                [
+                    [8.0, 8.0], [248.0, 8.0], [8.0, 248.0], [248.0, 248.0],
+                    [128.0, 8.0], [8.0, 128.0], [248.0, 128.0], [128.0, 248.0],
+                    [128.0, 96.0], [96.0, 128.0],
+                ],
+            ]
+        )
+        edge = np.vstack(
+            [
+                np.column_stack((np.linspace(4.0, 252.0, 59), rng.uniform(4.0, 12.0, 59))),
+                np.column_stack((rng.uniform(4.0, 12.0, 59), np.linspace(4.0, 252.0, 59))),
+                [[4.0, 4.0], [252.0, 4.0], [4.0, 252.0], [252.0, 252.0]],
+            ]
+        )
+        qx, qy = np.meshgrid(np.linspace(4.0, 252.0, 33), np.linspace(4.0, 252.0, 33))
+        query = np.column_stack((qx.ravel(), qy.ravel()))
+
+        def localized_motion(points):
+            radius_sq = np.sum((points - [128.0, 128.0]) ** 2, axis=1)
+            amplitude = 1.5 * np.exp(-radius_sq / (2.0 * 42.0**2))
+            return points + np.column_stack((amplitude, -0.6 * amplitude))
+
+        fixtures = {
+            "high_uniform": (uniform, localized_motion),
+            "medium_regular": (medium, localized_motion),
+            "low_clustered": (clustered, localized_motion),
+            # This edge-only scene has a known affine motion; it has no observed
+            # foreground controls in the interior from which a local bump could be inferred.
+            "extreme_edges": (edge, lambda points: points * 1.002 + [0.5, -0.25]),
+        }
+
+        for name, (source, transform) in fixtures.items():
+            with self.subTest(layout=name):
+                target = transform(source)
+                fitted = fit_apap_tps_grid_reference(
+                    source, target, grid_size=8, regularization=1.0e-4
+                )
+                expected = transform(query)
+                error = np.linalg.norm(fitted.map_points(query) - expected, axis=1)
+                self.assertEqual(fitted.input_count, len(source))
+                self.assertEqual(len(fitted.control_points), 64)
+                self.assertLessEqual(float(error.max()), 1.0)
+                self.assertLessEqual(float(error.mean()), 0.15)
+                self.assertTrue(np.isfinite(fitted.map_points(query)).all())
+
+                if name == "high_uniform":
+                    changed_target = target.copy()
+                    changed_target[-1, 0] += 0.25
+                    perturbed = fit_apap_tps_grid_reference(
+                        source, changed_target, grid_size=8, regularization=1.0e-4
+                    )
+                    effect = np.linalg.norm(
+                        perturbed.map_points(query) - fitted.map_points(query), axis=1
+                    )
+                    self.assertGreater(float(effect.max()), 1.0e-8)
+                    local = np.linalg.norm(fitted.map_points(query) - query, axis=1)
+                    self.assertGreater(float(local.max()), 1.0)
+
     def test_aanap(self):
         src_pts = np.array([
             [x, y] for y in np.linspace(20, 180, 5) for x in np.linspace(20, 180, 5)
