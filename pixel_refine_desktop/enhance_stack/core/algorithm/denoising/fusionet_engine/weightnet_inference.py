@@ -359,6 +359,59 @@ def load_weightnet_onnx(
     patch_size: int = 512,
     input_channels: int | None = 1,
 ):
+    # Explicit experimental selection: use the same GPU graph and weights as
+    # DirectML, with native Taichi compute. Keep automatic runtime policy intact.
+    if str(runtime).strip().lower() in ("taichi_cuda", "taichi_aot"):
+        from taichi_vision.taichi_aot import onnx as load_native
+
+        if input_channels not in (None, 1) or patch_size not in (512, 1024):
+            raise ValueError("Native WeightNet currently admits grayscale 512/1024 profiles only")
+        source = Path(model_path)
+        search_dirs = [
+            source.parent if source.is_file() else source,
+            Path("database/Learning_Model/nanoFlow"),
+            Path("database/Learning_Model/weightNet"),
+            Path("pixel_refine_desktop/ui/data/models"),
+        ]
+        if source.is_file() and source.suffix.lower() == ".bundle":
+            bundle = source
+        else:
+            bundle = next((d / name for d in search_dirs
+                           for name in ("weightnet_master.bundle", "weightnet_v3_master.bundle")
+                           if (d / name).is_file()), None)
+        if bundle is None:
+            raise FileNotFoundError(f"Native WeightNet requires the qualified 512/1024 bundle: {source}")
+        import zipfile
+        member = f"weightnet_{patch_size}_gpu_1c_fp32.onnx"
+        with zipfile.ZipFile(bundle) as archive:
+            if member not in archive.namelist():
+                raise ValueError(f"Native WeightNet profile {member} is missing from {bundle}")
+            model_bytes = archive.read(member)
+            if str(runtime).strip().lower() == "taichi_aot":
+                import hashlib
+                from taichi_vision import taichi_aot
+                from taichi_vision.taichi_aot import neural
+                from taichi_vision.taichi_algorithm.denoising.resident_weightnet import ResidentWeightNet
+                backend = taichi_aot.get_backend_name()
+                custom_artifact = os.environ.get("PIXEL_REFINE_WEIGHTNET_AOT_ARTIFACT", "")
+                if custom_artifact and Path(custom_artifact).is_file():
+                    artifact = Path(custom_artifact)
+                else:
+                    artifact = neural.resolve_or_compile_tcm(
+                        model_bytes,
+                        backend=backend,
+                        model_name=f"weightnet_{patch_size}",
+                        patch_tools=True,
+                    )
+                if not artifact.is_file():
+                    raise FileNotFoundError(f"Pre-baked WeightNet artifact is missing for {backend}: {artifact}")
+                session = ResidentWeightNet(artifact, model_sha256=hashlib.sha256(model_bytes).hexdigest())
+                print(f"[WeightNet AOT] backend={session.engine.arch} patch={patch_size} model={artifact.name} host_patch_readback=0")
+                return session
+            session = load_native(model_bytes, backend="cuda", channels=1)
+        session.runtime = "taichi_cuda"
+        return _validate_weightnet_input_channels(session, 1)
+
     try:
         import onnxruntime as ort
     except ImportError as exc:
@@ -383,7 +436,7 @@ def load_weightnet_onnx(
         providers = ["CPUExecutionProvider"]
     else:
         raise ValueError(
-            f"Unsupported ONNX runtime {runtime!r}; choose auto, dml, or cpu."
+            f"Unsupported ONNX runtime {runtime!r}; choose auto, dml, cpu, or taichi_cuda."
         )
 
     options = ort.SessionOptions()
@@ -410,6 +463,50 @@ def load_weightnet_onnx(
         Path(f"database/Learning_Model/weightNet/{dev_upper}"),
         Path(f"database/Learning_Model/nanoFlow/{dev_upper}"),
     ]
+
+    # A qualified DirectML batch-2 profile is shipped as a companion artifact.
+    # Keep the established bundle profile as the default everywhere else.
+    batch_two_name = f"weightnet_{patch_size}_{dev_suffix}_2b_1c_fp32.onnx"
+    batch_two_model = next(
+        (directory / batch_two_name for directory in search_dirs
+         if (directory / batch_two_name).is_file()),
+        None,
+    )
+    try:
+        requested_batch_size = int(
+            os.environ.get("PIXEL_REFINE_WEIGHTNET_BATCH_SIZE", "1")
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "PIXEL_REFINE_WEIGHTNET_BATCH_SIZE must be 1 or 2"
+        ) from exc
+    if requested_batch_size not in (1, 2):
+        raise ValueError(
+            "PIXEL_REFINE_WEIGHTNET_BATCH_SIZE must be 1 or 2"
+        )
+    if requested_batch_size == 2:
+        if runtime != "dml" or input_channels != 1:
+            raise ValueError(
+                "WeightNet batch-2 profile is qualified only for DirectML, "
+                f"single-channel input; runtime={runtime}, channels={input_channels}"
+            )
+        if batch_two_model is None:
+            raise FileNotFoundError(
+                f"Requested batch-2 WeightNet profile is missing: {batch_two_name}"
+            )
+        options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+        session = ort.InferenceSession(
+            str(batch_two_model),
+            sess_options=options,
+            providers=["DmlExecutionProvider"],
+        )
+        _validate_weightnet_input_channels(session, input_channels)
+        print(
+            f"[WeightNet ONNX Profile] runtime={runtime} model={batch_two_model.name} "
+            f"providers={session.get_providers()} patch={patch_size} batch=2 "
+            "cpu_fallback=disabled"
+        )
+        return session
 
     # 0. Check for Unified Model Archive Bundle (Zero-Disk In-Memory Streaming)
     bundle_names = [
@@ -559,6 +656,9 @@ def infer_single_support_weight_map(
     Output: weight_map_work [3, work_h, work_w] by default, or the native
     scalar map [1, work_h, work_w] when ``return_scalar`` is requested.
     """
+    if getattr(session, "runtime", None) == "taichi_aot":
+        return session.infer(ref_work, supp_work, overlap=overlap, ghost_penalty=ghost_penalty,
+                             ghost_cutoff=ghost_cutoff, stop_event=stop_event)
     channels, work_h, work_w = ref_work.shape
     if channels not in (1, 3) or tuple(supp_work.shape) != tuple(ref_work.shape):
         raise ValueError(
@@ -566,12 +666,15 @@ def infer_single_support_weight_map(
             f"got ref={ref_work.shape}, support={supp_work.shape}"
         )
     is_decoupled = isinstance(session, DecoupledWeightNetSession)
+    inference_batch_size = 1
 
     if is_decoupled:
         tile_size = session.patch_size
     else:
         try:
             model_in_shape = session.get_inputs()[0].shape
+            if model_in_shape and isinstance(model_in_shape[0], int):
+                inference_batch_size = max(1, int(model_in_shape[0]))
             if (
                 len(model_in_shape) >= 4
                 and isinstance(model_in_shape[2], int)
@@ -580,6 +683,11 @@ def infer_single_support_weight_map(
                 tile_size = int(model_in_shape[2])
         except Exception:
             pass
+    if inference_batch_size > 1 and (is_decoupled or inference_batch_size != 2):
+        raise RuntimeError(
+            "WeightNet only supports the qualified coupled batch-2 inference profile; "
+            f"got batch={inference_batch_size}, decoupled={is_decoupled}"
+        )
 
     # The selected production-quality model consumes luminance. RGB callers
     # retain compatibility, but their input is reduced to one channel below.
@@ -702,10 +810,12 @@ def infer_single_support_weight_map(
     alpha_total = 0.0
 
     ref_in = np.zeros(
-        (1, 3 if is_rgb_model else 1, tile_size, tile_size), dtype=np.float32
+        (inference_batch_size, 3 if is_rgb_model else 1, tile_size, tile_size),
+        dtype=np.float32,
     )
     supp_in = np.zeros(
-        (1, 3 if is_rgb_model else 1, tile_size, tile_size), dtype=np.float32
+        (inference_batch_size, 3 if is_rgb_model else 1, tile_size, tile_size),
+        dtype=np.float32,
     )
 
     # Reuse DirectML output storage for coupled static models.  session.run()
@@ -751,6 +861,81 @@ def infer_single_support_weight_map(
             coupled_io = None
             coupled_weight_out = None
             coupled_alpha_out = None
+
+    # Batch two independent tiles into each DirectML call. This branch is
+    # shared by standard and MultiPatch modes because both enter this helper.
+    # Alpha is a scalar mean over the full ONNX batch, so weight it by the
+    # number of tiles represented to preserve the single-tile aggregate.
+    if inference_batch_size == 2:
+        for batch_start in range(0, total_tiles, inference_batch_size):
+            if stop_event is not None:
+                if hasattr(stop_event, "is_set") and stop_event.is_set():
+                    raise RuntimeError("Inference cancelled.")
+                elif callable(stop_event) and stop_event():
+                    raise RuntimeError("Inference cancelled.")
+
+            batch_coords = tile_coords[
+                batch_start : batch_start + inference_batch_size
+            ]
+            model_batch_coords = batch_coords
+            if len(model_batch_coords) == 1:
+                # The ONNX profile has a fixed B=2 shape. Duplicate the final
+                # real tile for a one-tile tail, then discard its second output.
+                model_batch_coords = [batch_coords[0], batch_coords[0]]
+            ref_in.fill(0.0)
+            supp_in.fill(0.0)
+            for slot, (y_start, y_end, x_start, x_end) in enumerate(
+                model_batch_coords
+            ):
+                cur_h, cur_w = y_end - y_start, x_end - x_start
+                ref_in[slot, 0, :cur_h, :cur_w] = ref_luma[
+                    y_start:y_end, x_start:x_end
+                ]
+                supp_in[slot, 0, :cur_h, :cur_w] = supp_luma[
+                    y_start:y_end, x_start:x_end
+                ]
+
+            try:
+                if coupled_io is not None:
+                    coupled_io.bind_cpu_input("ref_img", ref_in)
+                    coupled_io.bind_cpu_input("support_img", supp_in)
+                    session.run_with_iobinding(coupled_io)
+                    weight_np = coupled_weight_out
+                    alpha_np = coupled_alpha_out
+                else:
+                    weight_np, alpha_np = session.run(
+                        ["weight_map", "alpha"],
+                        {"ref_img": ref_in, "support_img": supp_in},
+                    )
+            except Exception as exc:
+                raise RuntimeError(
+                    "DirectML WeightNet batch-2 inference failed; refusing to "
+                    "substitute a heuristic confidence map."
+                ) from exc
+
+            raw_w = np.asarray(weight_np, dtype=np.float32)
+            alpha_values = np.asarray(alpha_np, dtype=np.float32)
+            if (
+                raw_w.ndim != 4
+                or raw_w.shape[0] != inference_batch_size
+                or not np.isfinite(raw_w).all()
+                or not np.isfinite(alpha_values).all()
+            ):
+                raise RuntimeError(
+                    "DirectML WeightNet batch-2 returned invalid output shapes or values: "
+                    f"weight_map={raw_w.shape}, alpha={alpha_values.shape}"
+                )
+            alpha_total += float(alpha_values.mean()) * len(batch_coords)
+
+            for slot, (y_start, y_end, x_start, x_end) in enumerate(batch_coords):
+                cur_h, cur_w = y_end - y_start, x_end - x_start
+                cur_win = window_2d[:, :, :cur_h, :cur_w]
+                weight_tile = raw_w[slot, 0:1, :cur_h, :cur_w]
+                weight_map_accum[:, y_start:y_end, x_start:x_end] += (
+                    weight_tile * cur_win[0]
+                )
+                weight_stitch_work[:, :, y_start:y_end, x_start:x_end] += cur_win
+        tile_coords = []
 
     for i, (y_start, y_end, x_start, x_end) in enumerate(tile_coords):
         if stop_event is not None:
@@ -858,6 +1043,8 @@ def infer_single_support_weight_map(
                 if np.isfinite(alpha_values).all():
                     alpha_total += float(alpha_values.mean())
             except Exception:
+                if getattr(session, "runtime", None) == "taichi_cuda":
+                    raise
                 if is_rgb_model:
                     diff = np.mean(
                         np.abs(

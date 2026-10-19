@@ -381,6 +381,7 @@ from taichi_vision.taichi_algorithm.aot_api import (  # noqa: E402
 )
 
 # Neural AOT Engine (ONNX & PyTorch native execution, .tcm support)
+from taichi_vision.taichi_algorithm.sfm import sfm, SfMResult, CameraInfo
 from .neural_engine import (
     onnx,
     pytorch,
@@ -388,6 +389,9 @@ from .neural_engine import (
     export_neural_tcm,
     load_neural_tcm,
 )
+from .neural_adapters import adapt_image_to_nchw
+from .neural import InferenceSession, resolve_or_compile_tcm
+from . import neural
 
 try:
     from taichi_vision.taichi_algorithm.taichi_worker import ti_thread

@@ -1,4 +1,4 @@
-﻿# Ignore distribution and build directories
+# Ignore distribution and build directories
 dist/
 build/
 test_algorithm/
@@ -21,6 +21,20 @@ scratch/
 ai_governance/*
 !ai_governance/assistant_backup/**
 !ai_governance/CHANGELOG_20261010.md
+!ai_governance/TAICHI_VISION_CLEANUP_BASELINE_20261010.md
+!ai_governance/TAICHI_VISION_CLEANUP_RESULTS_20261010.md
+!ai_governance/APP_LOGIC_AUDIT_MEMORY_20261010.md
+!ai_governance/KNOWLEDGE_INDEX.md
+!ai_governance/AGENT_HARNESS_MAP.md
+!ai_governance/INTERPOLATION_GPU_PERFORMANCE_HANDOFF_20261010.md
+!ai_governance/taichi_vision_map/
+!ai_governance/taichi_vision_map/**
+!ai_governance/APP_UI_BATCH_WORKFLOW_AUDIT_20261011.md
+!ai_governance/APP_UI_BULK_BATCH_HANDOFF_20261011.md
+!ai_governance/APP_UI_PREVIEW_NAV_HANDOFF_20261011.md
+!ai_governance/APP_UI_PROCESS_QUEUE_HANDOFF_20261011.md
+!ai_governance/TAICHI_ONNX_NATIVE_ACCELERATION_PLAN_20261015.md
+!ai_governance/XIAOMI_CAMERA_REVERSE_ENGINEERING_MEMORY_20261019.md
 artifact_implementation_plan/
 .kunsdd/
 save_align_image/
@@ -73,3 +87,7 @@ tmp/
 *.temp
 *.bak
 *.backup
+
+# AI governance
+ai_governance/
+
