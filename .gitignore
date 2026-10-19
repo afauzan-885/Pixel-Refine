@@ -18,7 +18,8 @@ scratch/
 .agent/
 .vscode/
 .commandcode/
-ai_governance/*
+database/
+ai_governance/
 !ai_governance/assistant_backup/**
 !ai_governance/CHANGELOG_20261010.md
 !ai_governance/TAICHI_VISION_CLEANUP_BASELINE_20261010.md
@@ -88,6 +89,19 @@ tmp/
 *.bak
 *.backup
 
-# AI governance
+# AI governance & Agent artifacts
 ai_governance/
+.goals/
+.vscode/
+
+# Non-coding documentation & notes
+REPOSITORY_ORIENTATION*.md
+taichi_vision/documentation/
+
+# Intermediates, logs, and benchmarks
+*.log
+*.ll
+*.tcb
+.output_benchmark/
+build_*_log.txt
 
