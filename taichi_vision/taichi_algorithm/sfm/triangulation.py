@@ -182,119 +182,149 @@ if TAICHI_AVAILABLE:
 # HOST WRAPPERS (NumPy implementations with hybrid precision)
 # =============================================================================
 
+# =============================================================================
+# HOST WRAPPERS (NumPy implementations with hybrid precision)
+# =============================================================================
+
 def _triangulate_dlt_np(pts1, pts2, P1, P2):
-    """DLT triangulation (NumPy, Float64 precision)."""
+    """DLT triangulation (Vectorized NumPy, Float64 precision)."""
+    pts1 = np.asarray(pts1, dtype=np.float64)
+    pts2 = np.asarray(pts2, dtype=np.float64)
+    P1 = np.asarray(P1, dtype=np.float64)
+    P2 = np.asarray(P2, dtype=np.float64)
     n = len(pts1)
-    pts3d = np.zeros((n, 3), dtype=np.float64)
-    for i in range(n):
-        A = np.array([
-            pts1[i, 0] * P1[2] - P1[0],
-            pts1[i, 1] * P1[2] - P1[1],
-            pts2[i, 0] * P2[2] - P2[0],
-            pts2[i, 1] * P2[2] - P2[1],
-        ], dtype=np.float64)
-        _, _, Vt = np.linalg.svd(A)
-        X = Vt[-1]
-        if abs(X[3]) > 1e-10:
-            pts3d[i] = X[:3] / X[3]
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    # Build (N, 4, 3) matrix M and (N, 4) vector b
+    # row 0: pts1[:, 0] * P1[2] - P1[0]
+    # row 1: pts1[:, 1] * P1[2] - P1[1]
+    # row 2: pts2[:, 0] * P2[2] - P2[0]
+    # row 3: pts2[:, 1] * P2[2] - P2[1]
+    r0 = pts1[:, 0:1] * P1[2:3, :3] - P1[0:1, :3]
+    b0 = -(pts1[:, 0] * P1[2, 3] - P1[0, 3])
+
+    r1 = pts1[:, 1:2] * P1[2:3, :3] - P1[1:2, :3]
+    b1 = -(pts1[:, 1] * P1[2, 3] - P1[1, 3])
+
+    r2 = pts2[:, 0:1] * P2[2:3, :3] - P2[0:1, :3]
+    b2 = -(pts2[:, 0] * P2[2, 3] - P2[0, 3])
+
+    r3 = pts2[:, 1:2] * P2[2:3, :3] - P2[1:2, :3]
+    b3 = -(pts2[:, 1] * P2[2, 3] - P2[1, 3])
+
+    # Stack to (N, 4, 3) and (N, 4)
+    M = np.stack([r0, r1, r2, r3], axis=1) # (N, 4, 3)
+    b = np.column_stack([b0, b1, b2, b3]) # (N, 4)
+
+    # Normal equations: M^T M X = M^T b
+    MtM = np.einsum('nka,nkb->nab', M, M) # (N, 3, 3)
+    Mtb = np.einsum('nka,nk->na', M, b)   # (N, 3)
+
+    # Solve batch
+    try:
+        pts3d = np.linalg.solve(MtM, Mtb[:, :, None])[:, :, 0]
+    except (np.linalg.LinAlgError, ValueError):
+        pts3d = np.zeros((n, 3), dtype=np.float64)
+        for i in range(n):
+            try:
+                pts3d[i] = np.linalg.solve(MtM[i], Mtb[i])
+            except (np.linalg.LinAlgError, ValueError):
+                pts3d[i] = 0.0
     return pts3d
 
 
 def _triangulate_wmid2_np(pts1, pts2, P1, P2, C1, C2):
     """
     Weighted Midpoint (wMid2) with inverse depth weighting.
-    Prevents depth explosion at low parallax.
+    Prevents depth explosion at low parallax. Fully vectorized.
     """
+    pts1 = np.asarray(pts1, dtype=np.float64)
+    pts2 = np.asarray(pts2, dtype=np.float64)
+    C1 = np.asarray(C1, dtype=np.float64)
+    C2 = np.asarray(C2, dtype=np.float64)
     n = len(pts1)
-    pts3d = np.zeros((n, 3), dtype=np.float64)
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float64)
 
-    for i in range(n):
-        # Ray directions (normalized coordinates assumed)
-        r1 = np.array([pts1[i, 0] - C1[0], pts1[i, 1] - C1[1], 1.0 - C1[2]], dtype=np.float64)
-        r2 = np.array([pts2[i, 0] - C2[0], pts2[i, 1] - C2[1], 1.0 - C2[2]], dtype=np.float64)
+    r1 = np.column_stack([pts1[:, 0] - C1[0], pts1[:, 1] - C1[1], np.full(n, 1.0 - C1[2])])
+    r2 = np.column_stack([pts2[:, 0] - C2[0], pts2[:, 1] - C2[1], np.full(n, 1.0 - C2[2])])
 
-        r1_norm = np.linalg.norm(r1)
-        r2_norm = np.linalg.norm(r2)
-        if r1_norm > 1e-10:
-            r1 /= r1_norm
-        if r2_norm > 1e-10:
-            r2 /= r2_norm
+    r1_norm = np.linalg.norm(r1, axis=1, keepdims=True)
+    r2_norm = np.linalg.norm(r2, axis=1, keepdims=True)
+    r1 = np.where(r1_norm > 1e-10, r1 / np.maximum(r1_norm, 1e-10), r1)
+    r2 = np.where(r2_norm > 1e-10, r2 / np.maximum(r2_norm, 1e-10), r2)
 
-        # Perpendicular bisector: find closest point on both rays
-        # ray1: C1 + lambda1 * r1, ray2: C2 + lambda2 * r2
-        d = C2 - C1
-        a = np.dot(r1, r1)
-        b = np.dot(r1, r2)
-        c = np.dot(r2, r2)
-        d1 = np.dot(d, r1)
-        d2 = np.dot(d, r2)
+    d = C2 - C1
+    a = np.sum(r1 * r1, axis=1)
+    b = np.sum(r1 * r2, axis=1)
+    c = np.sum(r2 * r2, axis=1)
+    d1 = np.dot(r1, d)
+    d2 = np.dot(r2, d)
 
-        denom = a * c - b * b
-        if abs(denom) > 1e-14:
-            lambda1 = (b * d2 - c * d1) / denom
-            lambda2 = (a * d2 - b * d1) / denom
-        else:
-            lambda1 = 0.0
-            lambda2 = 0.0
+    denom = a * c - b * b
+    valid_denom = np.abs(denom) > 1e-14
+    safe_denom = np.where(valid_denom, denom, 1.0)
 
-        P_a = C1 + lambda1 * r1
-        P_b = C2 + lambda2 * r2
+    lambda1 = np.where(valid_denom, (b * d2 - c * d1) / safe_denom, 0.0)
+    lambda2 = np.where(valid_denom, (a * d2 - b * d1) / safe_denom, 0.0)
 
-        # Inverse depth weighting
-        w1 = 1.0 / (lambda1 ** 2 + 1e-10)
-        w2 = 1.0 / (lambda2 ** 2 + 1e-10)
-        pts3d[i] = (w1 * P_a + w2 * P_b) / (w1 + w2)
+    P_a = C1[None, :] + lambda1[:, None] * r1
+    P_b = C2[None, :] + lambda2[:, None] * r2
 
+    w1 = 1.0 / (lambda1 ** 2 + 1e-10)
+    w2 = 1.0 / (lambda2 ** 2 + 1e-10)
+    w_sum = (w1 + w2)[:, None]
+    pts3d = (w1[:, None] * P_a + w2[:, None] * P_b) / w_sum
     return pts3d
 
 
 def _triangulate_lost_np(pts1, pts2, P1, P2, C1, C2, noise_sigma=0.5):
     """
     LOST (Linear Optimal Sine Triangulation) — Henry & Christian 2023.
-    Non-iterative WLS via trigonometric sine law. O(N) complexity.
+    Non-iterative WLS via trigonometric sine law. O(N) complexity. Fully vectorized.
     """
+    pts1 = np.asarray(pts1, dtype=np.float64)
+    pts2 = np.asarray(pts2, dtype=np.float64)
+    C1 = np.asarray(C1, dtype=np.float64)
+    C2 = np.asarray(C2, dtype=np.float64)
     n = len(pts1)
-    pts3d = np.zeros((n, 3), dtype=np.float64)
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float64)
 
-    for i in range(n):
-        r1 = np.array([pts1[i, 0] - C1[0], pts1[i, 1] - C1[1], 1.0 - C1[2]], dtype=np.float64)
-        r2 = np.array([pts2[i, 0] - C2[0], pts2[i, 1] - C2[1], 1.0 - C2[2]], dtype=np.float64)
+    r1 = np.column_stack([pts1[:, 0] - C1[0], pts1[:, 1] - C1[1], np.full(n, 1.0 - C1[2])])
+    r2 = np.column_stack([pts2[:, 0] - C2[0], pts2[:, 1] - C2[1], np.full(n, 1.0 - C2[2])])
 
-        r1_norm = np.linalg.norm(r1)
-        r2_norm = np.linalg.norm(r2)
-        if r1_norm > 1e-10:
-            r1 /= r1_norm
-        if r2_norm > 1e-10:
-            r2 /= r2_norm
+    r1_norm = np.linalg.norm(r1, axis=1, keepdims=True)
+    r2_norm = np.linalg.norm(r2, axis=1, keepdims=True)
+    r1 = np.where(r1_norm > 1e-10, r1 / np.maximum(r1_norm, 1e-10), r1)
+    r2 = np.where(r2_norm > 1e-10, r2 / np.maximum(r2_norm, 1e-10), r2)
 
-        baseline = C2 - C1
-        baseline_len = np.linalg.norm(baseline)
+    baseline = C2 - C1
+    cross = np.cross(r1, r2)
+    sin_theta = np.linalg.norm(cross, axis=1)
 
-        # Cross product for sine of angle
-        cross = np.cross(r1, r2)
-        sin_theta = np.linalg.norm(cross)
+    valid_sin = sin_theta >= 1e-10
+    safe_sin = np.where(valid_sin, sin_theta, 1.0)
 
-        if sin_theta < 1e-10:
-            pts3d[i] = (C1 + C2) / 2.0
-            continue
+    bx_r2 = np.cross(baseline[None, :], r2)
+    bx_r1 = np.cross(baseline[None, :], r1)
+    lambda1 = np.linalg.norm(bx_r2, axis=1) / safe_sin
+    lambda2 = np.linalg.norm(bx_r1, axis=1) / safe_sin
 
-        # Sine law: lambda1 = |baseline x r2| / sin(theta)
-        bx_r2 = np.cross(baseline, r2)
-        bx_r1 = np.cross(baseline, r1)
-        lambda1 = np.linalg.norm(bx_r2) / sin_theta
-        lambda2 = np.linalg.norm(bx_r1) / sin_theta
+    sigma1_sq = (noise_sigma ** 2) * (lambda1 ** 2)
+    sigma2_sq = (noise_sigma ** 2) * (lambda2 ** 2)
 
-        # Covariance-weighted combination
-        sigma1_sq = noise_sigma ** 2 * lambda1 ** 2
-        sigma2_sq = noise_sigma ** 2 * lambda2 ** 2
+    P_a = C1[None, :] + lambda1[:, None] * r1
+    P_b = C2[None, :] + lambda2[:, None] * r2
 
-        P_a = C1 + lambda1 * r1
-        P_b = C2 + lambda2 * r2
+    w1 = 1.0 / (sigma1_sq + 1e-10)
+    w2 = 1.0 / (sigma2_sq + 1e-10)
+    w_sum = (w1 + w2)[:, None]
+    pts3d = (w1[:, None] * P_a + w2[:, None] * P_b) / w_sum
 
-        w1 = 1.0 / (sigma1_sq + 1e-10)
-        w2 = 1.0 / (sigma2_sq + 1e-10)
-        pts3d[i] = (w1 * P_a + w2 * P_b) / (w1 + w2)
-
+    midpoint = (C1 + C2)[None, :] * 0.5
+    pts3d = np.where(valid_sin[:, None], pts3d, midpoint)
     return pts3d
 
 

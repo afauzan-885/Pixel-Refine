@@ -144,14 +144,20 @@ def rgb_to_bgr_i32(
     h: ti.i32,
     w: ti.i32,
 ):
-    for r, c in ti.ndrange(h, w):
-        val_r = ti.math.clamp(src[r, c, 0] * 65535.0 + 0.5, 0.0, 65535.0)
-        val_g = ti.math.clamp(src[r, c, 1] * 65535.0 + 0.5, 0.0, 65535.0)
-        val_b = ti.math.clamp(src[r, c, 2] * 65535.0 + 0.5, 0.0, 65535.0)
+    # Preserve LLVM lowering; dev3 SPIR-V cannot lower the integer ndrange division.
+    if ti.static(ti.lang.impl.current_cfg().arch in (ti.vulkan, ti.opengl)):
+        for I in ti.grouped(dst):
+            value = ti.math.clamp(src[I[0], I[1], 2 - I[2]] * 65535.0 + 0.5, 0.0, 65535.0)
+            dst[I] = ti.cast(ti.round(value), ti.i32)
+    else:
+        for r, c in ti.ndrange(h, w):
+            val_r = ti.math.clamp(src[r, c, 0] * 65535.0 + 0.5, 0.0, 65535.0)
+            val_g = ti.math.clamp(src[r, c, 1] * 65535.0 + 0.5, 0.0, 65535.0)
+            val_b = ti.math.clamp(src[r, c, 2] * 65535.0 + 0.5, 0.0, 65535.0)
 
-        dst[r, c, 0] = ti.cast(ti.round(val_b), ti.i32)
-        dst[r, c, 1] = ti.cast(ti.round(val_g), ti.i32)
-        dst[r, c, 2] = ti.cast(ti.round(val_r), ti.i32)
+            dst[r, c, 0] = ti.cast(ti.round(val_b), ti.i32)
+            dst[r, c, 1] = ti.cast(ti.round(val_g), ti.i32)
+            dst[r, c, 2] = ti.cast(ti.round(val_r), ti.i32)
 
 
 @ti.kernel

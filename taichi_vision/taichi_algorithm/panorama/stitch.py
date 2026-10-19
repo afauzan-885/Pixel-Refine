@@ -21,7 +21,7 @@ from ..pipeline_common import (
     as_gray_float32,
     timed_stage,
 )
-from ..alignment.apap import APAPWarp, fit_apap
+from ..alignment.apap import AANAPWarp, APAPWarp, fit_aanap, fit_apap
 from ..alignment.quality import (
     TransformEstimationError,
     TransformQuality,
@@ -50,7 +50,7 @@ class AlignmentResult:
     model: str
     tps: TPSWarp | None = None
     tps_quality: TPSQuality | None = None
-    apap: APAPWarp | None = None
+    apap: APAPWarp | AANAPWarp | None = None
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
@@ -261,6 +261,11 @@ def align_pair(
             feature=feature,
             strict=backend_name == "aot",
         )
+    if str(refine).lower() == "apap" and correspondence is None:
+        raise PanoramaError(
+            "APAP refinement requires matched local feature pairs; "
+            "phase-correlation translation cannot provide APAP support"
+        )
 
     warnings: list[str] = []
     if correspondence is not None:
@@ -411,17 +416,33 @@ def align_pair(
                     tps = None
             except (ValueError, TransformEstimationError, np.linalg.LinAlgError) as exc:
                 warnings.append(f"TPS refinement unavailable: {exc}")
+        elif str(refine).lower() == "apap":
+            if not quality.valid:
+                raise PanoramaError(
+                    f"APAP refinement requires a valid global correspondence gate: "
+                    f"{quality.reason}"
+                )
+            if len(inlier_source) < 4:
+                raise PanoramaError(
+                    "APAP refinement requires at least four RANSAC inlier pairs; "
+                    f"received {len(inlier_source)}"
+                )
+            # APAP was explicitly requested. Do not turn a fit/backend/support
+            # failure into an apparently successful global-homography result.
+            apap = fit_apap(
+                inlier_source, inlier_target, global_homography=transform
+            )
         elif (
-            str(refine).lower() == "apap" and len(inlier_source) >= 4 and quality.valid
+            str(refine).lower() == "aanap" and len(inlier_source) >= 4 and quality.valid
         ):
             try:
-                apap = fit_apap(
+                apap = fit_aanap(
                     inlier_source, inlier_target, global_homography=transform
                 )
             except (ValueError, TransformEstimationError, np.linalg.LinAlgError) as exc:
-                warnings.append(f"APAP refinement unavailable: {exc}")
-        elif str(refine).lower() not in {"tps", "apap"}:
-            raise ValueError("refine must be None, 'tps', or 'apap'")
+                warnings.append(f"AANAP refinement unavailable: {exc}")
+        elif str(refine).lower() not in {"tps", "apap", "aanap"}:
+            raise ValueError("refine must be None, 'tps', 'apap', or 'aanap'")
 
     return AlignmentResult(
         transform=np.asarray(transform, dtype=np.float64),
@@ -450,6 +471,23 @@ def _warp_numpy(
         inverse = np.linalg.inv(np.asarray(transform, dtype=np.float64))
     except np.linalg.LinAlgError as exc:
         raise PanoramaError("warp transform is singular") from exc
+
+    try:
+        import cv2
+        M = np.ascontiguousarray(transform, dtype=np.float64)
+        warped = cv2.warpPerspective(
+            src, M, (width, height),
+            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+        )
+        mask_in = np.ones(src.shape[:2], dtype=np.uint8)
+        mask_warped = cv2.warpPerspective(
+            mask_in, M, (width, height),
+            flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+        ) > 0
+        return warped.astype(np.float32), mask_warped
+    except Exception:
+        pass
+
     yy, xx = np.indices((height, width), dtype=np.float64)
     homogeneous = np.stack((xx.ravel(), yy.ravel(), np.ones(xx.size)), axis=1)
     mapped = homogeneous @ inverse.T
@@ -499,6 +537,35 @@ def _sample_source_coordinates(
     src = as_float32_image(image, name="image")
     h, w = src.shape[:2]
     valid = np.asarray(valid, dtype=bool)
+
+    try:
+        import cv2
+        map_x = np.ascontiguousarray(source_x, dtype=np.float32)
+        map_y = np.ascontiguousarray(source_y, dtype=np.float32)
+        if map_x.ndim == 1 and len(map_x) > 32000:
+            n = len(map_x)
+            cols = 2048
+            pad = (cols - (n % cols)) % cols
+            padded_x = np.pad(map_x, (0, pad), mode='constant') if pad > 0 else map_x
+            padded_y = np.pad(map_y, (0, pad), mode='constant') if pad > 0 else map_y
+            rows = len(padded_x) // cols
+            out_2d = cv2.remap(src, padded_x.reshape(rows, cols), padded_y.reshape(rows, cols), interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            out_flat = out_2d.reshape(-1) if src.ndim == 2 else out_2d.reshape(-1, src.shape[2])
+            out = out_flat[:n]
+        elif map_x.ndim == 1:
+            out_2d = cv2.remap(src, map_x[None, :], map_y[None, :], interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            out = out_2d[0]
+        else:
+            out = cv2.remap(src, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+        finite = np.isfinite(map_x) & np.isfinite(map_y)
+        in_bounds = (map_x >= 0.0) & (map_x <= w - 1.0) & (map_y >= 0.0) & (map_y <= h - 1.0)
+        out_valid = valid & finite & in_bounds
+        out[~out_valid] = 0.0
+        return out.astype(np.float32), out_valid
+    except Exception:
+        pass
+
     x = np.asarray(source_x, dtype=np.float64)
     y = np.asarray(source_y, dtype=np.float64)
     finite = np.isfinite(x) & np.isfinite(y)
@@ -575,30 +642,20 @@ def sparse_to_dense_warp(
             raise ValueError(
                 "valid_mask shape must match source_map spatial dimensions"
             )
-    x = maps[..., 0]
-    y = maps[..., 1]
-    finite = np.isfinite(x) & np.isfinite(y)
-    h_src, w_src = src.shape[:2]
-    valid = (
-        valid
-        & finite
-        & (x >= 0.0)
-        & (x <= w_src - 1.0)
-        & (y >= 0.0)
-        & (y <= h_src - 1.0)
-    )
-    safe_x = np.where(valid, x, 0.0).astype(np.float32, copy=False)
-    safe_y = np.where(valid, y, 0.0).astype(np.float32, copy=False)
+    x = np.asarray(maps[..., 0], dtype=np.float32)
+    y = np.asarray(maps[..., 1], dtype=np.float32)
+    h_src, w_src = float(src.shape[0]), float(src.shape[1])
+    in_bounds = (x >= 0.0) & (x <= w_src - 1.0) & (y >= 0.0) & (y <= h_src - 1.0) & np.isfinite(x) & np.isfinite(y)
+    valid = in_bounds if valid_mask is None else (valid & in_bounds)
+    safe_x = np.where(valid, x, np.float32(0.0))
+    safe_y = np.where(valid, y, np.float32(0.0))
     if selected == "numpy":
-        output, output_valid = _sample_source_coordinates(
+        return _sample_source_coordinates(
             src,
-            safe_x.reshape(-1),
-            safe_y.reshape(-1),
-            valid.reshape(-1),
+            safe_x,
+            safe_y,
+            valid,
         )
-        return output.reshape(
-            (height, width) + (() if src.ndim == 2 else (src.shape[2],))
-        ), output_valid.reshape(height, width)
 
     try:
         from .. import aot_api
@@ -729,6 +786,22 @@ def _feather_weight(
     """Distance-to-border feather weight in the source image domain."""
 
     h, w = source_shape[:2]
+    canvas_h, canvas_w = valid.shape
+
+    try:
+        import cv2
+        dx = np.minimum(np.arange(w, dtype=np.float32), float(w - 1) - np.arange(w, dtype=np.float32))
+        dy = np.minimum(np.arange(h, dtype=np.float32), float(h - 1) - np.arange(h, dtype=np.float32))
+        src_dist = np.minimum(dx[None, :], dy[:, None]) + 1.0
+        M = np.ascontiguousarray(transform, dtype=np.float64)
+        warped_dist = cv2.warpPerspective(
+            src_dist, M, (canvas_w, canvas_h),
+            flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0
+        )
+        return np.where(valid, np.clip(warped_dist, 1.0, None), 0.0).astype(np.float32)
+    except Exception:
+        pass
+
     yy, xx = np.indices(valid.shape, dtype=np.float64)
     homogeneous = np.stack((xx.ravel(), yy.ravel(), np.ones(xx.size)), axis=1)
     try:
@@ -892,19 +965,43 @@ def stitch_panorama(
                 ) as exc:
                     alignment.warnings.append(f"inverse TPS unavailable: {exc}")
             elif alignment.apap is not None:
-                try:
-                    inverse_apap = fit_apap(
-                        alignment.target_points[alignment.inlier_mask],
-                        alignment.source_points[alignment.inlier_mask],
-                        global_homography=np.linalg.inv(alignment.transform),
+                inv_h = np.linalg.inv(alignment.transform)
+                if isinstance(alignment.apap, AANAPWarp):
+                    try:
+                        inverse_apap = fit_aanap(
+                            alignment.target_points[alignment.inlier_mask],
+                            alignment.source_points[alignment.inlier_mask],
+                            global_homography=inv_h,
+                        )
+                    except (
+                        ValueError,
+                        TransformEstimationError,
+                        np.linalg.LinAlgError,
+                    ) as exc:
+                        alignment.warnings.append(
+                            f"inverse AANAP unavailable: {exc}"
+                        )
+                else:
+                    try:
+                        inverse_apap = fit_apap(
+                            alignment.target_points[alignment.inlier_mask],
+                            alignment.source_points[alignment.inlier_mask],
+                            global_homography=inv_h,
+                        )
+                    except (
+                        ValueError,
+                        TransformEstimationError,
+                        np.linalg.LinAlgError,
+                    ) as exc:
+                        raise PanoramaError(
+                            f"APAP inverse refinement failed for pair {index - 1}->{index}: {exc}"
+                        ) from exc
+                    local_field = (
+                        index - 1,
+                        lambda points, warp=inverse_apap: warp.map_points(
+                            points, unsupported="identity"
+                        ),
                     )
-                    local_field = (index - 1, inverse_apap.map_points)
-                except (
-                    ValueError,
-                    TransformEstimationError,
-                    np.linalg.LinAlgError,
-                ) as exc:
-                    alignment.warnings.append(f"inverse APAP unavailable: {exc}")
             local_inverse_fields.append(local_field)
     if transforms is not None:
         local_inverse_fields = [None for _ in arrays]

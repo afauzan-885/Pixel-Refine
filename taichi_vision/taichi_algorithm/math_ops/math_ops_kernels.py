@@ -126,24 +126,29 @@ def math_meshgrid_ij_kernel(dst_x: ti.types.ndarray(), dst_y: ti.types.ndarray()
 def math_bitonic_sort_step(src: ti.types.ndarray(), stage: ti.i32, step: ti.i32):
     n = src.shape[0]
     for i in range(n):
-        pair_dis = 1 << step
-        block_size = 1 << (stage + 1)
-        block_idx = i >> (stage + 1)
-        within_block = i % block_size
-        partner_offset = 1 << step
-        partner = i
-        if within_block < partner_offset:
-            partner = i + partner_offset
-        else:
-            partner = i - partner_offset
-        if partner >= 0 and partner < n:
-            ascending = ((i >> stage) & 1) == 0
-            if ascending:
-                if src[i] > src[partner]:
-                    src[i], src[partner] = src[partner], src[i]
-            else:
-                if src[i] < src[partner]:
-                    src[i], src[partner] = src[partner], src[i]
+        partner = i ^ (1 << step)
+        if partner > i and partner < n:
+            ascending = ((i & (1 << (stage + 1))) == 0)
+            need_swap = (src[i] > src[partner]) if ascending else (src[i] < src[partner])
+            if need_swap:
+                src[i], src[partner] = src[partner], src[i]
+
+
+@ti.kernel
+def math_bitonic_sort_kv_step(keys: ti.types.ndarray(), vals: ti.types.ndarray(), stage: ti.i32, step: ti.i32):
+    n = keys.shape[0]
+    for i in range(n):
+        partner = i ^ (1 << step)
+        if partner > i and partner < n:
+            ascending = ((i & (1 << (stage + 1))) == 0)
+            need_swap = (keys[i] > keys[partner]) if ascending else (keys[i] < keys[partner])
+            if need_swap:
+                k_tmp = keys[i]
+                keys[i] = keys[partner]
+                keys[partner] = k_tmp
+                v_tmp = vals[i]
+                vals[i] = vals[partner]
+                vals[partner] = v_tmp
 
 
 # ---- Linear algebra kernels ----
@@ -263,6 +268,13 @@ def register_graphs(module):
     a_step = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "step", ti.i32)
     g.dispatch(math_bitonic_sort_step, a_src1d, a_stage, a_step)
     module.add_graph("math_sort", g.compile())
+
+    # Graph: math_sort_kv
+    g = ti.graph.GraphBuilder()
+    a_keys1d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "keys", ti.f32, ndim=1)
+    a_vals1d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "vals", ti.i32, ndim=1)
+    g.dispatch(math_bitonic_sort_kv_step, a_keys1d, a_vals1d, a_stage, a_step)
+    module.add_graph("math_sort_kv", g.compile())
 
     # Graph: math_mat3_inv
     g = ti.graph.GraphBuilder()

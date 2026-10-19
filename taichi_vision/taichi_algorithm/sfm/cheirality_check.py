@@ -213,20 +213,42 @@ def _decompose_essential_np(E):
 
 
 def _triangulate_dlt_np(pts1, pts2, P1, P2):
-    """DLT triangulation for N point pairs. Returns (N, 3) 3D points."""
+    """Vectorized DLT triangulation for N point pairs. Returns (N, 3) 3D points."""
+    pts1 = np.asarray(pts1, dtype=np.float64)
+    pts2 = np.asarray(pts2, dtype=np.float64)
+    P1 = np.asarray(P1, dtype=np.float64)
+    P2 = np.asarray(P2, dtype=np.float64)
     n = len(pts1)
-    pts3d = np.zeros((n, 3), dtype=np.float64)
-    for i in range(n):
-        A = np.array([
-            pts1[i, 0] * P1[2] - P1[0],
-            pts1[i, 1] * P1[2] - P1[1],
-            pts2[i, 0] * P2[2] - P2[0],
-            pts2[i, 1] * P2[2] - P2[1],
-        ], dtype=np.float64)
-        _, _, Vt = np.linalg.svd(A)
-        X = Vt[-1]
-        if abs(X[3]) > 1e-10:
-            pts3d[i] = X[:3] / X[3]
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    r0 = pts1[:, 0:1] * P1[2:3, :3] - P1[0:1, :3]
+    b0 = -(pts1[:, 0] * P1[2, 3] - P1[0, 3])
+
+    r1 = pts1[:, 1:2] * P1[2:3, :3] - P1[1:2, :3]
+    b1 = -(pts1[:, 1] * P1[2, 3] - P1[1, 3])
+
+    r2 = pts2[:, 0:1] * P2[2:3, :3] - P2[0:1, :3]
+    b2 = -(pts2[:, 0] * P2[2, 3] - P2[0, 3])
+
+    r3 = pts2[:, 1:2] * P2[2:3, :3] - P2[1:2, :3]
+    b3 = -(pts2[:, 1] * P2[2, 3] - P2[1, 3])
+
+    M = np.stack([r0, r1, r2, r3], axis=1) # (N, 4, 3)
+    b = np.column_stack([b0, b1, b2, b3]) # (N, 4)
+
+    MtM = np.einsum('nka,nkb->nab', M, M) # (N, 3, 3)
+    Mtb = np.einsum('nka,nk->na', M, b)   # (N, 3)
+
+    try:
+        pts3d = np.linalg.solve(MtM, Mtb[:, :, None])[:, :, 0]
+    except (np.linalg.LinAlgError, ValueError):
+        pts3d = np.zeros((n, 3), dtype=np.float64)
+        for i in range(n):
+            try:
+                pts3d[i] = np.linalg.solve(MtM[i], Mtb[i])
+            except (np.linalg.LinAlgError, ValueError):
+                pts3d[i] = 0.0
     return pts3d
 
 

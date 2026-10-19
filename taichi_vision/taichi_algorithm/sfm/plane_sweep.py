@@ -534,22 +534,21 @@ def multi_view_plane_sweep(
 # =============================================================================
 
 def _sweep_single_depth_numpy(ref_img, target_img, K_ref, K_target, R_rel, t_rel, depth, patch_radius):
-    """Numpy fallback: compute NCC cost untuk satu depth hypothesis."""
+    """Vectorized numpy plane sweep: dense warping + O(1) patch NCC via uniform box filter."""
+    from scipy.ndimage import uniform_filter
+
     h, w = ref_img.shape
-    cost = np.ones((h, w), dtype=np.float32)
+    fx_r, fy_r = float(K_ref[0, 0]), float(K_ref[1, 1])
+    cx_r, cy_r = float(K_ref[0, 2]), float(K_ref[1, 2])
 
-    fx_r, fy_r = K_ref[0, 0], K_ref[1, 1]
-    cx_r, cy_r = K_ref[0, 2], K_ref[1, 2]
-
-    # Create meshgrid of reference pixels
-    xs, ys = np.meshgrid(np.arange(w), np.arange(h))
+    xs, ys = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
     nx = (xs - cx_r) / fx_r
     ny = (ys - cy_r) / fy_r
 
     # 3D points at depth
-    X = nx * depth
-    Y = ny * depth
-    Z = np.full_like(X, depth)
+    X = nx * float(depth)
+    Y = ny * float(depth)
+    Z = np.full_like(X, float(depth))
 
     # Project to target
     Px = R_rel[0, 0] * X + R_rel[0, 1] * Y + R_rel[0, 2] * Z + t_rel[0]
@@ -557,55 +556,50 @@ def _sweep_single_depth_numpy(ref_img, target_img, K_ref, K_target, R_rel, t_rel
     Pz = R_rel[2, 0] * X + R_rel[2, 1] * Y + R_rel[2, 2] * Z + t_rel[2]
 
     valid = Pz > 1e-6
-    tx = np.where(valid, K_target[0, 0] * Px / Pz + K_target[0, 2], -1)
-    ty = np.where(valid, K_target[1, 1] * Py / Pz + K_target[1, 2], -1)
+    safe_Pz = np.where(valid, Pz, 1.0)
+    tx = K_target[0, 0] * Px / safe_Pz + K_target[0, 2]
+    ty = K_target[1, 1] * Py / safe_Pz + K_target[1, 2]
 
-    # Simple NCC per pixel using small patch
-    r = patch_radius
-    for yi in range(r, h - r):
-        for xi in range(r, w - r):
-            if not valid[yi, xi]:
-                continue
-            stx, sty = tx[yi, xi], ty[yi, xi]
-            stye, stxe = int(sty), int(stx)
-            if stye < r or stye >= h - r or stxe < r or stxe >= w - r:
-                continue
+    r = int(patch_radius)
+    inside = valid & (tx >= r) & (tx <= w - 1 - r) & (ty >= r) & (ty <= h - 1 - r)
 
-            ref_patch = ref_img[yi - r:yi + r + 1, xi - r:xi + r + 1].ravel()
-            # Bilinear sample target patch
-            dy_arr, dx_arr = np.meshgrid(
-                np.arange(-r, r + 1), np.arange(-r, r + 1), indexing='ij'
-            )
-            sample_y = sty + dy_arr
-            sample_x = stx + dx_arr
-            sy0 = np.floor(sample_y).astype(int)
-            sx0 = np.floor(sample_x).astype(int)
-            sy1 = sy0 + 1
-            sx1 = sx0 + 1
-            wy = sample_y - sy0
-            wx = sample_x - sx0
+    # Vectorized bilinear interpolation of target image
+    sy0 = np.floor(ty).astype(np.int64)
+    sx0 = np.floor(tx).astype(np.int64)
+    sy1 = sy0 + 1
+    sx1 = sx0 + 1
+    wy = (ty - sy0).astype(np.float32)
+    wx = (tx - sx0).astype(np.float32)
 
-            # Clamp
-            sy0c = np.clip(sy0, 0, h - 1)
-            sy1c = np.clip(sy1, 0, h - 1)
-            sx0c = np.clip(sx0, 0, w - 1)
-            sx1c = np.clip(sx1, 0, w - 1)
+    sy0c = np.clip(sy0, 0, h - 1)
+    sy1c = np.clip(sy1, 0, h - 1)
+    sx0c = np.clip(sx0, 0, w - 1)
+    sx1c = np.clip(sx1, 0, w - 1)
 
-            target_patch = (
-                (1 - wy) * (1 - wx) * target_img[sy0c, sx0c] +
-                (1 - wy) * wx * target_img[sy0c, sx1c] +
-                wy * (1 - wx) * target_img[sy1c, sx0c] +
-                wy * wx * target_img[sy1c, sx1c]
-            ).ravel()
+    target_warped = (
+        (1.0 - wy) * (1.0 - wx) * target_img[sy0c, sx0c]
+        + (1.0 - wy) * wx * target_img[sy0c, sx1c]
+        + wy * (1.0 - wx) * target_img[sy1c, sx0c]
+        + wy * wx * target_img[sy1c, sx1c]
+    )
 
-            if len(ref_patch) > 1:
-                mr = ref_patch.mean()
-                mt = target_patch.mean()
-                vr = ref_patch.var()
-                vt = target_patch.var()
-                if vr > 1e-10 and vt > 1e-10:
-                    ncc = np.mean((ref_patch - mr) * (target_patch - mt)) / (np.sqrt(vr) * np.sqrt(vt))
-                    cost[yi, xi] = 1.0 - max(0.0, ncc)
+    k = 2 * r + 1
+    mr = uniform_filter(ref_img, size=k)
+    mt = uniform_filter(target_warped, size=k)
+    vr = np.maximum(uniform_filter(ref_img * ref_img, size=k) - mr * mr, 0.0)
+    vt = np.maximum(uniform_filter(target_warped * target_warped, size=k) - mt * mt, 0.0)
+    cov = uniform_filter(ref_img * target_warped, size=k) - mr * mt
+
+    denom = np.sqrt(np.maximum(vr * vt, 1e-12))
+    ncc = np.clip(cov / denom, 0.0, 1.0)
+    cost = np.where(inside, 1.0 - ncc, 1.0).astype(np.float32)
+
+    # Edge borders
+    if r > 0:
+        cost[:r, :] = 1.0
+        cost[-r:, :] = 1.0
+        cost[:, :r] = 1.0
+        cost[:, -r:] = 1.0
 
     return cost
 

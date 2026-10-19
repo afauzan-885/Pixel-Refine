@@ -260,8 +260,8 @@ if TAICHI_AVAILABLE:
         core_w: ti.i32,
     ):
         """Publish a tile core into a resident frame without host traffic."""
-        channels = src.shape[2]
-        for y, x, channel in ti.ndrange(src.shape[0], src.shape[1], channels):
+        for I in ti.grouped(src):
+            y, x, channel = I[0], I[1], I[2]
             if y < core_h and x < core_w:
                 sy = src_y + y
                 sx = src_x + x

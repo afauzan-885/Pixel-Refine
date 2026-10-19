@@ -9041,7 +9041,7 @@ def iterative_feature_gap_report(
             "operation": operation,
             "adapter_registered": adapter is not None,
             "semantic_cpu_partition": bool(
-                adapter is not None and can_partition_block(operation, backend)
+                adapter is not None and can_partition_block(operation, "cpu")
             ),
             "native_evidence_records": native_records,
             "native_partition_evidence": False,
@@ -9115,7 +9115,7 @@ def global_reduction_partition_gap_report(
             "path": operation_path(operation).value,
             "adapter_registered": adapter is not None,
             "semantic_cpu_partition": bool(
-                adapter is not None and can_partition_block(operation, backend)
+                adapter is not None and can_partition_block(operation, "cpu")
             ),
             "automatic_safe": bool(can_auto_block(operation, backend)),
             "partition_safe": bool(can_partition_block(operation, backend)),

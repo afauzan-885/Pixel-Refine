@@ -711,20 +711,29 @@ def _ha_green_half_res_fused_kernel(
 ):
     """Extract green sub-sampling to half size grayscale."""
     inv_range = 1.0 / ti.max(1.0, white - black)
-    for r, c in ti.ndrange(h // 2, w // 2):
+    # Iterate the output extent directly.  The dev3 Vulkan SPIR-V backend
+    # asserts while lowering multidimensional ``ti.ndrange`` loops, even for
+    # a minimal f32 copy kernel; grouped ndarray iteration emits a valid loop
+    # and covers the same (h // 2, w // 2) output domain.
+    for I in ti.grouped(dst):
+        r, c = I[0], I[1]
         r_orig = r * 2
         c_orig = c * 2
         g_val = 0.0
         g_count = 0.0
         for dr, dc in ti.static([(0, 0), (0, 1), (1, 0), (1, 1)]):
             nr, nc = r_orig + dr, c_orig + dc
-            nr_mod = nr % 2
-            nc_mod = nc % 2
-            color_idx = ti.select(nr_mod == 0, ti.select(nc_mod == 0, c00, c01), ti.select(nc_mod == 0, c10, c11))
+            # Each output owns an even-origin 2x2 CFA cell, so dr/dc are
+            # already the exact CFA phase. Avoid dynamic i32 modulo/select;
+            # dev3 Vulkan SPIR-V mis-lowers select expressions involving an
+            # integer predicate when the selected values feed f32 math.
+            color_idx = ti.select(dr == 0, ti.select(dc == 0, c00, c01), ti.select(dc == 0, c10, c11))
             is_green = (color_idx == 1) or (color_idx == 3)
             if is_green:
                 raw_val = ti.math.clamp((bayer[nr, nc] - black) * inv_range, 0.0, 1.0)
-                gain = wb_g1 if color_idx == 1 else wb_g2
+                gain = wb_g2
+                if color_idx == 1:
+                    gain = wb_g1
                 g_val += raw_val * gain
                 g_count += 1.0
         if g_count > 0.0:
@@ -753,7 +762,8 @@ def _ha_rgb_half_res_fused_kernel(
 ):
     """Extract RGB direct sub-sampling to half size RGB (with WB + cmatrix)."""
     inv_range = 1.0 / ti.max(1.0, white - black)
-    for r, c in ti.ndrange(h // 2, w // 2):
+    for I in ti.grouped(dst):
+        r, c = I[0], I[1]
         r_orig = r * 2
         c_orig = c * 2
         val_00 = ti.math.clamp((bayer[r_orig, c_orig] - black) * inv_range, 0.0, 1.0)

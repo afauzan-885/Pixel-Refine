@@ -351,6 +351,149 @@ def _quantize_plane_gpu_chained(plane, quality, chroma=False):
     return dc_diff, symbols, categories, amplitudes, token_count, dc_histogram, ac_histogram
 
 
+def _scan_dc_differences(dc_values, rows: int, cols: int, subsampling: str, component: str):
+    """Compute DC predictors in scan order with vectorized host arithmetic."""
+    dc_grid = np.asarray(dc_values, dtype=np.float32).reshape(rows, cols)
+    if subsampling == "420" and component == "y":
+        scan_dc = dc_grid.reshape(rows // 2, 2, cols // 2, 2).transpose(0, 2, 1, 3).reshape(-1)
+        scan_diff = np.empty_like(scan_dc)
+        scan_diff[0] = scan_dc[0]
+        scan_diff[1:] = scan_dc[1:] - scan_dc[:-1]
+        return np.ascontiguousarray(
+            scan_diff.reshape(rows // 2, cols // 2, 2, 2).transpose(0, 2, 1, 3).reshape(-1),
+            dtype=np.float32,
+        )
+    diff = np.empty(rows * cols, dtype=np.float32)
+    diff[0] = dc_grid.flat[0]
+    diff[1:] = dc_grid.flat[1:] - dc_grid.flat[:-1]
+    return diff
+
+
+def _prepare_fused_plane_resident(
+    plane,
+    quality,
+    *,
+    chroma=False,
+    subsampling="444",
+    component="y",
+    collect_histogram=True,
+):
+    """Prepare JPEG tokens on the configured AOT backend and retain them there.
+
+    Only raw DC values and (when requested) the small AC histogram cross back
+    to the host. The large per-block symbol arrays remain backend-resident
+    until Huffman codes are available and the packed scan is produced.
+    """
+    h, w = plane.shape
+    hb, wb = h // 8, w // 8
+    base_table = JPEG_CHROMA_TABLE if chroma else JPEG_QUALITY_TABLE
+    scale = 5000 // quality if quality < 50 else 200 - 2 * quality
+    quant_table = np.asarray(
+        [max(1, min(255, (value * scale + 50) // 100)) for value in base_table],
+        dtype=np.float32,
+    )
+    state = _dispatch(
+        "compression_image",
+        "compression_jpeg_fused_transform_tokens_histogram_2d",
+        inputs={
+            "src": np.ascontiguousarray(plane, dtype=np.float32),
+            "quant_table": quant_table,
+            "basis": _DCT_BASIS,
+            "order": _JPEG_ZIGZAG,
+        },
+        outputs={
+            "dc_values": ((hb * wb,), np.float32),
+            "symbols": ((hb, wb * 64), np.int32),
+            "categories": ((hb, wb * 64), np.int32),
+            "amplitudes": ((hb, wb * 64), np.int32),
+            "token_count": ((hb, wb), np.int32),
+            "dc_histogram": np.zeros(16, dtype=np.int32),
+            "ac_histogram": np.zeros(256, dtype=np.int32),
+        },
+        scalars={"h_blocks": hb, "w_blocks": wb},
+        plain_ndarray=False,
+        return_gpu=True,
+    )
+    try:
+        dc_values = np.asarray(state["dc_values"].to_numpy(), dtype=np.float32).reshape(hb, wb)
+        dc_diff = _scan_dc_differences(dc_values, hb, wb, subsampling, component)
+        state["dc_values"].destroy()
+        state["dc_values"] = None
+        state["dc_histogram"].destroy()
+        state["dc_histogram"] = None
+        ac_histogram = (
+            np.asarray(state["ac_histogram"].to_numpy(), dtype=np.int64)
+            if collect_histogram
+            else None
+        )
+        state["ac_histogram"].destroy()
+        state["ac_histogram"] = None
+        state["dc_diff_host"] = dc_diff
+        state["ac_histogram_host"] = ac_histogram
+        state["h_blocks"] = hb
+        state["w_blocks"] = wb
+        return state
+    except Exception:
+        _destroy_fused_plane_state(state)
+        raise
+
+
+def _destroy_fused_plane_state(state) -> None:
+    for name in ("dc_values", "symbols", "categories", "amplitudes", "token_count", "dc_histogram", "ac_histogram"):
+        value = state.get(name)
+        if value is not None and hasattr(value, "destroy"):
+            value.destroy()
+
+
+def _fused_plane_histograms(state):
+    dc_diff = np.asarray(state["dc_diff_host"], dtype=np.float32)
+    magnitude = np.abs(dc_diff.astype(np.int32, copy=False))
+    categories = np.zeros(magnitude.shape, dtype=np.int32)
+    for category in range(1, 16):
+        categories[(magnitude >= (1 << (category - 1))) & (magnitude < (1 << category))] = category
+    dc_histogram = np.bincount(categories, minlength=16).astype(np.int64, copy=False)
+    return dc_histogram, state["ac_histogram_host"]
+
+
+def _pack_fused_plane_resident(state, dc_table, ac_table):
+    hb, wb = state["h_blocks"], state["w_blocks"]
+    dc_codes, dc_lengths = _code_arrays(dc_table, 16)
+    ac_codes, ac_lengths = _code_arrays(ac_table, 256)
+    max_output_bytes = 256
+    packed = _dispatch(
+        "compression_image",
+        "compression_jpeg_pack_bytes_2d",
+        inputs={
+            "dc_diff": state["dc_diff_host"],
+            "ac_symbols": state["symbols"],
+            "ac_categories": state["categories"],
+            "ac_amplitudes": state["amplitudes"],
+            "ac_counts": state["token_count"],
+            "dc_codes": dc_codes,
+            "dc_lengths": dc_lengths,
+            "ac_codes": ac_codes,
+            "ac_lengths": ac_lengths,
+        },
+        outputs={
+            "output": ((hb, wb * max_output_bytes), np.int32),
+            "output_count": ((hb, wb), np.int32),
+        },
+        scalars={"h_blocks": hb, "w_blocks": wb, "max_output_bytes": max_output_bytes},
+        plain_ndarray=False,
+        return_gpu=True,
+    )
+    try:
+        counts = np.asarray(packed["output_count"].to_numpy(), dtype=np.int32).reshape(-1)
+        if np.any((counts + 7) // 8 > max_output_bytes):
+            raise RuntimeError("JPEG block byte buffer overflow; increase the bounded block capacity")
+        raw_bytes = np.asarray(packed["output"].to_numpy(), dtype=np.int32).reshape(hb * wb, max_output_bytes)
+        block_bytes = raw_bytes.astype(np.uint8, copy=True)
+        return block_bytes, counts
+    finally:
+        packed["output"].destroy()
+        packed["output_count"].destroy()
+
+
 def _materialize_ordered(value):
     if hasattr(value, "to_numpy"):
         try:
@@ -601,8 +744,26 @@ def _prepare_scan_tokens(ordered, prepared, subsampling, component, restart_inte
     if not restart_interval and not (subsampling == "420" and component == "y"):
         return prepared
     dc_diff, symbols, categories, amplitudes, token_count = prepared
-    dc = np.asarray(dc_diff, dtype=np.float32).copy()
     rows, cols = ordered.shape[0], ordered.shape[1] // 64
+    if not restart_interval and subsampling == "420" and component == "y":
+        # JPEG 4:2:0 scans visit four luma blocks per MCU in this order:
+        # (row0,col0), (row0,col1), (row1,col0), (row1,col1). Vectorize the
+        # gather/difference/scatter instead of allocating a 98k-entry Python
+        # tuple and iterating over every block on the host.
+        dc_grid = np.asarray(ordered).reshape(rows, cols, 64)[:, :, 0]
+        scan_dc = dc_grid.reshape(rows // 2, 2, cols // 2, 2).transpose(0, 2, 1, 3).reshape(-1)
+        scan_diff = np.empty_like(scan_dc)
+        scan_diff[0] = scan_dc[0]
+        scan_diff[1:] = scan_dc[1:] - scan_dc[:-1]
+        row_major_diff = scan_diff.reshape(rows // 2, cols // 2, 2, 2).transpose(0, 2, 1, 3).reshape(-1)
+        return (
+            np.ascontiguousarray(row_major_diff, dtype=np.float32),
+            symbols,
+            categories,
+            amplitudes,
+            token_count,
+        )
+    dc = np.asarray(dc_diff, dtype=np.float32).copy()
     previous = 0.0
     previous_mcu = -1
     for linear, mcu_index in _component_scan_order(rows, cols, subsampling, component):

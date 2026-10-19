@@ -41,8 +41,10 @@ class BitWriter:
         """Append an MSB-first byte slice without a Python call per bit.
 
         JPEG block payloads are usually not byte-aligned at block boundaries.
-        This method keeps the carry bits in the writer while copying aligned
-        runs directly into the output buffer.
+        Merge the bounded payload as one Python integer so a carried block does
+        not execute one Python loop per byte. JPEG blocks are at most a few
+        hundred bytes, keeping the temporary integer small and its work linear
+        in the block size.
         """
         if self._lsb:
             raise ValueError("write_bytes_msb requires an MSB-first writer")
@@ -50,19 +52,23 @@ class BitWriter:
         count = len(raw) * 8 if bit_count is None else int(bit_count)
         if count < 0 or count > len(raw) * 8:
             raise ValueError("byte slice bit count is out of range")
-        full_bytes, remainder = divmod(count, 8)
-        if self._count == 0:
-            self._data.extend(raw[:full_bytes])
-        else:
-            for index in range(full_bytes):
-                combined = (self._accumulator << 8) | int(raw[index])
-                total = self._count + 8
-                shift = total - 8
-                self._data.append((combined >> shift) & 0xFF)
-                self._accumulator = combined & ((1 << shift) - 1 if shift else 0)
-                self._count = shift
-        if remainder:
-            self.write(int(raw[full_bytes]) >> (8 - remainder), remainder)
+        if count == 0:
+            return
+
+        source_bytes = (count + 7) // 8
+        source_value = int.from_bytes(raw[:source_bytes], "big")
+        source_padding = source_bytes * 8 - count
+        if source_padding:
+            source_value >>= source_padding
+
+        total_bits = self._count + count
+        remainder = total_bits & 7
+        combined = (self._accumulator << count) | source_value
+        full_bytes = total_bits >> 3
+        if full_bytes:
+            self._data.extend((combined >> remainder).to_bytes(full_bytes, "big"))
+        self._accumulator = combined & ((1 << remainder) - 1) if remainder else 0
+        self._count = remainder
 
     def align(self, fill: int = 0) -> None:
         if self._count:

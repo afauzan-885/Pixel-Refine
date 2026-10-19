@@ -64,6 +64,19 @@ def compile_estimate_noise(arch, save_path: str):
     )
     module.add_graph("estimate_noise", g.compile())
 
+    gray_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=2)
+    gray_graph = ti.graph.GraphBuilder()
+    gray_graph.dispatch(
+        estimate_noise_mod.estimate_noise_gray_kernel,
+        gray_arg,
+        block_mad_out_arg,
+        h_arg,
+        w_arg,
+        num_blocks_x_arg,
+        num_blocks_y_arg,
+    )
+    module.add_graph("estimate_noise_gray", gray_graph.compile())
+
     module.archive(str(save_path))
     print(f"  [OK] Saved TCM: {save_path}")
     ti.reset()

@@ -308,12 +308,15 @@ def _graph_cut_maps_aot(
 
     left_gray = np.ascontiguousarray(_gray(lhs), dtype=np.float32)
     right_gray = np.ascontiguousarray(_gray(rhs), dtype=np.float32)
-    maps = graph_cut_unary_aot(
-        left_gray,
-        right_gray,
-        color_weight=float(color_weight),
-        gradient_weight=float(gradient_weight),
-    )
+    try:
+        maps = graph_cut_unary_aot(
+            left_gray,
+            right_gray,
+            color_weight=float(color_weight),
+            gradient_weight=float(gradient_weight),
+        )
+    except RuntimeError as exc:
+        raise NotImplementedError(str(exc)) from exc
     return (
         np.ascontiguousarray(maps["unary_left"], dtype=np.float64),
         np.ascontiguousarray(maps["unary_right"], dtype=np.float64),
@@ -519,6 +522,36 @@ def seam_energy(
             lhs = np.ascontiguousarray(lhs[..., 0], dtype=np.float32)
             rhs = np.ascontiguousarray(rhs[..., 0], dtype=np.float32)
         return _seam_energy_taichi(lhs, rhs, overlap, float(color_weight), float(gradient_weight)), overlap
+
+    # Active bounding box optimization: skip non-overlapping regions for high-res images
+    if overlap_mask is not None and np.any(overlap):
+        rows_active = np.flatnonzero(np.any(overlap, axis=1))
+        cols_active = np.flatnonzero(np.any(overlap, axis=0))
+        r0 = max(0, int(rows_active[0]) - 1)
+        r1 = min(lhs.shape[0], int(rows_active[-1]) + 2)
+        c0 = max(0, int(cols_active[0]) - 1)
+        c1 = min(lhs.shape[1], int(cols_active[-1]) + 2)
+
+        if (r1 - r0 < lhs.shape[0]) or (c1 - c0 < lhs.shape[1]):
+            energy = np.full(lhs.shape[:2], np.float32(1.0e6), dtype=np.float32)
+            sub_lhs = lhs[r0:r1, c0:c1]
+            sub_rhs = rhs[r0:r1, c0:c1]
+            sub_ov = overlap[r0:r1, c0:c1]
+
+            if sub_lhs.ndim == 2:
+                sub_color = np.abs(sub_lhs - sub_rhs)
+            else:
+                sub_color = np.mean(np.abs(sub_lhs - sub_rhs), axis=2)
+            sub_lg, sub_rg = _gray(sub_lhs), _gray(sub_rhs)
+            gx_l = np.diff(sub_lg, axis=1, prepend=sub_lg[:, :1])
+            gy_l = np.diff(sub_lg, axis=0, prepend=sub_lg[:1, :])
+            gx_r = np.diff(sub_rg, axis=1, prepend=sub_rg[:, :1])
+            gy_r = np.diff(sub_rg, axis=0, prepend=sub_rg[:1, :])
+            sub_grad = np.abs(gx_l - gx_r) + np.abs(gy_l - gy_r)
+            sub_energy = (float(color_weight) * sub_color + float(gradient_weight) * sub_grad).astype(np.float32)
+            energy[r0:r1, c0:c1] = np.where(sub_ov, sub_energy, np.float32(1.0e6))
+            return energy, overlap
+
     if lhs.ndim == 2:
         color = np.abs(lhs - rhs)
     else:
@@ -540,6 +573,20 @@ def _dp_vertical(energy: np.ndarray, overlap: np.ndarray) -> np.ndarray:
     h, w = energy.shape
     if not np.any(overlap):
         return np.zeros((h, w), dtype=bool)
+
+    # Restrict computation to active overlap columns for fast execution on high-res images
+    cols_with_overlap = np.flatnonzero(np.any(overlap, axis=0))
+    if len(cols_with_overlap) == 0:
+        return np.zeros((h, w), dtype=bool)
+    c0 = max(0, int(cols_with_overlap[0]))
+    c1 = min(w, int(cols_with_overlap[-1]) + 1)
+    if (c0 > 0 or c1 < w) and (c1 - c0 < w):
+        sub_seam = _dp_vertical(energy[:, c0:c1], overlap[:, c0:c1])
+        full_seam = np.zeros((h, w), dtype=bool)
+        full_seam[:, :c0] = True
+        full_seam[:, c0:c1] = sub_seam
+        return full_seam
+
     # Quantise the local cost before the sequential recurrence so the CPU-JIT
     # and NumPy paths share deterministic tie decisions despite f32 reduction
     # order differences below 1e-7.
@@ -548,20 +595,37 @@ def _dp_vertical(energy: np.ndarray, overlap: np.ndarray) -> np.ndarray:
     predecessor = np.zeros((h, w), dtype=np.int8)
     first = overlap[0]
     cost[0, first] = energy[0, first]
+
+    # Preallocate recurrence buffers to eliminate per-row heap allocations
+    c_left = np.empty(w, dtype=np.float64)
+    c_right = np.empty(w, dtype=np.float64)
+    best_cost = np.empty(w, dtype=np.float64)
+    pred = np.empty(w, dtype=np.int8)
+    left_better = np.empty(w, dtype=bool)
+    right_better = np.empty(w, dtype=bool)
+
     for row in range(1, h):
-        for col in range(w):
-            if not overlap[row, col]:
-                continue
-            candidates = [col]
-            if col > 0:
-                candidates.append(col - 1)
-            if col + 1 < w:
-                candidates.append(col + 1)
-            # ``min`` preserves insertion order on ties: straight, left,
-            # right.  This makes the seam bit-for-bit deterministic.
-            previous = min(candidates, key=lambda idx: (cost[row - 1, idx], idx != col, idx))
-            cost[row, col] = float(energy[row, col]) + cost[row - 1, previous]
-            predecessor[row, col] = np.int8(previous - col)
+        prev = cost[row - 1]
+        c_left[0] = 1.0e30
+        c_left[1:] = prev[:-1]
+        c_right[-1] = 1.0e30
+        c_right[:-1] = prev[1:]
+
+        np.copyto(best_cost, prev)
+        pred.fill(0)
+
+        # Ties preserve preference order: straight > left > right
+        np.less(c_left, best_cost, out=left_better)
+        best_cost[left_better] = c_left[left_better]
+        pred[left_better] = -1
+
+        np.less(c_right, best_cost, out=right_better)
+        best_cost[right_better] = c_right[right_better]
+        pred[right_better] = 1
+
+        mask = overlap[row]
+        cost[row, mask] = energy[row, mask] + best_cost[mask]
+        predecessor[row, mask] = pred[mask]
     last_candidates = np.flatnonzero(np.isfinite(cost[-1]) & (cost[-1] < 1.0e30))
     if len(last_candidates) == 0:
         return np.zeros((h, w), dtype=bool)
@@ -621,7 +685,7 @@ def dynamic_programming_seam(
     labels = _dp_vertical(energy, overlap) if direction_name == "vertical" else _dp_horizontal(energy, overlap)
     if overlap_mask is not None:
         supplied = np.asarray(overlap_mask, dtype=bool)
-        labels = np.where(supplied, labels, False)
+        labels &= supplied
     return np.ascontiguousarray(labels, dtype=bool)
 
 

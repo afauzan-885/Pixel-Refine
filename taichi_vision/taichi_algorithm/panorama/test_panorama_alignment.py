@@ -3,16 +3,146 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from ..alignment.apap import fit_apap
-from ..alignment.quality import estimate_affine, project_points, ransac_transform
+from ..alignment.quality import (
+    TransformEstimationError,
+    estimate_affine,
+    project_points,
+    ransac_transform,
+)
 from ..alignment.tps import fit_tps_checked
+from . import stitch
 from .stitch import align_pair, sparse_to_dense_warp, stitch_panorama
 
 
 class PanoramaAlignmentTests(unittest.TestCase):
+    def test_requested_apap_rejects_phase_correlation_only_matches(self) -> None:
+        image = np.zeros((32, 40), dtype=np.float32)
+        image[8:24, 10:30] = 1.0
+
+        with self.assertRaisesRegex(
+            stitch.PanoramaError, "matched local feature pairs"
+        ):
+            align_pair(
+                image,
+                image,
+                feature="none",
+                refine="apap",
+                backend="numpy",
+            )
+
+    def test_requested_apap_rejects_too_few_inlier_pairs(self) -> None:
+        reference = np.zeros((32, 40), dtype=np.float32)
+        points = np.array([[2.0, 2.0], [34.0, 2.0], [18.0, 28.0]])
+
+        def matcher(_reference: np.ndarray, _moving: np.ndarray):
+            return points + np.array([3.0, -2.0]), points
+
+        with self.assertRaisesRegex(stitch.PanoramaError, "at least four"):
+            align_pair(
+                reference,
+                reference,
+                matcher=matcher,
+                model="affine",
+                refine="apap",
+                backend="numpy",
+            )
+
+    def test_requested_apap_does_not_hide_native_fit_failure(self) -> None:
+        reference = np.zeros((40, 48), dtype=np.float32)
+        points = np.array(
+            [[2.0, 2.0], [44.0, 2.0], [44.0, 36.0], [2.0, 36.0], [20.0, 15.0]],
+            dtype=np.float64,
+        )
+
+        def matcher(_reference: np.ndarray, _moving: np.ndarray):
+            return points + np.array([3.0, -2.0]), points
+
+        with patch.object(
+            stitch,
+            "fit_apap",
+            side_effect=RuntimeError("target-qualified APAP TCM missing"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "target-qualified APAP TCM missing"):
+                align_pair(
+                    reference,
+                    reference,
+                    matcher=matcher,
+                    model="affine",
+                    refine="apap",
+                    backend="numpy",
+                )
+
+    def test_requested_apap_does_not_hide_inverse_fit_failure(self) -> None:
+        image = np.zeros((40, 48), dtype=np.float32)
+        points = np.array(
+            [[2.0, 2.0], [44.0, 2.0], [44.0, 36.0], [2.0, 36.0], [20.0, 15.0]],
+            dtype=np.float64,
+        )
+
+        def matcher(_reference: np.ndarray, _moving: np.ndarray):
+            return points + np.array([3.0, -2.0]), points
+
+        with patch.object(
+            stitch,
+            "fit_apap",
+            side_effect=[object(), TransformEstimationError("sparse inverse support")],
+        ):
+            with self.assertRaisesRegex(
+                stitch.PanoramaError, "APAP inverse refinement failed"
+            ):
+                stitch_panorama(
+                    [image, image],
+                    matcher=matcher,
+                    model="affine",
+                    refine="apap",
+                    blend="average",
+                    backend="numpy",
+                )
+
+    def test_panorama_inverse_apap_leaves_unsupported_points_at_identity(self) -> None:
+        from ..alignment.apap import fit_apap_reference
+
+        points = np.array(
+            [[5.0, 5.0], [45.0, 5.0], [45.0, 35.0], [5.0, 35.0]],
+            dtype=np.float64,
+        )
+        image = np.zeros((40, 50), dtype=np.float32)
+        image[10:30, 12:38] = 1.0
+
+        def matcher(_reference: np.ndarray, _moving: np.ndarray):
+            return points.copy(), points.copy()
+
+        def fit_local(reference_points, moving_points, **kwargs):
+            return fit_apap_reference(
+                reference_points,
+                moving_points,
+                grid_shape=(3, 3),
+                sigma=1.0,
+                **{
+                    key: value
+                    for key, value in kwargs.items()
+                    if key in {"global_homography"}
+                },
+            )
+
+        with patch.object(stitch, "fit_apap", side_effect=fit_local):
+            panorama = stitch_panorama(
+                [image, image.copy()],
+                matcher=matcher,
+                model="affine",
+                refine="apap",
+                blend="average",
+                backend="numpy",
+            )
+
+        self.assertGreaterEqual(panorama.shape[0], image.shape[0])
+        self.assertGreaterEqual(panorama.shape[1], image.shape[1])
+
     def test_affine_ransac_rejects_outlier(self) -> None:
         source = np.array(
             [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0], [25.0, 75.0], [80.0, 20.0]],

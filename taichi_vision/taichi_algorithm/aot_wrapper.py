@@ -3222,6 +3222,52 @@ def solvePnP(objectPoints, imagePoints, cameraMatrix, distCoeffs=None, flags=0):
     return True, np.zeros((3, 1), dtype=np.float32), np.zeros((3, 1), dtype=np.float32)
 
 
+def warp_apap(
+    image,
+    src_points,
+    dst_points,
+    dsize=None,
+    ref_image=None,
+    enable_adaptive_refine=True,
+    err_threshold=0.04,
+    max_refine_iters=5,
+    mesh_shape=(33, 33),
+    return_gpu=False,
+):
+    """As-Projective-As-Possible (APAP) image warping with GPU Catmull-Rom and Adaptive Refine.
+
+    Args:
+        image: Source image to warp (2D grayscale or 3D RGB).
+        src_points: Keypoint coordinates on moving image (N, 2).
+        dst_points: Corresponding keypoint coordinates on reference image (N, 2).
+        dsize: Output image dimensions (width, height). Defaults to input image shape.
+        ref_image: Optional reference image for parallax diamond-stencil search and refinement.
+        enable_adaptive_refine: Enables adaptive early-exit diamond search on hard/occlusion regions.
+        err_threshold: Pixel difference early-exit threshold on easy regions.
+        max_refine_iters: Maximum diamond refinement iterations (1 to 5).
+        mesh_shape: Sparse grid resolution for mesh warping. Defaults to (33, 33).
+        return_gpu: Return the native GPU output buffer without a host readback.
+
+    Returns:
+        A GPU output buffer when ``return_gpu`` is true; otherwise a tuple of
+        ``(warped_image, valid_mask)`` NumPy arrays.
+    """
+    from .alignment.mesh_warp import warp_apap as _impl
+
+    return _impl(
+        image=image,
+        src_points=src_points,
+        dst_points=dst_points,
+        dsize=dsize,
+        ref_image=ref_image,
+        enable_adaptive_refine=enable_adaptive_refine,
+        err_threshold=err_threshold,
+        max_refine_iters=max_refine_iters,
+        mesh_shape=mesh_shape,
+        return_gpu=return_gpu,
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # MATH OPS (math_*) — Element-wise, Reduction, Linear Algebra
 # ══════════════════════════════════════════════════════════════════════════
@@ -3820,6 +3866,7 @@ class _TaichiAlgorithm:
 
     # ── SfM ──
     findHomography = staticmethod(findHomography)
+    warp_apap = staticmethod(warp_apap)
     solvePnP = staticmethod(solvePnP)
 
     # ── FFT ──

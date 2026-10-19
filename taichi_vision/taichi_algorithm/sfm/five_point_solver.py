@@ -129,12 +129,14 @@ def _solve_5pt_numpy(pts1_norm, pts2_norm):
         pts2_h = np.ascontiguousarray(pts2_norm, dtype=np.float64)
         E_cv, mask = cv2.findEssentialMat(pts1_h, pts2_h, focal=1.0, pp=(0.0, 0.0),
                                            method=cv2.RANSAC, prob=0.999, threshold=0.001)
-        if E_cv is not None:
+        if (
+            E_cv is not None
+            and E_cv.ndim == 2
+            and E_cv.shape[1] == 3
+            and E_cv.shape[0] % 3 == 0
+        ):
             E_cv = E_cv.astype(np.float64)
-            if E_cv.shape == (3, 3):
-                return [E_cv]
-            elif E_cv.shape == (6, 3):
-                return [E_cv[i*3:(i+1)*3] for i in range(2)]
+            return [E_cv[i:i + 3] for i in range(0, E_cv.shape[0], 3)]
     except Exception:
         pass
 
@@ -151,8 +153,8 @@ def solve_five_point(pts1, pts2, K1=None, K2=None):
     Solve essential matrix from 5 point correspondences.
 
     Args:
-        pts1: (N, 2) pixel coordinates in image 1 (at least 5 points)
-        pts2: (N, 2) pixel coordinates in image 2
+        pts1: (N, 2) points in image 1; use camera-normalized coordinates when K1 is omitted
+        pts2: (N, 2) points in image 2; use camera-normalized coordinates when K2 is omitted
         K1: (3, 3) camera 1 intrinsic matrix (for normalization)
         K2: (3, 3) camera 2 intrinsic matrix (for normalization)
 
@@ -178,19 +180,15 @@ def solve_five_point(pts1, pts2, K1=None, K2=None):
         pts2_h = np.hstack([pts2, np.ones((len(pts2), 1))])
         pts2 = (K2_inv @ pts2_h.T).T[:, :2]
 
-    # Hartley normalization
-    T1, pts1_norm = common.hartley_normalize(pts1[:5])
-    T2, pts2_norm = common.hartley_normalize(pts2[:5])
+    # The five-point essential constraint assumes calibrated camera coordinates.
+    # Hartley normalization is useful for a fundamental-matrix solve, but its
+    # independent translations/scales do not preserve the essential constraint.
+    E_candidates_norm = _solve_5pt_numpy(pts1[:5], pts2[:5])
 
-    # Solve for normalized essential matrix
-    E_candidates_norm = _solve_5pt_numpy(pts1_norm, pts2_norm)
-
-    # Denormalize: E = T2^T @ E_norm @ T1
+    # K1/K2 normalization above already places points in camera coordinates.
     E_candidates = []
     for E_norm in E_candidates_norm:
-        E = T2.T @ E_norm @ T1
-        # Enforce essential constraint
-        E = common.enforce_essential_np(E)
+        E = common.enforce_essential_np(E_norm)
         E_candidates.append(E)
 
     return E_candidates

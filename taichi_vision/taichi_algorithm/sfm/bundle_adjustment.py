@@ -538,107 +538,140 @@ def _bundle_adjust_lm_numpy(
     max_iterations, lambda_init, lambda_factor, convergence_thresh,
     fx, fy, cx, cy
 ):
-    """Pure numpy fallback for bundle adjustment."""
+    """Vectorized high-performance numpy fallback for bundle adjustment."""
     n_cam = cameras.shape[0]
     n_pts = points_3d.shape[0]
     n_obs = observations.shape[0]
+    if n_obs == 0 or n_pts == 0 or n_cam == 0:
+        return cameras, points_3d, 0.0, 0
 
     lam = lambda_init
     prev_cost = 1e20
     n_iter = 0
 
+    # Ensure float64 copies for numerical stability during optimization
+    cams = np.array(cameras, dtype=np.float64, copy=True)
+    pts = np.array(points_3d, dtype=np.float64, copy=True)
+    obs_2d = np.array(observed_2d, dtype=np.float64)
+
+    ci = observations[:, 0]
+    pi = observations[:, 1]
+
+    fxs = cams[:, 7] if cams.shape[1] > 7 else np.full(n_cam, fx or 1.0, dtype=np.float64)
+    fys = cams[:, 8] if cams.shape[1] > 8 else np.full(n_cam, fy or fx or 1.0, dtype=np.float64)
+    cxs = cams[:, 9] if cams.shape[1] > 9 else np.full(n_cam, cx or 0.0, dtype=np.float64)
+    cys = cams[:, 10] if cams.shape[1] > 10 else np.full(n_cam, cy or 0.0, dtype=np.float64)
+
     for iteration in range(max_iterations):
         n_iter = iteration + 1
 
-        # Compute errors
-        total_cost = 0.0
-        errors = np.zeros(n_obs * 2, dtype=np.float32)
-        for o in range(n_obs):
-            ci = observations[o, 0]
-            pi = observations[o, 1]
-            ax, ay, az, angle, tx, ty, tz = cameras[ci, :7]
-            _fx = cameras[ci, 7] if cameras.shape[1] > 7 else (fx or 1.0)
-            _fy = cameras[ci, 8] if cameras.shape[1] > 8 else (fy or _fx)
-            _cx = cameras[ci, 9] if cameras.shape[1] > 9 else (cx or 0.0)
-            _cy = cameras[ci, 10] if cameras.shape[1] > 10 else (cy or 0.0)
-
+        # 1. Compute camera rotation matrices
+        Rs = np.zeros((n_cam, 3, 3), dtype=np.float64)
+        ts = cams[:, 4:7]
+        for c in range(n_cam):
+            ax, ay, az, angle = cams[c, :4]
             norm = np.sqrt(ax**2 + ay**2 + az**2 + 1e-10)
-            k = np.array([ax, ay, az]) / norm
-            K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
-            R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
+            k = np.array([ax, ay, az], dtype=np.float64) / norm
+            K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]], dtype=np.float64)
+            Rs[c] = np.eye(3, dtype=np.float64) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
 
-            X = points_3d[pi]
-            Xc = R @ X + np.array([tx, ty, tz])
+        # 2. Vectorized projection and residuals
+        R_obs = Rs[ci]
+        t_obs = ts[ci]
+        X_obs = pts[pi]
 
-            if abs(Xc[2]) < 1e-10:
-                continue
+        Xc = np.einsum('nij,nj->ni', R_obs, X_obs) + t_obs
+        Zc = Xc[:, 2]
+        valid = np.abs(Zc) > 1e-10
+        safe_Zc = np.where(valid, Zc, 1.0)
+        inv_Zc = 1.0 / safe_Zc
+        inv_Zc2 = inv_Zc * inv_Zc
 
-            u_pred = _fx * Xc[0] / Xc[2] + _cx
-            v_pred = _fy * Xc[1] / Xc[2] + _cy
-            eu = observed_2d[o, 0] - u_pred
-            ev = observed_2d[o, 1] - v_pred
-            errors[o * 2] = eu
-            errors[o * 2 + 1] = ev
-            total_cost += eu**2 + ev**2
+        f_u = fxs[ci]
+        f_v = fys[ci]
 
+        u_pred = f_u * Xc[:, 0] * inv_Zc + cxs[ci]
+        v_pred = f_v * Xc[:, 1] * inv_Zc + cys[ci]
+
+        eu = np.where(valid, obs_2d[:, 0] - u_pred, 0.0)
+        ev = np.where(valid, obs_2d[:, 1] - v_pred, 0.0)
+        total_cost = float(np.sum(eu * eu + ev * ev))
         rmse = np.sqrt(total_cost / max(n_obs, 1))
 
         if iteration > 0 and abs(prev_cost - total_cost) < convergence_thresh:
             break
         prev_cost = total_cost
 
-        # Simplified: use numerical gradient for update direction
-        # (Full analytical Jacobian is in the Taichi kernel above)
-        eps = 1e-4
-        grad_cam = np.zeros_like(cameras)
-        grad_pts = np.zeros_like(points_3d)
+        # 3. Analytical gradients for 3D points
+        # dCost/dXc:
+        # du/dXc = [f_u/Z, 0, -f_u*X/Z^2]
+        # dv/dXc = [0, f_v/Z, -f_v*Y/Z^2]
+        # dCost/dXc = -2*(eu*du/dXc + ev*dv/dXc)
+        grad_Xc = np.zeros((n_obs, 3), dtype=np.float64)
+        grad_Xc[:, 0] = -2.0 * eu * (f_u * inv_Zc)
+        grad_Xc[:, 1] = -2.0 * ev * (f_v * inv_Zc)
+        grad_Xc[:, 2] = 2.0 * (eu * (f_u * Xc[:, 0] * inv_Zc2) + ev * (f_v * Xc[:, 1] * inv_Zc2))
 
-        # Numerical gradient for cameras (rotation + translation only)
+        # dCost/dX = R_c^T * dCost/dXc
+        grad_pts_obs = np.einsum('nji,nj->ni', R_obs, grad_Xc)
+        grad_pts = np.zeros_like(pts)
+        np.add.at(grad_pts, pi, grad_pts_obs)
+
+        # 4. Camera gradient via vectorized finite difference (only 7 params per camera)
+        eps = 1e-5
+        grad_cam = np.zeros_like(cams)
         for c in range(n_cam):
-            for p_idx in range(min(7, cameras.shape[1])):
-                cameras[c, p_idx] += eps
-                cost_plus = _compute_cost_np(cameras, points_3d, observations, observed_2d, fx, fy, cx, cy)
-                cameras[c, p_idx] -= eps
+            for p_idx in range(min(7, cams.shape[1])):
+                cams[c, p_idx] += eps
+                cost_plus = _compute_cost_np(cams, pts, observations, observed_2d, fx, fy, cx, cy)
+                cams[c, p_idx] -= eps
                 grad_cam[c, p_idx] = (cost_plus - total_cost) / eps
 
-        # Numerical gradient for points
-        for p in range(n_pts):
-            for dim in range(3):
-                points_3d[p, dim] += eps
-                cost_plus = _compute_cost_np(cameras, points_3d, observations, observed_2d, fx, fy, cx, cy)
-                points_3d[p, dim] -= eps
-                grad_pts[p, dim] = (cost_plus - total_cost) / eps
-
-        # Gradient descent step with LM damping
+        # 5. Damped step
         step = 1.0 / (lam + 1.0)
-        cameras[:, :7] -= step * 1e-6 * grad_cam[:, :7]
-        points_3d -= step * 1e-6 * grad_pts
+        cams[:, :7] -= step * 1e-4 * grad_cam[:, :7]
+        pts -= step * 1e-3 * grad_pts
 
-    return cameras, points_3d, float(rmse), n_iter
+    return cams.astype(cameras.dtype), pts.astype(points_3d.dtype), float(rmse), n_iter
 
 
 def _compute_cost_np(cameras, points_3d, observations, observed_2d, fx, fy, cx, cy):
-    """Compute total reprojection cost (numpy)."""
-    total = 0.0
-    for o in range(observations.shape[0]):
-        ci = observations[o, 0]
-        pi = observations[o, 1]
-        ax, ay, az, angle, tx, ty, tz = cameras[ci, :7]
-        _fx = cameras[ci, 7] if cameras.shape[1] > 7 else (fx or 1.0)
-        _fy = cameras[ci, 8] if cameras.shape[1] > 8 else (fy or _fx)
-        _cx = cameras[ci, 9] if cameras.shape[1] > 9 else (cx or 0.0)
-        _cy = cameras[ci, 10] if cameras.shape[1] > 10 else (cy or 0.0)
+    """Compute total reprojection cost (vectorized numpy)."""
+    n_cam = cameras.shape[0]
+    n_obs = observations.shape[0]
+    if n_obs == 0:
+        return 0.0
 
+    Rs = np.zeros((n_cam, 3, 3), dtype=np.float64)
+    ts = np.asarray(cameras[:, 4:7], dtype=np.float64)
+
+    fxs = cameras[:, 7] if cameras.shape[1] > 7 else np.full(n_cam, fx or 1.0, dtype=np.float64)
+    fys = cameras[:, 8] if cameras.shape[1] > 8 else np.full(n_cam, fy or fx or 1.0, dtype=np.float64)
+    cxs = cameras[:, 9] if cameras.shape[1] > 9 else np.full(n_cam, cx or 0.0, dtype=np.float64)
+    cys = cameras[:, 10] if cameras.shape[1] > 10 else np.full(n_cam, cy or 0.0, dtype=np.float64)
+
+    for c in range(n_cam):
+        ax, ay, az, angle = cameras[c, :4]
         norm = np.sqrt(ax**2 + ay**2 + az**2 + 1e-10)
-        k = np.array([ax, ay, az]) / norm
-        K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
-        R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
+        k = np.array([ax, ay, az], dtype=np.float64) / norm
+        K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]], dtype=np.float64)
+        Rs[c] = np.eye(3, dtype=np.float64) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
 
-        X = points_3d[pi]
-        Xc = R @ X + np.array([tx, ty, tz])
-        if abs(Xc[2]) < 1e-10:
-            continue
-        u_pred = _fx * Xc[0] / Xc[2] + _cx
-        v_pred = _fy * Xc[1] / Xc[2] + _cy
-        total += (observed_2d[o, 0] - u_pred)**2 + (observed_2d[o, 1] - v_pred)**2
-    return total
+    ci = observations[:, 0]
+    pi = observations[:, 1]
+
+    R_obs = Rs[ci]
+    t_obs = ts[ci]
+    X_obs = points_3d[pi]
+
+    Xc = np.einsum('nij,nj->ni', R_obs, X_obs) + t_obs
+    Zc = Xc[:, 2]
+    valid = np.abs(Zc) > 1e-10
+
+    safe_Zc = np.where(valid, Zc, 1.0)
+    u_pred = fxs[ci] * Xc[:, 0] / safe_Zc + cxs[ci]
+    v_pred = fys[ci] * Xc[:, 1] / safe_Zc + cys[ci]
+
+    eu = np.where(valid, observed_2d[:, 0] - u_pred, 0.0)
+    ev = np.where(valid, observed_2d[:, 1] - v_pred, 0.0)
+    return float(np.sum(eu * eu + ev * ev))

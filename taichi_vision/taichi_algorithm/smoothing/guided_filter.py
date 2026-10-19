@@ -199,8 +199,8 @@ def _box_filter_1ch(src_gpu, radius, buffer_provider):
 
     # Horizontal pass
     from .box_filter import _box_blur_h_generic_1ch_kernel, _box_blur_v_generic_1ch_kernel
-    _box_blur_h_generic_1ch_kernel(src_gpu, tmp, h, w, radius)
-    _box_blur_v_generic_1ch_kernel(tmp, result, h, w, radius)
+    _box_blur_h_generic_1ch_kernel(src_gpu, tmp, h, w, float(radius))
+    _box_blur_v_generic_1ch_kernel(tmp, result, h, w, float(radius))
 
     common.release_temp_buffer(tmp)
     return result
@@ -229,6 +229,10 @@ def guided_filter(guide, src, radius=8, epsilon=1e-4, dst=None, buffer_provider=
     Returns:
         Filtered image in same format as input.
     """
+    radius_value = int(radius)
+    if radius_value < 0 or radius_value >= (1 << 24) or radius_value != radius:
+        raise ValueError("radius must be an integer in the exact float32 range")
+
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 

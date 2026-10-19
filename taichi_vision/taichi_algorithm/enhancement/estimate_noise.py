@@ -35,6 +35,59 @@ if os.environ.get("AOT_MODE", "1") == "0":
 
 if TAICHI_AVAILABLE:
 
+    @ti.func
+    def _noise_luma(src: ti.template(), y, x, grayscale: ti.template()):
+        value = 0.0
+        if ti.static(grayscale):
+            value = src[y, x]
+        else:
+            value = 0.2126 * src[y, x][0] + 0.7152 * src[y, x][1] + 0.0722 * src[y, x][2]
+        return value
+
+    @ti.func
+    def _noise_block_mad(src: ti.template(), by, bx, h, w, grayscale: ti.template()):
+        # 1. Accumulate local mean and MAD of subband minimum across 4x4 decimated pixels (8x8 source)
+        sum_val = 0.0
+        for iy in range(4):
+            for ix in range(4):
+                y0 = (by * 4 + iy) * 2
+                x0 = (bx * 4 + ix) * 2
+
+                if y0 + 1 < h and x0 + 1 < w:
+                    tl = _noise_luma(src, y0, x0, grayscale)
+                    tr = _noise_luma(src, y0, x0 + 1, grayscale)
+                    bl = _noise_luma(src, y0 + 1, x0, grayscale)
+                    br = _noise_luma(src, y0 + 1, x0 + 1, grayscale)
+
+                    hh = ti.abs(tl - tr - bl + br) * 0.5
+                    lh = ti.abs(tl + tr - bl - br) * 0.5
+                    hl = ti.abs(tl - tr + bl - br) * 0.5
+                    v_min = ti.min(hh, ti.min(lh, hl))
+                    sum_val += v_min
+
+        mean_val = sum_val / 16.0
+
+        # 2. Compute Mean Absolute Deviation (MAD proxy)
+        mad_sum = 0.0
+        for iy in range(4):
+            for ix in range(4):
+                y0 = (by * 4 + iy) * 2
+                x0 = (bx * 4 + ix) * 2
+
+                if y0 + 1 < h and x0 + 1 < w:
+                    tl = _noise_luma(src, y0, x0, grayscale)
+                    tr = _noise_luma(src, y0, x0 + 1, grayscale)
+                    bl = _noise_luma(src, y0 + 1, x0, grayscale)
+                    br = _noise_luma(src, y0 + 1, x0 + 1, grayscale)
+
+                    hh = ti.abs(tl - tr - bl + br) * 0.5
+                    lh = ti.abs(tl + tr - bl - br) * 0.5
+                    hl = ti.abs(tl - tr + bl - br) * 0.5
+                    v_min = ti.min(hh, ti.min(lh, hl))
+                    mad_sum += ti.abs(v_min - mean_val)
+
+        return mad_sum / 16.0
+
     @ti.kernel
     def estimate_noise_kernel(
         src: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
@@ -44,54 +97,24 @@ if TAICHI_AVAILABLE:
         num_blocks_x: ti.i32,
         num_blocks_y: ti.i32,
     ):
-        """
-        Taichi GPU Kernel: Computes 2D Wavelet Subband Minima per 8x8 block in parallel.
-        """
         for by, bx in ti.ndrange(num_blocks_y, num_blocks_x):
-            b_idx = by * num_blocks_x + bx
+            block_mad_out[by * num_blocks_x + bx] = _noise_block_mad(
+                src, by, bx, h, w, False,
+            )
 
-            # 1. Accumulate local mean and MAD of subband minimum across 4x4 decimated pixels (8x8 source)
-            sum_val = 0.0
-            for iy in range(4):
-                for ix in range(4):
-                    y0 = (by * 4 + iy) * 2
-                    x0 = (bx * 4 + ix) * 2
-
-                    if y0 + 1 < h and x0 + 1 < w:
-                        tl = 0.2126 * src[y0, x0][0] + 0.7152 * src[y0, x0][1] + 0.0722 * src[y0, x0][2]
-                        tr = 0.2126 * src[y0, x0 + 1][0] + 0.7152 * src[y0, x0 + 1][1] + 0.0722 * src[y0, x0 + 1][2]
-                        bl = 0.2126 * src[y0 + 1, x0][0] + 0.7152 * src[y0 + 1, x0][1] + 0.0722 * src[y0 + 1, x0][2]
-                        br = 0.2126 * src[y0 + 1, x0 + 1][0] + 0.7152 * src[y0 + 1, x0 + 1][1] + 0.0722 * src[y0 + 1, x0 + 1][2]
-
-                        hh = ti.abs(tl - tr - bl + br) * 0.5
-                        lh = ti.abs(tl + tr - bl - br) * 0.5
-                        hl = ti.abs(tl - tr + bl - br) * 0.5
-                        v_min = ti.min(hh, ti.min(lh, hl))
-                        sum_val += v_min
-
-            mean_val = sum_val / 16.0
-
-            # 2. Compute Mean Absolute Deviation (MAD proxy)
-            mad_sum = 0.0
-            for iy in range(4):
-                for ix in range(4):
-                    y0 = (by * 4 + iy) * 2
-                    x0 = (bx * 4 + ix) * 2
-
-                    if y0 + 1 < h and x0 + 1 < w:
-                        tl = 0.2126 * src[y0, x0][0] + 0.7152 * src[y0, x0][1] + 0.0722 * src[y0, x0][2]
-                        tr = 0.2126 * src[y0, x0 + 1][0] + 0.7152 * src[y0, x0 + 1][1] + 0.0722 * src[y0, x0 + 1][2]
-                        bl = 0.2126 * src[y0 + 1, x0][0] + 0.7152 * src[y0 + 1, x0][1] + 0.0722 * src[y0 + 1, x0][2]
-                        br = 0.2126 * src[y0 + 1, x0 + 1][0] + 0.7152 * src[y0 + 1, x0 + 1][1] + 0.0722 * src[y0 + 1, x0 + 1][2]
-
-                        hh = ti.abs(tl - tr - bl + br) * 0.5
-                        lh = ti.abs(tl + tr - bl - br) * 0.5
-                        hl = ti.abs(tl - tr + bl - br) * 0.5
-                        v_min = ti.min(hh, ti.min(lh, hl))
-                        mad_sum += ti.abs(v_min - mean_val)
-
-            block_mad_out[b_idx] = mad_sum / 16.0
-
+    @ti.kernel
+    def estimate_noise_gray_kernel(
+        src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        block_mad_out: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        h: ti.i32,
+        w: ti.i32,
+        num_blocks_x: ti.i32,
+        num_blocks_y: ti.i32,
+    ):
+        for by, bx in ti.ndrange(num_blocks_y, num_blocks_x):
+            block_mad_out[by * num_blocks_x + bx] = _noise_block_mad(
+                src, by, bx, h, w, True,
+            )
 
 # =========================================================================
 # 3. PURE GPU AOT / TCM EXECUTION
@@ -145,7 +168,13 @@ def estimate_noise(src: Any, *, session=None) -> Tuple[float, float]:
 
         engine = get_engine()
         mod = _mod("estimate_noise")
-        h, w = src.shape[:2]
+        shape = tuple(src.shape)
+        grayscale = len(shape) == 2 and not getattr(src, "is_vector", False)
+        if not grayscale and not (len(shape) == 3 and shape[2] == 3):
+            raise ValueError(f"Expected image of shape [H, W, 3] or [H, W], got {shape}")
+        h, w = shape[:2]
+        if h < 8 or w < 8:
+            return 0.0, 0.0
         num_bx = max(1, w // 8)
         num_by = max(1, h // 8)
         block_mad_buf, block_mad_host = _gpu_noise_scratch(
@@ -153,10 +182,10 @@ def estimate_noise(src: Any, *, session=None) -> Tuple[float, float]:
         )
 
         src_v = src
-        if hasattr(src, "is_vector") and not src.is_vector:
+        if not grayscale and hasattr(src, "is_vector") and not src.is_vector:
             src_v = src.view_as_vector(True)
         mod.run(
-            "estimate_noise",
+            "estimate_noise_gray" if grayscale else "estimate_noise",
             src=src_v,
             block_mad_out=block_mad_buf,
             h=int(h),
@@ -170,7 +199,7 @@ def estimate_noise(src: Any, *, session=None) -> Tuple[float, float]:
         # Partitioning avoids a second full-size sort allocation while keeping
         # the same cleanest-third median as the previous sorted path.
         mads = block_mad_buf.to_numpy(out=block_mad_host)
-        keep = max(4, len(mads) // 3)
+        keep = min(len(mads), max(4, len(mads) // 3))
         mads.partition(keep - 1)
         mads[:keep].sort()
         best_mad = float(np.median(mads[:keep]))

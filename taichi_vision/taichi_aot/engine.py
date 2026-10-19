@@ -5617,7 +5617,17 @@ class AOTEngine:
                         f"[AOTEngine TCM ABI] {preflight.status}: "
                         f"{os.path.basename(tcm_manifest_path)}: {preflight.reason}"
                     )
-            cache_key = artifact_key(p, self.arch, self.device_id, device_name)
+            # CPU AOT loads an extracted directory, but validation status must
+            # follow the packed TCM that produced it. This keeps changed TCM
+            # payloads from inheriting a stale quarantine under a new extract
+            # directory name.
+            cache_artifact_path = tcm_manifest_path or p
+            cache_key = artifact_key(
+                cache_artifact_path,
+                self.arch,
+                self.device_id,
+                device_name,
+            )
             cached = get_status(cache_key)
             if cached and cached.get("status") == "quarantined":
                 raise RuntimeError(

@@ -226,12 +226,12 @@ if TAICHI_AVAILABLE or os.environ.get("AOT_MODE", "1") == "1":
                 cost_vec[4] += ti.cast(_bm_popcount32(d_p ^ d_d), ti.f32)
         return cost_vec
 
-    @ti.kernel
     @ti.func
     def _bm_median3(a: ti.i32, b: ti.i32, c: ti.i32) -> ti.i32:
         return a + b + c - ti.min(a, ti.min(b, c)) - ti.max(a, ti.max(b, c))
 
-def _bm_grid_track_kernel(
+    @ti.kernel
+    def _bm_grid_track_kernel(
         prev: ti.types.ndarray(),
         next: ti.types.ndarray(),
         prev_grid_flow: ti.types.ndarray(),

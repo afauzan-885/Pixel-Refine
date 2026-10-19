@@ -1317,16 +1317,23 @@ def remap_accumulate_cfa_weighted_plane_kernel(
     Flow is sampled in the RGB-analysis domain and converted from full-sensor
     pixels into this half-resolution lattice before the source lookup.
     """
-    flow_x_scale = float(w_flow - 1) / float(w_dst - 1)
-    flow_y_scale = float(h_flow - 1) / float(h_dst - 1)
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
     weight_x_scale = float(w_work) / float(w_dst)
     weight_y_scale = float(h_work) / float(h_dst)
     for r, c in ti.ndrange(h_plane, w_plane):
         gr = r * 2 + plane_origin_y
         gc = c * 2 + plane_origin_x
         if gr < h_dst and gc < w_dst:
-            fx = float(gc) * flow_x_scale
-            fy = float(gr) * flow_y_scale
+            # Match the pixel-center convention used by bilinear resize.
+            fx = ti.max(
+                0.0,
+                ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+            )
+            fy = ti.max(
+                0.0,
+                ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+            )
             dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
             dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
             src_x = float(c) + dx * scale_x * 0.5
@@ -1348,8 +1355,14 @@ def remap_accumulate_cfa_weighted_plane_kernel(
                     + ty * tx * source_plane[sy1, sx1]
                 )
 
-                wx = float(gc) * weight_x_scale
-                wy = float(gr) * weight_y_scale
+                wx = ti.max(
+                    0.0,
+                    ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                )
+                wy = ti.max(
+                    0.0,
+                    ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                )
                 wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
                 wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
                 wx1 = ti.min(wx0 + 1, w_work - 1)
@@ -1388,16 +1401,23 @@ def remap_accumulate_cfa_scalar_weighted_plane_kernel(
     scale_y: ti.f32,
 ):
     """Scalar SpatialFusion weight variant for one Bayer lattice."""
-    flow_x_scale = float(w_flow - 1) / float(w_dst - 1)
-    flow_y_scale = float(h_flow - 1) / float(h_dst - 1)
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
     weight_x_scale = float(w_work) / float(w_dst)
     weight_y_scale = float(h_work) / float(h_dst)
     for r, c in ti.ndrange(h_plane, w_plane):
         gr = r * 2 + plane_origin_y
         gc = c * 2 + plane_origin_x
         if gr < h_dst and gc < w_dst:
-            fx = float(gc) * flow_x_scale
-            fy = float(gr) * flow_y_scale
+            # Keep flow lookup aligned with bilinear_resize's pixel centers.
+            fx = ti.max(
+                0.0,
+                ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+            )
+            fy = ti.max(
+                0.0,
+                ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+            )
             dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
             dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
             src_x = float(c) + dx * scale_x * 0.5
@@ -1415,8 +1435,14 @@ def remap_accumulate_cfa_scalar_weighted_plane_kernel(
                     + ty * (1.0 - tx) * source_plane[sy1, sx0]
                     + ty * tx * source_plane[sy1, sx1]
                 )
-                wx = float(gc) * weight_x_scale
-                wy = float(gr) * weight_y_scale
+                wx = ti.max(
+                    0.0,
+                    ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                )
+                wy = ti.max(
+                    0.0,
+                    ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                )
                 wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
                 wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
                 wx1 = ti.min(wx0 + 1, w_work - 1)

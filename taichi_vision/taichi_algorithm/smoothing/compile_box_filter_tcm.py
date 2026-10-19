@@ -27,7 +27,7 @@ def compile_box_filter_aot(arch=ti.vulkan, save_path="box_filter_vulkan.tcm"):
 
     h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "h", ti.i32)
     w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "w", ti.i32)
-    radius_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "radius", ti.i32)
+    radius_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "radius", ti.f32)
 
     src_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "src", ti.f32, ndim=3)
     tmp_3d = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "tmp", ti.f32, ndim=3)

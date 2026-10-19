@@ -31,12 +31,10 @@ if TAICHI_AVAILABLE:
     def _gaussian_blur_x_3ch_body(src: ti.template(), dst: ti.template(), h: int, w: int, weights: ti.template(), radius: int):
         for y, x in ti.ndrange(h, w):
             acc0, acc1, acc2 = 0.0, 0.0, 0.0
-            total_weight = 0.0
             w0 = weights[0]
             acc0 += src[y, x, 0] * w0
             acc1 += src[y, x, 1] * w0
             acc2 += src[y, x, 2] * w0
-            total_weight += w0
             for k in ti.static(range(1, 17)):
                 if k <= radius:
                     wk = weights[k]
@@ -45,53 +43,46 @@ if TAICHI_AVAILABLE:
                     acc0 += (src[y, lx, 0] + src[y, rx, 0]) * wk
                     acc1 += (src[y, lx, 1] + src[y, rx, 1]) * wk
                     acc2 += (src[y, lx, 2] + src[y, rx, 2]) * wk
-                    total_weight += 2.0 * wk
-            dst[y, x, 2] = acc2 / total_weight
+            dst[y, x, 0] = acc0
+            dst[y, x, 1] = acc1
+            dst[y, x, 2] = acc2
 
     @ti.func
     def _gaussian_blur_x_vec3_body(src: ti.template(), dst: ti.template(), h: int, w: int, weights: ti.template(), radius: int):
         for y, x in ti.ndrange(h, w):
             acc = ti.Vector([0.0, 0.0, 0.0])
-            total_weight = 0.0
             w0 = weights[0]
             acc += src[y, x] * w0
-            total_weight += w0
             for k in ti.static(range(1, 17)):
                 if k <= radius:
                     wk = weights[k]
                     lx = common.reflect_idx(x - k, w)
                     rx = common.reflect_idx(x + k, w)
                     acc += (src[y, lx] + src[y, rx]) * wk
-                    total_weight += 2.0 * wk
-            dst[y, x] = acc / total_weight
+            dst[y, x] = acc
 
     @ti.func
     def _gaussian_blur_y_vec3_body(src: ti.template(), dst: ti.template(), h: int, w: int, weights: ti.template(), radius: int):
         for y, x in ti.ndrange(h, w):
             acc = ti.Vector([0.0, 0.0, 0.0])
-            total_weight = 0.0
             w0 = weights[0]
             acc += src[y, x] * w0
-            total_weight += w0
             for k in ti.static(range(1, 17)):
                 if k <= radius:
                     wk = weights[k]
                     ty = common.reflect_idx(y - k, h)
                     by = common.reflect_idx(y + k, h)
                     acc += (src[ty, x] + src[by, x]) * wk
-                    total_weight += 2.0 * wk
-            dst[y, x] = acc / total_weight
+            dst[y, x] = acc
 
     @ti.func
     def _gaussian_blur_y_3ch_body(src: ti.template(), dst: ti.template(), h: int, w: int, weights: ti.template(), radius: int):
         for y, x in ti.ndrange(h, w):
             acc0, acc1, acc2 = 0.0, 0.0, 0.0
-            total_weight = 0.0
             w0 = weights[0]
             acc0 += src[y, x, 0] * w0
             acc1 += src[y, x, 1] * w0
             acc2 += src[y, x, 2] * w0
-            total_weight += w0
             for k in ti.static(range(1, 17)):
                 if k <= radius:
                     wk = weights[k]
@@ -100,10 +91,9 @@ if TAICHI_AVAILABLE:
                     acc0 += (src[ty, x, 0] + src[by, x, 0]) * wk
                     acc1 += (src[ty, x, 1] + src[by, x, 1]) * wk
                     acc2 += (src[ty, x, 2] + src[by, x, 2]) * wk
-                    total_weight += 2.0 * wk
-            dst[y, x, 0] = acc0 / total_weight
-            dst[y, x, 1] = acc1 / total_weight
-            dst[y, x, 2] = acc2 / total_weight
+            dst[y, x, 0] = acc0
+            dst[y, x, 1] = acc1
+            dst[y, x, 2] = acc2
 
     @ti.kernel
     def _gaussian_blur_x_3ch_f32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int, weights: ti.types.ndarray(), radius: int):
@@ -132,30 +122,26 @@ if TAICHI_AVAILABLE:
     @ti.kernel
     def _gaussian_blur_x_1ch_f32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int, weights: ti.types.ndarray(), radius: int):
         for y, x in ti.ndrange(h, w):
-            acc, total_w = ti.cast(0.0, ti.f32), ti.cast(0.0, ti.f32)
+            acc = ti.cast(0.0, ti.f32)
             w0 = weights[0]
             acc += src[y, x] * w0
-            total_w += w0
             for k in ti.static(range(1, 17)):
                 if k <= radius:
                     wk = weights[k]
                     acc += (src[y, common.reflect_idx(x-k, w)] + src[y, common.reflect_idx(x+k, w)]) * wk
-                    total_w += 2.0 * wk
-            dst[y, x] = acc / total_w
+            dst[y, x] = acc
 
     @ti.kernel
     def _gaussian_blur_y_1ch_f32_kernel(src: ti.types.ndarray(), dst: ti.types.ndarray(), h: int, w: int, weights: ti.types.ndarray(), radius: int):
         for y, x in ti.ndrange(h, w):
-            acc, total_w = 0.0, 0.0
+            acc = 0.0
             w0 = weights[0]
             acc += src[y, x] * w0
-            total_w += w0
             for k in ti.static(range(1, 17)):
                 if k <= radius:
                     wk = weights[k]
                     acc += (src[common.reflect_idx(y-k, h), x] + src[common.reflect_idx(y+k, h), x]) * wk
-                    total_w += 2.0 * wk
-            dst[y, x] = acc / total_w
+            dst[y, x] = acc
 
 def compute_gaussian_weights(sigma, radius):
     weights = []

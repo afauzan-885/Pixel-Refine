@@ -38,6 +38,10 @@ def __getattr__(name):
         from . import dng_aot as _dng
 
         return getattr(_dng, name)
+    if name == "JpegBackendUnavailableError":
+        from .jpeg_accelerated import JpegBackendUnavailableError
+
+        return JpegBackendUnavailableError
     if name in {"NativeTensor", "NativeAOTEngine", "build_native_request"}:
         from . import native_dispatch as _native
 
@@ -85,6 +89,21 @@ def encode_rgb_aot(*args, **kwargs):
 
 def jpeg_encode_aot(*args, **kwargs):
     from taichi_vision.taichi_algorithm.compression.jpeg_aot import jpeg_encode_aot as _impl
+    return _impl(*args, **kwargs)
+
+
+def encode_jpeg_accelerated(*args, **kwargs):
+    from taichi_vision.taichi_algorithm.compression.jpeg_accelerated import encode_jpeg_accelerated as _impl
+    return _impl(*args, **kwargs)
+
+
+def decode_jpeg_accelerated(*args, **kwargs):
+    from taichi_vision.taichi_algorithm.compression.jpeg_accelerated import decode_jpeg_accelerated as _impl
+    return _impl(*args, **kwargs)
+
+
+def jpeg_acceleration_status(*args, **kwargs):
+    from taichi_vision.taichi_algorithm.compression.jpeg_accelerated import jpeg_acceleration_status as _impl
     return _impl(*args, **kwargs)
 
 
@@ -668,6 +687,10 @@ __all__ = [
     "encode_grayscale_aot",
     "encode_rgb_aot",
     "jpeg_encode_aot",
+    "JpegBackendUnavailableError",
+    "encode_jpeg_accelerated",
+    "decode_jpeg_accelerated",
+    "jpeg_acceleration_status",
     "encode_grayscale",
     "encode_rgb",
     "jpeg_encode",
