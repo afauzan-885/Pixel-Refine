@@ -44,10 +44,15 @@ class SplatSRAOTEngine:
 
         # Initialize engine and load TCM
         self._engine = get_engine()
-        tcm_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "../../../../../ui/data/aot_assets"
-        )
+        from taichi_vision.llvm20_runtime_paths import application_assets_root
+
+        tcm_dir = application_assets_root("vulkan_x86_64_windows")
+        if tcm_dir is None:
+            tcm_dir = os.path.abspath(os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "../../../../../../taichi_vision/taichi_algorithm/aot_tcm",
+                "vulkan_x86_64_windows", "application_assets"
+            ))
         tcm_path = os.path.join(tcm_dir, "splat_sr_vulkan.tcm")
         self._mod = self._engine.load(tcm_path)
 

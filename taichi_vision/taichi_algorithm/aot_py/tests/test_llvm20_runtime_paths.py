@@ -15,10 +15,14 @@ class LLVM20RuntimePathTests(unittest.TestCase):
             bundle = root / "bundles" / "opengl_x86_64_windows"
             tcm = bundle / "tcm" / bundle.name
             tcm.mkdir(parents=True)
-            with mock.patch.dict(
-                "os.environ",
-                {"PIXEL_REFINE_RUNTIME_ROOT": str(root)},
-                clear=False,
+            with (
+                mock.patch.object(paths, "_project_backend_dir", return_value=None),
+                mock.patch.object(paths, "PROJECT_TCM_ROOT", root / "project_tcm"),
+                mock.patch.dict(
+                    "os.environ",
+                    {"PIXEL_REFINE_RUNTIME_ROOT": str(root)},
+                    clear=False,
+                ),
             ):
                 self.assertEqual(paths.runtime_root(), root.resolve())
                 self.assertEqual(paths.bundle_root("opengl_x86_64_windows"), bundle.resolve())
@@ -29,10 +33,14 @@ class LLVM20RuntimePathTests(unittest.TestCase):
             root = Path(temp)
             generic = root / "bundles" / "vulkan_x86_64_windows"
             (generic / "tcm" / generic.name).mkdir(parents=True)
-            with mock.patch.dict(
-                "os.environ",
-                {"PIXEL_REFINE_RUNTIME_ROOT": str(root)},
-                clear=False,
+            with (
+                mock.patch.object(paths, "_project_backend_dir", return_value=None),
+                mock.patch.object(paths, "PROJECT_TCM_ROOT", root / "project_tcm"),
+                mock.patch.dict(
+                    "os.environ",
+                    {"PIXEL_REFINE_RUNTIME_ROOT": str(root)},
+                    clear=False,
+                ),
             ):
                 self.assertEqual(
                     paths.bundle_root("vulkan_x86_64_windows_nvidia"), generic.resolve()
@@ -41,6 +49,61 @@ class LLVM20RuntimePathTests(unittest.TestCase):
                     paths.tcm_root("vulkan_x86_64_windows_nvidia"),
                     (generic / "tcm" / generic.name).resolve(),
                 )
+
+    def test_application_assets_use_explicit_tcm_root_without_project_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with mock.patch.dict("os.environ", {"PIXEL_REFINE_AOT_TCM_ROOT": str(root)}):
+                self.assertEqual(
+                    paths.application_assets_root("cpu_x86_64_windows"),
+                    root.resolve() / "cpu_x86_64_windows" / "application_assets",
+                )
+
+    def test_application_assets_use_resolved_target(self):
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            paths, "PROJECT_TCM_ROOT", Path("missing_test_project_tcm")
+        ), mock.patch.object(
+            paths, "tcm_root", return_value=Path("target_tcm")
+        ):
+            self.assertEqual(
+                paths.application_assets_root("cpu_x86_64_windows"),
+                Path("target_tcm/application_assets"),
+            )
+
+    def test_application_assets_reject_unsafe_target(self):
+        with self.assertRaises(ValueError):
+            paths.application_assets_root("../other")
+
+    def test_application_assets_vendor_probe_uses_generic_graphics_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            generic = root / "opengl_x86_64_windows" / "application_assets"
+            generic.mkdir(parents=True)
+            with mock.patch.dict("os.environ", {"PIXEL_REFINE_AOT_TCM_ROOT": str(root)}):
+                self.assertEqual(
+                    paths.application_assets_root("opengl_x86_64_windows_intel"),
+                    generic.resolve(),
+                )
+                specific = root / "opengl_x86_64_windows_intel" / "application_assets"
+                specific.mkdir(parents=True)
+                self.assertEqual(
+                    paths.application_assets_root("opengl_x86_64_windows_intel"),
+                    specific.resolve(),
+                )
+
+    def test_project_graphics_assets_precede_historical_runtime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            generic = root / "vulkan_x86_64_windows" / "application_assets"
+            generic.mkdir(parents=True)
+            with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+                paths, "PROJECT_TCM_ROOT", root
+            ), mock.patch.object(paths, "tcm_root") as resolve:
+                self.assertEqual(
+                    paths.application_assets_root("vulkan_x86_64_windows_nvidia"),
+                    generic,
+                )
+                resolve.assert_not_called()
 
     def test_invalid_explicit_root_fails_closed(self) -> None:
         with mock.patch.dict(

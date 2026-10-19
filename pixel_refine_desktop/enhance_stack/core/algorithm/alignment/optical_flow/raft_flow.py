@@ -75,7 +75,9 @@ class RAFTFlow(LucasKanade):
                     str(batch_id),
                     {},
                 )
-                section = batch_params.get("raft_params", {})
+                section = batch_parameter_manager.get_batch_algorithm_params(
+                    batch_id, "alignment", "RAFT", batch_entry=batch_params
+                )
                 if isinstance(section, dict):
                     visible_config.update(section)
             except Exception as exc:

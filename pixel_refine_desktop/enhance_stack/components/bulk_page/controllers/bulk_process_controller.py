@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_names, get_spec, plan_stages
 from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_result_service import (
     batch_selections, copy_result, expected_output_names, find_existing_outputs,
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
@@ -20,7 +22,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QMessageBox,
     QGridLayout,
-    QSpinBox,
     QComboBox,
     QMenu,
     QSizePolicy,
@@ -40,7 +41,9 @@ from UILibrary import (
     ModalDialog,
     ProgressBar,
     Button,
+    NumericStepper,
 )
+from UILibrary.forms import apply_numeric_spinbox_style
 
 
 def save_json_state(path, data):
@@ -116,18 +119,18 @@ class MassAlgorithmEditDialog(ModalDialog):
         from_label.setStyleSheet(
             "font-family: 'Segoe UI', Arial; font-size: 12px; font-weight: 600; color: #334155;"
         )
-        self.from_spinbox = QSpinBox()
-        self.from_spinbox.setStyleSheet(
-            "font-size: 12px; padding: 3px 6px; border: 1px solid #CBD5E1; border-radius: 4px;"
-        )
+        self.from_spinbox = NumericStepper()
+        self.from_spinbox.setAccelerated(True)
+        self.from_spinbox.setFixedWidth(128)
+        apply_numeric_spinbox_style(self.from_spinbox)
         to_label = QLabel("To:")
         to_label.setStyleSheet(
             "font-family: 'Segoe UI', Arial; font-size: 12px; font-weight: 600; color: #334155;"
         )
-        self.to_spinbox = QSpinBox()
-        self.to_spinbox.setStyleSheet(
-            "font-size: 12px; padding: 3px 6px; border: 1px solid #CBD5E1; border-radius: 4px;"
-        )
+        self.to_spinbox = NumericStepper()
+        self.to_spinbox.setAccelerated(True)
+        self.to_spinbox.setFixedWidth(128)
+        apply_numeric_spinbox_style(self.to_spinbox)
 
         range_layout.addWidget(from_label)
         range_layout.addWidget(self.from_spinbox)
@@ -375,7 +378,7 @@ class BatchProcessDialog(ModalDialog):
 
         # 2. Table Widget with Master Header Checkbox
         self.table_widget = QTableWidget()
-        self.table_widget.setColumnCount(4)
+        self.table_widget.setColumnCount(5)
         self.table_widget.setWordWrap(False)
         self.table_widget.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.table_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -390,7 +393,7 @@ class BatchProcessDialog(ModalDialog):
         )
         self.table_widget.setHorizontalHeader(self.header_view)
         self.table_widget.setHorizontalHeaderLabels(
-            ["", "Project Name", "Status", "Details"]
+            ["", "Project Name", "Status", "Details", ""]
         )
         self.header_view.master_checkbox_toggled.connect(
             self._on_master_checkbox_clicked
@@ -842,7 +845,7 @@ class BatchProcessDialog(ModalDialog):
             item_name.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.table_widget.setItem(i, 1, item_name)
 
-            item_status = QTableWidgetItem(language_config.BATCH_QUEUE)
+            item_status = QTableWidgetItem(f"⏳ {language_config.BATCH_QUEUE}")
             item_status.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             item_status.setTextAlignment(Qt.AlignCenter)
             self.table_widget.setItem(i, 2, item_status)
@@ -852,6 +855,15 @@ class BatchProcessDialog(ModalDialog):
             item_details.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             item_details.setToolTip(algo_summary)
             self.table_widget.setItem(i, 3, item_details)
+
+            cancel_button = QPushButton("×")
+            cancel_button.setToolTip("Cancel this queued or running batch")
+            cancel_button.setAccessibleName(f"Cancel {seq_num}")
+            cancel_button.setFixedSize(26, 26)
+            cancel_button.clicked.connect(
+                lambda checked=False, row=i: self.cancel_batch(row)
+            )
+            self.table_widget.setCellWidget(i, 4, cancel_button)
 
         self.table_widget.setVerticalHeaderLabels(
             [str(i + 1) for i in range(len(self.panels))]
@@ -864,13 +876,21 @@ class BatchProcessDialog(ModalDialog):
         self.adjust_column_widths()
 
     def on_batch_finished(self, row, success, result_message):
-        status = "Success" if success else "Failed"
-        color = self.COLOR_SUCCESS if success else self.COLOR_FAILED
+        was_cancelled = str(result_message).startswith("Cancelled")
+        status = "Cancelled" if was_cancelled else ("Success" if success else "Failed")
+        color = (
+            self.COLOR_CANCELLED
+            if was_cancelled
+            else (self.COLOR_SUCCESS if success else self.COLOR_FAILED)
+        )
 
         self.table_widget.item(row, 2).setText(status)
         self.table_widget.item(row, 2).setTextAlignment(Qt.AlignCenter)
         self._update_details_cell(row, result_message)
         self._set_row_color(row, color)
+        cancel_button = self.table_widget.cellWidget(row, 4)
+        if cancel_button:
+            cancel_button.setEnabled(False)
         self.processed_count += 1
         self._eta.finish(success)
 
@@ -904,7 +924,13 @@ class BatchProcessDialog(ModalDialog):
     def on_progress_update_from_thread(
         self, row, status, details, percent_in_batch, current_num, total_num
     ):
-        self.table_widget.item(row, 2).setText(status)
+        if row < len(self.panels):
+            batch_id = getattr(
+                self.panels[row], "batch_id", getattr(self.panels[row], "id", "")
+            )
+            if getattr(self, "processing_thread", None) and self.processing_thread._batch_cancelled(batch_id):
+                return
+        self.table_widget.item(row, 2).setText(f"⚙ {status}")
         self._update_details_cell(row, details)
 
         num_total_batches = len(self.panels_to_process_with_rows)
@@ -984,7 +1010,7 @@ class BatchProcessDialog(ModalDialog):
             return
 
         for panel, row in self.panels_to_process_with_rows:
-            self.table_widget.item(row, 2).setText(language_config.BATCH_QUEUE)
+            self.table_widget.item(row, 2).setText(f"⏳ {language_config.BATCH_QUEUE}")
             batch_id = getattr(panel, "batch_id", getattr(panel, "id", ""))
             algo_summary = self._get_algorithm_summary(batch_id)
             self._update_details_cell(row, algo_summary)
@@ -1028,6 +1054,40 @@ class BatchProcessDialog(ModalDialog):
                 self.action_button.setEnabled(False)
                 self.progress_status_tag.setText("Cancelling...")
 
+    def cancel_batch(self, row):
+        """Cancel one queued job or request cancellation of its active worker."""
+        if not self._is_processing or row < 0 or row >= len(self.panels):
+            return
+        panel = self.panels[row]
+        batch_id = getattr(panel, "batch_id", getattr(panel, "id", ""))
+        status_item = self.table_widget.item(row, 2)
+        if status_item is None:
+            return
+        status = status_item.text()
+        if status in ("Success", "Failed", "Cancelled"):
+            return
+        processing_thread = getattr(self, "processing_thread", None)
+        if processing_thread is None:
+            return
+        processing_thread.cancel_batch(batch_id)
+        if "Processing" in status:
+            status_item.setText("Cancelling…")
+        else:
+            status_item.setText("Cancelled")
+            self._set_row_color(row, self.COLOR_CANCELLED)
+            button = self.table_widget.cellWidget(row, 4)
+            if button:
+                button.setEnabled(False)
+
+    def cancel_batch_by_id(self, batch_id):
+        """Resolve and cancel a job by stable batch identity, independent of row order."""
+        for row, panel in enumerate(self.panels):
+            panel_batch_id = getattr(panel, "batch_id", getattr(panel, "id", ""))
+            if str(panel_batch_id) == str(batch_id):
+                self.cancel_batch(row)
+                return True
+        return False
+
     def closeEvent(self, event):
         """Keep the dialog alive until cancellation completes without blocking Qt."""
         processing_thread = getattr(self, "processing_thread", None)
@@ -1069,12 +1129,16 @@ class BatchProcessDialog(ModalDialog):
             if not status_item:
                 continue
 
-            if status_item.text() == "Processing":
+            if "Processing" in status_item.text() or status_item.text().startswith("Cancelling"):
                 status_item.setText(language_config.BATCH_CANCELED_INFO)
                 self._update_details_cell(i, "")
                 self._set_row_color(i, self.COLOR_CANCELLED)
 
-            elif status_item.text() == "Pending" and self._was_cancelled:
+            elif self._was_cancelled and (
+                "Waiting" in status_item.text()
+                or "Menunggu" in status_item.text()
+                or status_item.text() == "Pending"
+            ):
                 status_item.setText(language_config.BATCH_CANCELED_INFO)
                 self._update_details_cell(i, "")
                 self._set_row_color(i, self.COLOR_CANCELLED)
@@ -1089,9 +1153,12 @@ class BatchProcessDialog(ModalDialog):
             self.table_widget.viewport().width()
             - header.sectionSize(0)
             - header.sectionSize(2)
+            - 36
         )
         header.setSectionResizeMode(1, QHeaderView.Interactive)
         header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.Fixed)
+        self.table_widget.setColumnWidth(4, 36)
         self.table_widget.setColumnWidth(1, int(available_width * (1 / 4)))
 
     def browse_output_folder(self):
@@ -1114,6 +1181,28 @@ class ProcessingThread(QThread):
         self.batch_page_layout = batch_page_layout
         self.target_folder = target_folder
         self._is_running = True
+        self._cancelled_batch_ids = set()
+        self._active_batch_id = None
+        self._cancel_lock = threading.Lock()
+
+    def cancel_batch(self, batch_id):
+        batch_key = str(batch_id)
+        with self._cancel_lock:
+            self._cancelled_batch_ids.add(batch_key)
+            active = self._active_batch_id == batch_key
+        if active:
+            try:
+                from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_manager import (
+                    BackendWorkerManager,
+                )
+
+                BackendWorkerManager.instance().stop_current_task()
+            except Exception:
+                pass
+
+    def _batch_cancelled(self, batch_id):
+        with self._cancel_lock:
+            return str(batch_id) in self._cancelled_batch_ids
 
     def _result_identity(self, panel, batch_id):
         database = getattr(self.batch_page_layout, "database_manager", None)
@@ -1162,10 +1251,9 @@ class ProcessingThread(QThread):
             BackendWorkerManager.instance(),
             {"batch_id": batch_id, "single_process": False, "db_path": db_path, "settings": settings},
             lambda percent, message="": progress_callback(percent, str(message).split("||", 1)[0]),
-            lambda: not self._is_running,
+            lambda: not self._is_running or self._batch_cancelled(batch_id),
         )
         if result.get("type") == "cancelled":
-            self._is_running = False
             return []
         if not result.get("success"):
             raise RuntimeError(result.get("error", "Batch worker failed"))
@@ -1183,6 +1271,12 @@ class ProcessingThread(QThread):
                 panel, "sequential_batch_number", getattr(panel, "name", "?")
             )
             batch_id = getattr(panel, "batch_id", getattr(panel, "id", "UNKNOWN"))
+
+            if self._batch_cancelled(batch_id):
+                self.batch_finished.emit(row, False, "Cancelled before processing")
+                continue
+            with self._cancel_lock:
+                self._active_batch_id = str(batch_id)
 
             try:
 
@@ -1215,6 +1309,9 @@ class ProcessingThread(QThread):
                     sub_process_progress_callback(100, "Existing result found; skipping stacking")
                 else:
                     result = self._process_batch(target_panel, batch_id, sub_process_progress_callback)
+                    if self._batch_cancelled(batch_id):
+                        self.batch_finished.emit(row, False, "Cancelled during processing")
+                        continue
                     if not self._is_running:
                         break
                     outputs = returned_output_paths(result)
@@ -1230,7 +1327,7 @@ class ProcessingThread(QThread):
                 details = []
                 sub_process_progress_callback(99, "Menyimpan hasil ke folder tujuan...")
                 for output_file in dict.fromkeys(outputs):
-                    if not self._is_running:
+                    if not self._is_running or self._batch_cancelled(batch_id):
                         break
                     if reused:
                         destination = os.path.join(self.target_folder, os.path.basename(output_file))
@@ -1243,6 +1340,9 @@ class ProcessingThread(QThread):
                     if not success:
                         raise OSError(f"Could not save {os.path.basename(output_file)}: {detail}")
                     details.append(detail)
+                if self._batch_cancelled(batch_id):
+                    self.batch_finished.emit(row, False, "Cancelled during export")
+                    continue
                 if not self._is_running:
                     break
                 message = "Success: Reused existing result" if reused else "Success: Saved"
@@ -1253,10 +1353,17 @@ class ProcessingThread(QThread):
 
             except Exception as e:
                 error_detail = str(e)
-                failed_summary = {"seq": seq_num, "id": batch_id, "error": error_detail}
-                failed_batches_summary.append(failed_summary)
-                print(f"[Bulk Save] batch={batch_id} error: {error_detail}")
-                self.batch_finished.emit(row, False, f"Failed: {error_detail}")
+                if self._batch_cancelled(batch_id):
+                    self.batch_finished.emit(row, False, "Cancelled during processing")
+                else:
+                    failed_summary = {"seq": seq_num, "id": batch_id, "error": error_detail}
+                    failed_batches_summary.append(failed_summary)
+                    print(f"[Bulk Save] batch={batch_id} error: {error_detail}")
+                    self.batch_finished.emit(row, False, f"Failed: {error_detail}")
+            finally:
+                with self._cancel_lock:
+                    if self._active_batch_id == str(batch_id):
+                        self._active_batch_id = None
 
         self.processing_complete.emit(failed_batches_summary)
 

@@ -47,7 +47,7 @@ from .similarity_parameter_settings import (
     save_similarity_v1_config,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import (
-    get_parameter_provider, get_specs, normalize_name,
+    get_parameter_provider, get_spec, get_specs, normalize_name,
 )
 
 
@@ -232,14 +232,26 @@ def slider(label_text, min_val, max_val, default, format_func=None, tooltip=""):
     return row, row.slider, row.value_input
 
 
-def dropdown(label_text, options, default, tooltip=""):
+def _dropdown_display_value(field, value):
+    labels = field.get("option_labels", {})
+    return str(labels.get(str(value), value))
+
+
+def _dropdown_stored_value(field, display_value):
+    labels = field.get("option_labels", {})
+    reverse_labels = {str(label): value for value, label in labels.items()}
+    return reverse_labels.get(str(display_value), display_value)
+
+
+def dropdown(label_text, options, default, tooltip="", option_labels=None):
     """Create [dropdown] widget with label using FormGroup.
 
     Returns: FormGroup
     """
+    option_labels = option_labels or {}
     form = FormGroup(label=label_text, input_type="select")
-    form.add_options([str(o) for o in options])
-    form.set_value(str(default))
+    form.add_options([str(option_labels.get(str(o), o)) for o in options])
+    form.set_value(str(option_labels.get(str(default), default)))
     form.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
     form.setMinimumHeight(58)
     form.setMaximumHeight(64)
@@ -529,6 +541,7 @@ class AlignmentParameterPage(QWidget):
         self.algorithm_name = normalize_name("alignment", algorithm_name)
         self.provider = ALIGNMENT_PARAMETER_PROVIDERS.get(self.algorithm_name)
         self.controls = {}
+        self.field_widgets = {}
         self._loading = False
         self._responsive_slider_rows = []
         self._setup_ui()
@@ -562,7 +575,7 @@ class AlignmentParameterPage(QWidget):
         title.setContentsMargins(0, 4, 0, 6)
         layout.addWidget(title)
 
-        config = self.provider["load"]() if self.provider.get("load") else {}
+        config = self._load_config_for_batch(self._active_batch_id())
         self._loading = True
         schema = self.provider.get("schema", [])
         for field in schema:
@@ -570,12 +583,14 @@ class AlignmentParameterPage(QWidget):
             value = config.get(key, field.get("default"))
             widget = self._create_field(field, value)
             if widget is not None:
+                self.field_widgets[key] = widget
                 (
                     layout.addWidget(widget)
                     if isinstance(widget, QWidget)
                     else layout.addLayout(widget)
                 )
         self._loading = False
+        self._update_conditional_visibility()
 
         if not schema:
             info_desc = QLabel(
@@ -607,7 +622,13 @@ class AlignmentParameterPage(QWidget):
         tooltip = self._resolve_tooltip(field)
 
         if field_type == "dropdown":
-            form = dropdown(label, field.get("options", []), value, tooltip=tooltip)
+            form = dropdown(
+                label,
+                field.get("options", []),
+                value,
+                tooltip=tooltip,
+                option_labels=field.get("option_labels"),
+            )
             form.input.currentIndexChanged.connect(
                 lambda *_: self._save_current_config()
             )
@@ -662,15 +683,97 @@ class AlignmentParameterPage(QWidget):
         return field.get("tooltip", "")
 
     def _collect_current_config(self):
-        config = self.provider["load"]()
+        config = self._load_config_for_batch(self._active_batch_id())
         for key, (field, control) in self.controls.items():
             config[key] = self._coerce_value(field, self._read_value(field, control))
         return config
 
+    def _active_batch_id(self):
+        widget = self
+        while widget is not None:
+            batch_id = getattr(widget, "current_batch_id", None)
+            if batch_id is not None:
+                return batch_id
+            widget = widget.parent() if hasattr(widget, "parent") else None
+
+        try:
+            from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment.alignment_config_provider import (
+                find_active_right_panel,
+            )
+
+            right_panel = find_active_right_panel()
+            return getattr(right_panel, "current_batch_id", None)
+        except Exception:
+            return None
+
+    def _load_config_for_batch(self, batch_id):
+        if not self.provider:
+            return {}
+        schema = self.provider.get("schema", [])
+        config = {field["key"]: field.get("default") for field in schema}
+        if batch_id is None:
+            return config
+
+        try:
+            from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
+
+            snapshot = batch_parameter_manager.get_batch_alignment_runtime_snapshot(
+                batch_id
+            )
+            batch_config = snapshot.get("params")
+            if isinstance(batch_config, dict):
+                config.update(batch_config)
+        except Exception as exc:
+            print(
+                f"[AlignmentParameterPage] Could not load batch parameters "
+                f"for {self.algorithm_name} batch_id={batch_id}: {exc}"
+            )
+        if str(self.algorithm_name).strip().lower() in {"ofb", "akaze"}:
+            # Older batch JSON may still contain the retired APAP dropdown.
+            # Do not surface or carry that stale field into the active form.
+            config.pop("warp_method", None)
+        return config
+
+    def reload_from_active_batch(self, batch_id=None):
+        if not self.provider:
+            return
+        if batch_id is None:
+            batch_id = self._active_batch_id()
+        self._reload_values(self._load_config_for_batch(batch_id))
+
+    def _save_config_for_batch(self, config):
+        batch_id = self._active_batch_id()
+        if batch_id is None or not self.provider:
+            return
+
+        config = dict(config)
+        if str(self.algorithm_name).strip().lower() in {"ofb", "akaze"}:
+            config.pop("warp_method", None)
+        from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
+
+        widget = self
+        store = None
+        while widget is not None:
+            if hasattr(widget, "current_batch_id") and hasattr(widget, "align_form"):
+                save_batch = self.provider.get("save_batch")
+                if callable(save_batch):
+                    save_batch(config)
+                    return
+                store = getattr(widget, "_store", None)
+                break
+            widget = widget.parent() if hasattr(widget, "parent") else None
+        batch_parameter_manager.save_batch_algorithm_params(
+            batch_id,
+            "alignment",
+            self.algorithm_name,
+            config,
+            store=store,
+        )
+
     def _read_value(self, field, control):
         field_type = field["type"]
         if field_type == "dropdown":
-            return control.input.currentText()
+            return _dropdown_stored_value(field, control.input.currentText())
         if field_type == "text":
             return control.input.text()
         if field_type in ("toggle", "checkbox"):
@@ -737,9 +840,27 @@ class AlignmentParameterPage(QWidget):
     def _save_current_config(self):
         if self._loading or not self.provider:
             return
+        self._update_conditional_visibility()
         config = self._collect_current_config()
-        self.provider["save"](config)
-        self.provider["save_batch"](config)
+        self._save_config_for_batch(config)
+
+    def _update_conditional_visibility(self):
+        """Apply schema-level visibility rules to parameter rows."""
+        for key, widget in self.field_widgets.items():
+            field = self.controls.get(key, ({}, None))[0]
+            conditions = field.get("visible_if", {})
+            visible = True
+            for dependency, expected in conditions.items():
+                dependency_control = self.controls.get(dependency)
+                if dependency_control is None:
+                    visible = False
+                    break
+                dependency_field, control = dependency_control
+                actual = self._read_value(dependency_field, control)
+                if str(actual).strip().lower() != str(expected).strip().lower():
+                    visible = False
+                    break
+            widget.setVisible(visible)
 
     def flush_pending_config(self):
         """Persist the visible parameter values before a batch is dispatched."""
@@ -751,8 +872,7 @@ class AlignmentParameterPage(QWidget):
         config = {}
         for field in self.provider["schema"]:
             config[field["key"]] = field.get("default")
-        self.provider["save"](config)
-        self.provider["save_batch"](config)
+        self._save_config_for_batch(config)
         self._reload_values(config)
 
     def _reload_values(self, config):
@@ -760,7 +880,7 @@ class AlignmentParameterPage(QWidget):
         for key, (field, control) in self.controls.items():
             value = config.get(key, field.get("default"))
             if field["type"] == "dropdown":
-                control.set_value(str(value))
+                control.set_value(_dropdown_display_value(field, value))
             elif field["type"] == "text":
                 control.input.setText(str(value))
             elif field["type"] in ("toggle", "checkbox"):
@@ -787,9 +907,25 @@ class DenoisingParameterPage(AlignmentParameterPage):
         self.algorithm_name = normalize_name("denoising", algorithm_name)
         self.provider = DENOISING_PARAMETER_PROVIDERS.get(self.algorithm_name)
         self.controls = {}
+        self.field_widgets = {}
         self._loading = False
         self._responsive_slider_rows = []
         self._setup_ui()
+
+    def _load_config_for_batch(self, batch_id):
+        if self.algorithm_name != "FusionNet":
+            return super()._load_config_for_batch(batch_id)
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.fusionnet_parameter_settings import (
+            load_fusionnet_config_for_batch,
+        )
+
+        return load_fusionnet_config_for_batch(batch_id)
+
+    def _save_config_for_batch(self, config):
+        if self.algorithm_name != "FusionNet":
+            return super()._save_config_for_batch(config)
+        self.provider["save"](config)
+        self.provider["save_batch"](config)
 
 
 def get_alignment_settings_page(algorithm_name):

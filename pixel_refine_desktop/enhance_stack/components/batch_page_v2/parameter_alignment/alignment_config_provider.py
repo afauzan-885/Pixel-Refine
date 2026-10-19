@@ -96,17 +96,24 @@ def save_alignment_config_for_active_batch(algorithm_name, params_key, config):
         right_panel.align_form.set_value(algorithm_name)
 
     if hasattr(right_panel, "_store") and right_panel._store:
+        batch_parameter_manager.save_batch_algorithm_params(
+            batch_id,
+            "alignment",
+            algorithm_name,
+            config,
+            store=right_panel._store,
+        )
         bulk_data = {
             f"{str_id}.{key}": value
             for key, value in settings.items()
         }
-        bulk_data[f"{str_id}.{params_key}"] = config
         right_panel._store.update_bulk(bulk_data, save=True)
     else:
+        batch_parameter_manager.save_batch_algorithm_params(
+            batch_id, "alignment", algorithm_name, config
+        )
         data = batch_parameter_manager.load_json_state()
-        data.setdefault(str_id, {})
-        data[str_id].update(settings)
-        data[str_id][params_key] = config
+        data.setdefault(str_id, {}).update(settings)
         batch_parameter_manager.save_json_state(data=data)
 
     if hasattr(right_panel, "logic"):

@@ -351,6 +351,41 @@ class SplatSRRecipe:
             count=len(self.paths),
         )
 
+    def _generate_support_confidence(
+        self, state, analysis_rgb, alignment_flow, aligned_gray, context
+    ):
+        """Evaluate the configured confidence provider for an aligned support."""
+        from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.splat_sr.legacy import (
+            SplatSRAlgorithm,
+        )
+
+        if self.weight_source in ("compute_spatial", "spatial", "reliability"):
+            generate_device = getattr(state.provider, "generate_device", None)
+            with self.compute_gate:
+                if callable(generate_device):
+                    return generate_device(
+                        state.reference_gray,
+                        aligned_gray,
+                        session=context.session,
+                    )
+                return state.provider(state.reference_gray, aligned_gray)
+
+        fast_path = getattr(state.provider, "infer_aligned_support_with_flow", None)
+        with self.compute_gate:
+            if callable(fast_path):
+                return fast_path(
+                    state.analysis_reference_rgb,
+                    analysis_rgb,
+                    alignment_flow,
+                )
+            warped_analysis = SplatSRAlgorithm._warp_rgb_for_confidence(
+                analysis_rgb, alignment_flow
+            )
+            try:
+                return state.provider(state.analysis_reference_rgb, warped_analysis)
+            finally:
+                del warped_analysis
+
     def process_support(self, index, support, state, context):
         from taichi_vision import taichi_aot
         from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.splat_sr.legacy import (
@@ -455,36 +490,13 @@ class SplatSRRecipe:
                 np.multiply(raw_gray, post_gain, out=raw_gray)
                 np.multiply(aligned_gray, post_gain, out=aligned_gray)
 
-        if self.weight_source in ("compute_spatial", "spatial", "reliability"):
-            generate_device = getattr(state.provider, "generate_device", None)
-            with self.compute_gate:
-                if callable(generate_device):
-                    confidence = generate_device(
-                        state.reference_gray,
-                        aligned_gray,
-                        session=context.session,
-                    )
-                else:
-                    confidence = state.provider(state.reference_gray, aligned_gray)
-        else:
-            fast_path = getattr(
-                state.provider, "infer_aligned_support_with_flow", None
-            )
-            with self.compute_gate:
-                if callable(fast_path):
-                    confidence = fast_path(
-                        state.analysis_reference_rgb,
-                        analysis_rgb,
-                        alignment_flow,
-                    )
-                else:
-                    warped_analysis = SplatSRAlgorithm._warp_rgb_for_confidence(
-                        analysis_rgb, alignment_flow
-                    )
-                    confidence = state.provider(
-                        state.analysis_reference_rgb, warped_analysis
-                    )
-                    del warped_analysis
+        confidence = self._generate_support_confidence(
+            state,
+            analysis_rgb,
+            alignment_flow,
+            aligned_gray,
+            context,
+        )
 
         # Confidence has consumed RGB analysis; release it before tile uploads.
         del analysis_rgb

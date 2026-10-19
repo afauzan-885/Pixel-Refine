@@ -163,9 +163,9 @@ class LucasKanade:
                 batch_params = batch_parameter_manager.load_json_state().get(
                     str(batch_id), {}
                 )
-                section = batch_params.get("lucas_kanade_params", {})
-                if not section:
-                    section = batch_params.get("lucas_kanade_gpu_params", {})
+                section = batch_parameter_manager.get_batch_algorithm_params(
+                    batch_id, "alignment", "Lucas Kanade", batch_entry=batch_params
+                )
                 if isinstance(section, dict):
                     config.update(section)
             except Exception as exc:
@@ -969,7 +969,6 @@ class LucasKanade:
                 dst=warped_gpu,
                 return_gpu=True,
             )
-            taichi_aot.engine.sync()
             if profile is not None:
                 profile["warp"] += time.perf_counter() - t0
 
@@ -1039,7 +1038,6 @@ class LucasKanade:
                 roi_w,
                 return_gpu=True,
             )
-            taichi_aot.engine.sync()
         finally:
             if flow_gpu is not None and hasattr(flow_gpu, "release"):
                 flow_gpu.release()

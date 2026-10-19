@@ -65,6 +65,13 @@ def _resolve_aot_asset(name, *, engine=None):
             )
             if resolved is not None:
                 return os.path.abspath(str(resolved))
+        from taichi_vision.llvm20_runtime_paths import application_assets_root
+
+        app_assets = application_assets_root(target.target_id)
+        if app_assets is not None:
+            backend_asset = os.path.join(app_assets, f"{stem}_{target.backend}.tcm")
+            if os.path.isfile(backend_asset):
+                return os.path.abspath(backend_asset)
     except (ImportError, OSError, RuntimeError, ValueError):
         # Resolution is an additive hardening layer. If a package/frozen build
         # omits the registry, preserve the historical fallback below.

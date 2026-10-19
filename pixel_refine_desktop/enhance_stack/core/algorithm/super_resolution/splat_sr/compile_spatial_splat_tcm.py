@@ -44,6 +44,12 @@ _ARCHES = {
     "cuda": ti.cuda,
     "cpu": ti.cpu,
 }
+_TARGET_IDS = {
+    "cpu": "cpu_x86_64_windows",
+    "cuda": "cuda_x86_64_windows_nvidia",
+    "vulkan": "vulkan_x86_64_windows",
+    "opengl": "opengl_x86_64_windows",
+}
 
 
 def compile_spatial_splat(
@@ -53,7 +59,12 @@ def compile_spatial_splat(
     if name not in _ARCHES:
         raise ValueError(f"unsupported backend {backend!r}; choose {sorted(_ARCHES)}")
     output_dir = output_dir or os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "../../../../../ui/data/aot_assets")
+        os.path.join(
+            os.path.dirname(__file__),
+            "../../../../../../taichi_vision/taichi_algorithm/aot_tcm",
+            _TARGET_IDS[name],
+            "application_assets",
+        )
     )
     os.makedirs(output_dir, exist_ok=True)
     try:

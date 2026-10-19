@@ -9,14 +9,38 @@ import numpy as np
 
 def _asset_path(engine) -> Path:
     from taichi_vision.taichi_aot.artifact_targets import detect_target, resolve_artifact
+    from taichi_vision.llvm20_runtime_paths import (
+        application_assets_root,
+        tcm_root,
+    )
 
     target = detect_target(
         backend=str(engine.arch),
         device=str(getattr(engine, "gpu_name", "") or ""),
     )
-    assets_root = Path(__file__).resolve().parents[5] / "ui" / "data" / "aot_assets"
-    path = resolve_artifact(
-        assets_root, "hdr_spde_mr", target, allow_legacy=False
+    assets_root = application_assets_root(target.target_id)
+    if assets_root is None:
+        assets_root = (
+            Path(__file__).resolve().parents[6]
+            / "taichi_vision"
+            / "taichi_algorithm"
+            / "aot_tcm"
+            / target.target_id
+            / "application_assets"
+        )
+    roots = [assets_root]
+    canonical_root = tcm_root(target.target_id)
+    if canonical_root is not None and canonical_root not in roots:
+        roots.append(canonical_root)
+    path = next(
+        (
+            resolved
+            for root in roots
+            if (resolved := resolve_artifact(
+                root, "hdr_spde_mr", target, allow_legacy=False
+            )) is not None
+        ),
+        None,
     )
     if path is None:
         expected = assets_root / target.artifact_name("hdr_spde_mr")

@@ -89,6 +89,13 @@ class SpatialFusionDenoisingAlgorithm:
             for k, v in ctx.params.items():
                 if k not in config and v is not None:
                     config[k] = v
+            all_algorithm_params = ctx.params.get("algorithm_params")
+            if isinstance(all_algorithm_params, dict):
+                denoising_params = all_algorithm_params.get("denoising")
+                if isinstance(denoising_params, dict):
+                    canonical = denoising_params.get("similarity")
+                    if isinstance(canonical, dict):
+                        config.update(canonical)
         return normalize_similarity_spatial_config(config)
 
     @staticmethod
@@ -109,7 +116,8 @@ class SpatialFusionDenoisingAlgorithm:
             )
             import threading
 
-            is_raw = bool(getattr(ctx, "is_linear_mode", False))
+            source_descriptor = getattr(ctx, "source_descriptor", None)
+            is_raw = getattr(source_descriptor, "kind", None) == "raw"
             tile_size = max(8, int(config.get("similarity_spatial_tile_size", 24)))
             overlap = float(np.clip(config.get("similarity_spatial_overlap_percent", 0.35), 0.0, 0.85))
             # A dedicated setting preserves full-resolution behavior for old
@@ -178,18 +186,17 @@ class SpatialFusionDenoisingAlgorithm:
                 overlap=overlap,
                 ghost_penalty=ghost_penalty,
                 chroma_sensitivity=chroma_sensitivity,
-                is_raw=is_raw,
+                source_descriptor=source_descriptor,
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=getattr(ctx, "update_progress", None),
-                raw_native=bool(getattr(ctx, "is_raw_native", False)),
             )
 
             if result_fp32 is None:
                 return None
 
-            if bool(getattr(ctx, "is_raw_native", False)):
-                ctx.raw_native_result = result_fp32
+            if bool(getattr(ctx, "is_raw_pipeline", False)):
+                ctx.raw_pipeline_result = result_fp32
                 result = result_fp32.preview_rgb
                 print(
                     f"[SpatialFusion][RAW Native] preview shape={result.shape} "
@@ -253,7 +260,7 @@ class SpatialFusionDenoisingAlgorithm:
             enable_alignment=True,
             optical_flow_type="alignment_tile",
             return_raw=False,
-            is_linear_mode=bool(getattr(ctx, "is_linear_mode", False)),
+            is_linear_mode=bool(getattr(ctx, "is_raw_pipeline", False)),
             proxy_scale=float(config.get("proxy_scale", 1.0)),
             process_in="gpu",
             merging_backend="taichi",

@@ -8,6 +8,7 @@ import json
 import queue
 import sys
 import threading
+from collections import deque
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any, Callable, Iterable, Iterator, Mapping
@@ -17,6 +18,8 @@ from .contracts import (
     PipelineExecutionContext,
     PipelineOptions,
     PipelineRecipe,
+    PipelineSourceDescriptor,
+    PipelineSupportCompletion,
     PipelineSource,
 )
 
@@ -168,6 +171,30 @@ class InProcessingLease:
     def __exit__(self, exc_type, exc, traceback) -> bool:
         self.release()
         return False
+
+
+class PipelineSupportLease:
+    """Prepared payload whose admission and buffer ownership transfer together."""
+
+    __slots__ = ("index", "value", "_release_value", "_lease", "_lock", "_released")
+
+    def __init__(self, index, value, release_value, lease, *, retain_value=True):
+        self.index = int(index)
+        self.value = value if retain_value else None
+        self._release_value = release_value
+        self._lease = lease
+        self._lock = threading.Lock()
+        self._released = False
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        try:
+            _dispose(self.value, self._release_value)
+        finally:
+            self._lease.release()
 
 
 class _BoundedSupportStream(Iterator[tuple[int, Any]]):
@@ -345,6 +372,7 @@ class PipelineRuntime:
         progress_callback: Callable[..., None] | None = None,
         session: Any = None,
         session_factory: Callable[[Any], Any] | None = None,
+        source_descriptor: PipelineSourceDescriptor | None = None,
     ):
         self.prefetch_depth = normalize_prefetch_depth(prefetch_depth)
         self.in_processing_depth = normalize_in_processing_depth(in_processing_depth)
@@ -359,6 +387,7 @@ class PipelineRuntime:
         self._session = session
         self._owns_session = session is None
         self._session_factory = session_factory
+        self.source_descriptor = source_descriptor
         self._closed = False
         self._lock = threading.RLock()
         self._streams: set[_BoundedSupportStream] = set()
@@ -535,6 +564,30 @@ class PipelineRuntime:
         bounded by ``prefetch_depth``. Preparation stays on a host worker; this
         API does not make GPU kernel execution concurrent.
         """
+        yield from self._iter_prepared_supports(
+            indices,
+            loader,
+            prepare,
+            stop_when=stop_when,
+            raise_on_cancel=raise_on_cancel,
+            source_disposer=source_disposer,
+            prepared_disposer=prepared_disposer,
+            transfer_ownership=False,
+        )
+
+    def _iter_prepared_supports(
+        self,
+        indices: Iterable[int],
+        loader: Callable[[int], Any],
+        prepare: Callable[[int, Any], Any],
+        *,
+        stop_when: Callable[[], bool] | None = None,
+        raise_on_cancel: bool = False,
+        source_disposer: Callable[[Any], None] | None = None,
+        prepared_disposer: Callable[[Any], None] | None = None,
+        transfer_ownership: bool,
+    ) -> Iterator[tuple[int, Any]]:
+        """Shared prepared stream with optional explicit support ownership."""
         if self._closed:
             raise RuntimeError("PipelineRuntime is closed")
 
@@ -576,11 +629,26 @@ class PipelineRuntime:
                     try:
                         prepared = prepare(index, source)
                         prepared, release = own_prepared(prepared)
-                        yield index, prepared
+                        if transfer_ownership:
+                            support_lease = PipelineSupportLease(
+                                index,
+                                prepared,
+                                release or prepared_disposer,
+                                lease,
+                                retain_value=(release or prepared_disposer) is not None,
+                            )
+                            yielded_item = (index, prepared, support_lease)
+                            prepared = None
+                            lease = None
+                            yield yielded_item
+                            yielded_item = None
+                        else:
+                            yield index, prepared
                     finally:
                         if prepared is not None:
                             _dispose(prepared, release or prepared_disposer)
-                        lease.release()
+                        if lease is not None:
+                            lease.release()
             finally:
                 try:
                     source_stream.close()
@@ -686,11 +754,25 @@ class PipelineRuntime:
                     raise item.error
                 assert isinstance(item, _Loaded)
                 prepared, release, lease = item.value
-                try:
-                    yield item.index, prepared
-                finally:
-                    _dispose(prepared, release or prepared_disposer)
-                    lease.release()
+                if transfer_ownership:
+                    support_lease = PipelineSupportLease(
+                        item.index,
+                        prepared,
+                        release or prepared_disposer,
+                        lease,
+                        retain_value=(release or prepared_disposer) is not None,
+                    )
+                    yielded_item = (item.index, prepared, support_lease)
+                    prepared = None
+                    lease = None
+                    yield yielded_item
+                    yielded_item = None
+                else:
+                    try:
+                        yield item.index, prepared
+                    finally:
+                        _dispose(prepared, release or prepared_disposer)
+                        lease.release()
         finally:
             local_stop.set()
             if worker is not threading.current_thread():
@@ -705,6 +787,172 @@ class PipelineRuntime:
                     _dispose(prepared, release or prepared_disposer)
                     lease.release()
 
+    def iter_admitted_supports(
+        self,
+        indices: Iterable[int],
+        loader: Callable[[int], Any],
+        prepare: Callable[[int, Any], Any],
+        *,
+        stop_when: Callable[[], bool] | None = None,
+        raise_on_cancel: bool = False,
+        source_disposer: Callable[[Any], None] | None = None,
+        prepared_disposer: Callable[[Any], None] | None = None,
+    ) -> Iterator[tuple[int, Any, PipelineSupportLease]]:
+        """Yield prepared supports with explicit ownership through the last stage.
+
+        The consumer must release each returned lease only after every queued
+        stage that uses its support has completed. Loading may prefetch, while
+        preparation remains on the consuming stage thread.
+        """
+        source_stream = iter(
+            self.iter_supports(
+                indices,
+                loader,
+                stop_when=stop_when,
+                raise_on_cancel=raise_on_cancel,
+                disposer=source_disposer,
+            )
+        )
+        try:
+            while True:
+                lease = self.acquire_in_processing_slot(stop_when=stop_when)
+                if lease is None:
+                    if raise_on_cancel and _event_is_set(self.stop_event):
+                        raise PipelineCancelledError(
+                            "Pipeline in-processing queue cancelled"
+                        )
+                    break
+                try:
+                    index, source = next(source_stream)
+                except StopIteration:
+                    lease.release()
+                    break
+                except BaseException:
+                    lease.release()
+                    raise
+
+                prepared = None
+                try:
+                    prepared = prepare(index, source)
+                    support_lease = PipelineSupportLease(
+                        index,
+                        prepared,
+                        prepared_disposer,
+                        lease,
+                        retain_value=prepared_disposer is not None,
+                    )
+                    yielded_item = (index, prepared, support_lease)
+                    prepared = None
+                    lease = None
+                    yield yielded_item
+                    yielded_item = None
+                finally:
+                    if prepared is not None:
+                        _dispose(prepared, prepared_disposer)
+                    if lease is not None:
+                        lease.release()
+        finally:
+            try:
+                source_stream.close()
+            except Exception:
+                pass
+
+    def _execute_prepared_supports(
+        self,
+        source: PipelineSource,
+        recipe: PipelineRecipe,
+        support_indices: Iterable[int],
+        reference_state: Any,
+        context: PipelineExecutionContext,
+        prepare_support: Callable[..., Any],
+        release_support: Callable[..., Any],
+    ) -> None:
+        """Run a recipe whose support lifetime may extend past submission."""
+
+        def prepare(index: int, support: Any) -> Any:
+            context.check_cancelled()
+            return prepare_support(index, support, reference_state, context)
+
+        support_stream = self._iter_prepared_supports(
+            support_indices,
+            source.load_support,
+            prepare,
+            raise_on_cancel=True,
+            prepared_disposer=lambda support: release_support(
+                support, reference_state, context
+            ),
+            transfer_ownership=True,
+        )
+        pending: deque[
+            tuple[PipelineSupportCompletion, PipelineSupportLease]
+        ] = deque()
+
+        def finish_oldest() -> None:
+            completion, support_lease = pending.popleft()
+            try:
+                completion.result()
+            finally:
+                support_lease.release()
+
+        try:
+            for index, _support, support_lease in support_stream:
+                completion_pending = False
+                try:
+                    context.check_cancelled()
+                    completion = recipe.process_support(
+                        index,
+                        support_lease.value,
+                        reference_state,
+                        context,
+                    )
+                    if completion is None:
+                        support_lease.release()
+                        continue
+                    wait_for_result = getattr(completion, "result", None)
+                    if not callable(wait_for_result):
+                        raise TypeError(
+                            "process_support() must return None or a "
+                            "completion with result()"
+                        )
+                    pending.append((completion, support_lease))
+                    completion_pending = True
+                    if len(pending) >= self.in_processing_depth:
+                        finish_oldest()
+                except BaseException:
+                    if not completion_pending:
+                        support_lease.release()
+                    raise
+
+            while pending:
+                finish_oldest()
+        except BaseException:
+            while pending:
+                try:
+                    finish_oldest()
+                except BaseException:
+                    pass
+            raise
+        finally:
+            support_stream.close()
+
+    def _execute_legacy_supports(
+        self,
+        source: PipelineSource,
+        recipe: PipelineRecipe,
+        support_indices: Iterable[int],
+        reference_state: Any,
+        context: PipelineExecutionContext,
+    ) -> None:
+        """Run the original synchronous recipe contract."""
+        support_stream = self.iter_supports(
+            support_indices,
+            source.load_support,
+            raise_on_cancel=True,
+        )
+        for index, support in support_stream:
+            context.check_cancelled()
+            recipe.process_support(index, support, reference_state, context)
+
     def execute(
         self,
         source: PipelineSource,
@@ -712,9 +960,15 @@ class PipelineRuntime:
         support_indices: Iterable[int],
         *,
         options: Mapping[str, Any] | None = None,
+        source_descriptor: PipelineSourceDescriptor | None = None,
         engine: Any = None,
+        own_reference: bool = True,
     ) -> Any:
-        """Run the common reference → ordered supports → finalize lifecycle."""
+        """Run the common reference → ordered supports → finalize lifecycle.
+
+        Set ``own_reference=False`` when the source or caller retains ownership
+        of its reference payload beyond this execution.
+        """
         try:
             session = self.ensure_session(engine)
             context = PipelineExecutionContext(
@@ -726,19 +980,43 @@ class PipelineRuntime:
                 ),
                 stop_event=self.stop_event,
                 progress_callback=self.progress_callback,
+                source_descriptor=(
+                    source_descriptor
+                    if source_descriptor is not None
+                    else getattr(source, "descriptor", self.source_descriptor)
+                ),
             )
             context.check_cancelled()
             reference = source.load_reference()
-            if reference is not None and hasattr(session, "own"):
+            if own_reference and reference is not None and hasattr(session, "own"):
                 session.own(reference)
             reference_state = recipe.prepare_reference(reference, context)
-            for index, support in self.iter_supports(
-                support_indices,
-                source.load_support,
-                raise_on_cancel=True,
-            ):
-                context.check_cancelled()
-                recipe.process_support(index, support, reference_state, context)
+            prepare_support = getattr(recipe, "prepare_support", None)
+            release_support = getattr(recipe, "release_support", None)
+            if callable(prepare_support) != callable(release_support):
+                raise TypeError(
+                    "PreparedPipelineRecipe must implement both "
+                    "prepare_support() and release_support()"
+                )
+
+            if callable(prepare_support):
+                self._execute_prepared_supports(
+                    source,
+                    recipe,
+                    support_indices,
+                    reference_state,
+                    context,
+                    prepare_support,
+                    release_support,
+                )
+            else:
+                self._execute_legacy_supports(
+                    source,
+                    recipe,
+                    support_indices,
+                    reference_state,
+                    context,
+                )
             context.check_cancelled()
             return recipe.finalize(reference_state, context)
         finally:
@@ -811,6 +1089,7 @@ def runtime_entrypoint(function: Callable[..., Any]) -> Callable[..., Any]:
             in_processing_depth=resolve_in_processing_depth(),
             stop_event=bound.arguments.get("stop_event"),
             progress_callback=bound.arguments.get("progress_callback"),
+            source_descriptor=bound.arguments.get("source_descriptor"),
         )
         token = _active_runtime.set(runtime)
         try:
@@ -835,7 +1114,9 @@ __all__ = [
     "PREFETCH_MAX",
     "PREFETCH_MIN",
     "PREFETCH_SETTING_KEY",
+    "InProcessingLease",
     "PipelineRuntime",
+    "PipelineSupportLease",
     "current_pipeline_runtime",
     "normalize_prefetch_depth",
     "normalize_in_processing_depth",

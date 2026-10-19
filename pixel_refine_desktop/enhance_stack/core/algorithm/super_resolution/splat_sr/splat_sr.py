@@ -412,7 +412,16 @@ if _IS_COMPILE_MODE:
                     tx = (float(x + source_x) + flow[y, x, 0]) * float(scale)
                     d2 = (float(global_i) - ty) ** 2 + (float(global_j) - tx) ** 2
                     if d2 <= radius * radius:
-                        weight = confidence[y, x] * ti.exp(-d2 * inv_two_sigma2)
+                        # Frames/flow are halo crops, while confidence can remain
+                        # the borrowed full-frame resident map. Use the same
+                        # global source coordinate as the geometry above.
+                        confidence_y = ti.select(
+                            confidence.shape[0] == frames.shape[0], y, y + source_y
+                        )
+                        confidence_x = ti.select(
+                            confidence.shape[1] == frames.shape[1], x, x + source_x
+                        )
+                        weight = confidence[confidence_y, confidence_x] * ti.exp(-d2 * inv_two_sigma2)
                         denom += weight
                         v0 += weight * frames[y, x, 0]
                         v1 += weight * frames[y, x, 1]
@@ -602,7 +611,9 @@ if _IS_COMPILE_MODE:
         _build_splat_graph(module)
 
         out_dir = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "../../../../../ui/data/aot_assets"
+            os.path.dirname(__file__),
+            "../../../../../../taichi_vision/taichi_algorithm/aot_tcm",
+            "vulkan_x86_64_windows", "application_assets"
         ))
         os.makedirs(out_dir, exist_ok=True)
         tcm_path = _package_tcm(module, out_dir, "splat_sr_vulkan.tcm")

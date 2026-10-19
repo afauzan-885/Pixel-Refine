@@ -6,7 +6,6 @@ to the high-performance GPU-resident pipeline (resident_pipeline.py).
 """
 
 import gc
-import json
 import os
 import re
 import sqlite3
@@ -18,7 +17,7 @@ import numpy as np
 from ._common_helpers import frame_info as _frame_info
 from ..catalog import create_registry, get_names, get_options, get_spec, normalize_name
 
-from config import GENERAL_SETTINGS_FILE
+from config import SUPPORTED_FORMATS
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features.global_feature import (
     extract_exif,
     get_all_image_paths_for_single_process,
@@ -30,6 +29,9 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_featu
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.base_worker import (
     BaseAlgorithmWorker,
+)
+from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
+    PipelineSourceDescriptor,
 )
 
 
@@ -168,10 +170,9 @@ class PipelineContext:
     total_images: int = 0
     batch_plan: list = field(default_factory=list)
     params: dict = field(default_factory=dict)
-    is_linear_mode: bool = False
-    processing_format: str = "RGB Linear"
-    is_raw_native: bool = False
-    raw_native_result: object = None
+    source_descriptor: Optional[PipelineSourceDescriptor] = None
+    is_raw_pipeline: bool = False
+    raw_pipeline_result: object = None
     update_progress: object = None
     stop_requested: object = None
     single_process: bool = True
@@ -300,49 +301,58 @@ class MFDenoiserAlgorithm:
                 b_str = str(batch_id)
                 if b_str in batch_data and isinstance(batch_data[b_str], dict):
                     b_cfg = batch_data[b_str]
-                    # Accept the current batch key and legacy/experimental
-                    # names so SpatialFusion receives the same values that
-                    # the Similarity parameter panel saved.
-                    for key in (
-                        "spatial_params",
-                        "similarity_spatial_params",
-                        "similarity_fusion_params",
-                        "similarity_params",
-                    ):
-                        nested = b_cfg.get(key)
-                        if isinstance(nested, dict):
-                            params.update(nested)
+                    params["algorithm_params"] = (
+                        batch_parameter_manager.normalize_batch_algorithm_params(
+                            b_cfg
+                        )
+                    )
+                    denoising_name = b_cfg.get("denoising_algo", "Similarity")
+                    params.update(
+                        batch_parameter_manager.get_batch_algorithm_params(
+                            batch_id,
+                            "denoising",
+                            denoising_name,
+                            batch_entry=b_cfg,
+                        )
+                    )
 
                     align_settings = (
-                        batch_parameter_manager.get_alignment_settings_for_batch(
+                        batch_parameter_manager.get_batch_alignment_runtime_snapshot(
                             batch_id
                         )
                     )
-                    if (
-                        align_settings
-                        and "params" in align_settings
-                        and isinstance(align_settings["params"], dict)
-                    ):
-                        params["alignment_params"] = align_settings["params"]
-            except Exception:
-                pass
+                    if align_settings:
+                        alignment_spec = get_spec(
+                            "alignment",
+                            align_settings.get("alignment_algo", "No Alignment"),
+                        )
+                        alignment_params = {}
+                        if alignment_spec.parameters:
+                            schema = alignment_spec.parameters.load()["schema"]
+                            alignment_params.update(
+                                {
+                                    field["key"]: field.get("default")
+                                    for field in schema
+                                }
+                            )
+
+                        batch_params = align_settings.get("params")
+                        if isinstance(batch_params, dict):
+                            alignment_params.update(batch_params)
+                        if str(
+                            align_settings.get("alignment_algo", "")
+                        ).strip().lower() in {"ofb", "akaze"}:
+                            alignment_params["warp_method"] = "homography"
+                        params["alignment_params"] = alignment_params
+            except Exception as exc:
+                print(
+                    f"[MFDenoiser][Config] alignment settings unavailable "
+                    f"for batch_id={batch_id}: {exc}"
+                )
 
         params = normalize_similarity_spatial_config(params)
 
         print(f"[MFDenoiser][Config] params={params}")
-
-        params["enable_linear_mode"] = False
-        params["processing_format"] = "RGB Linear"
-        try:
-            if os.path.exists(GENERAL_SETTINGS_FILE):
-                with open(GENERAL_SETTINGS_FILE, "r") as f:
-                    general = json.load(f)
-                params["enable_linear_mode"] = general.get("enable_linear_mode", False)
-                params["processing_format"] = general.get(
-                    "processing_format", "RGB Linear"
-                )
-        except (OSError, json.JSONDecodeError):
-            pass
 
         return params
 
@@ -364,24 +374,35 @@ class MFDenoiserAlgorithm:
         ref_name = os.path.splitext(os.path.basename(ctx.image_paths[0]))[0]
         ctx.output_name_base = ref_name or "stack"
 
-        is_linear = ctx.params.get("enable_linear_mode", False)
-        _, ext = os.path.splitext(ctx.image_paths[0])
-        ctx.processing_format = (
-            str(ctx.params.get("processing_format", "RGB Linear")).strip()
-            or "RGB Linear"
+        raw_extensions = frozenset(
+            str(extension).lower()
+            for extension in SUPPORTED_FORMATS.get("raw", ())
         )
-        all_dng = all(
-            os.path.splitext(path)[1].lower() == ".dng" for path in ctx.image_paths
+        source_extensions = tuple(
+            os.path.splitext(path)[1].lower() for path in ctx.image_paths
         )
-        ctx.is_raw_native = ctx.processing_format.lower() == "raw native" and all_dng
-        if ctx.processing_format.lower() == "raw native" and not all_dng:
-            raise ValueError("RAW Native requires every frame in the burst to be a DNG")
-        ctx.is_linear_mode = bool(
-            (is_linear or ctx.is_raw_native)
-            and ext.lower() in (".dng", ".cr2", ".cr3", ".nef", ".arw")
+        raw_flags = tuple(extension in raw_extensions for extension in source_extensions)
+        if any(raw_flags) and not all(raw_flags):
+            raise ValueError("A denoising burst cannot mix RAW and RGB input frames")
+
+        is_raw_input = bool(raw_flags and all(raw_flags))
+        if is_raw_input and any(extension != ".dng" for extension in source_extensions):
+            unsupported = next(
+                extension for extension in source_extensions if extension != ".dng"
+            )
+            raise ValueError(
+                f"RAW pipeline detected {unsupported} input, but the active RAW "
+                "provider currently supports DNG only"
+            )
+
+        source_kind = "raw" if is_raw_input else "rgb"
+        ctx.source_descriptor = PipelineSourceDescriptor(
+            kind=source_kind,
+            metadata={"extensions": source_extensions},
         )
-        if ctx.is_raw_native:
-            print("[MFDenoiser][RAW Native] enabled: CFA accumulation route selected")
+        ctx.is_raw_pipeline = is_raw_input
+        if is_raw_input:
+            print("[MFDenoiser][RAW pipeline] CFA route selected from input descriptor")
         return ctx
 
     def build_batch_plan(self, ctx):
@@ -445,12 +466,17 @@ class MFDenoiserAlgorithm:
                     load_frame_to_gpu,
                 )
 
-                ref_gpu = load_frame_to_gpu(ctx.image_paths[0], is_raw=ctx.is_linear_mode)
+                ref_gpu = load_frame_to_gpu(
+                    ctx.image_paths[0],
+                    is_raw=(
+                        getattr(ctx.source_descriptor, "kind", None) == "raw"
+                    ),
+                )
                 ref_np = ref_gpu.to_numpy()
                 ref_gpu.destroy()
-                scale = 65535.0 if ctx.is_linear_mode else 255.0
+                scale = 65535.0 if ctx.is_raw_pipeline else 255.0
                 ctx.result_image = np.clip(ref_np * scale + 0.5, 0, scale).astype(
-                    np.uint16 if ctx.is_linear_mode else np.uint8
+                    np.uint16 if ctx.is_raw_pipeline else np.uint8
                 )
             return ctx
 
@@ -461,8 +487,8 @@ class MFDenoiserAlgorithm:
 
     def save_process(self, ctx):
         """Save the current pipeline result."""
-        raw_native_result = getattr(ctx, "raw_native_result", None)
-        if raw_native_result is not None:
+        raw_pipeline_result = getattr(ctx, "raw_pipeline_result", None)
+        if raw_pipeline_result is not None:
             output_folder = "database/stack"
             os.makedirs(output_folder, exist_ok=True)
             safe_name = (
@@ -473,10 +499,10 @@ class MFDenoiserAlgorithm:
             )
             output_suffix = ctx.params.get("output_suffix", "mf_denoiser")
             output_path = os.path.join(output_folder, f"{safe_name}_{output_suffix}.dng")
-            print(f"[MFDenoiser][Save] RAW Native DNG output_path={output_path}")
-            saved_path = raw_native_result.save_dng(output_path)
-            ctx.raw_native_result = None
-            del raw_native_result
+            print(f"[MFDenoiser][Save] RAW DNG output_path={output_path}")
+            saved_path = raw_pipeline_result.save_dng(output_path)
+            ctx.raw_pipeline_result = None
+            del raw_pipeline_result
             return saved_path
 
         if ctx.result_image is None:
@@ -497,7 +523,7 @@ class MFDenoiserAlgorithm:
             f"[MFDenoiser][Save] output_path={output_path} result={_frame_info(ctx.result_image)}"
         )
 
-        if ctx.is_linear_mode:
+        if ctx.is_raw_pipeline:
             result_to_save = ctx.result_image
             ctx.result_image = None
             return save_linear_dng(
@@ -509,12 +535,9 @@ class MFDenoiserAlgorithm:
         # Apply tone mapping only on RAW input (linear sensor data).
         # For standard non-RAW images (JPG, PNG, sRGB TIFF), tone mapping is already baked in,
         # so we disable tone mapping to prevent double tone mapping (oversaturation / blown highlights).
-        is_raw_input = False
-        if ctx.image_paths:
-            _, ext = os.path.splitext(ctx.image_paths[0])
-            is_raw_input = ext.lower() in (
-                ".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2", ".pef", ".raf"
-            )
+        is_raw_input = bool(
+            getattr(getattr(ctx, "source_descriptor", None), "kind", None) == "raw"
+        )
 
         result_to_save = ctx.result_image
         ctx.result_image = None
@@ -647,7 +670,7 @@ class MFDenoiserAlgorithm:
             ctx.frames = None
             ctx.aligned_frames = None
             ctx.result_image = None
-            ctx.raw_native_result = None
+            ctx.raw_pipeline_result = None
             import gc
             gc.collect()
         except Exception:

@@ -505,18 +505,6 @@ class EnhanceStackView(WorkspaceView):
                 and self.single_page_view.controller
             ):
                 self.single_page_view.controller.invalidate_batch_cache(None)
-
-            # Synchronize batches: refresh V2
-            if (
-                hasattr(self.single_page_view, "batch_panel")
-                and self.single_page_view.batch_panel
-            ):
-                batches = self.single_page_view.batch_panel._load_batches()
-                curr_id = self.single_page_view.batch_panel.current_batch_id
-                if curr_id is not None and any(b.id == curr_id for b in (batches or [])):
-                    self.single_page_view.batch_panel.select_batch_sync(curr_id)
-                elif batches:
-                    self.single_page_view.batch_panel.select_batch_sync(batches[0].id)
             # Synchronize switch on V2 header
             if (
                 hasattr(self.single_page_view, "workspace_panel")
@@ -525,6 +513,26 @@ class EnhanceStackView(WorkspaceView):
                 dp = self.single_page_view.workspace_panel.display_panel
                 dp.is_bulk_mode = False
                 dp.set_mode_button_state(False)
+
+            # Refresh after the V2 page is visible so grid sizing and thumbnail
+            # scheduling see the final viewport geometry.
+            QTimer.singleShot(0, self._refresh_batch_after_legacy_switch)
+
+    def _refresh_batch_after_legacy_switch(self):
+        """Reload the selected batch after returning from the legacy Bulk page."""
+        if self.stacked_widget.currentWidget() is not self.single_page_view:
+            return
+        batch_panel = getattr(self.single_page_view, "batch_panel", None)
+        if batch_panel is None:
+            return
+        batches = batch_panel._load_batches() or []
+        current_id = batch_panel.current_batch_id
+        selected_id = next(
+            (batch.id for batch in batches if batch.id == current_id),
+            batches[0].id if batches else None,
+        )
+        if selected_id is not None:
+            batch_panel.select_batch_sync(selected_id)
 
         # Single page buttons
         # self.top_bar.single_page_import_button.clicked.connect(

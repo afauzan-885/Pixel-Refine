@@ -59,12 +59,80 @@ def send_ipc(msg: dict):
         pass
 
 
+def _single_process_mode(msg: dict) -> bool:
+    """Read the execution mode from the JSONL request without coercing strings."""
+    value = msg.get("single_process", False)
+    if not isinstance(value, bool):
+        raise ValueError("single_process must be a JSON boolean")
+    return value
+
+
+def _validate_pipeline_plan(raw_plan: object, selections: dict) -> list[tuple[str, str]]:
+    """Validate Kotlin's ordered stages against selected algorithms without choosing their order."""
+    if not isinstance(raw_plan, list):
+        raise ValueError("pipeline_plan must be a JSON array")
+
+    from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec, plan_stages
+
+    expected = {stage.category: stage.name for stage in plan_stages(selections)}
+    result = []
+    seen = set()
+    for index, entry in enumerate(raw_plan):
+        if not isinstance(entry, dict):
+            raise ValueError(f"pipeline_plan[{index}] must be an object")
+        category = entry.get("category")
+        algorithm = entry.get("algorithm")
+        if not isinstance(category, str) or not isinstance(algorithm, str):
+            raise ValueError(f"pipeline_plan[{index}] requires string category and algorithm")
+        if category in seen:
+            raise ValueError(f"pipeline_plan contains multiple stages for '{category}'")
+        if category not in expected:
+            raise ValueError(f"pipeline_plan contains unselected stage category '{category}'")
+        spec = get_spec(category, algorithm)
+        if spec.disabled or spec.name != expected[category]:
+            raise ValueError(
+                f"pipeline_plan stage '{category}/{algorithm}' does not match selected '{expected[category]}'"
+            )
+        seen.add(category)
+        result.append((category, spec.name))
+
+    if seen != set(expected):
+        missing = sorted(set(expected) - seen)
+        raise ValueError(f"pipeline_plan is missing selected stages: {', '.join(missing)}")
+    return result
+
+
 class WorkerRunner:
     def __init__(self):
         self.cmd_queue = queue.Queue()
         self.current_stop_event = threading.Event()
         self.is_running = True
         self.current_task_id = None
+        self.pending_cancel_task_id = None
+        self.pipeline_session = None
+        self.state_lock = threading.Lock()
+
+    def request_task_cancel(self, task_id):
+        """Cancel only the matching task; remember a pre-dispatch request once."""
+        if not isinstance(task_id, str) or not task_id:
+            return
+        with self.state_lock:
+            session_task_id = self.pipeline_session.get("task_id") if self.pipeline_session else None
+            if task_id in (self.current_task_id, session_task_id):
+                self.current_stop_event.set()
+            else:
+                # The desktop app has one active task. Do not let stale IDs
+                # cancel a later task.
+                self.pending_cancel_task_id = task_id
+
+    def apply_pending_cancel(self, task_id):
+        with self.state_lock:
+            pending = self.pending_cancel_task_id
+            if pending is None:
+                return
+            self.pending_cancel_task_id = None
+            if pending == task_id:
+                self.current_stop_event.set()
 
     def start_stdin_reader(self):
         """Read lines from stdin asynchronously to remain responsive to stop commands."""
@@ -81,9 +149,19 @@ class WorkerRunner:
                         continue
                     data = json.loads(line)
                     cmd = data.get("cmd")
-                    if cmd == "stop":
-                        # Immediate stop trigger
-                        self.current_stop_event.set()
+                    if cmd in ("stop", "cancel"):
+                        task_id = data.get("task_id")
+                        if isinstance(task_id, str) and task_id:
+                            self.request_task_cancel(task_id)
+                        elif cmd == "stop":
+                            # Legacy callers do not send an ID.
+                            with self.state_lock:
+                                self.current_stop_event.set()
+                    elif cmd == "shutdown":
+                        # Closing the parent pipe must also stop an active adapter.
+                        with self.state_lock:
+                            if self.current_task_id or self.pipeline_session:
+                                self.current_stop_event.set()
                     self.cmd_queue.put(data)
                 except Exception as exc:
                     send_ipc({"type": "log", "level": "warning", "message": f"Stdin read error: {exc}"})
@@ -98,40 +176,46 @@ class WorkerRunner:
         device = os.environ.get("AOT_DEVICE", "0")
         vendor = os.environ.get("TARGET_VENDOR", "")
 
-        # Pre-initialize Taichi Vision engine in worker background so backend DLLs load immediately
+        startup_errors = []
         try:
-            import taichi_vision.taichi_aot as ta_aot
-            ta_aot.get_engine()
+            self._initialize_engine()
         except Exception as e:
-            send_ipc({"type": "log", "level": "warning", "message": f"Taichi AOT engine pre-init: {e}"})
+            startup_errors.append(f"Taichi AOT engine initialization failed: {e}")
+            send_ipc({"type": "log", "level": "error", "message": startup_errors[-1]})
 
-        # Pre-import and initialize algorithms during startup
         try:
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
-                running_mf_denoiser,
-            )
-            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
-                running_median,
-            )
-            from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.SplatSR import (
-                running_splatting_sr,
-            )
-            import config
+            self._initialize_algorithms()
             self._algorithms_ready = True
         except Exception as e:
-            send_ipc({"type": "log", "level": "error", "message": f"Pre-import error: {e}"})
+            startup_errors.append(f"Worker algorithm initialization failed: {e}")
+            send_ipc({"type": "log", "level": "error", "message": startup_errors[-1]})
             self._algorithms_ready = False
 
-        # Announce readiness after engine and algorithm modules are loaded
+        if startup_errors:
+            self._algorithms_ready = False
+            self.is_running = False
+            send_ipc({
+                "type": "error",
+                "phase": "startup",
+                "error": "Worker initialization failed",
+                "details": "\n".join(startup_errors),
+                "arch": arch,
+                "device": device,
+                "vendor": vendor,
+            })
+            return
+
+        # The configuration fields identify the requested selector; successful
+        # initialization does not independently prove physical device identity.
         send_ipc({
             "type": "ready",
             "pid": os.getpid(),
             "arch": arch,
             "device": device,
             "vendor": vendor,
+            "protocol_version": 2,
+            "capabilities": ["stage_session_v1"],
         })
-
-
 
         while self.is_running:
             try:
@@ -141,40 +225,93 @@ class WorkerRunner:
 
             cmd = msg.get("cmd")
             if cmd == "shutdown":
-                self.is_running = False
+                self.shutdown()
                 break
             elif cmd == "ping":
                 send_ipc({
                     "type": "pong",
-                    "status": "busy" if self.current_task_id else "idle",
+                    "status": "busy" if self.current_task_id or self.pipeline_session else "idle",
                     "pid": os.getpid(),
                     "arch": os.environ.get("AOT_ARCH", "unknown"),
                     "device": os.environ.get("AOT_DEVICE", "0"),
                 })
             elif cmd == "execute":
                 self.execute_task(msg)
+            elif cmd == "execute_stage":
+                self.execute_task(msg, stage_only=True)
+            elif cmd == "finish_pipeline":
+                self.finish_pipeline(msg)
 
-    def execute_task(self, msg: dict):
+    @staticmethod
+    def _initialize_engine():
+        """Load the configured runtime and fail startup if it cannot initialize."""
+        import taichi_vision.taichi_aot as ta_aot
+        ta_aot.get_engine()
+
+    @staticmethod
+    def _initialize_algorithms():
+        """Import required adapters without executing any processing algorithm."""
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
+            running_mf_denoiser,
+        )
+        from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.Median import (
+            running_median,
+        )
+        from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.SplatSR import (
+            running_splatting_sr,
+        )
+        import config
+
+    def execute_task(self, msg: dict, *, stage_only=False):
         task_id = msg.get("task_id", "default")
-        self.current_task_id = task_id
+        with self.state_lock:
+            self.current_task_id = task_id
+            pending = self.pending_cancel_task_id
+            if pending is not None:
+                self.pending_cancel_task_id = None
+                if pending == task_id:
+                    self.current_stop_event.set()
+            stopped_before_execution = self.current_stop_event.is_set()
+            if not stage_only and not stopped_before_execution:
+                self.current_stop_event.clear()
 
         # If stop was already signaled (e.g. user clicked cancel during worker warmup or task queueing)
-        if self.current_stop_event.is_set():
-            send_ipc({
+        if stopped_before_execution:
+            event = {
                 "type": "cancelled",
                 "task_id": task_id,
                 "message": "Task cancelled before execution.",
-            })
-            self.current_stop_event.clear()
+            }
+            if stage_only:
+                event.update(self._stage_event_fields(msg))
+            send_ipc(event)
+            if stage_only:
+                with self.state_lock:
+                    session = self.pipeline_session
+                    if session is not None and session.get("task_id") == task_id:
+                        session["failed"] = True
+            if not stage_only:
+                with self.state_lock:
+                    self.current_stop_event.clear()
             self.current_task_id = None
             return
-
-        self.current_stop_event.clear()
 
         batch_id = msg.get("batch_id")
         if batch_id is None or batch_id == 0:
             batch_id = 1
-        single_process = False
+        try:
+            single_process = _single_process_mode(msg)
+        except ValueError as exc:
+            event = {
+                "type": "error",
+                "task_id": task_id,
+                "error": str(exc),
+            }
+            if stage_only:
+                event.update(self._stage_event_fields(msg))
+            send_ipc(event)
+            self.current_task_id = None
+            return
         db_path = msg.get("db_path")
         settings = msg.get("settings", {})
 
@@ -199,18 +336,22 @@ class WorkerRunner:
                 ui_msg = str(message)
                 console_msg = str(message)
 
-            send_ipc({
+            event = {
                 "type": "progress",
                 "task_id": task_id,
                 "percent": int(percent),
                 "ui_msg": ui_msg,
                 "console_msg": console_msg,
                 "raw_msg": f"{ui_msg}||{console_msg}",
-            })
+            }
+            if stage_only:
+                event.update(self._stage_event_fields(msg))
+            send_ipc(event)
 
         def stop_callback():
             return self.current_stop_event.is_set()
 
+        stage_terminal = None
         try:
             from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
                 running_mf_denoiser,
@@ -267,6 +408,54 @@ class WorkerRunner:
                 if (is_hdr_checked and raw_hdr not in ("", "None"))
                 else "No HDR"
             )
+
+            selections = {
+                "alignment": alignment_choice,
+                "denoising": denoising_choice,
+                "super_resolution": super_resolution_choice,
+                "hdr": hdr_choice,
+            }
+            pipeline_plan = (
+                _validate_pipeline_plan(msg.get("pipeline_plan"), selections)
+                if "pipeline_plan" in msg
+                else None
+            )
+            stage_index = None
+            if stage_only:
+                stage_index = msg.get("stage_index")
+                pipeline_id = msg.get("pipeline_id")
+                if not isinstance(stage_index, int) or isinstance(stage_index, bool):
+                    raise ValueError("stage_index must be an integer")
+                if not isinstance(pipeline_id, str) or not pipeline_id or pipeline_id != task_id:
+                    raise ValueError("pipeline_id must match task_id")
+                if pipeline_plan is None or stage_index < 0 or stage_index >= len(pipeline_plan):
+                    raise ValueError("stage_index is outside the validated pipeline plan")
+                signature = {
+                    "task_id": task_id,
+                    "pipeline_id": pipeline_id,
+                    "batch_id": batch_id,
+                    "db_path": db_path,
+                    "settings": settings,
+                    "single_process": single_process,
+                    "pipeline_plan": pipeline_plan,
+                }
+                with self.state_lock:
+                    session = self.pipeline_session
+                    if session is None:
+                        if stage_index != 0:
+                            raise ValueError("pipeline stages must begin at index 0")
+                        session = {**signature, "next_stage_index": 0, "failed": False}
+                        self.pipeline_session = session
+                    else:
+                        for key, value in signature.items():
+                            if session.get(key) != value:
+                                raise ValueError(f"pipeline session changed {key}")
+                    if session["failed"]:
+                        raise ValueError("pipeline session has already failed or been cancelled")
+                    if stage_index != session["next_stage_index"]:
+                        raise ValueError(
+                            f"expected pipeline stage index {session['next_stage_index']}, got {stage_index}"
+                        )
 
             denoising_owns_alignment = denoising_choice in (
                 "Average",
@@ -448,7 +637,15 @@ class WorkerRunner:
                     output_paths.extend(returned_output_paths(result))
                     any_executed = True
 
-            if (
+            if stage_only:
+                category, selected_algo_name = pipeline_plan[stage_index]
+                execute(category, selected_algo_name)
+            elif pipeline_plan is not None:
+                # The Kotlin desktop app owns stage order; this worker only validates
+                # stage identity and invokes the existing Python compute adapters.
+                for category, selected_algo_name in pipeline_plan:
+                    execute(category, selected_algo_name)
+            elif (
                 denoising_owns_alignment
                 or super_resolution_owns_alignment
                 or hdr_owns_alignment
@@ -464,7 +661,7 @@ class WorkerRunner:
                 execute("denoising", denoising_choice)
 
             if stop_callback():
-                send_ipc({
+                event = {
                     "type": "cancelled",
                     "task_id": task_id,
                     "message": "Task cancelled by user (partial result preserved).",
@@ -472,71 +669,137 @@ class WorkerRunner:
                     "any_executed": any_executed,
                     "output_paths": output_paths,
                     "recovered": True,
-                })
+                }
             else:
-                send_ipc({
+                event = {
                     "type": "finished",
                     "task_id": task_id,
                     "success": True,
                     "any_executed": any_executed,
                     "output_paths": output_paths,
-                })
+                }
+            if stage_only:
+                event.update(self._stage_event_fields(msg))
+            send_ipc(event)
+            stage_terminal = event["type"] if stage_only else None
 
         except Exception as exc:
             tb = traceback.format_exc()
-            send_ipc({
+            event = {
                 "type": "error",
                 "task_id": task_id,
                 "error": str(exc),
                 "traceback": tb,
-            })
+            }
+            if stage_only:
+                event.update(self._stage_event_fields(msg))
+            send_ipc(event)
+            stage_terminal = "error" if stage_only else None
         finally:
+            if stage_only:
+                with self.state_lock:
+                    session = self.pipeline_session
+                    if session is not None and session.get("task_id") == task_id:
+                        if stage_terminal == "finished":
+                            session["next_stage_index"] = stage_index + 1
+                        else:
+                            session["failed"] = True
+                self.current_task_id = None
+            else:
+                self.current_task_id = None
+                self.current_stop_event.clear()
+                self._cleanup_after_pipeline()
+
+    @staticmethod
+    def _stage_event_fields(msg):
+        index = msg.get("stage_index")
+        plan = msg.get("pipeline_plan")
+        stage = plan[index] if (
+            isinstance(index, int) and not isinstance(index, bool)
+            and isinstance(plan, list) and 0 <= index < len(plan)
+            and isinstance(plan[index], dict)
+        ) else {}
+        category = stage.get("category", "")
+        algorithm = stage.get("algorithm", "")
+        return {
+            "pipeline_id": msg.get("pipeline_id"),
+            "stage_index": index,
+            "stage_id": f"{index}:{category}:{algorithm}",
+        }
+
+    def finish_pipeline(self, msg):
+        task_id = msg.get("task_id")
+        pipeline_id = msg.get("pipeline_id")
+        if not isinstance(task_id, str) or not task_id or pipeline_id != task_id:
+            send_ipc({"type": "error", "task_id": task_id, "error": "invalid pipeline identity"})
+            return
+        with self.state_lock:
+            session = self.pipeline_session
+            if session is not None and session.get("pipeline_id") != pipeline_id:
+                send_ipc({"type": "error", "task_id": task_id, "error": "pipeline identity mismatch"})
+                return
+            self.pipeline_session = None
             self.current_task_id = None
-            # --- Universal Post-Task Memory Cleanup ---
-            try:
-                import taichi_vision.taichi_aot as ta_aot
-                engine = ta_aot.get_engine()
-                if hasattr(engine, "buffer_pool") and hasattr(engine.buffer_pool, "clear"):
-                    engine.buffer_pool.clear()
-                if hasattr(engine, "_drain_retired"):
-                    engine._drain_retired(wait=True)
-                if hasattr(engine, "sync"):
-                    engine.sync()
-            except Exception:
-                pass
+            if self.pending_cancel_task_id == task_id:
+                self.pending_cancel_task_id = None
+            self.current_stop_event.clear()
+        if session is not None:
+            self._cleanup_after_pipeline()
+        send_ipc({"type": "pipeline_finished", "task_id": task_id, "pipeline_id": pipeline_id})
 
-            try:
-                from taichi_vision.taichi_algorithm.aot_api import clear_farneback_cache
-                clear_farneback_cache()
-            except Exception:
-                pass
+    def shutdown(self):
+        """Stop the command loop and finalize any idle staged session once."""
+        with self.state_lock:
+            self.is_running = False
+            session = self.pipeline_session
+            active_task_id = self.current_task_id
+            if session is not None and active_task_id is not None:
+                self.current_stop_event.set()
+        if session is not None and active_task_id is None:
+            self.finish_pipeline({
+                "task_id": session["task_id"],
+                "pipeline_id": session["pipeline_id"],
+            })
 
+    def _cleanup_after_pipeline(self):
+        # --- Universal Post-Task Memory Cleanup ---
+        try:
+            import taichi_vision.taichi_aot as ta_aot
+            engine = ta_aot.get_engine()
+            if hasattr(engine, "buffer_pool") and hasattr(engine.buffer_pool, "clear"):
+                engine.buffer_pool.clear()
+            if hasattr(engine, "_drain_retired"):
+                engine._drain_retired(wait=True)
+            if hasattr(engine, "sync"):
+                engine.sync()
+        except Exception:
+            pass
+
+        try:
+            from taichi_vision.taichi_algorithm.aot_api import clear_farneback_cache
+            clear_farneback_cache()
+        except Exception:
+            pass
+
+        try:
+            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_pipeline import (
+                clear_spatial_cache,
+            )
+            clear_spatial_cache()
+        except Exception:
+            pass
+
+        import gc
+        gc.collect()
+
+        if sys.platform == "win32":
             try:
-                from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_pipeline import (
-                    clear_spatial_cache,
+                import ctypes
+                ctypes.windll.kernel32.SetProcessWorkingSetSize(
+                    ctypes.windll.kernel32.GetCurrentProcess(), -1, -1
                 )
-                clear_spatial_cache()
             except Exception:
                 pass
-
-            try:
-                actions = None
-                settings = None
-                msg = None
-            except Exception:
-                pass
-
-            import gc
-            gc.collect()
-
-            if sys.platform == "win32":
-                try:
-                    import ctypes
-                    ctypes.windll.kernel32.SetProcessWorkingSetSize(
-                        ctypes.windll.kernel32.GetCurrentProcess(), -1, -1
-                    )
-                except Exception:
-                    pass
 
 
 def main():

@@ -15,11 +15,12 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_proces
     PipelineTelemetry,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.raw_pipeline.provider import (
-    RawNativeProvider,
+    RawPipelineProvider,
     _analysis_transform,
     _normalize_phase_planes_into,
     _normalized_for_rgb_parity,
     _phase_planes,
+    _warp_analysis_proxy,
 )
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.rgb_pipeline.provider import (
     RGBFrameProvider,
@@ -30,6 +31,33 @@ def test_canonical_resident_exports_public_entrypoints():
     assert callable(canonical_resident.run_resident_pipeline)
     assert callable(canonical_resident.run_gpu_resident_pipeline)
     assert callable(canonical_resident.load_frame_to_gpu)
+
+
+def test_weightnet_reference_has_no_clahe(monkeypatch):
+    import cv2
+    import numpy as np
+    from taichi_vision import taichi_aot
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("CLAHE must not run in FusionNet")
+
+    monkeypatch.setattr(cv2, "createCLAHE", forbidden)
+    monkeypatch.setattr(taichi_aot, "clahe", forbidden, raising=False)
+    gray = np.linspace(0, 1, 48, dtype=np.float32).reshape(6, 8)
+
+    class AnalysisBuffer:
+        shape = gray.shape
+
+        def to_numpy(self):
+            return gray.copy()
+
+    reference, transfer = canonical_resident.prepare_weightnet_reference_input(
+        AnalysisBuffer(), work_shape=gray.shape)
+    np.testing.assert_array_equal(reference, gray[None, ...])
+    assert transfer is None
+    legacy_reference, legacy_transfer = canonical_resident.apply_clahe_16bit_reference(reference)
+    np.testing.assert_array_equal(legacy_reference, reference)
+    assert legacy_transfer is None
 
 
 def test_legacy_resident_import_is_a_lazy_compatibility_facade():
@@ -46,26 +74,30 @@ def test_fusionet_engine_reexports_canonical_resident_entrypoint():
     assert fusionet_engine.run_resident_pipeline is canonical_resident.run_resident_pipeline
 
 
-def test_rgb_provider_contract_is_metadata_only_until_executor_migration():
-    provider = RGBFrameProvider(["reference.png", "support.png"], is_raw=False)
+def test_rgb_provider_contract_accepts_only_rgb_source_paths():
+    provider = RGBFrameProvider(["reference.png", "support.png"])
     metadata = provider.metadata(1, shape=(32, 48, 3))
     assert metadata.source_id == "support.png"
     assert metadata.shape == (32, 48, 3)
     assert metadata.carrier_kind == "rgb"
     assert provider.source_path(0) == "reference.png"
-    assert RGBFrameProvider(["reference.dng"], is_raw=True).source_mode == "raw_rgb"
+    assert RGBFrameProvider(["reference.png"]).source_mode == "rgb"
+    import pytest
+
+    with pytest.raises(ValueError, match="already-RGB inputs only"):
+        RGBFrameProvider(["raw.DNG"])
 
 
 def test_raw_provider_preserves_public_dispatch_boundary():
-    provider = RawNativeProvider(["reference.dng", "support.dng"], weight_engine="average")
-    assert provider.source_mode == "raw_native"
+    provider = RawPipelineProvider(["reference.dng", "support.dng"], weight_engine="average")
+    assert provider.source_mode == "raw"
     assert provider.carrier_kind == "cfa"
     assert provider.options["weight_engine"] == "average"
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.raw_pipeline import (
-        run_raw_native_resident_pipeline,
+        run_raw_resident_pipeline,
     )
 
-    assert callable(run_raw_native_resident_pipeline)
+    assert callable(run_raw_resident_pipeline)
     provider.close()
 
 
@@ -89,7 +121,7 @@ def test_raw_host_prefetch_bytes_decode_to_the_same_cfa_carrier(tmp_path):
     )
     support_path = tmp_path / "support.dng"
     support_path.write_bytes(encoded)
-    provider = RawNativeProvider(
+    provider = RawPipelineProvider(
         [str(tmp_path / "reference.dng"), str(support_path)],
         weight_engine="average",
     )
@@ -189,7 +221,205 @@ def test_raw_analysis_transform_keeps_dense_flow_in_work_domain():
     ) is flow
 
 
-def test_raw_provider_normalization_matches_rgb_demosaic_scalar_contract():
+def test_raw_feature_apap_returns_local_flow_and_cleans_up_failed_remap(monkeypatch):
+    import numpy as np
+    import pytest
+    from taichi_vision import taichi_aot
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.OFB import OFBAlgorithm
+    from taichi_vision.taichi_algorithm.alignment import apap as apap_module
+
+    class Buffer:
+        def __init__(self, data):
+            self.data = np.asarray(data, dtype=np.float32)
+            self.shape = self.data.shape
+            self.releases = 0
+
+        def destroy(self):
+            self.releases += 1
+
+    yy, xx = np.meshgrid(np.linspace(0, 47, 6), np.linspace(0, 63, 8), indexing="ij")
+    reference = np.column_stack((xx.ravel(), yy.ravel())).astype(np.float32)
+    support = reference.copy()
+    support[:, 0] += 2.0 * np.sin(reference[:, 0] / 15.0)
+    source = Buffer(np.zeros((48, 64, 3), dtype=np.float32))
+    uploads, remaps = [], []
+
+    def upload(data, **kwargs):
+        buffer = Buffer(data)
+        uploads.append(buffer)
+        return buffer
+
+    def remap(src, flow, height, width, **kwargs):
+        remaps.append((src, flow, height, width))
+        return Buffer(np.zeros((height, width, 3), dtype=np.float32))
+
+    monkeypatch.setattr(taichi_aot, "cvtColor", lambda *args, **kwargs: Buffer(np.zeros((48, 64))))
+    monkeypatch.setattr(taichi_aot, "resize", lambda *args, **kwargs: Buffer(np.zeros((48, 64))))
+    monkeypatch.setattr(taichi_aot, "match_feature_reference", lambda *args, **kwargs: (reference, support))
+    monkeypatch.setattr(taichi_aot, "upload", upload)
+    monkeypatch.setattr(taichi_aot, "remap_with_flow", remap)
+    monkeypatch.setattr(OFBAlgorithm, "_find_homography", lambda *args, **kwargs: (np.eye(3), None))
+    original_fit_apap = apap_module.fit_apap
+    fit_calls = []
+
+    def capture_fit_apap(src, dst, **kwargs):
+        fit_calls.append(kwargs)
+        return original_fit_apap(src, dst, **kwargs)
+
+    monkeypatch.setattr(apap_module, "fit_apap", capture_fit_apap)
+
+    aligner = canonical_resident.FeatureMatchingGPUAligner.__new__(canonical_resident.FeatureMatchingGPUAligner)
+    aligner.work_h, aligner.work_w = 48, 64
+    aligner.target_h, aligner.target_w = 96, 128
+    aligner.feature_type = "ofb"
+    aligner.warp_method = "apap"
+    aligner.config = {}
+    aligner.apap_fit_grid_size = 17
+    aligner._feature_reference_cache = object()
+    aligner._feature_resident_matches = False
+    preview, _, transform = aligner.align_frame(source, return_transform=True)
+    np.testing.assert_array_equal(fit_calls[0]["global_homography"], np.eye(3))
+    assert transform is uploads[-1]
+    assert transform.shape == (33, 33, 2)
+    assert float(np.ptp(transform.data[..., 0])) > 0.5
+    assert remaps[-1] == (source, transform, 48, 64)
+    # The existing RAW provider recognises this as a local flow, not a 3x3 H.
+    assert _analysis_transform(transform, full_shape=(96, 128), proxy_shape=(48, 64)) is transform
+    assert source.releases == transform.releases == 0
+    preview.destroy()
+    transform.destroy()
+
+    def fail_remap(*args, **kwargs):
+        raise RuntimeError("injected APAP remap failure")
+
+    monkeypatch.setattr(taichi_aot, "remap_with_flow", fail_remap)
+    with pytest.raises(RuntimeError, match="injected APAP remap failure"):
+        aligner.align_frame(source, return_transform=True)
+    assert uploads[-1].releases == 1
+    assert source.releases == 0
+
+
+def test_feature_apap_alignment_keeps_image_carriers_on_device(monkeypatch):
+    import numpy as np
+    from taichi_vision import taichi_aot
+    from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.OFB import OFBAlgorithm
+    from taichi_vision.taichi_algorithm.alignment import mesh_warp
+
+    class Buffer:
+        def __init__(self, shape):
+            self.shape = tuple(shape)
+            self.data = np.zeros(self.shape, dtype=np.float32)
+            self.readbacks = 0
+            self.releases = 0
+
+        def to_numpy(self):
+            self.readbacks += 1
+            return self.data
+
+        def destroy(self):
+            self.releases += 1
+
+    yy, xx = np.meshgrid(np.linspace(5, 42, 6), np.linspace(5, 58, 8), indexing="ij")
+    reference = np.column_stack((xx.ravel(), yy.ravel())).astype(np.float32)
+    support = reference.copy()
+    support[:, 0] += 1.5 * np.sin(reference[:, 0] / 15.0)
+    source = Buffer((48, 64, 3))
+    secondary = Buffer((48, 64, 3))
+    warped = [Buffer(source.shape), Buffer(secondary.shape)]
+    calls = []
+    tracked = []
+
+    monkeypatch.setattr(
+        taichi_aot, "cvtColor", lambda *_args, **_kwargs: Buffer((48, 64))
+    )
+    monkeypatch.setattr(
+        taichi_aot,
+        "match_feature_reference",
+        lambda *_args, **_kwargs: (reference.copy(), support.copy()),
+    )
+    monkeypatch.setattr(
+        OFBAlgorithm,
+        "_find_homography",
+        lambda src, *_args, **_kwargs: (np.eye(3), np.ones(len(src), dtype=bool)),
+    )
+
+    def resident_warp(image, *args, **kwargs):
+        calls.append((image, kwargs.get("return_gpu"), kwargs.get("global_homography")))
+        return warped[len(calls) - 1]
+
+    monkeypatch.setattr(mesh_warp, "warp_apap", resident_warp)
+    monkeypatch.setattr(
+        canonical_resident,
+        "_track_gpu_result",
+        lambda result: tracked.append(result) or result,
+    )
+    aligner = canonical_resident.FeatureMatchingGPUAligner.__new__(
+        canonical_resident.FeatureMatchingGPUAligner
+    )
+    aligner.work_h = aligner.target_h = 48
+    aligner.work_w = aligner.target_w = 64
+    aligner.feature_type = "ofb"
+    aligner.warp_method = "apap"
+    aligner.config = {}
+    aligner.apap_fit_grid_size = 17
+    aligner._feature_reference_cache = object()
+    aligner._feature_resident_matches = False
+
+    primary, secondary_result = aligner.align_frame(
+        source, secondary_frame_to_warp=secondary
+    )
+
+    assert primary is warped[0]
+    assert secondary_result is warped[1]
+    assert tracked == warped
+    assert calls[:2][0][:2] == (source, True)
+    assert calls[:2][1][:2] == (secondary, True)
+    np.testing.assert_array_equal(calls[0][2], np.eye(3))
+    np.testing.assert_array_equal(calls[1][2], np.eye(3))
+    assert source.readbacks == secondary.readbacks == 0
+
+
+def test_apap_fit_grid_follows_batch_preset_without_changing_flow_resolution():
+    assert canonical_resident._resolve_apap_fit_grid_size({"mode": "fast"}) == 13
+    assert canonical_resident._resolve_apap_fit_grid_size({"mode": "balance"}) == 17
+    assert canonical_resident._resolve_apap_fit_grid_size({"mode": "high"}) == 25
+    assert canonical_resident._resolve_apap_fit_grid_size(
+        {"mode": "balance", "apap_fit_grid_size": 11}
+    ) == 11
+
+
+def test_raw_analysis_flow_warp_uses_supported_remap_arguments(monkeypatch):
+    import numpy as np
+
+    class Buffer:
+        handle = object()
+        dtype = np.dtype(np.float32)
+
+    class FakeAOT:
+        engine = type("Engine", (), {"arch": "cuda"})()
+
+        def remap_with_flow(self, _src, _flow, _height, _width, *, return_gpu=False):
+            self.return_gpu = return_gpu
+            return object()
+
+    fake_aot = FakeAOT()
+    monkeypatch.setattr(canonical_resident, "_managed_api", lambda _api: fake_aot)
+    source = Buffer()
+    flow = Buffer()
+
+    _warp_analysis_proxy(source, flow, height=48, width=64)
+    assert fake_aot.return_gpu is True
+
+    host_flow = np.zeros((12, 16, 2), dtype=np.float32)
+    _warp_analysis_proxy(source, host_flow, height=48, width=64)
+    assert fake_aot.return_gpu is True
+
+    fake_aot.engine.arch = "vulkan"
+    _warp_analysis_proxy(source, flow, height=48, width=64)
+    assert fake_aot.return_gpu is True
+
+
+def test_raw_provider_normalization_preserves_fractional_per_plane_levels():
     import numpy as np
 
     class FakeRawFrame:
@@ -200,17 +430,42 @@ def test_raw_provider_normalization_matches_rgb_demosaic_scalar_contract():
         white_level = (1023.0, 1023.0, 1023.0, 1023.0)
 
     actual = _normalized_for_rgb_parity(FakeRawFrame())
-    inverse_range = np.float32(1.0) / np.float32(1023 - 64)
-    expected = np.clip(
-        (FakeRawFrame.samples.astype(np.float32) - np.float32(64))
-        * inverse_range,
-        np.float32(0.0),
-        np.float32(1.0),
-    )
+    expected = np.empty(FakeRawFrame.samples.shape, dtype=np.float32)
+    for index, (black, white) in enumerate(
+        zip(FakeRawFrame.black_level, FakeRawFrame.white_level)
+    ):
+        row, col = divmod(index, 2)
+        target = expected[row::2, col::2]
+        source = FakeRawFrame.samples[row::2, col::2].astype(np.float32)
+        target[:] = np.clip(
+            (source - np.float32(black))
+            * (np.float32(1.0) / np.float32(white - black)),
+            np.float32(0.0),
+            np.float32(1.0),
+        )
 
     assert actual.dtype == np.float32
     assert actual.flags.c_contiguous
-    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1.0e-7)
+
+
+def test_raw_normalization_removes_plane_level_pattern_from_known_flat_field():
+    import numpy as np
+
+    class FakeRawFrame:
+        phase_origin = (0, 0)
+        black_level = (64.0, 68.0, 72.0, 76.0)
+        white_level = (1088.0, 1092.0, 1096.0, 1100.0)
+
+        def __init__(self):
+            self.samples = np.empty((32, 32), dtype=np.uint16)
+            for index, black in enumerate(self.black_level):
+                row, col = divmod(index, 2)
+                self.samples[row::2, col::2] = int(black + 256)
+
+    frame = FakeRawFrame()
+    normalized = _normalized_for_rgb_parity(frame)
+    np.testing.assert_allclose(normalized, 0.25, rtol=0.0, atol=1.0e-7)
 
 
 def test_reusable_raw_cfa_plane_normalization_is_bit_exact_for_all_phases():
@@ -248,7 +503,7 @@ def test_reusable_raw_cfa_plane_normalization_is_bit_exact_for_all_phases():
                 np.testing.assert_array_equal(actual_plane, expected_plane)
 
 
-def test_raw_native_provider_reuses_host_and_gpu_cfa_plane_slots(monkeypatch):
+def test_raw_pipeline_provider_reuses_host_and_gpu_cfa_plane_slots(monkeypatch):
     import numpy as np
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.raw_pipeline import (
         provider as raw_provider,
@@ -296,7 +551,7 @@ def test_raw_native_provider_reuses_host_and_gpu_cfa_plane_slots(monkeypatch):
     reference = FakeRawFrame(np.arange(48).reshape(6, 8) + 64)
     support = FakeRawFrame(np.arange(48).reshape(6, 8) + 128)
     engine = FakeEngine()
-    provider = RawNativeProvider(["reference.dng", "support.dng"])
+    provider = RawPipelineProvider(["reference.dng", "support.dng"])
     provider._engine = engine
     provider._reference_frame = reference
     provider._sum_gpu = object()
@@ -319,9 +574,8 @@ def test_raw_native_provider_reuses_host_and_gpu_cfa_plane_slots(monkeypatch):
     provider.accumulate(provider_frame, transform=transform)
 
     assert len(engine.allocations) == 4
-    assert len(engine.writes) == 8
+    assert len(engine.writes) == 4
     assert tuple(engine.writes[:4]) == first_buffers
-    assert tuple(engine.writes[4:]) == first_buffers
     expected = _phase_planes(support, _normalized_for_rgb_parity(support))
     for actual, reference_plane in zip(seen_planes[-1], expected):
         np.testing.assert_array_equal(actual, reference_plane)

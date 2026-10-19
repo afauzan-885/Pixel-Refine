@@ -1117,6 +1117,24 @@ if AOT_MODE == "0":
         from .aot_api import demosaic as implementation
         return implementation(*args, **kwargs)
     from .image_processing.warp_affine import warpAffine as warp_affine
+
+    def bgr2gray(src, dst=None):
+        """Convert BGR input to grayscale through the existing JIT facade."""
+        return common.cvtColor(src, common.COLOR_BGR2GRAY, dst=dst)
+
+    def remap_with_flow(src, flow, full_h, full_w, dst=None, buffer_provider="pool"):
+        """Forward to the maintained JIT flow-remap implementation."""
+        from .interpolation.remap import remap_with_flow as implementation
+
+        return implementation(
+            src,
+            flow,
+            full_h,
+            full_w,
+            dst=dst,
+            buffer_provider=buffer_provider,
+        )
+
     def gaussian_window(*args, **kwargs):
         from .image_processing.extended_aot import gaussian_window_aot
         return gaussian_window_aot(*args, **kwargs)

@@ -40,6 +40,9 @@ class RecordingSession(BufferSession):
 @pytest.mark.parametrize("storage", ["ram", "disk"])
 def test_tiled_gpu_confidence_matches_resident_hann_with_motion(shape, block_size, storage, tmp_path, monkeypatch):
     monkeypatch.setenv("SPLATSR_SCRATCH_DIR", str(tmp_path))
+    def fail_tile_remap(*args, **kwargs):
+        raise AssertionError("Splat SR must not materialize tile confidence via remap")
+    monkeypatch.setattr(taichi_aot, "remap_with_flow_tile", fail_tile_remap, raising=False)
     rng = np.random.default_rng(728)
     reference = rng.uniform(0.1, 0.85, (*shape, 3)).astype(np.float32)
     support = rng.uniform(0.1, 0.85, (*shape, 3)).astype(np.float32)
@@ -63,6 +66,8 @@ def test_tiled_gpu_confidence_matches_resident_hann_with_motion(shape, block_siz
             asset_dir=os.environ.get("SPLATSR_TEST_TILE_ASSETS"),
             backing_factory=RamAccumulatorBacking if storage == "ram" else _TileBacking,
         )
+        assert not hasattr(tiled, "confidence_scratch")
+        assert not hasattr(tiled, "zero_crop_flow")
         tiled.add_frame(reference, None, None)
         device_confidence = session.own(taichi_aot.upload(confidence))
         tiled.add_frame(support, flow, device_confidence)
@@ -92,7 +97,9 @@ def test_tiled_gpu_confidence_matches_resident_hann_with_motion(shape, block_siz
             max(buffer_shape[-3:-1] if len(buffer_shape) == 4 else buffer_shape[:2])
             <= block_size + 7
             for buffer_shape in session.device_shapes
+            if buffer_shape[:2] != shape
         )
+        assert shape in session.device_shapes  # original confidence remains resident
         assert not any(buffer_shape == expected.shape for buffer_shape in session.device_shapes)
         assert tiled.output_shape[0] <= block_size + 7
         assert tiled.output_shape[1] <= block_size + 7

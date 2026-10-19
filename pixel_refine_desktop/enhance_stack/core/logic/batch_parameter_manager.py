@@ -7,11 +7,140 @@ import json
 import os
 from typing import Dict, Any, Optional
 import config
-from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec, normalize_name
+from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import (
+    get_spec,
+    get_specs,
+    normalize_name,
+)
 
 
 # Centralized JSON path for batch parameters
 BATCH_PARAMETER_PATH = os.path.join("database", "align", "batch_parameter.json")
+ALGORITHM_PARAMETER_CONTAINER = "algorithm_params"
+
+
+def _legacy_parameter_keys(spec):
+    """Return legacy payload names accepted while batches migrate in place."""
+    keys = list(spec.parameter_keys)
+    if spec.category == "alignment" and spec.key == "ofb":
+        keys.append("orb_params")
+    if spec.category == "alignment" and spec.key == "block_matching":
+        keys.append("block_matching_params")
+    if spec.category == "alignment" and spec.key == "lucas_kanade":
+        keys.append("lucas_kanade_gpu_params")
+    if spec.category == "denoising" and spec.key == "similarity":
+        keys.extend(
+            ("spatial_params", "similarity_spatial_params", "similarity_fusion_params")
+        )
+    return tuple(dict.fromkeys(keys))
+
+
+def normalize_batch_algorithm_params(batch_entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the canonical nested parameter container from legacy batch keys.
+
+    ``algorithm_params`` is the single runtime source of truth. Existing
+    algorithm-specific top-level keys remain readable as migration inputs.
+    """
+    if not isinstance(batch_entry, dict):
+        return {}
+    existing = batch_entry.get(ALGORITHM_PARAMETER_CONTAINER)
+    normalized = {
+        category: dict(values)
+        for category, values in existing.items()
+        if category in ("alignment", "denoising", "super_resolution", "hdr")
+        and isinstance(values, dict)
+    } if isinstance(existing, dict) else {}
+    for category in ("alignment", "denoising", "super_resolution", "hdr"):
+        normalized.setdefault(category, {})
+        for spec in get_specs(category):
+            if spec.key in normalized[category]:
+                continue
+            legacy = next(
+                (
+                    batch_entry[key]
+                    for key in _legacy_parameter_keys(spec)
+                    if isinstance(batch_entry.get(key), dict)
+                ),
+                None,
+            )
+            if legacy is not None:
+                normalized[category][spec.key] = dict(legacy)
+    return normalized
+
+
+def get_batch_algorithm_params(
+    batch_id: Optional[int],
+    category: str,
+    algorithm: str,
+    *,
+    batch_entry: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Resolve settings for one algorithm, preferring the canonical container."""
+    if batch_entry is None:
+        if batch_id is None:
+            return {}
+        state = load_json_state()
+        batch_entry = state.get(str(batch_id), {}) if isinstance(state, dict) else {}
+    if not isinstance(batch_entry, dict):
+        return {}
+    spec = get_spec(category, algorithm)
+    container = batch_entry.get(ALGORITHM_PARAMETER_CONTAINER)
+    if isinstance(container, dict):
+        section = container.get(spec.category)
+        if isinstance(section, dict) and isinstance(section.get(spec.key), dict):
+            return dict(section[spec.key])
+    for key in _legacy_parameter_keys(spec):
+        value = batch_entry.get(key)
+        if isinstance(value, dict):
+            return dict(value)
+    return {}
+
+
+def set_batch_algorithm_params(
+    batch_entry: Dict[str, Any], category: str, algorithm: str, params: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Update the canonical container and return it; no disk/store I/O occurs."""
+    if not isinstance(batch_entry, dict):
+        raise TypeError("batch_entry must be a dictionary")
+    spec = get_spec(category, algorithm)
+    container = normalize_batch_algorithm_params(batch_entry)
+    container.setdefault(spec.category, {})[spec.key] = dict(params or {})
+    batch_entry[ALGORITHM_PARAMETER_CONTAINER] = container
+    return container
+
+
+def save_batch_algorithm_params(
+    batch_id: Optional[int],
+    category: str,
+    algorithm: str,
+    params: Dict[str, Any],
+    *,
+    store: Any = None,
+) -> bool:
+    """Persist one algorithm payload through the shared canonical container."""
+    if batch_id is None:
+        return False
+    batch_key = str(batch_id)
+    state = load_json_state()
+    entry = dict(state.get(batch_key, {}) or {})
+    container = set_batch_algorithm_params(entry, category, algorithm, params)
+    spec = get_spec(category, algorithm)
+    updates = {
+        f"{batch_key}.{ALGORITHM_PARAMETER_CONTAINER}": container,
+    }
+    # Keep legacy readers compatible during migration. Runtime reads prefer
+    # the canonical container above.
+    for legacy_key in spec.parameter_keys:
+        updates[f"{batch_key}.{legacy_key}"] = dict(params or {})
+    if store is not None:
+        store.update_bulk(updates, save=True)
+        return True
+    entry[ALGORITHM_PARAMETER_CONTAINER] = container
+    for legacy_key in spec.parameter_keys:
+        entry[legacy_key] = dict(params or {})
+    state[batch_key] = entry
+    save_json_state(data=state)
+    return True
 
 
 def _normalize_alignment_name(name: str) -> str:
@@ -242,8 +371,14 @@ def get_batch_alignment_runtime_snapshot(batch_id: Optional[int]) -> Dict[str, A
 
     spec = get_spec("alignment", alignment_algo)
     params_key = spec.parameter_keys[0] if spec.parameter_keys else ""
-    params = next((batch_entry[key] for key in spec.parameter_keys
-                   if isinstance(batch_entry.get(key), dict) and batch_entry[key]), {})
+    params = get_batch_algorithm_params(
+        batch_id, "alignment", alignment_algo, batch_entry=batch_entry
+    )
+    if alignment_algo.strip().lower() in {"ofb", "akaze"}:
+        # Homography is the only enabled warp for these feature aligners.
+        # Normalize legacy per-batch APAP values at the runtime boundary.
+        params = dict(params)
+        params["warp_method"] = "homography"
     if alignment_algo == "Lucas Kanade":
         gpu_params = batch_entry.get("lucas_kanade_gpu_params", {})
         if not isinstance(gpu_params, dict):

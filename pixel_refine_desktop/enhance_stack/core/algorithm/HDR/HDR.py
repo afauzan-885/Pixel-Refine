@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
-from itertools import chain
 
 from .card_content import CARD_CONTENT, CARD_NAME, LEGACY_CARD_NAME
-from .hdr_fusion import WeightedHDRFusion, estimate_noise_taichi, rgb_to_gray
+from .hdr_fusion import WeightedHDRFusion
 from .spde_mr import SPDEMRAlgorithm, SPDEMRFusion
 
 
@@ -36,64 +35,37 @@ def _run_array_frames(algorithm, ctx, frames):
     from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
         PipelineRuntime,
     )
+    from .runtime_recipe import HDRArraySource, HDRFusionRecipe
 
-    iterator = iter(frames)
-    try:
-        reference = next(iterator)
-    except StopIteration as exc:
-        raise ValueError("HDR fusion requires at least one frame") from exc
-
-    stop_event = getattr(ctx, "stop_event", None)
-    external_session = getattr(ctx, "session", None)
-    runtime = None
-    if external_session is None:
-        runtime = PipelineRuntime(
-            prefetch_depth=0,
-            stop_event=stop_event,
-            progress_callback=getattr(ctx, "progress_callback", None),
-        )
-        session = runtime.ensure_session()
-    else:
-        session = external_session
-
-    try:
-        import numpy as np
-
-        reference = np.ascontiguousarray(reference, dtype=np.float32)
-        radiance_enabled = False
-        if isinstance(algorithm, SPDEMRAlgorithm):
-            fusion = algorithm.create_fusion(
-                reference, radiance_enabled=radiance_enabled
-            )
-        else:
-            fusion = WeightedHDRFusion(reference.shape, radiance_enabled=False)
-        for index, image in enumerate(chain((reference,), iterator)):
-            if hasattr(ctx, "check_cancelled"):
-                ctx.check_cancelled()
-            elif stop_event is not None:
-                stopped = (
-                    stop_event.is_set()
-                    if hasattr(stop_event, "is_set")
-                    else stop_event()
-                    if callable(stop_event)
-                    else bool(stop_event)
-                )
-                if stopped:
-                    raise RuntimeError("HDR fusion was cancelled")
-            image = np.ascontiguousarray(image, dtype=np.float32)
-            noise = estimate_noise_taichi(rgb_to_gray(image), session)
-            if isinstance(algorithm, SPDEMRAlgorithm):
-                fusion.add_spde_frame(
-                    image,
-                    noise_sigma=noise,
-                    is_reference=index == 0,
-                )
-            else:
-                fusion.add_frame(image, noise_sigma=noise)
-        return fusion.finalize(reference)[0]
-    finally:
-        if runtime is not None:
-            runtime.close()
+    cancel_callback = getattr(ctx, "check_cancelled", None)
+    stop_event = (
+        None
+        if callable(cancel_callback)
+        else getattr(ctx, "stop_event", None)
+    )
+    source = HDRArraySource(frames)
+    recipe = HDRFusionRecipe(
+        analyses=None,
+        selected_index=0,
+        support_paths=None,
+        effective_exposures=None,
+        is_spde_mr=isinstance(algorithm, SPDEMRAlgorithm),
+        align_support=False,
+        cancel_callback=cancel_callback,
+        include_radiance=False,
+    )
+    runtime = PipelineRuntime(
+        prefetch_depth=0,
+        stop_event=stop_event,
+        progress_callback=getattr(ctx, "progress_callback", None),
+        session=getattr(ctx, "session", None),
+    )
+    return runtime.execute(
+        source,
+        recipe,
+        source.support_indices(),
+        own_reference=False,
+    )
 
 
 def running_hdr_fusion(

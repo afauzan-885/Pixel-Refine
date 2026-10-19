@@ -16,7 +16,7 @@ import numpy as np
 import os
 
 from .metadata import normalize_cfa_rgb_codes
-from .result import RawNativeResult
+from .result import RawPipelineResult
 from ..contracts import (
     FrameMetadata,
     ProviderFrame,
@@ -60,7 +60,8 @@ def _is_cancelled(stop_event) -> bool:
 def _phase_planes(frame, normalized: np.ndarray) -> tuple[np.ndarray, ...]:
     """Return contiguous, phase-correct Bayer planes in tile order."""
     planes = []
-    phase_y, phase_x = (int(frame.phase_origin[0]) & 1, int(frame.phase_origin[1]) & 1)
+    phase_origin = getattr(frame, "phase_origin", (0, 0))
+    phase_y, phase_x = (int(phase_origin[0]) & 1, int(phase_origin[1]) & 1)
     for index in range(4):
         plane_y, plane_x = divmod(index, 2)
         row = (plane_y - phase_y) & 1
@@ -70,22 +71,17 @@ def _phase_planes(frame, normalized: np.ndarray) -> tuple[np.ndarray, ...]:
 
 
 def _normalize_phase_planes_into(frame, destinations) -> tuple[np.ndarray, ...]:
-    """Normalize CFA samples directly into reusable, contiguous plane arrays.
-
-    This preserves the scalar black/white, float32 reciprocal-multiply, clamp,
-    and phase ordering used by ``_normalized_for_rgb_parity`` followed by
-    ``_phase_planes`` while avoiding a full-size normalized mosaic temporary.
-    """
+    """Normalize each CFA lattice with its own sensor black/white levels."""
 
     if len(destinations) != 4:
         raise ValueError("RAW Native CFA workspace must contain four planes")
     samples = np.asarray(frame.samples)
-    black = np.float32(int(float(frame.black_level[0])))
-    white = np.float32(int(float(frame.white_level[0])))
-    inverse_range = np.float32(1.0) / np.maximum(
-        np.float32(1.0), np.float32(white - black)
-    )
-    phase_y, phase_x = (int(frame.phase_origin[0]) & 1, int(frame.phase_origin[1]) & 1)
+    black_levels = tuple(float(value) for value in frame.black_level)
+    white_levels = tuple(float(value) for value in frame.white_level)
+    if len(black_levels) not in (1, 4) or len(white_levels) not in (1, 4):
+        raise ValueError("RAW Native normalization requires one or four CFA levels")
+    phase_origin = getattr(frame, "phase_origin", (0, 0))
+    phase_y, phase_x = (int(phase_origin[0]) & 1, int(phase_origin[1]) & 1)
     for index, destination in enumerate(destinations):
         plane_y, plane_x = divmod(index, 2)
         row = (plane_y - phase_y) & 1
@@ -97,6 +93,11 @@ def _normalize_phase_planes_into(frame, destinations) -> tuple[np.ndarray, ...]:
                 f"expected {source.shape}/float32, got "
                 f"{destination.shape}/{destination.dtype}"
             )
+        black = np.float32(black_levels[index if len(black_levels) == 4 else 0])
+        white = np.float32(white_levels[index if len(white_levels) == 4 else 0])
+        inverse_range = np.float32(1.0) / np.maximum(
+            np.float32(1.0), np.float32(white - black)
+        )
         np.subtract(source, black, out=destination, dtype=np.float32)
         np.multiply(destination, inverse_range, out=destination)
         np.clip(
@@ -109,32 +110,38 @@ def _normalize_phase_planes_into(frame, destinations) -> tuple[np.ndarray, ...]:
 
 
 def _normalized_for_rgb_parity(frame) -> np.ndarray:
-    """Normalize one CFA carrier exactly like ``demosaic(path)`` does.
+    """Normalize a CFA carrier while preserving per-plane sensor levels.
 
-    The canonical RGB loader currently follows rawpy's scalar RAW contract:
-    channel-zero black level, one white level, float32 reciprocal multiply,
-    then clamp to the sensor interval.  ``RawMosaicFrame.normalized_headroom``
-    intentionally preserves per-plane black levels and highlight headroom,
-    which is useful for sensor-native processing but makes even a one-frame
-    RAW round-trip differ from the RGB-resident oracle.
-
-    Keep this parity conversion local to the denoising provider.  It does not
-    change ``RawMosaicFrame`` or the public demosaic API, and it makes the CFA
-    carrier consumed by fusion match the samples seen by the RGB path before
-    Hamilton reconstruction.
+    The legacy name remains for internal compatibility. Fusion consumes RAW
+    sensor samples, so black and white levels follow the DNG's four spatial
+    CFA entries (including fractional black levels) before phase-aware
+    warping. Values remain clamped to the normalized sensor interval.
     """
 
-    samples = np.asarray(frame.samples).astype(np.float32, copy=False)
-    black = np.float32(int(float(frame.black_level[0])))
-    white = np.float32(int(float(frame.white_level[0])))
-    inverse_range = np.float32(1.0) / np.maximum(
-        np.float32(1.0), np.float32(white - black)
-    )
-    normalized = (samples - black) * inverse_range
-    return np.ascontiguousarray(
-        np.clip(normalized, np.float32(0.0), np.float32(1.0)),
-        dtype=np.float32,
-    )
+    samples = np.asarray(frame.samples)
+    if samples.ndim != 2:
+        raise ValueError("RAW Native normalization requires a 2D CFA mosaic")
+    normalized = np.empty(samples.shape, dtype=np.float32)
+    black_levels = tuple(float(value) for value in frame.black_level)
+    white_levels = tuple(float(value) for value in frame.white_level)
+    if len(black_levels) not in (1, 4) or len(white_levels) not in (1, 4):
+        raise ValueError("RAW Native normalization requires one or four CFA levels")
+    phase_origin = getattr(frame, "phase_origin", (0, 0))
+    phase_y, phase_x = (int(phase_origin[0]) & 1, int(phase_origin[1]) & 1)
+    for index in range(4):
+        plane_y, plane_x = divmod(index, 2)
+        row = (plane_y - phase_y) & 1
+        col = (plane_x - phase_x) & 1
+        black = np.float32(black_levels[index if len(black_levels) == 4 else 0])
+        white = np.float32(white_levels[index if len(white_levels) == 4 else 0])
+        inverse_range = np.float32(1.0) / np.maximum(
+            np.float32(1.0), np.float32(white - black)
+        )
+        destination = normalized[row::2, col::2]
+        np.subtract(samples[row::2, col::2], black, out=destination, dtype=np.float32)
+        np.multiply(destination, inverse_range, out=destination)
+        np.clip(destination, np.float32(0.0), np.float32(1.0), out=destination)
+    return np.ascontiguousarray(normalized, dtype=np.float32)
 
 
 def _plane_homography(matrix: np.ndarray, frame, index: int) -> np.ndarray:
@@ -392,7 +399,7 @@ def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None):
     )
 
 
-def _legacy_run_raw_native_resident_pipeline(
+def _legacy_run_raw_resident_pipeline(
     image_paths: Sequence[str | Path],
     *,
     session=None,
@@ -413,7 +420,7 @@ def _legacy_run_raw_native_resident_pipeline(
     stop_event=None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
     **_unused,
-) -> Tuple[RawNativeResult, float]:
+) -> Tuple[RawPipelineResult, float]:
     """Fuse a DNG burst directly in Bayer CFA space.
 
     RGB is used only to estimate an alignment transform.  The transform is
@@ -693,7 +700,7 @@ def _legacy_run_raw_native_resident_pipeline(
             print(
                 "[RAW Native][FusionNet] WeightNet proxy cache ready: "
                 f"shape={tuple(fusion_ref_work_chw.shape)} tile={fusion_tile_size} "
-                f"overlap={fusion_overlap:.3f} CLAHE=reference-cache"
+                f"overlap={fusion_overlap:.3f} CLAHE=off"
             )
 
         _release(ref_analysis_gpu)
@@ -1013,7 +1020,7 @@ def _legacy_run_raw_native_resident_pipeline(
         if normalized_engine == "fusionet"
         else 1.0
     )
-    result = RawNativeResult(
+    result = RawPipelineResult(
         normalized_mosaic=fused_mosaic,
         preview_rgb=np.ascontiguousarray(preview, dtype=np.float32),
         reference_frame=reference,
@@ -1057,15 +1064,15 @@ class _RawDngHostPayload:
         self._data = None
 
 
-class RawNativeProvider:
+class RawPipelineProvider:
     """RAW Native carrier boundary used by the resident dispatcher.
 
     ``run`` is retained as a compatibility entry point, but delegates to the
     shared resident executor.  The former standalone runner remains available
-    privately as ``_legacy_run_raw_native_resident_pipeline`` for comparison.
+    privately as ``_legacy_run_raw_resident_pipeline`` for comparison.
     """
 
-    source_mode = "raw_native"
+    source_mode = "raw"
     carrier_kind = "cfa"
 
     def __init__(self, image_paths, **options):
@@ -1082,6 +1089,7 @@ class RawNativeProvider:
         self._cfa_planes_gpu = None
         self._cfa_buffer_session = None
         self._cfa_planes_initialized = False
+        self._cfa_staged_carrier = None
         self._finalized = False
 
     def _read_frame(self, index: int):
@@ -1274,20 +1282,28 @@ class RawNativeProvider:
         )
 
         self._ensure_cfa_workspace(support)
-        planes = _normalize_phase_planes_into(support, self._cfa_planes_host)
         gpu_planes = self._cfa_planes_gpu
         active_weight = weight_map if weight_map is not None else self._one_weight_gpu
-        # A mapped host-accessible plane can still be read by queued kernels;
-        # synchronize once before overwriting the set. Device-local writes use
-        # the engine's staging/copy route, which orders against prior work.
-        if self._cfa_planes_initialized and any(
-            bool(getattr(buffer, "host_accessible", False))
-            for buffer in gpu_planes
-        ):
-            self._engine.sync()
-        for destination, plane in zip(gpu_planes, planes):
-            self._engine.write_into(destination, plane, synchronize=False)
-        self._cfa_planes_initialized = True
+        # Deep Analysis accumulates several confidence maps for the same RAW
+        # frame (center plus selected neighboring patches). Its CFA samples do
+        # not change between those calls, so normalize and upload the four Bayer
+        # planes once, then reuse the resident planes for every candidate map.
+        # Keep the existing staging behavior when a different frame arrives.
+        if self._cfa_staged_carrier is not support:
+            planes = _normalize_phase_planes_into(support, self._cfa_planes_host)
+            # A mapped host-accessible plane can still be read by queued
+            # kernels; synchronize once before overwriting the set.
+            # Device-local writes use the engine's staging/copy route, which
+            # orders against prior work.
+            if self._cfa_planes_initialized and any(
+                bool(getattr(buffer, "host_accessible", False))
+                for buffer in gpu_planes
+            ):
+                self._engine.sync()
+            for destination, plane in zip(gpu_planes, planes):
+                self._engine.write_into(destination, plane, synchronize=False)
+            self._cfa_planes_initialized = True
+            self._cfa_staged_carrier = support
         if isinstance(transform, np.ndarray) and transform.ndim == 2 and transform.shape == (3, 3):
             _accumulate_homography_cfa(
                 gpu_planes,
@@ -1335,7 +1351,7 @@ class RawNativeProvider:
             preview_rgb = preview.to_numpy()
         finally:
             _release(preview)
-        result = RawNativeResult(
+        result = RawPipelineResult(
             normalized_mosaic=mosaic,
             preview_rgb=np.ascontiguousarray(preview_rgb, dtype=np.float32),
             reference_frame=reference,
@@ -1350,7 +1366,7 @@ class RawNativeProvider:
         return ResidentResult(
             value=result,
             mean_alpha=float(mean_alpha),
-            source_mode="raw_native",
+            source_mode="raw",
             report=dict(result.report or {}),
         )
 
@@ -1385,15 +1401,16 @@ class RawNativeProvider:
         self._cfa_plane_shape = None
         self._cfa_buffer_session = None
         self._cfa_planes_initialized = False
+        self._cfa_staged_carrier = None
         self._engine = None
         return None
 
 
-def run_raw_native_resident_pipeline(image_paths, **kwargs):
-    """Compatibility entry point delegating to the shared resident executor."""
+def run_raw_resident_pipeline(image_paths, **kwargs):
+    """Run the canonical RAW path through the shared resident executor."""
     from ..resident_pipeline import _run_shared_raw_provider_pipeline
 
     return _run_shared_raw_provider_pipeline(image_paths, **kwargs)
 
 
-__all__ = ["RawNativeProvider", "run_raw_native_resident_pipeline"]
+__all__ = ["RawPipelineProvider", "run_raw_resident_pipeline"]

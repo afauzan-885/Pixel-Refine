@@ -9,7 +9,7 @@ import numpy as np
 
 class SfMMVSAOTTests(unittest.TestCase):
     def test_cpu_stereo_regularizer_leaves(self) -> None:
-        from ...aot_api.research import (
+        from taichi_vision.taichi_algorithm.aot_api.research import (
             sfm_patchmatch_iteration_aot,
             sfm_sgm_path_aot,
         )

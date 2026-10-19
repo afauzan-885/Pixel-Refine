@@ -26,14 +26,13 @@ def state_for(method="FusionNet", sr=False):
     ("Similarity", "similarity"), ("SpatialFusion", "similarity"),
     ("Average", "average"),
 ])
-@pytest.mark.parametrize("settings,extension", [
-    ({}, ".tif"), ({"enable_linear_mode": True}, ".dng"),
-    ({"processing_format": "RAW Native"}, ".dng"),
+@pytest.mark.parametrize("settings", [
+    {}, {"enable_linear_mode": True}, {"processing_format": "RAW Native"},
 ])
-def test_exact_names_follow_catalogue_and_output_domain(method, suffix, settings, extension):
+def test_exact_names_follow_catalogue_and_input_domain(method, suffix, settings):
     stages = plan_stages(service.batch_selections(state_for(method)))
     assert service.expected_output_names(stages, ["folder/Ref image-1.dng"], settings) == [
-        f"Refimage-1_{suffix}{extension}"
+        f"Refimage-1_{suffix}.dng"
     ]
 
 
@@ -44,13 +43,21 @@ def test_disabled_denoiser_never_reuses_its_result():
     assert not plan_stages(service.batch_selections(state))
 
 
-def test_native_invalid_input_and_hdr_dynamic_reference_disable_cache():
+def test_mixed_raw_rgb_and_hdr_dynamic_reference_disable_cache():
     stages = plan_stages(service.batch_selections(state_for()))
-    assert service.expected_output_names(stages, ["ref.dng", "support.tif"], {
-        "processing_format": "RAW Native"
-    }) is None
+    assert service.expected_output_names(stages, ["ref.dng", "support.tif"], {}) is None
+    assert service.expected_output_names(stages, ["ref.nef", "support.nef"], {}) is None
     stages = plan_stages({"hdr": "Weighted HDR"})
     assert service.expected_output_names(stages, ["ref.dng"], {}) is None
+
+
+def test_rgb_denoising_output_extension_follows_input_not_legacy_settings():
+    stages = plan_stages(service.batch_selections(state_for()))
+    assert service.expected_output_names(
+        stages,
+        ["folder/Ref image-1.tiff"],
+        {"processing_format": "RAW Native", "enable_linear_mode": True},
+    ) == ["Refimage-1_fusionet.tif"]
 
 
 def test_exact_lookup_ignores_other_images_methods_numbered_copies_and_empty_files(tmp_path):
@@ -179,7 +186,7 @@ def bulk_job(tmp_path, monkeypatch):
 @pytest.mark.parametrize("location", ["stack", "target"])
 def test_bulk_existing_exact_output_skips_algorithm(bulk_job, location):
     data = bulk_job
-    existing = getattr(data, location) / "ref_fusionet.tif"
+    existing = getattr(data, location) / "ref_fusionet.dng"
     existing.write_bytes(b"already computed output")
 
     def must_not_process(**_kwargs):
@@ -200,8 +207,8 @@ def test_bulk_uses_declared_path_not_unrelated_folder_files(bulk_job):
 
     def process(**kwargs):
         calls.append(kwargs)
-        (data.stack / "unrelated_fusionet.tif").write_bytes(b"unrelated")
-        output = data.stack / "ref_fusionet.tif"
+        (data.stack / "unrelated_fusionet.dng").write_bytes(b"unrelated")
+        output = data.stack / "ref_fusionet.dng"
         output.write_bytes(b"actual result")
         return [str(output)]
 
@@ -209,8 +216,8 @@ def test_bulk_uses_declared_path_not_unrelated_folder_files(bulk_job):
     data.job.run()
     assert len(calls) == 1
     assert data.finished == [(0, True, "Success: Saved")]
-    assert (data.target / "ref_fusionet.tif").read_bytes() == b"actual result"
-    assert not (data.target / "unrelated_fusionet.tif").exists()
+    assert (data.target / "ref_fusionet.dng").read_bytes() == b"actual result"
+    assert not (data.target / "unrelated_fusionet.dng").exists()
     assert (data.stack / "ref_similarity.tif").exists()
 
 
@@ -219,14 +226,14 @@ def test_bulk_missing_output_is_reported_in_failure_summary(bulk_job):
     data.panel.process_all_batch = lambda **kwargs: []
     data.job.run()
     assert data.finished[0][1] is False
-    assert "ref_fusionet.tif" in data.finished[0][2]
+    assert "ref_fusionet.dng" in data.finished[0][2]
     assert data.summaries[0][0]["id"] == 1
 
 
 def test_bulk_incomplete_multi_stage_result_is_not_exported(bulk_job):
     data = bulk_job
     data.state.write_text(json.dumps({"1": state_for(sr=True)}), encoding="utf-8")
-    output = data.stack / "ref_fusionet.tif"
+    output = data.stack / "ref_fusionet.dng"
 
     def process(**kwargs):
         output.write_bytes(b"one result only")
@@ -265,7 +272,7 @@ def test_actual_panel_returns_declared_algorithm_output(bulk_job, monkeypatch):
     data.panel.database_manager = data.layout.database_manager
     data.panel._exists_flags = lambda paths: [True] * len(paths)
     data.panel._last_result = None
-    output = data.stack / "ref_fusionet.tif"
+    output = data.stack / "ref_fusionet.dng"
     calls = []
 
     def run(category, key, parent, **kwargs):
@@ -284,7 +291,7 @@ def test_bulk_cancelled_algorithm_does_not_export(bulk_job):
     data = bulk_job
 
     def process(**kwargs):
-        output = data.stack / "ref_fusionet.tif"
+        output = data.stack / "ref_fusionet.dng"
         output.write_bytes(b"result")
         data.job.stop()
         return str(output)

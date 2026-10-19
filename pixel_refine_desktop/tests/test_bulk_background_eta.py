@@ -97,7 +97,61 @@ def test_worker_failure_and_cancellation_are_not_successful_exports(tmp_path, mo
         job._process_batch(SimpleNamespace(), 7, lambda *args: None)
     worker.dispatch_task = lambda *args, **kwargs: {"type": "cancelled", "success": True}
     assert job._process_batch(SimpleNamespace(), 7, lambda *args: None) == []
-    assert not job._is_running
+    assert job._is_running  # Per-batch cancellation must not discard later queue entries.
+
+
+def test_active_batch_cancel_holds_queue_slot_until_worker_returns(qapp, tmp_path, monkeypatch):
+    from threading import Event
+
+    from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_manager import (
+        BackendWorkerManager,
+    )
+    import pixel_refine_desktop.enhance_stack.components.bulk_page.controllers.bulk_process_controller as controller
+
+    panels = [
+        SimpleNamespace(batch_id=batch_id, name=f"Batch {batch_id}")
+        for batch_id in (7, 8)
+    ]
+    layout = SimpleNamespace(database_manager=None)
+    thread = ProcessingThread([(panels[0], 0), (panels[1], 1)], layout, str(tmp_path))
+    entered_worker = Event()
+    release_worker = Event()
+    started_batches = []
+    terminal_rows = []
+
+    monkeypatch.setattr(controller, "find_existing_outputs", lambda *args: [])
+    monkeypatch.setattr(
+        BackendWorkerManager,
+        "instance",
+        lambda: SimpleNamespace(stop_current_task=lambda: None),
+    )
+    thread._result_identity = lambda panel, batch_id: ([], [])
+
+    def process_batch(panel, batch_id, progress_callback):
+        started_batches.append(batch_id)
+        entered_worker.set()
+        release_worker.wait(5)
+        return []
+
+    thread._process_batch = process_batch
+    thread.batch_finished.connect(lambda *args: terminal_rows.append(args))
+    thread.start()
+    try:
+        assert entered_worker.wait(3)
+        thread.cancel_batch(7)
+        thread.cancel_batch(8)
+        time.sleep(0.05)
+        assert started_batches == [7]
+    finally:
+        release_worker.set()
+
+    assert thread.wait(5000)
+    qapp.processEvents()
+    assert started_batches == [7]
+    assert terminal_rows == [
+        (0, False, "Cancelled during processing"),
+        (1, False, "Cancelled before processing"),
+    ]
 
 
 def test_qt_heartbeat_continues_while_child_holds_its_gil(qapp, tmp_path, monkeypatch):
@@ -147,6 +201,9 @@ def test_batch_dialog_geometry_survives_long_text_and_batch_transitions(qapp, tm
     monkeypatch.chdir(tmp_path)
     panels = [SimpleNamespace(batch_id=i, name=f"Batch {i}") for i in (1, 2)]
     dialog = BatchProcessDialog(panels, SimpleNamespace(database_manager=None))
+    assert dialog.table_widget.columnCount() == 5
+    assert dialog.table_widget.item(0, 2).text().startswith("⏳")
+    assert dialog.table_widget.cellWidget(0, 4).toolTip()
     dialog.show()
     qapp.processEvents()
     dialog._is_processing = True

@@ -1,38 +1,10 @@
-"""
-GPU-Resident Zero-Copy Pipeline for FusionNet.
+"""Resident alignment, WeightNet confidence, and RGB/CFA burst accumulation.
 
-Minimizes CPU↔GPU data transfers by keeping all full-resolution data in VRAM
-throughout the align → weight → fuse lifecycle. The only unavoidable CPU
-touches are:
-
-    1. ONNX WeightNet inference at work-resolution (~2 MB/frame vs ~50 MB full-res)
-    2. auto_enhance histogram analysis (once on reference, tiny)
-    3. Final result download (one frame)
-    4. Per-frame blend bridge (accumulator multiply-add — no dedicated AOT kernel yet)
-
-Architecture:
-    ┌─────────────────────────────────────────────────────────┐
-    │  Load frames directly to GPU VRAM (demosaic/imread)    │
-    └────────────────────┬────────────────────────────────────┘
-                         ▼
-    ┌─────────────────────────────────────────────────────────┐
-    │  Reference: build pyramid on GPU (taichi_bridge)       │
-    │  Accumulator: sum_img, weight_sum — VRAM-resident      │
-    └────────────────────┬────────────────────────────────────┘
-                         ▼
-    ┌─────────────────────────────────────────────────────────┐
-    │  Per support frame (all in VRAM until ONNX bridge):    │
-    │    a. GPU alignment → aligned frame stays in VRAM      │
-    │    b. Downsample to work-res on GPU (resize)           │
-    │    c. Download enhanced RGB work-res for ONNX          │
-    │    d. Upload weight map back to GPU                     │
-    │    e. Upsample weight to full-res on GPU               │
-    │    f. Blend: multiply-add on CPU bridge                 │
-    └────────────────────┬────────────────────────────────────┘
-                         ▼
-    ┌─────────────────────────────────────────────────────────┐
-    │  Download final fused result (one frame)                │
-    └─────────────────────────────────────────────────────────┘
+Standard uses DirectML. Deep Analysis uses Taichi AOT by default and retains
+candidate selection, WeightNet confidence, and fusion buffers in the same device
+runtime. Initial calibration samples and final outputs still cross the host
+boundary. RAW output consists of a CFA mosaic and a separate RGB preview.
+Neither route applies CLAHE.
 """
 
 import gc
@@ -40,6 +12,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Tuple
@@ -71,6 +44,402 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser impo
 )
 
 ANALYSIS_AUTO_ENHANCE_MODE = "natural"
+
+
+def _multi_patch_weightnet_input(candidate_hwc, *, channels, transfer_map=None):
+    """Convert one RGB candidate readback to the existing WeightNet CHW contract."""
+
+    if getattr(transfer_map, "runtime", None) == "taichi_aot":
+        return transfer_map.prepare(candidate_hwc)
+    candidate = np.asarray(candidate_hwc, dtype=np.float32)
+    if (
+        candidate.ndim == 3
+        and candidate.shape[0] in (1, 3)
+        and candidate.shape[-1] not in (1, 3)
+    ):
+        if channels == candidate.shape[0]:
+            chw = np.ascontiguousarray(candidate, dtype=np.float32)
+        elif channels == 1 and candidate.shape[0] == 3:
+            gray = (
+                candidate[0] * np.float32(0.299)
+                + candidate[1] * np.float32(0.587)
+                + candidate[2] * np.float32(0.114)
+            )
+            chw = np.ascontiguousarray(gray[None, ...], dtype=np.float32)
+        else:
+            raise ValueError(
+                f"multi-patch CHW proxy has {candidate.shape[0]} channels; expected {channels}"
+            )
+        if transfer_map is not None:
+            apply_precomputed_transfer_map(chw, transfer_map)
+        return chw
+    if candidate.ndim == 2:
+        candidate = candidate[..., None]
+    if candidate.ndim != 3 or candidate.shape[2] not in (1, 3):
+        raise ValueError(f"multi-patch proxy must be HWC 1/3-channel, got {candidate.shape}")
+    if channels == 1:
+        if candidate.shape[2] == 3:
+            gray = (
+                candidate[..., 0] * np.float32(0.299)
+                + candidate[..., 1] * np.float32(0.587)
+                + candidate[..., 2] * np.float32(0.114)
+            )
+        else:
+            gray = candidate[..., 0]
+        chw = np.ascontiguousarray(gray[None, ...], dtype=np.float32)
+    else:
+        if candidate.shape[2] != 3:
+            raise ValueError("RGB WeightNet requires a 3-channel analysis proxy")
+        chw = np.ascontiguousarray(np.transpose(candidate, (2, 0, 1)), dtype=np.float32)
+    if transfer_map is not None:
+        apply_precomputed_transfer_map(chw, transfer_map)
+    return chw
+
+
+def _select_multi_patch_candidates(
+    reference_chw,
+    candidate_source_chw,
+    offsets,
+    *,
+    max_neighbors,
+    stop_event,
+    telemetry,
+):
+    from ..patch_process.multi_patch import (
+        CandidateSelection,
+        cohere_candidate_selection,
+    )
+
+    started = time.perf_counter()
+    if stop_event is not None and (
+        bool(stop_event())
+        if callable(stop_event)
+        else bool(stop_event.is_set())
+        if hasattr(stop_event, "is_set")
+        else False
+    ):
+        return CandidateSelection(
+            indices=np.empty((0, *np.asarray(reference_chw).shape[-2:]), dtype=np.int32),
+            valid=np.empty((0, *np.asarray(reference_chw).shape[-2:]), dtype=bool),
+            search_candidate_count=0,
+        )
+
+    from taichi_vision import taichi_aot
+
+    offset_array = np.ascontiguousarray(
+        [(int(offset.dx_proxy), int(offset.dy_proxy)) for offset in offsets],
+        dtype=np.int32,
+    )
+    indices_gpu = taichi_aot.select_multi_patch_topk(
+        np.ascontiguousarray(reference_chw, dtype=np.float32),
+        np.ascontiguousarray(candidate_source_chw, dtype=np.float32),
+        offset_array,
+        max_neighbors=max_neighbors,
+    )
+    try:
+        indices = np.ascontiguousarray(indices_gpu.to_numpy(), dtype=np.int32)
+    finally:
+        indices_gpu.destroy()
+    valid = indices >= 0
+    selection = CandidateSelection(
+        indices=indices,
+        valid=valid,
+        search_candidate_count=len(offsets),
+    )
+    # The AOT graph ranks every pixel independently. Use one rank decision per
+    # 10-pixel patch cell before assembling candidate carriers so flat-field
+    # noise cannot create pixel-frequency offset mosaics.
+    selection = cohere_candidate_selection(
+        selection,
+        offsets,
+        cell_size=10,
+        patch_size=5,
+    )
+    telemetry.record("local_patch_search", started)
+    telemetry.searched(selection.search_candidate_count)
+    return selection
+
+
+def _iter_multi_patch_rank_maps(
+    session,
+    reference_chw,
+    candidate_source_chw,
+    offsets,
+    *,
+    max_neighbors,
+    tile_size,
+    overlap,
+    ghost_penalty,
+    ghost_cutoff,
+    chroma_sensitivity,
+    stop_event,
+    telemetry,
+    selection=None,
+    device_lock=None,
+    prefetch_depth=0,
+):
+    """Yield one local top-K candidate confidence map at a time.
+
+    Patch distance is used only inside ``select_topk_candidates`` to choose
+    source offsets. The returned WeightNet map is masked only by geometric
+    rank validity and is the sole candidate confidence passed to fusion.
+    """
+
+    from ..fusionet_engine.weightnet_inference import infer_single_support_weight_map
+    from ..patch_process.multi_patch import gather_rank_candidate
+
+    if getattr(session, "runtime", None) == "taichi_aot":
+        yield from session.candidates(reference_chw, candidate_source_chw, offsets,
+                                      max_neighbors=max_neighbors, telemetry=telemetry,
+                                      overlap=overlap, ghost_penalty=ghost_penalty,
+                                      ghost_cutoff=ghost_cutoff, stop_event=stop_event)
+        return
+
+    if selection is None:
+        if device_lock is None:
+            selection = _select_multi_patch_candidates(
+                reference_chw,
+                candidate_source_chw,
+                offsets,
+                max_neighbors=max_neighbors,
+                stop_event=stop_event,
+                telemetry=telemetry,
+            )
+        else:
+            with device_lock:
+                selection = _select_multi_patch_candidates(
+                    reference_chw,
+                    candidate_source_chw,
+                    offsets,
+                    max_neighbors=max_neighbors,
+                    stop_event=stop_event,
+                    telemetry=telemetry,
+                )
+
+    def _is_cancelled():
+        return stop_event is not None and (
+            bool(stop_event())
+            if callable(stop_event)
+            else bool(stop_event.is_set())
+            if hasattr(stop_event, "is_set")
+            else False
+        )
+
+    if int(prefetch_depth) > 0:
+        input_queue = queue.Queue(maxsize=max(1, int(prefetch_depth)))
+        input_sentinel = object()
+        producer_stop = threading.Event()
+        producer_errors = []
+
+        def _queue_input(candidate):
+            while not producer_stop.is_set():
+                if _is_cancelled():
+                    producer_stop.set()
+                    return False
+                try:
+                    input_queue.put(candidate, timeout=0.05)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
+        def _candidate_input_producer():
+            try:
+                for rank in range(selection.indices.shape[0]):
+                    if producer_stop.is_set() or _is_cancelled():
+                        break
+                    rank_indices = selection.indices[rank]
+                    valid = selection.valid[rank].copy()
+                    if not np.any(valid):
+                        continue
+                    candidate_chw, gathered_valid = gather_rank_candidate(
+                        candidate_source_chw, offsets, rank_indices
+                    )
+                    valid &= gathered_valid
+                    if not np.any(valid):
+                        del candidate_chw
+                        continue
+                    if not _queue_input((rank_indices, valid, candidate_chw)):
+                        del candidate_chw
+                        break
+            except Exception as exc:
+                producer_errors.append(exc)
+            finally:
+                if not producer_stop.is_set():
+                    _queue_input(input_sentinel)
+
+        producer = threading.Thread(
+            target=_candidate_input_producer,
+            name="FusionNet-DeepAnalysis-prefetch",
+            daemon=True,
+        )
+        producer.start()
+        try:
+            while True:
+                if _is_cancelled():
+                    producer_stop.set()
+                    return
+                try:
+                    item = input_queue.get(timeout=0.05)
+                except queue.Empty:
+                    if not producer.is_alive():
+                        break
+                    continue
+                if item is input_sentinel:
+                    break
+                rank_indices, valid, candidate_chw = item
+                inference_started = time.perf_counter()
+                try:
+                    confidence, alpha = infer_single_support_weight_map(
+                        session,
+                        reference_chw,
+                        candidate_chw,
+                        tile_size=tile_size,
+                        overlap=overlap,
+                        ghost_penalty=ghost_penalty,
+                        ghost_cutoff=ghost_cutoff,
+                        chroma_sensitivity=chroma_sensitivity,
+                        stop_event=stop_event,
+                        return_scalar=(reference_chw.shape[0] == 1),
+                    )
+                    telemetry.record("weightnet", inference_started)
+                    confidence = np.asarray(confidence, dtype=np.float32)
+                    if confidence.ndim != 3 or confidence.shape[1:] != valid.shape:
+                        raise ValueError(
+                            f"WeightNet confidence must be CHW on {valid.shape}, got {confidence.shape}"
+                        )
+                    confidence[:, ~valid] = 0.0
+                    telemetry.candidate()
+                    yield rank_indices, valid, confidence, float(alpha)
+                finally:
+                    del candidate_chw
+            if producer_errors:
+                raise RuntimeError(
+                    "Deep Analysis candidate prefetch failed"
+                ) from producer_errors[0]
+        finally:
+            producer_stop.set()
+            producer.join()
+        if producer_errors:
+            raise RuntimeError("Deep Analysis candidate prefetch failed") from producer_errors[0]
+        return
+
+    for rank in range(selection.indices.shape[0]):
+        if _is_cancelled():
+            return
+        rank_indices = selection.indices[rank]
+        valid = selection.valid[rank]
+        if not np.any(valid):
+            continue
+        candidate_chw, gathered_valid = gather_rank_candidate(
+            candidate_source_chw, offsets, rank_indices
+        )
+        valid &= gathered_valid
+        inference_started = time.perf_counter()
+        confidence, alpha = infer_single_support_weight_map(
+            session,
+            reference_chw,
+            candidate_chw,
+            tile_size=tile_size,
+            overlap=overlap,
+            ghost_penalty=ghost_penalty,
+            ghost_cutoff=ghost_cutoff,
+            chroma_sensitivity=chroma_sensitivity,
+            stop_event=stop_event,
+            return_scalar=(reference_chw.shape[0] == 1),
+        )
+        telemetry.record("weightnet", inference_started)
+        confidence = np.asarray(confidence, dtype=np.float32)
+        if confidence.ndim != 3 or confidence.shape[1:] != valid.shape:
+            raise ValueError(
+                f"WeightNet confidence must be CHW on {valid.shape}, got {confidence.shape}"
+            )
+        confidence[:, ~valid] = 0.0
+        telemetry.candidate()
+        del candidate_chw
+        yield rank_indices, valid, confidence, float(alpha)
+
+
+def _upload_weightnet_confidence(engine, confidence_chw, *, confidence_scale=1.0):
+    """Upload WeightNet CHW confidence as a scalar map or HWC vector map."""
+
+    from taichi_vision.taichi_algorithm.denoising.resident_weightnet import ResidentConfidence
+    if isinstance(confidence_chw, ResidentConfidence):
+        return confidence_chw.device(float(confidence_scale))
+    confidence = np.asarray(confidence_chw, dtype=np.float32)
+    if confidence.ndim != 3 or confidence.shape[0] not in (1, 3):
+        raise ValueError(f"WeightNet confidence must be 1/3-channel CHW, got {confidence.shape}")
+    confidence_scale = float(confidence_scale)
+    if not np.isfinite(confidence_scale) or confidence_scale < 0.0:
+        raise ValueError("confidence_scale must be finite and non-negative")
+    if confidence_scale != 1.0:
+        # Each local rank comes from the same sensor frame and its CFA samples
+        # overlap spatially with neighboring output locations.  Discount only
+        # these extra spatial ranks; the temporal center candidate stays at its
+        # original WeightNet confidence.
+        confidence = np.ascontiguousarray(confidence * np.float32(confidence_scale))
+    if confidence.shape[0] == 1:
+        host = np.ascontiguousarray(confidence[0], dtype=np.float32)
+        return engine.upload(host, is_vector=False)
+    host = np.ascontiguousarray(np.transpose(confidence, (1, 2, 0)), dtype=np.float32)
+    return engine.upload(host, is_vector=True)
+
+
+def _iter_deep_support_candidate_maps(session, reference_chw, support_chw, offsets, **options):
+    """Yield same-location and selected local top-K candidate maps."""
+    from ..fusionet_engine.weightnet_inference import infer_single_support_weight_map
+
+    max_neighbors = int(options["max_neighbors"])
+    stop_event = options["stop_event"]
+    telemetry = options["telemetry"]
+    if getattr(session, "runtime", None) == "taichi_aot":
+        count = 1 + min(max_neighbors, len(offsets))
+        center, alpha = session.infer(reference_chw, support_chw, **options)
+        telemetry.candidate()
+        yield None, None, center, alpha, count
+        for rank, valid, confidence, alpha in session.candidates(
+            reference_chw, support_chw, offsets, **options
+        ):
+            yield rank, valid, confidence, alpha, count
+        return
+    selection = _select_multi_patch_candidates(
+        reference_chw, support_chw, offsets,
+        max_neighbors=max_neighbors, stop_event=stop_event, telemetry=telemetry,
+    )
+    active_ranks = [r for r in range(selection.indices.shape[0]) if np.any(selection.valid[r])]
+    if not active_ranks:
+        raise RuntimeError("Deep Analysis produced no valid neighbor ranks")
+    count = 1 + len(active_ranks)
+    started = time.perf_counter()
+    center, alpha = infer_single_support_weight_map(
+        session, reference_chw, support_chw,
+        tile_size=options["tile_size"], overlap=options["overlap"],
+        ghost_penalty=options["ghost_penalty"], ghost_cutoff=options["ghost_cutoff"],
+        chroma_sensitivity=options["chroma_sensitivity"], stop_event=stop_event,
+        return_scalar=(reference_chw.shape[0] == 1),
+    )
+    telemetry.record("weightnet_center", started)
+    telemetry.candidate()
+    yield None, None, center, float(alpha), count
+    for result in _iter_multi_patch_rank_maps(
+        session, reference_chw, support_chw, offsets,
+        max_neighbors=max_neighbors,
+        tile_size=options["tile_size"], overlap=options["overlap"],
+        ghost_penalty=options["ghost_penalty"], ghost_cutoff=options["ghost_cutoff"],
+        chroma_sensitivity=options["chroma_sensitivity"],
+        stop_event=stop_event, telemetry=telemetry, selection=selection,
+    ):
+        rank_indices, valid, confidence, rank_alpha = result
+        yield rank_indices, valid, confidence, rank_alpha, count
+
+
+def _resolve_apap_fit_grid_size(config):
+    """Choose a local-model grid independently from the fixed 33x33 warp grid."""
+    settings = config or {}
+    preset = str(settings.get("mode", "fast")).strip().lower()
+    default_size = {"fast": 13, "balance": 17, "high": 25}.get(preset, 17)
+    return max(4, min(33, int(settings.get("apap_fit_grid_size", default_size))))
+
 
 def _select_ransac_inlier_correspondences(source, target, inlier_mask):
     """Apply one RANSAC mask while preserving the selected rows' input order."""
@@ -570,72 +939,23 @@ def apply_clahe_16bit_reference(
     clip_limit: float = 2.0,
     tile_grid_size: Tuple[int, int] = (8, 8),
     backend: str = "auto",
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Apply CLAHE to Reference Luminance and precompute 2D transfer ratio map.
-    Uses Taichi Vision GPU-accelerated CLAHE primarily, falling back to OpenCV
-    if needed.  ``backend='opencv'`` forces the OpenCV implementation while
-    retaining the same cached transfer-map contract.
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Compatibility alias: CLAHE was removed from FusionNet preprocessing.
 
-    Returns:
-        enhanced_chw: np.ndarray [1|3, H, W] float32 enhanced reference frame.
-        transfer_map: np.ndarray [H, W] float32 precomputed luminance boost ratio map.
+    Preserve the historical callable and tuple contract for external callers;
+    return the supplied CHW analysis tensor with no transfer map.
     """
     img = np.ascontiguousarray(rgb_chw, dtype=np.float32)
     if img.ndim != 3 or img.shape[0] not in (1, 3):
         raise ValueError(f"WeightNet reference must be CHW with 1 or 3 channels, got {img.shape}")
-    lum = (
-        img[0]
-        if img.shape[0] == 1
-        else 0.2126 * img[0] + 0.7152 * img[1] + 0.0722 * img[2]
-    )
-
-    lum_clahe = None
-    force_opencv = str(backend).strip().lower() == "opencv"
-    if not force_opencv:
-        try:
-            from taichi_vision import taichi_aot
-            taichi_aot = _managed_api(taichi_aot)
-
-            res = taichi_aot.clahe(
-                lum,
-                clip_limit=float(clip_limit),
-                tile_grid_size=tile_grid_size,
-            )
-            if hasattr(res, "to_numpy"):
-                res = res.to_numpy()
-            lum_clahe = np.asarray(res, dtype=np.float32)
-            if lum_clahe.size > 0 and float(np.max(lum_clahe)) > 1.5:
-                lum_clahe = lum_clahe / 255.0
-        except Exception:
-            pass
-
-    if lum_clahe is None:
-        try:
-            import cv2
-
-            # Discretize to 16-bit uint16 [0..65535]
-            lum_u16 = np.clip(lum * 65535.0 + 0.5, 0.0, 65535.0).astype(np.uint16)
-            clahe = cv2.createCLAHE(clipLimit=float(clip_limit), tileGridSize=tile_grid_size)
-            lum_clahe_u16 = clahe.apply(lum_u16)
-            lum_clahe = lum_clahe_u16.astype(np.float32) / 65535.0
-        except Exception:
-            lum_clahe = lum
-
-    # Transfer ratio map: ratio(y, x) = Y'_clahe / Y
-    transfer_map = ((lum_clahe + 1e-6) / (lum + 1e-6)).astype(np.float32)
-    # ``img`` is the one CHW staging array that will be passed to ONNX.  Keep
-    # it as the enhanced reference instead of allocating a second full RGB
-    # work image solely for the elementwise transfer-map application.
-    np.multiply(img, transfer_map[None, :, :], out=img)
-    np.clip(img, 0.0, 1.0, out=img)
-    return img, transfer_map
+    return img, None
 
 
 def apply_precomputed_transfer_map(
     rgb_chw: np.ndarray,
     transfer_map: np.ndarray,
 ) -> np.ndarray:
-    """Apply the one reference CLAHE map in-place to one ONNX work buffer."""
+    """Compatibility helper for callers supplying an explicit transfer map."""
     img = np.asarray(rgb_chw)
     if img.dtype != np.float32 or not img.flags.c_contiguous:
         img = np.ascontiguousarray(img, dtype=np.float32)
@@ -650,9 +970,12 @@ def prepare_weightnet_reference_input(
     work_shape: tuple[int, int],
     clip_limit: float = 2.0,
     tile_grid_size: tuple[int, int] = (8, 8),
-) -> tuple[np.ndarray, np.ndarray]:
-    """Build the canonical WeightNet reference tensor and CLAHE cache."""
+    session=None,
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    """Build the WeightNet reference tensor directly from the analysis proxy."""
 
+    if getattr(session, "runtime", None) == "taichi_aot":
+        return session.prepare_reference(analysis_gpu)
     from taichi_vision import taichi_aot
 
     taichi_aot = _managed_api(taichi_aot)
@@ -678,11 +1001,7 @@ def prepare_weightnet_reference_input(
     finally:
         if work_gpu is not analysis_gpu:
             _destroy_work_item(work_gpu)
-    return apply_clahe_16bit_reference(
-        reference_chw,
-        clip_limit=clip_limit,
-        tile_grid_size=tile_grid_size,
-    )
+    return reference_chw, None
 
 
 def prepare_weightnet_support_input(
@@ -697,6 +1016,8 @@ def prepare_weightnet_support_input(
     pipelines can reuse the HWC readback and CHW bridge arrays per worker.
     """
 
+    if getattr(transfer_map, "runtime", None) == "taichi_aot":
+        return transfer_map.prepare(aligned_analysis_gpu)
     if workspace is not None:
         return workspace.read(aligned_analysis_gpu, transfer_map=transfer_map)
 
@@ -1441,6 +1762,20 @@ class FeatureMatchingGPUAligner:
         self.feature_type = str(feature_type).lower().strip()
         self.work_scale = work_scale
         self.config = feature_config or {}
+        self.apap_fit_grid_size = _resolve_apap_fit_grid_size(self.config)
+        requested_warp_method = str(
+            self.config.get("warp_method", "homography")
+        ).strip().lower()
+        self.warp_method = "homography"
+        if requested_warp_method != "homography":
+            print(
+                f"[GPU Pipeline][Align] {self.feature_type.upper()} requested "
+                f"warp={requested_warp_method.upper()} is disabled; using HOMOGRAPHY"
+            )
+        print(
+            f"[GPU Pipeline][Align] feature={self.feature_type.upper()} "
+            f"warp={self.warp_method.upper()}"
+        )
 
         ref_gray_gpu = taichi_aot.cvtColor(ref_analysis_gpu, taichi_aot.COLOR_RGB2GRAY)
         h, w = ref_gray_gpu.shape[:2]
@@ -1493,12 +1828,26 @@ class FeatureMatchingGPUAligner:
                     k_contrast=float(self.config.get("k_contrast", 0.02)),
                     num_fed_steps=max(1, int(self.config.get("num_fed_steps", 8))),
                 )
-                resident_algorithm_allowed = self.feature_type == "ofb" or (
-                    self.feature_type == "akaze"
-                    and os.environ.get("TAICHI_FEATURE_RESIDENT_AKAZE", "0") == "1"
+                resident_algorithm_allowed = (
+                    self.warp_method == "homography"
+                    and (
+                        self.feature_type == "ofb"
+                        or (
+                            self.feature_type == "akaze"
+                            and os.environ.get("TAICHI_FEATURE_RESIDENT_AKAZE", "0")
+                            == "1"
+                        )
+                    )
                 )
+                # CUDA's resident correspondence pack path can corrupt the
+                # native heap after matching completes. Keep CUDA on the
+                # cache-backed compatibility readback path until that graph
+                # is validated there; feature extraction and RANSAC still run
+                # on the selected backend / host respectively.
+                resident_match_backend_allowed = feature_arch != "cuda"
                 self._feature_resident_matches = (
                     resident_algorithm_allowed
+                    and resident_match_backend_allowed
                     and os.environ.get("TAICHI_FEATURE_RESIDENT_MATCHES", "1") != "0"
                     and taichi_aot.aot_graph_available(
                         self.feature_type, "compact_matches_to_points"
@@ -1596,6 +1945,13 @@ class FeatureMatchingGPUAligner:
             _destroy_work_item(supp_gray_gpu)
 
         H_matrix = None
+        apap_ref_points = None
+        apap_support_points = None
+        matched_pair_count = 0
+        if resident_matches is not None:
+            matched_pair_count = int(resident_matches.count)
+        elif matched is not None and len(matched) >= 2:
+            matched_pair_count = min(len(matched[0]), len(matched[1]))
         scale_x = self.target_w / float(self.work_w)
         scale_y = self.target_h / float(self.work_h)
         if resident_matches is not None:
@@ -1609,21 +1965,55 @@ class FeatureMatchingGPUAligner:
                         64, int(self.config.get("ransac_hypotheses", 256))
                     )
                     ransac_iters = max(1, int(self.config.get("ransac_iters", 2)))
-                    H_candidate, inlier_mask = taichi_aot.find_homography(
-                        pts_supp_gpu,
-                        pts_ref_gpu,
-                        method="RANSAC",
-                        ransacReprojThreshold=reproj_threshold,
-                        n_hypotheses=ransac_hypotheses,
-                        max_iters=ransac_iters,
-                        return_gpu=True,
-                    )
-                    if H_candidate is not None:
-                        H_matrix = scale_homography(
-                            H_candidate,
-                            source_shape=(self.work_h, self.work_w),
-                            destination_shape=(self.target_h, self.target_w),
+                    if self.feature_type == "ofb":
+                        from ...alignment.feature_matching.OFB import OFBAlgorithm
+
+                        H_candidate, inlier_mask = OFBAlgorithm._find_homography(
+                            pts_supp_gpu.to_numpy(),
+                            pts_ref_gpu.to_numpy(),
+                            threshold=reproj_threshold,
+                            hypotheses=ransac_hypotheses,
+                            refinements=ransac_iters,
                         )
+                    else:
+                        H_candidate, inlier_mask = taichi_aot.find_homography(
+                            pts_supp_gpu,
+                            pts_ref_gpu,
+                            method="RANSAC",
+                            ransacReprojThreshold=reproj_threshold,
+                            n_hypotheses=ransac_hypotheses,
+                            max_iters=ransac_iters,
+                            return_gpu=True,
+                        )
+                    if H_candidate is not None:
+                        if self.feature_type == "ofb":
+                            H_matrix = scale_homography(
+                                np.asarray(H_candidate, dtype=np.float32),
+                                source_shape=(self.work_h, self.work_w),
+                                destination_shape=(self.target_h, self.target_w),
+                            )
+                        else:
+                            H_matrix = scale_homography(
+                                H_candidate,
+                                source_shape=(self.work_h, self.work_w),
+                                destination_shape=(self.target_h, self.target_w),
+                            )
+                    if self.warp_method == "apap":
+                        if H_matrix is not None:
+                            pts_ref = np.ascontiguousarray(
+                                pts_ref_gpu.to_numpy(), dtype=np.float32
+                            )
+                            pts_supp = np.ascontiguousarray(
+                                pts_supp_gpu.to_numpy(), dtype=np.float32
+                            )
+                            apap_ref_points, apap_support_points = (
+                                _select_ransac_inlier_correspondences(
+                                    pts_ref, pts_supp, inlier_mask
+                                )
+                            )
+                            scale = np.array([scale_x, scale_y], dtype=np.float32)
+                            apap_ref_points *= scale
+                            apap_support_points *= scale
                     if isinstance(inlier_mask, TaichiGPUBuffer):
                         get_engine().sync()
                         _destroy_work_item(inlier_mask)
@@ -1664,26 +2054,33 @@ class FeatureMatchingGPUAligner:
                 reproj_threshold = max(
                     0.5, float(self.config.get("ransac_threshold", 5.0))
                 )
-                # OFB consumes only the refined homography.  Its inlier mask
-                # is not used by the established OFB route, so keep that
-                # mask resident and release it without forcing a host
-                # readback.  AKAZE still needs the mask for its defensive
-                # geometry validation and therefore keeps the host result.
-                homography_mask_on_gpu = self.feature_type == "ofb"
-                H_candidate, inlier_mask = taichi_aot.find_homography(
-                    pts_supp,
-                    pts_ref,
-                    method="RANSAC",
-                    ransacReprojThreshold=reproj_threshold,
-                    n_hypotheses=ransac_hypotheses,
-                    max_iters=ransac_iters,
-                    return_gpu=homography_mask_on_gpu,
-                )
-                if self.feature_type == "akaze":
+                if self.feature_type == "ofb":
+                    from ...alignment.feature_matching.OFB import OFBAlgorithm
+
+                    H_candidate, inlier_mask = OFBAlgorithm._find_homography(
+                        pts_supp,
+                        pts_ref,
+                        threshold=reproj_threshold,
+                        hypotheses=ransac_hypotheses,
+                        refinements=ransac_iters,
+                    )
+                    H_matrix = (
+                        None
+                        if H_candidate is None
+                        else np.asarray(H_candidate, dtype=np.float32)
+                    )
+                else:
+                    H_candidate, inlier_mask = taichi_aot.find_homography(
+                        pts_supp,
+                        pts_ref,
+                        method="RANSAC",
+                        ransacReprojThreshold=reproj_threshold,
+                        n_hypotheses=ransac_hypotheses,
+                        max_iters=ransac_iters,
+                        return_gpu=False,
+                    )
                     # AKAZE's binary matches are more vulnerable to repeated
                     # texture producing a plausible-looking but wrong H.
-                    # Keep the established OFB route unchanged while making
-                    # the AKAZE path fail closed (or use robust translation).
                     H_matrix = self._validate_homography(
                         H_candidate,
                         pts_supp,
@@ -1693,26 +2090,106 @@ class FeatureMatchingGPUAligner:
                         height=self.target_h,
                         reproj_threshold=reproj_threshold,
                     )
-                else:
-                    H_matrix = H_candidate
-                    if isinstance(inlier_mask, TaichiGPUBuffer):
-                        # ``find_homography(return_gpu=True)`` leaves the
-                        # final inlier-mask dispatch asynchronous.  Establish
-                        # the same lifecycle barrier that the old host
-                        # readback provided before returning its buffer to
-                        # the pool; otherwise the next warp can observe a
-                        # recycled allocation on graphics backends.
-                        get_engine().sync()
-                        _destroy_work_item(inlier_mask)
+                if self.warp_method == "apap" and H_matrix is not None:
+                    apap_ref_points, apap_support_points = (
+                        _select_ransac_inlier_correspondences(
+                            pts_ref, pts_supp, inlier_mask
+                        )
+                    )
 
         if H_matrix is not None:
-            # Warp primary linear frame directly on GPU
-            warped_primary = taichi_aot.warp_perspective(
-                supp_linear_gpu,
-                H_matrix,
-                (self.target_w, self.target_h),
-                return_gpu=True,
-            )
+            if self.warp_method == "apap":
+                if apap_ref_points is None or apap_support_points is None:
+                    raise RuntimeError(
+                        f"{self.feature_type.upper()} APAP warp needs at least four matched point pairs"
+                    )
+                from taichi_vision.taichi_algorithm.alignment.apap import fit_apap
+
+                print(
+                    "[GPU Pipeline][Align] APAP RANSAC inliers="
+                    f"{len(apap_ref_points)} (no second correspondence filter)"
+                )
+                # RANSAC's H maps support -> reference. APAP's inverse map
+                # consumes reference coordinates and returns support
+                # coordinates, so reuse the validated transform in reverse
+                # instead of estimating the same global control a second time.
+                apap_global_h = np.linalg.inv(
+                    np.asarray(H_matrix, dtype=np.float64)
+                )
+                if return_transform:
+                    # RAW merges the CFA carrier, not this RGB proxy. Return
+                    # the local inverse field instead of losing APAP here by
+                    # returning only its global RANSAC homography.
+                    apap_warp = fit_apap(
+                        apap_ref_points,
+                        apap_support_points,
+                        global_homography=apap_global_h,
+                        grid_shape=(self.apap_fit_grid_size,) * 2,
+                    )
+                    flow = apap_warp.to_flow(
+                        (33, 33), full_shape=(self.target_h, self.target_w)
+                    )
+                    flow_gpu = taichi_aot.upload(flow, is_vector=False)
+                    warped_primary = None
+                    warped_secondary = None
+                    try:
+                        warped_primary = taichi_aot.remap_with_flow(
+                            supp_linear_gpu, flow_gpu,
+                            int(supp_linear_gpu.shape[0]), int(supp_linear_gpu.shape[1]),
+                            return_gpu=True,
+                        )
+                        if secondary_frame_to_warp is not None:
+                            warped_secondary = taichi_aot.remap_with_flow(
+                                secondary_frame_to_warp, flow_gpu,
+                                int(secondary_frame_to_warp.shape[0]),
+                                int(secondary_frame_to_warp.shape[1]),
+                                return_gpu=True,
+                            )
+                    except BaseException:
+                        for buffer in (warped_primary, warped_secondary, flow_gpu):
+                            if buffer is not None:
+                                _destroy_work_item(buffer)
+                        raise
+                    print(
+                        "[GPU Pipeline][Align] APAP carrier transform=local_flow "
+                        f"grid={flow.shape[:2]} model_grid="
+                        f"{self.apap_fit_grid_size}x{self.apap_fit_grid_size} "
+                        "warp=AOT-flow units=flow_pixels"
+                    )
+                    return warped_primary, warped_secondary, flow_gpu
+
+                from taichi_vision.taichi_algorithm.alignment.mesh_warp import (
+                    warp_apap,
+                )
+
+                warped_primary = _track_gpu_result(
+                    warp_apap(
+                        supp_linear_gpu,
+                        apap_ref_points,
+                        apap_support_points,
+                        dsize=(self.target_w, self.target_h),
+                        global_homography=apap_global_h,
+                        fit_grid_shape=(self.apap_fit_grid_size,) * 2,
+                        return_gpu=True,
+                    )
+                )
+            elif self.feature_type == "ofb":
+                from ...alignment.feature_matching.OFB import OFBAlgorithm
+
+                primary_np = np.ascontiguousarray(supp_linear_gpu.to_numpy())
+                warped_primary_np = OFBAlgorithm._warp_perspective(
+                    primary_np, H_matrix, (self.target_w, self.target_h)
+                )
+                warped_primary = taichi_aot.upload(
+                    np.ascontiguousarray(warped_primary_np), is_vector=False
+                )
+            else:
+                warped_primary = taichi_aot.warp_perspective(
+                    supp_linear_gpu,
+                    H_matrix,
+                    (self.target_w, self.target_h),
+                    return_gpu=True,
+                )
             warped_secondary = None
             if secondary_frame_to_warp is not None:
                 scale_mat = np.array(
@@ -1724,18 +2201,50 @@ class FeatureMatchingGPUAligner:
                     dtype=np.float32,
                 )
                 H_work = scale_mat @ H_matrix @ scale_mat_inv
-                warped_secondary = taichi_aot.warp_perspective(
-                    secondary_frame_to_warp,
-                    H_work,
-                    (self.work_w, self.work_h),
-                    return_gpu=True,
-                )
+                if self.warp_method == "apap":
+                    scale = np.array([scale_x, scale_y], dtype=np.float32)
+                    work_ref_points = apap_ref_points / scale
+                    work_support_points = apap_support_points / scale
+                    warped_secondary = _track_gpu_result(
+                        warp_apap(
+                            secondary_frame_to_warp,
+                            work_ref_points,
+                            work_support_points,
+                            dsize=(self.work_w, self.work_h),
+                            global_homography=np.linalg.inv(
+                                np.asarray(H_work, dtype=np.float64)
+                            ),
+                            return_gpu=True,
+                        )
+                    )
+                elif self.feature_type == "ofb":
+                    secondary_np = np.ascontiguousarray(
+                        secondary_frame_to_warp.to_numpy()
+                    )
+                    warped_secondary_np = OFBAlgorithm._warp_perspective(
+                        secondary_np, H_work, (self.work_w, self.work_h)
+                    )
+                    warped_secondary = taichi_aot.upload(
+                        np.ascontiguousarray(warped_secondary_np), is_vector=False
+                    )
+                else:
+                    warped_secondary = taichi_aot.warp_perspective(
+                        secondary_frame_to_warp,
+                        H_work,
+                        (self.work_w, self.work_h),
+                        return_gpu=True,
+                    )
             if return_transform:
                 return warped_primary, warped_secondary, np.ascontiguousarray(
                     H_matrix, dtype=np.float32
                 )
             return warped_primary, warped_secondary
         else:
+            print(
+                f"[GPU Pipeline][Align] feature={self.feature_type.upper()} "
+                f"warp={self.warp_method.upper()} not_applied=no_trusted_transform "
+                f"matched_pairs={matched_pair_count}; support remains unaligned"
+            )
             if return_transform:
                 return supp_linear_gpu, secondary_frame_to_warp, None
             return supp_linear_gpu, secondary_frame_to_warp
@@ -1876,13 +2385,21 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
             )
             flow_gpu = self._normalize_resident_flow(flow_gpu, flow_destination)
             warped_primary = taichi_aot.remap_with_flow(
-                supp_linear_gpu, flow_gpu, self.full_h, self.full_w, return_gpu=True
+                supp_linear_gpu,
+                flow_gpu,
+                self.full_h,
+                self.full_w,
+                return_gpu=True,
             )
             warped_secondary = None
             if secondary_frame_to_warp is not None:
                 sec_h, sec_w = (int(v) for v in secondary_frame_to_warp.shape[:2])
                 warped_secondary = taichi_aot.remap_with_flow(
-                    secondary_frame_to_warp, flow_gpu, sec_h, sec_w, return_gpu=True
+                    secondary_frame_to_warp,
+                    flow_gpu,
+                    sec_h,
+                    sec_w,
+                    return_gpu=True,
                 )
             if return_transform:
                 retained_flow = self._resident_flow_view()
@@ -2137,6 +2654,9 @@ def _run_shared_raw_provider_pipeline(
     work_scale: float = 0.50,
     flownet_work_scale: Optional[float] = None,
     weightnet_work_scale: Optional[float] = None,
+    denoising_mode: str = "standard",
+    max_neighbor_candidates: int = 4,
+    patch_search_radius: int = 5,
     max_work_dimension: Optional[int] = 2048,
     tile_size: int = 256,
     overlap: float = 0.30,
@@ -2149,17 +2669,24 @@ def _run_shared_raw_provider_pipeline(
     progress_callback: Optional[Callable[..., None]] = None,
     auto_params: Optional[dict] = None,
     prefetch_depth: Optional[int] = None,
+    source_descriptor=None,
     _runtime: Optional[PipelineRuntime] = None,
     **_unused,
 ) -> Tuple[Any, float]:
     """Run RAW CFA accumulation through the shared resident frame loop.
 
     The resident executor owns analysis, alignment, weight generation, queue
-    lifetime, and cleanup.  ``RawNativeProvider`` owns only CFA carrier I/O
+    lifetime, and cleanup.  ``RawPipelineProvider`` owns only CFA carrier I/O
     and phase-safe accumulation/finalization.
     """
 
     normalized_engine = str(weight_engine).strip().lower()
+    normalized_denoising_mode = str(denoising_mode).strip().lower().replace(" ", "_")
+    if normalized_denoising_mode not in {"standard", "deep_analysis"}:
+        raise ValueError(f"Unsupported FusionNet denoising mode: {denoising_mode!r}")
+    if normalized_denoising_mode == "deep_analysis" and normalized_engine != "fusionet":
+        raise ValueError("Deep Analysis mode is available only with FusionNet")
+    denoising_mode = normalized_denoising_mode
     # Retain the argument for compatibility. Stages below explicitly use
     # analysis mode for alignment and natural mode for FusionNet weight input.
     analysis_auto_enhance_mode = ANALYSIS_AUTO_ENHANCE_MODE
@@ -2170,7 +2697,7 @@ def _run_shared_raw_provider_pipeline(
     if len(image_paths) < 2:
         raise ValueError("RAW Native fusion requires at least two DNG frames")
 
-    from .raw_pipeline.provider import RawNativeProvider
+    from .raw_pipeline.provider import RawPipelineProvider
     from taichi_vision import taichi_aot
     taichi_aot = _managed_api(taichi_aot)
     from taichi_vision.taichi_aot import get_engine
@@ -2196,6 +2723,7 @@ def _run_shared_raw_provider_pipeline(
             in_processing_depth=resolve_in_processing_depth(),
             stop_event=stop_event,
             progress_callback=progress_callback,
+            source_descriptor=source_descriptor,
         )
     buffer_session = runtime.ensure_session(engine)
     engine = buffer_session.managed_api(engine)
@@ -2203,7 +2731,7 @@ def _run_shared_raw_provider_pipeline(
     weightnet_channels = _resolve_weightnet_input_channels(
         session, weightnet_input_channels
     )
-    provider = buffer_session.own(RawNativeProvider(image_paths, weight_engine=normalized_engine))
+    provider = buffer_session.own(RawPipelineProvider(image_paths, weight_engine=normalized_engine))
     pipeline_telemetry = PipelineTelemetry(engine, enabled=telemetry)
     aligner = None
     ref_proxy_full_gpu = None
@@ -2300,7 +2828,7 @@ def _run_shared_raw_provider_pipeline(
                     host_accessible=False,
                 )
             )
-        if normalized_engine == "fusionet":
+        if normalized_engine == "fusionet" and getattr(session, "runtime", None) != "taichi_aot":
             weightnet_support_workspace = _WeightNetReadbackWorkspace(
                 geometry.weight_shape, channels=weightnet_channels
             )
@@ -2452,6 +2980,7 @@ def _run_shared_raw_provider_pipeline(
                 fusion_ref_work_chw, fusion_transfer_map = prepare_weightnet_reference_input(
                     ref_weight_input_gpu,
                     work_shape=geometry.weight_shape,
+                    session=session,
                 )
                 if ref_weight_analysis_gpu is not ref_analysis_gpu:
                     _destroy_work_item(ref_weight_analysis_gpu)
@@ -2483,6 +3012,81 @@ def _run_shared_raw_provider_pipeline(
         pipeline_telemetry.emit("reference_loaded")
         total_supports = len(image_paths) - 1
         alpha_total = 0.0
+
+        if denoising_mode == "deep_analysis":
+            from ..patch_process.multi_patch import (
+                CandidateTelemetry,
+                candidate_flow_from_indices,
+                search_candidate_offsets,
+            )
+
+            reference_offsets = search_candidate_offsets(
+                geometry.full_shape,
+                geometry.weight_shape,
+                align_shape=geometry.align_shape,
+                search_radius=patch_search_radius,
+                patch_stride=2,
+                preserve_cfa_phase=True,
+            )
+            # Give each selected local rank an equal share of the bounded
+            # local-candidate confidence contribution.
+            local_rank_weight_scale = 1.0 / float(
+                max(1, int(max_neighbor_candidates)) ** 2
+            )
+            reference_telemetry = CandidateTelemetry()
+            for rank_indices, _rank_valid, confidence, _rank_alpha in _iter_multi_patch_rank_maps(
+                session,
+                fusion_ref_work_chw,
+                fusion_ref_work_chw,
+                reference_offsets,
+                max_neighbors=max_neighbor_candidates,
+                tile_size=tile_size,
+                overlap=overlap,
+                ghost_penalty=ghost_penalty,
+                ghost_cutoff=ghost_cutoff,
+                chroma_sensitivity=chroma_sensitivity,
+                stop_event=stop_event,
+                telemetry=reference_telemetry,
+            ):
+                if _cancelled():
+                    raise RuntimeError("RAW Deep Analysis cancelled during reference neighbors")
+                flow_gpu = weight_gpu = None
+                try:
+                    flow_host = candidate_flow_from_indices(
+                        rank_indices,
+                        reference_offsets,
+                        full_shape=geometry.full_shape,
+                        flow_shape=geometry.align_shape,
+                    )
+                    flow_gpu = engine.upload(flow_host, is_vector=True)
+                    weight_gpu = _upload_weightnet_confidence(
+                        engine,
+                        confidence,
+                        confidence_scale=local_rank_weight_scale,
+                    )
+                    accumulate_started = time.perf_counter()
+                    provider.accumulate(
+                        ref_frame,
+                        transform=flow_gpu,
+                        weight_map=weight_gpu,
+                    )
+                    reference_telemetry.record("cfa_accumulation_device", accumulate_started)
+                finally:
+                    if weight_gpu is not None:
+                        _destroy_work_item(weight_gpu)
+                    if flow_gpu is not None:
+                        _destroy_work_item(flow_gpu)
+            if reference_telemetry.candidate_count == 0:
+                raise RuntimeError(
+                    "RAW Deep Analysis patch search produced no reference neighbors"
+                )
+            print(
+                "[FusionNet MultiPatch][RAW reference] "
+                f"shape={geometry.weight_shape} dtype=float32 "
+                f"neighbors={reference_telemetry.candidate_count} "
+                f"search_candidates={reference_telemetry.search_candidate_count} "
+                f"stages={reference_telemetry.summary()}"
+            )
 
         def _load_support_dng_payload(index):
             return provider.load_support_dng_payload_host(index)
@@ -2516,6 +3120,7 @@ def _run_shared_raw_provider_pipeline(
             aligned_analysis_weight = None
             transform = None
             weight_gpu = None
+            deep_analysis_accumulated = False
             try:
                 if needs_analysis:
                     from .raw_pipeline.provider import _demosaic_carrier_gpu
@@ -2666,53 +3271,328 @@ def _run_shared_raw_provider_pipeline(
                         _destroy_work_item(support_analysis)
                         support_analysis = None
                 elif normalized_engine == "fusionet":
-                    if weightnet_channels == 1:
-                        taichi_aot.cvtColor(
-                            aligned_analysis_weight,
-                            taichi_aot.COLOR_RGB2GRAY,
-                            dst=weightnet_gray_gpu,
-                            return_gpu=True,
+                    if getattr(session, "runtime", None) == "taichi_aot":
+                        from ..patch_process.multi_patch import CandidateTelemetry, search_candidate_offsets
+                        telemetry = CandidateTelemetry()
+                        support_resident = session.prepare(aligned_analysis_weight)
+                        native_confidence, alpha = session.infer(
+                            fusion_ref_work_chw, support_resident, overlap=overlap,
+                            ghost_penalty=ghost_penalty, ghost_cutoff=ghost_cutoff,
+                            stop_event=stop_event,
                         )
-                        weightnet_support_gpu = weightnet_gray_gpu
+                        telemetry.candidate()
+                        if denoising_mode == "deep_analysis":
+                            center_weight = _upload_weightnet_confidence(engine, native_confidence)
+                            try:
+                                provider.accumulate(support_frame, transform=transform, weight_map=center_weight)
+                            finally:
+                                _destroy_work_item(center_weight)
+                            candidates = search_candidate_offsets(
+                                geometry.full_shape, geometry.weight_shape,
+                                align_shape=geometry.align_shape, search_radius=patch_search_radius,
+                                patch_stride=2, preserve_cfa_phase=True,
+                            )
+                            candidate_alpha_total = alpha
+                            for selected, _, confidence, rank_alpha in session.candidates(
+                                fusion_ref_work_chw, support_resident, candidates,
+                                max_neighbors=max_neighbor_candidates, telemetry=telemetry,
+                                overlap=overlap, ghost_penalty=ghost_penalty,
+                                ghost_cutoff=ghost_cutoff, stop_event=stop_event,
+                            ):
+                                flow_gpu = selected.flow(full_shape=geometry.full_shape,
+                                                         flow_shape=geometry.align_shape,
+                                                         base_transform=transform)
+                                local_weight = _upload_weightnet_confidence(
+                                    engine, confidence, confidence_scale=local_rank_weight_scale)
+                                try:
+                                    provider.accumulate(support_frame, transform=flow_gpu, weight_map=local_weight)
+                                finally:
+                                    _destroy_work_item(flow_gpu)
+                                    _destroy_work_item(local_weight)
+                                candidate_alpha_total += rank_alpha
+                            alpha = candidate_alpha_total / telemetry.candidate_count
+                            deep_analysis_accumulated = True
+                        else:
+                            weight_gpu = _upload_weightnet_confidence(engine, native_confidence)
+                        print(f"[FusionNet Resident][RAW] mode={denoising_mode} "
+                              f"shape={geometry.weight_shape} dtype=float32 "
+                              f"candidates={telemetry.candidate_count} host_patch_readback=0")
+                        del support_resident
+                    elif str(denoising_mode).strip().lower() == "deep_analysis":
+                        from ..patch_process.multi_patch import (
+                            CandidateTelemetry,
+                            candidate_flow_from_indices,
+                            search_candidate_offsets,
+                        )
+
+                        telemetry = CandidateTelemetry()
+                        candidate_alpha_total = 0.0
+                        candidates = search_candidate_offsets(
+                            geometry.full_shape,
+                            geometry.weight_shape,
+                            align_shape=geometry.align_shape,
+                            search_radius=patch_search_radius,
+                            patch_stride=2,
+                            preserve_cfa_phase=True,
+                        )
+                        readback_started = time.perf_counter()
+                        support_proxy_hwc = (
+                            aligned_analysis_weight.to_numpy()
+                            if hasattr(aligned_analysis_weight, "to_numpy")
+                            else np.asarray(aligned_analysis_weight)
+                        )
+                        telemetry.record("analysis_candidate_readback", readback_started)
+                        support_proxy_chw = _multi_patch_weightnet_input(
+                            support_proxy_hwc,
+                            channels=weightnet_channels,
+                            transfer_map=fusion_transfer_map,
+                        )
+                        del support_proxy_hwc
+
+                        # Keep ONNX inference serial, but hand each completed
+                        # candidate to a bounded CFA-consumer queue. This lets
+                        # the Taichi CFA accumulator consume candidate N while
+                        # WeightNet evaluates candidate N+1, matching the
+                        # standard route's overlapped inference/merge stages.
+                        candidate_queue = queue.Queue(maxsize=1)
+                        candidate_errors = []
+                        candidate_sentinel = object()
+                        deep_taichi_lock = threading.Lock()
+
+                        def _raw_deep_candidate_consumer():
+                            nonlocal candidate_alpha_total
+                            try:
+                                from taichi_vision.taichi_aot.engine import ensure_cuda_context
+
+                                ensure_cuda_context()
+                            except Exception:
+                                pass
+                            while True:
+                                candidate = candidate_queue.get()
+                                if candidate is candidate_sentinel:
+                                    return
+                                rank_indices, confidence, rank_alpha = candidate
+                                transform_gpu = weight_gpu = None
+                                deep_taichi_lock.acquire()
+                                try:
+                                    if _cancelled():
+                                        raise RuntimeError(
+                                            "RAW Deep Analysis cancelled during candidate fusion"
+                                        )
+                                    if rank_indices is None:
+                                        transform_gpu = transform
+                                    else:
+                                        transform_started = time.perf_counter()
+                                        if (
+                                            transform is not None
+                                            and hasattr(transform, "to_numpy")
+                                            and len(getattr(transform, "shape", ())) == 3
+                                        ):
+                                            transform_gpu = taichi_aot.compose_multi_patch_dense_flow(
+                                                rank_indices,
+                                                np.asarray(
+                                                    [(item.dx_full, item.dy_full) for item in candidates],
+                                                    dtype=np.int32,
+                                                ),
+                                                transform,
+                                                full_shape=geometry.full_shape,
+                                            )
+                                        else:
+                                            rank_flow_host = candidate_flow_from_indices(
+                                                rank_indices,
+                                                candidates,
+                                                full_shape=geometry.full_shape,
+                                                flow_shape=geometry.align_shape,
+                                                base_transform=transform,
+                                            )
+                                            transform_gpu = engine.upload(
+                                                rank_flow_host, is_vector=True
+                                            )
+                                        telemetry.record("candidate_transform", transform_started)
+                                    weight_gpu = _upload_weightnet_confidence(
+                                        engine,
+                                        confidence,
+                                        confidence_scale=(
+                                            local_rank_weight_scale
+                                            if rank_indices is not None
+                                            else 1.0
+                                        ),
+                                    )
+                                    accumulate_started = time.perf_counter()
+                                    provider.accumulate(
+                                        support_frame,
+                                        transform=transform_gpu,
+                                        weight_map=weight_gpu,
+                                    )
+                                    telemetry.record("cfa_accumulation_device", accumulate_started)
+                                    candidate_alpha_total += float(rank_alpha)
+                                except Exception as exc:
+                                    candidate_errors.append(exc)
+                                    return
+                                finally:
+                                    try:
+                                        if weight_gpu is not None:
+                                            _destroy_work_item(weight_gpu)
+                                        if rank_indices is not None and transform_gpu is not None:
+                                            _destroy_work_item(transform_gpu)
+                                    finally:
+                                        deep_taichi_lock.release()
+
+                        candidate_consumer = threading.Thread(
+                            target=_raw_deep_candidate_consumer,
+                            name=f"FusionNet-RAW-candidate-{ordinal}",
+                            daemon=True,
+                        )
+                        candidate_consumer.start()
+
+                        def _queue_raw_deep_candidate(candidate):
+                            while candidate_consumer.is_alive():
+                                if candidate_errors:
+                                    raise RuntimeError(
+                                        "RAW Deep Analysis candidate consumer failed"
+                                    ) from candidate_errors[0]
+                                if _cancelled():
+                                    raise RuntimeError(
+                                        "RAW Deep Analysis cancelled during candidate queueing"
+                                    )
+                                try:
+                                    candidate_queue.put(candidate, timeout=0.05)
+                                    return
+                                except queue.Full:
+                                    continue
+                            if candidate_errors:
+                                raise RuntimeError(
+                                    "RAW Deep Analysis candidate consumer failed"
+                                ) from candidate_errors[0]
+                            raise RuntimeError(
+                                "RAW Deep Analysis candidate consumer stopped unexpectedly"
+                            )
+
+                        try:
+                            # ONNX calls stay one-at-a-time. Their results are
+                            # consumed on a separate Taichi worker immediately.
+                            center_started = time.perf_counter()
+                            center_confidence, center_alpha = infer_single_support_weight_map(
+                                session,
+                                fusion_ref_work_chw,
+                                support_proxy_chw,
+                                tile_size=tile_size,
+                                overlap=overlap,
+                                ghost_penalty=float(ghost_penalty),
+                                ghost_cutoff=float(ghost_cutoff),
+                                chroma_sensitivity=float(chroma_sensitivity),
+                                stop_event=stop_event,
+                                return_scalar=(weightnet_channels == 1),
+                            )
+                            telemetry.record("weightnet_center", center_started)
+                            telemetry.candidate()
+                            _queue_raw_deep_candidate((None, center_confidence, center_alpha))
+
+                            for rank_indices, _rank_valid, confidence, rank_alpha in _iter_multi_patch_rank_maps(
+                                session,
+                                fusion_ref_work_chw,
+                                support_proxy_chw,
+                                candidates,
+                                max_neighbors=max_neighbor_candidates,
+                                tile_size=tile_size,
+                                overlap=overlap,
+                                ghost_penalty=float(ghost_penalty),
+                                ghost_cutoff=float(ghost_cutoff),
+                                chroma_sensitivity=float(chroma_sensitivity),
+                                stop_event=stop_event,
+                                telemetry=telemetry,
+                                device_lock=deep_taichi_lock,
+                                prefetch_depth=2,
+                            ):
+                                if _cancelled():
+                                    raise RuntimeError(
+                                        "RAW Deep Analysis cancelled during neighbor ranks"
+                                    )
+                                _queue_raw_deep_candidate(
+                                    (rank_indices, confidence, rank_alpha)
+                                )
+                        finally:
+                            if candidate_consumer.is_alive():
+                                while candidate_consumer.is_alive():
+                                    try:
+                                        candidate_queue.put(candidate_sentinel, timeout=0.05)
+                                        break
+                                    except queue.Full:
+                                        if candidate_errors:
+                                            break
+                            candidate_consumer.join()
+                        if candidate_errors:
+                            raise RuntimeError(
+                                "RAW Deep Analysis candidate consumer failed"
+                            ) from candidate_errors[0]
+                        del support_proxy_chw
+                        if telemetry.candidate_count == 0:
+                            raise RuntimeError("RAW Deep Analysis produced no candidates")
+                        alpha = candidate_alpha_total / telemetry.candidate_count
+                        deep_analysis_accumulated = True
+                        backend_details = {}
+                        try:
+                            from taichi_vision.taichi_aot import backend_info
+
+                            backend_details = backend_info()
+                        except Exception:
+                            backend_details = {"backend": getattr(engine, "arch", "unknown")}
+                        print(
+                            "[FusionNet MultiPatch][RAW] "
+                            f"backend={getattr(engine, 'arch', 'unknown')} device={backend_details} "
+                            f"shape={geometry.weight_shape} dtype=float32 "
+                            f"weightnet={getattr(session, 'runtime', 'onnx')} "
+                            "candidate_prefetch_depth=2 "
+                            f"stages={telemetry.summary()}"
+                        )
                     else:
-                        weightnet_support_gpu = aligned_analysis_weight
-                    support_chw = prepare_weightnet_support_input(
-                        weightnet_support_gpu,
-                        fusion_transfer_map,
-                        workspace=weightnet_support_workspace,
-                    )
-                    weight_chw, alpha = infer_single_support_weight_map(
-                        session,
-                        fusion_ref_work_chw,
-                        support_chw,
-                        tile_size=tile_size,
-                        overlap=overlap,
-                        ghost_penalty=float(ghost_penalty),
-                        ghost_cutoff=float(ghost_cutoff),
-                        chroma_sensitivity=float(chroma_sensitivity),
-                        stop_event=stop_event,
-                        return_scalar=(weightnet_channels == 1),
-                    )
-                    weight_upload = (
-                        weightnet_upload_workspace.stage(weight_chw)
-                        if weightnet_upload_workspace is not None
-                        else (
-                            np.ascontiguousarray(weight_chw[0], dtype=np.float32)
-                            if weightnet_channels == 1
-                            else np.ascontiguousarray(
-                                np.transpose(weight_chw, (1, 2, 0)),
-                                dtype=np.float32,
+                        if weightnet_channels == 1:
+                            taichi_aot.cvtColor(
+                                aligned_analysis_weight,
+                                taichi_aot.COLOR_RGB2GRAY,
+                                dst=weightnet_gray_gpu,
+                                return_gpu=True,
+                            )
+                            weightnet_support_gpu = weightnet_gray_gpu
+                        else:
+                            weightnet_support_gpu = aligned_analysis_weight
+                        support_chw = prepare_weightnet_support_input(
+                            weightnet_support_gpu,
+                            fusion_transfer_map,
+                            workspace=weightnet_support_workspace,
+                        )
+                        weight_chw, alpha = infer_single_support_weight_map(
+                            session,
+                            fusion_ref_work_chw,
+                            support_chw,
+                            tile_size=tile_size,
+                            overlap=overlap,
+                            ghost_penalty=float(ghost_penalty),
+                            ghost_cutoff=float(ghost_cutoff),
+                            chroma_sensitivity=float(chroma_sensitivity),
+                            stop_event=stop_event,
+                            return_scalar=(weightnet_channels == 1),
+                        )
+                        weight_upload = (
+                            weightnet_upload_workspace.stage(weight_chw)
+                            if weightnet_upload_workspace is not None
+                            else (
+                                np.ascontiguousarray(weight_chw[0], dtype=np.float32)
+                                if weightnet_channels == 1
+                                else np.ascontiguousarray(
+                                    np.transpose(weight_chw, (1, 2, 0)),
+                                    dtype=np.float32,
+                                )
                             )
                         )
-                    )
-                    weight_gpu = engine.upload(weight_upload, is_vector=False)
-                    del weight_upload
-                    if aligned_analysis_weight is not None:
-                        if support_analysis is aligned_analysis_weight:
-                            support_analysis = None
-                        _destroy_work_item(aligned_analysis_weight)
-                        aligned_analysis_weight = None
-                    del support_chw, weight_chw
+                        weight_gpu = engine.upload(weight_upload, is_vector=False)
+                        del weight_upload
+                        if aligned_analysis_weight is not None:
+                            if support_analysis is aligned_analysis_weight:
+                                support_analysis = None
+                            _destroy_work_item(aligned_analysis_weight)
+                            aligned_analysis_weight = None
+                        del support_chw, weight_chw
                 else:
                     alpha = 1.0
 
@@ -2742,8 +3622,13 @@ def _run_shared_raw_provider_pipeline(
                     _destroy_work_item(aligned_analysis_weight)
                     aligned_analysis_weight = None
 
-                provider.accumulate(support_frame, transform=transform, weight_map=weight_gpu)
-                alpha_total += float(alpha)
+                if not deep_analysis_accumulated:
+                    provider.accumulate(
+                        support_frame,
+                        transform=transform,
+                        weight_map=weight_gpu,
+                    )
+                alpha_total += alpha if getattr(session, "runtime", None) == "taichi_aot" else float(alpha)
                 _emit(
                     int(25 + (65 * ordinal / max(1, total_supports))),
                     f"RAW Native {ordinal}/{total_supports}",
@@ -2811,7 +3696,7 @@ def _run_shared_raw_provider_pipeline(
 
             if hasattr(taichi_aot, "reclaim_resident_buffers"):
                 engine.sync()
-                taichi_aot.reclaim_resident_buffers("raw_native_burst_complete")
+                taichi_aot.reclaim_resident_buffers("raw_pipeline_burst_complete")
         except Exception as exc:
             print(f"[GPU Pipeline] Post-burst reclaim skipped: {exc}")
 
@@ -2827,6 +3712,7 @@ def run_gpu_resident_pipeline(
     session=None,
     *,
     source_mode: Optional[str] = None,
+    source_descriptor=None,
     telemetry: Optional[bool] = None,
     weight_engine: str = "fusionet",
     alignment_plan: str = "optical_flow",
@@ -2837,6 +3723,9 @@ def run_gpu_resident_pipeline(
     work_scale: float = 0.50,
     flownet_work_scale: Optional[float] = None,
     weightnet_work_scale: Optional[float] = None,
+    denoising_mode: str = "standard",
+    max_neighbor_candidates: int = 4,
+    patch_search_radius: int = 5,
     max_work_dimension: Optional[int] = 2048,
     tile_size: int = 512,
     weightnet_input_channels: Optional[int] = None,
@@ -2845,7 +3734,6 @@ def run_gpu_resident_pipeline(
     ghost_penalty_min: Optional[float] = None,
     ghost_cutoff: float = 0.05,
     chroma_sensitivity: float = 6.0,
-    is_raw: bool = False,
     storage_mode: str = "direct",
     alignment_only: bool = False,
     batch_queue: Optional[int] = None,
@@ -2854,7 +3742,6 @@ def run_gpu_resident_pipeline(
     auto_params: Optional[dict] = None,
     stop_event: Optional[threading.Event] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
-    raw_native: bool = False,
 ) -> Tuple[Optional[np.ndarray], float]:
     """Execute the full GPU-resident FusionNet / SpatialFusion / Streaming Burst pipeline.
 
@@ -2874,6 +3761,10 @@ def run_gpu_resident_pipeline(
         work_scale: Downscale factor for WeightNet/Spatial weight computation.
         flownet_work_scale: Downscale factor for Optical Flow alignment.
         weightnet_work_scale: Downscale factor for WeightNet ONNX inference.
+        max_neighbor_candidates: Deep Analysis top-K neighbor limit per target
+            location and frame; ignored by Standard.
+        patch_search_radius: Deep Analysis radius in WeightNet-grid pixels;
+            ignored by Standard.
         max_work_dimension: Optional safety cap for analysis dimensions. Set
             to ``None`` when the UI-requested scale must be used natively.
         tile_size: Tile size for weight computation.
@@ -2884,7 +3775,8 @@ def run_gpu_resident_pipeline(
         ghost_penalty_min: Minimum ghost penalty for high-noise regions.
         ghost_cutoff: Ghost cutoff threshold.
         chroma_sensitivity: Color deviation protection scale.
-        is_raw: Whether images are RAW/DNG.
+        source_descriptor/source_mode: Input-layer classification forwarded to
+            the denoising runtime before it selects the RAW or RGB provider.
         storage_mode: "direct" (RAM/VRAM stream).
         alignment_only: If True, executes pure alignment without blending.
         batch_queue: Deprecated compatibility argument retained for existing
@@ -2903,11 +3795,22 @@ def run_gpu_resident_pipeline(
     Returns:
         (result_fp32, mean_alpha): Fused float32 RGB [H, W, 3] and mean alpha.
     """
+    if source_descriptor is None:
+        source_descriptor = getattr(current_pipeline_runtime(), "source_descriptor", None)
+    if source_mode is None and source_descriptor is not None:
+        source_mode = source_descriptor.kind
     if source_mode is None:
-        source_mode = "raw_native" if raw_native else ("raw_rgb" if is_raw else "rgb")
+        source_mode = "rgb"
     source_mode = str(source_mode).strip().lower()
-    if source_mode not in {"rgb", "raw_rgb", "raw_native", "video_rgb"}:
+    if source_mode not in {"rgb", "raw", "video_rgb"}:
         raise ValueError(f"Unsupported resident source_mode: {source_mode!r}")
+    denoising_mode = str(denoising_mode).strip().lower().replace(" ", "_")
+    if denoising_mode not in {"standard", "deep_analysis"}:
+        raise ValueError(f"Unsupported FusionNet denoising mode: {denoising_mode!r}")
+    if denoising_mode == "deep_analysis" and str(weight_engine).strip().lower() != "fusionet":
+        raise ValueError("Deep Analysis mode is available only with FusionNet")
+    max_neighbor_candidates = max(1, min(16, int(max_neighbor_candidates)))
+    patch_search_radius = max(1, min(16, int(patch_search_radius)))
     # The public parameter remains accepted for source compatibility; each
     # engine stage below chooses its explicit analysis/natural/linear contract.
     analysis_auto_enhance_mode = ANALYSIS_AUTO_ENHANCE_MODE
@@ -2918,11 +3821,16 @@ def run_gpu_resident_pipeline(
             in_processing_depth=resolve_in_processing_depth(),
             stop_event=stop_event,
             progress_callback=progress_callback,
+            source_descriptor=source_descriptor,
         )
-    raw_native = source_mode == "raw_native"
-    is_raw = source_mode in {"raw_rgb", "raw_native"}
+    is_raw = source_mode == "raw"
 
-    if raw_native:
+    if source_mode == "raw":
+        if any(Path(path).suffix.lower() != ".dng" for path in image_paths):
+            raise ValueError(
+                "RAW pipeline currently supports DNG input only; "
+                "this RAW format cannot be processed without a compatible RAW provider"
+            )
         # The provider supplies only the CFA carrier operations.  The shared
         # executor below owns the same frame loop, analysis, alignment, weight
         # generation, telemetry, and cleanup as the RGB path.
@@ -2934,7 +3842,7 @@ def run_gpu_resident_pipeline(
 
             session = load_weightnet_onnx(
                 DEFAULT_WEIGHTNET_ONNX,
-                runtime="dml",
+                runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "dml"),
                 patch_size=int(tile_size),
                 input_channels=1,
             )
@@ -2950,6 +3858,9 @@ def run_gpu_resident_pipeline(
             work_scale=work_scale,
             flownet_work_scale=flownet_work_scale,
             weightnet_work_scale=weightnet_work_scale,
+            denoising_mode=denoising_mode,
+            max_neighbor_candidates=max_neighbor_candidates,
+            patch_search_radius=patch_search_radius,
             max_work_dimension=max_work_dimension,
             tile_size=tile_size,
             overlap=overlap,
@@ -2960,6 +3871,7 @@ def run_gpu_resident_pipeline(
             auto_params=auto_params,
             stop_event=stop_event,
             progress_callback=progress_callback,
+            source_descriptor=source_descriptor,
             weightnet_input_channels=weightnet_input_channels,
             analysis_enhance=analysis_enhance,
             analysis_auto_enhance_mode=analysis_auto_enhance_mode,
@@ -3017,7 +3929,7 @@ def run_gpu_resident_pipeline(
     if session is None and weight_engine == "fusionet" and not alignment_only:
         session = load_weightnet_onnx(
             DEFAULT_WEIGHTNET_ONNX,
-            runtime="dml",
+            runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "dml"),
             patch_size=tile_size,
             input_channels=1,
         )
@@ -3028,11 +3940,6 @@ def run_gpu_resident_pipeline(
     # ------------------------------------------------------------------
     # PHASE 1: Load reference frame directly to GPU
     # ------------------------------------------------------------------
-    RAW_EXTS = {".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2", ".pef", ".raf"}
-    first_ext = os.path.splitext(str(image_paths[0]))[1].lower() if image_paths else ""
-    if not is_raw and first_ext in RAW_EXTS:
-        is_raw = True
-
     if progress_callback:
         progress_callback(
             PROGRESS_LOAD_IMAGES_MIN,
@@ -3042,7 +3949,7 @@ def run_gpu_resident_pipeline(
 
     from .rgb_pipeline.provider import RGBFrameProvider
 
-    rgb_provider = buffer_session.own(RGBFrameProvider(image_paths, is_raw=is_raw))
+    rgb_provider = buffer_session.own(RGBFrameProvider(image_paths))
     ref_gpu = buffer_session.own(rgb_provider.load_reference_gpu())
     target_h, target_w = ref_gpu.shape[:2]
 
@@ -3209,7 +4116,7 @@ def run_gpu_resident_pipeline(
         weightnet_gray_gpu = engine.allocate(
             (work_h, work_w), dtype=np.float32, host_accessible=False
         )
-    if weight_engine == "fusionet":
+    if weight_engine == "fusionet" and getattr(session, "runtime", None) != "taichi_aot":
         weightnet_support_workspace = _WeightNetReadbackWorkspace(
             (work_h, work_w), channels=weightnet_channels
         )
@@ -3323,9 +4230,10 @@ def run_gpu_resident_pipeline(
             work_shape=geometry.weight_shape,
             clip_limit=2.0,
             tile_grid_size=(8, 8),
+            session=session,
         )
         analysis_context.weight_reference = ref_work_rgb_np
-        analysis_context.clahe_transfer_map = ref_transfer_map
+        analysis_context.clahe_transfer_map = None
         if reference_analysis_gpu is not ref_gpu:
             _destroy_work_item(reference_analysis_gpu)
 
@@ -3438,6 +4346,94 @@ def run_gpu_resident_pipeline(
                     return True
         return False
 
+    def _remap_rgb_rank_carrier(source_gpu, rank_indices, offsets, telemetry):
+        """Gather per-location neighbor offsets from an aligned RGB carrier."""
+        from ..patch_process.multi_patch import candidate_flow_from_indices
+
+        flow_host = candidate_flow_from_indices(
+            rank_indices,
+            offsets,
+            full_shape=geometry.full_shape,
+            flow_shape=geometry.align_shape,
+        )
+        flow_gpu = engine.upload(flow_host, is_vector=True)
+        try:
+            started = time.perf_counter()
+            result = taichi_aot.remap_with_flow(
+                source_gpu,
+                flow_gpu,
+                int(geometry.full_shape[0]),
+                int(geometry.full_shape[1]),
+                return_gpu=True,
+            )
+            telemetry.record("carrier_rank_remap", started)
+            return result
+        finally:
+            _destroy_work_item(flow_gpu)
+
+    patch_offsets = None
+    if weight_engine == "fusionet" and denoising_mode == "deep_analysis":
+        from ..patch_process.multi_patch import (
+            CandidateTelemetry,
+            search_candidate_offsets,
+        )
+
+        patch_offsets = search_candidate_offsets(
+            geometry.full_shape,
+            geometry.weight_shape,
+            align_shape=geometry.align_shape,
+            search_radius=patch_search_radius,
+            patch_stride=2,
+            preserve_cfa_phase=False,
+        )
+        reference_telemetry = CandidateTelemetry()
+        for rank_indices, _rank_valid, confidence, _rank_alpha in _iter_multi_patch_rank_maps(
+            session,
+            ref_work_rgb_np,
+            ref_work_rgb_np,
+            patch_offsets,
+            max_neighbors=max_neighbor_candidates,
+            tile_size=tile_size,
+            overlap=overlap,
+            ghost_penalty=ghost_penalty,
+            ghost_cutoff=ghost_cutoff,
+            chroma_sensitivity=chroma_sensitivity,
+            stop_event=stop_event,
+            telemetry=reference_telemetry,
+        ):
+            if _is_stopped():
+                raise RuntimeError("RGB Deep Analysis cancelled during reference neighbors")
+            candidate_carrier_gpu = weight_gpu = None
+            try:
+                candidate_carrier_gpu = _remap_rgb_rank_carrier(
+                    ref_gpu, rank_indices, patch_offsets, reference_telemetry
+                )
+                weight_gpu = _upload_weightnet_confidence(engine, confidence)
+                accumulate_started = time.perf_counter()
+                rgb_provider.accumulate(
+                    candidate_carrier_gpu,
+                    transform=None,
+                    weight_map=weight_gpu,
+                )
+                reference_telemetry.record("rgb_accumulation_device", accumulate_started)
+                if getattr(session, "runtime", None) != "taichi_aot":
+                    engine.sync()
+            finally:
+                if weight_gpu is not None:
+                    _destroy_work_item(weight_gpu)
+                if candidate_carrier_gpu is not None:
+                    _destroy_work_item(candidate_carrier_gpu)
+        if reference_telemetry.candidate_count == 0:
+            raise RuntimeError("RGB Deep Analysis patch search produced no reference neighbors")
+        print(
+            "[FusionNet MultiPatch][RGB reference] "
+            f"backend={getattr(engine, 'arch', 'unknown')} "
+            f"shape={geometry.weight_shape} dtype=float32 "
+            f"neighbors={reference_telemetry.candidate_count} "
+            f"search_candidates={reference_telemetry.search_candidate_count} "
+            f"stages={reference_telemetry.summary()}"
+        )
+
     def _workers_stopped():
         return _is_stopped() or runtime.worker_stop_requested
 
@@ -3457,61 +4453,21 @@ def run_gpu_resident_pipeline(
     def _iter_in_processing_supports(
         indices, loader, *, disposer=None, prepare=None
     ):
-        """Admit a queued source payload, then prepare it inside its processing slot."""
+        """Register generic runtime leases until the final blend stage releases them."""
         nonlocal in_processing_peak
-        supports = iter(
-            runtime.iter_supports(
-                indices,
-                loader,
-                stop_when=lambda: _workers_stopped() or pipeline_error is not None,
-                disposer=disposer,
-            )
-        )
-        try:
-            while not _workers_stopped() and pipeline_error is None:
-                lease = runtime.acquire_in_processing_slot(
-                    stop_when=lambda: _workers_stopped() or pipeline_error is not None
+        for index, support, support_lease in runtime.iter_admitted_supports(
+            indices,
+            loader,
+            prepare or (lambda _index, value: value),
+            stop_when=lambda: _workers_stopped() or pipeline_error is not None,
+            source_disposer=disposer,
+        ):
+            with in_processing_lock:
+                in_processing_active[int(index)] = support_lease
+                in_processing_peak = max(
+                    in_processing_peak, len(in_processing_active)
                 )
-                if lease is None:
-                    break
-                try:
-                    index, source_payload = next(supports)
-                except StopIteration:
-                    lease.release()
-                    break
-                except BaseException:
-                    lease.release()
-                    raise
-                with in_processing_lock:
-                    in_processing_active[int(index)] = lease
-                    in_processing_peak = max(
-                        in_processing_peak, len(in_processing_active)
-                    )
-                try:
-                    support = (
-                        prepare(index, source_payload)
-                        if prepare is not None
-                        else source_payload
-                    )
-                except BaseException:
-                    if disposer is not None:
-                        try:
-                            disposer(source_payload)
-                        except Exception:
-                            pass
-                    _release_in_processing_slot(index)
-                    raise
-                finally:
-                    # For byte-backed payloads, prepare consumes and clears the
-                    # wrapper; do not retain the source container while its
-                    # decoded frame proceeds through alignment and blending.
-                    source_payload = None
-                yield index, support
-        finally:
-            try:
-                supports.close()
-            except Exception:
-                pass
+            yield index, support
 
     def _put_stage_end(stage_queue):
         # Consumers can exit on cancel/error before reading the sentinel.
@@ -3874,6 +4830,38 @@ def run_gpu_resident_pipeline(
     # ------------------------------------------------------------------
     # Worker 3: Weight Inference (DirectML ONNX AI or Native Taichi AOT)
     # ------------------------------------------------------------------
+    def _enqueue_deep_candidate(
+        curr_idx,
+        curr_name,
+        carrier_gpu,
+        weight_gpu,
+        alpha_share,
+        candidate_index,
+        candidate_count,
+        telemetry,
+        carrier_owned,
+    ):
+        while not _workers_stopped() and pipeline_error is None:
+            try:
+                weighted_queue.put(
+                    (
+                        curr_idx,
+                        curr_name,
+                        carrier_gpu,
+                        weight_gpu,
+                        float(alpha_share),
+                        int(candidate_index),
+                        int(candidate_count),
+                        telemetry,
+                        bool(carrier_owned),
+                    ),
+                    timeout=0.05,
+                )
+                return True
+            except queue.Full:
+                continue
+        return False
+
     def _weight_inference_worker():
         weight_slot = None
         try:
@@ -3902,6 +4890,91 @@ def run_gpu_resident_pipeline(
                     _destroy_work_item_except(supp_work_item, supp_aligned_linear_gpu)
                     break
 
+                if (
+                    weight_engine == "fusionet"
+                    and str(denoising_mode).strip().lower() == "deep_analysis"
+                ):
+                    from ..patch_process.multi_patch import CandidateTelemetry
+
+                    if patch_offsets is None:
+                        raise RuntimeError("Deep Analysis search offsets were not initialized")
+                    telemetry = CandidateTelemetry()
+                    try:
+                        source_proxy_chw = np.asarray(supp_work_item, dtype=np.float32)
+                        options = dict(
+                            max_neighbors=max_neighbor_candidates,
+                            tile_size=tile_size,
+                            overlap=overlap,
+                            ghost_penalty=ghost_penalty,
+                            ghost_cutoff=ghost_cutoff,
+                            chroma_sensitivity=chroma_sensitivity,
+                            stop_event=stop_event,
+                            telemetry=telemetry,
+                        )
+                        candidate_maps = _iter_deep_support_candidate_maps(
+                            session,
+                            ref_work_rgb_np,
+                            source_proxy_chw,
+                            patch_offsets,
+                            **options,
+                        )
+                        for candidate_index, (
+                            rank_indices,
+                            _rank_valid,
+                            confidence,
+                            alpha,
+                            candidate_count,
+                        ) in enumerate(candidate_maps):
+                            if _workers_stopped():
+                                raise RuntimeError(
+                                    "RGB Deep Analysis cancelled during candidate maps"
+                                )
+                            carrier_owned = rank_indices is not None
+                            candidate_carrier_gpu = weight_work_gpu = None
+                            try:
+                                if carrier_owned:
+                                    with gpu_hardware_lock:
+                                        candidate_carrier_gpu = _remap_rgb_rank_carrier(
+                                            supp_aligned_linear_gpu,
+                                            rank_indices,
+                                            patch_offsets,
+                                            telemetry,
+                                        )
+                                else:
+                                    candidate_carrier_gpu = supp_aligned_linear_gpu
+                                with gpu_hardware_lock:
+                                    weight_work_gpu = _upload_weightnet_confidence(
+                                        engine, confidence
+                                    )
+                                queued = _enqueue_deep_candidate(
+                                    curr_idx,
+                                    curr_name,
+                                    candidate_carrier_gpu,
+                                    weight_work_gpu,
+                                    alpha / candidate_count,
+                                    candidate_index,
+                                    candidate_count,
+                                    telemetry,
+                                    carrier_owned,
+                                )
+                                if not queued:
+                                    raise RuntimeError(
+                                        "RGB Deep Analysis stopped before candidate fusion"
+                                    )
+                                candidate_carrier_gpu = weight_work_gpu = None
+                            finally:
+                                if carrier_owned and candidate_carrier_gpu is not None:
+                                    _destroy_work_item(candidate_carrier_gpu)
+                                if weight_work_gpu is not None:
+                                    _destroy_work_item(weight_work_gpu)
+                    finally:
+                        with gpu_hardware_lock:
+                            _destroy_work_item(supp_aligned_linear_gpu)
+                        _destroy_work_item_except(
+                            supp_work_item,
+                            supp_aligned_linear_gpu,
+                        )
+                    continue
                 if weight_engine == "spatial_fusion":
                     weight_slot = _take_spatial_weight_slot()
                     if weight_slot is None:
@@ -4035,7 +5108,8 @@ def run_gpu_resident_pipeline(
         finally:
             _put_stage_end(weighted_queue)
 
-    is_thread_affine = str(getattr(engine, "arch", "")).lower() in ("opengl", "gles")
+    is_thread_affine = (str(getattr(engine, "arch", "")).lower() in ("opengl", "gles")
+                        or getattr(session, "runtime", None) == "taichi_aot")
 
     if is_thread_affine:
         # Context-affine backends (OpenGL/GLES) execute all GPU work synchronously on the context-owner thread
@@ -4156,6 +5230,116 @@ def run_gpu_resident_pipeline(
                 ):
                     _destroy_work_item(supp_analysis_sec_gpu)
 
+                if (
+                    weight_engine == "fusionet"
+                    and str(denoising_mode).strip().lower() == "deep_analysis"
+                ):
+                    from ..patch_process.multi_patch import CandidateTelemetry
+
+                    if patch_offsets is None:
+                        raise RuntimeError("Deep Analysis search offsets were not initialized")
+                    telemetry = CandidateTelemetry()
+                    proxy_host = (
+                        supp_aligned_sec_gpu
+                        if getattr(session, "runtime", None) == "taichi_aot"
+                        else supp_aligned_sec_gpu.to_numpy()
+                        if hasattr(supp_aligned_sec_gpu, "to_numpy")
+                        else np.asarray(supp_aligned_sec_gpu)
+                    )
+                    support_proxy_chw = _multi_patch_weightnet_input(
+                        proxy_host,
+                        channels=weightnet_channels,
+                        transfer_map=ref_transfer_map,
+                    )
+                    del proxy_host
+                    try:
+                        options = dict(
+                            max_neighbors=max_neighbor_candidates,
+                            tile_size=tile_size,
+                            overlap=overlap,
+                            ghost_penalty=ghost_penalty,
+                            ghost_cutoff=ghost_cutoff,
+                            chroma_sensitivity=chroma_sensitivity,
+                            stop_event=stop_event,
+                            telemetry=telemetry,
+                        )
+                        for candidate_index, (
+                            rank_indices,
+                            _rank_valid,
+                            confidence,
+                            alpha,
+                            candidate_count,
+                        ) in enumerate(
+                            _iter_deep_support_candidate_maps(
+                                session,
+                                ref_work_rgb_np,
+                                support_proxy_chw,
+                                patch_offsets,
+                                **options,
+                            )
+                        ):
+                            if _workers_stopped():
+                                raise RuntimeError(
+                                    "RGB Deep Analysis cancelled during candidate maps"
+                                )
+                            carrier_owned = rank_indices is not None
+                            candidate_carrier_gpu = weight_gpu = None
+                            try:
+                                if carrier_owned:
+                                    candidate_carrier_gpu = _remap_rgb_rank_carrier(
+                                        supp_aligned_linear_gpu,
+                                        rank_indices,
+                                        patch_offsets,
+                                        telemetry,
+                                    )
+                                else:
+                                    candidate_carrier_gpu = supp_aligned_linear_gpu
+                                weight_gpu = _upload_weightnet_confidence(
+                                    engine, confidence
+                                )
+                                rgb_provider.accumulate(
+                                    candidate_carrier_gpu,
+                                    transform=None,
+                                    weight_map=weight_gpu,
+                                )
+                                if getattr(session, "runtime", None) != "taichi_aot":
+                                    engine.sync()
+                                alpha_total += alpha / candidate_count
+                            finally:
+                                if carrier_owned and candidate_carrier_gpu is not None:
+                                    _destroy_work_item(candidate_carrier_gpu)
+                                if weight_gpu is not None:
+                                    _destroy_work_item(weight_gpu)
+                        processed_count += 1
+                    finally:
+                        released_ids = set()
+                        for buffer in (supp_aligned_sec_gpu, supp_aligned_linear_gpu):
+                            if buffer is not None and id(buffer) not in released_ids:
+                                _destroy_work_item(buffer)
+                                released_ids.add(id(buffer))
+                        del support_proxy_chw
+
+                    if telemetry.candidate_count == 0:
+                        raise RuntimeError("Deep Analysis produced no RGB candidates")
+                    if progress_callback:
+                        progress_callback(
+                            _merge_percent(processed_count, total_supp),
+                            ui=f"Memproses {curr_idx}/{total_supp}...",
+                            console=f"Memproses frame {curr_idx}/{total_supp} ({curr_name}) [Deep Analysis]...",
+                        )
+                    print(
+                        "[FusionNet MultiPatch][RGB] "
+                        f"backend={getattr(engine, 'arch', 'unknown')} "
+                        f"shape={geometry.weight_shape} dtype=float32 "
+                        f"maps={telemetry.candidate_count} "
+                        f"search_candidates={telemetry.search_candidate_count} "
+                        f"stages={telemetry.summary()}"
+                    )
+                    pipeline_telemetry.emit(f"blend_{curr_idx}")
+                    _release_in_processing_slot(curr_idx)
+                    if _workers_stopped():
+                        break
+                    continue
                 if weight_engine == "spatial_fusion":
                     taichi_aot.cvtColor(
                         supp_aligned_sec_gpu,
@@ -4215,12 +5399,12 @@ def run_gpu_resident_pipeline(
                             return_gpu=True,
                         )
                         weightnet_input_gpu = weightnet_gray_gpu
-                    _destroy_work_item(supp_aligned_sec_gpu)
                     supp_work_rgb_np = prepare_weightnet_support_input(
                         weightnet_input_gpu,
                         ref_transfer_map,
                         workspace=weightnet_support_workspace,
                     )
+                    _destroy_work_item(supp_aligned_sec_gpu)
                     weight_work_np, alpha_mean = infer_single_support_weight_map(
                         session,
                         ref_work_rgb_np,
@@ -4234,6 +5418,9 @@ def run_gpu_resident_pipeline(
                         return_scalar=(weightnet_channels == 1),
                     )
                     weight_work_item = (
+                        _upload_weightnet_confidence(engine, weight_work_np)
+                        if getattr(session, "runtime", None) == "taichi_aot"
+                        else (
                         weightnet_upload_workspace.stage(weight_work_np)
                         if weightnet_upload_workspace is not None
                         else np.ascontiguousarray(
@@ -4241,7 +5428,7 @@ def run_gpu_resident_pipeline(
                             if weightnet_channels == 1
                             else np.transpose(weight_work_np, (1, 2, 0)),
                             dtype=np.float32,
-                        )
+                        ))
                     )
                     del weight_work_np
 
@@ -4275,7 +5462,7 @@ def run_gpu_resident_pipeline(
                 _destroy_work_item(supp_aligned_linear_gpu)
                 if not _is_persistent_weight(weight_work_gpu):
                     _destroy_work_item(weight_work_gpu)
-                if weight_engine != "spatial_fusion":
+                if weight_engine != "spatial_fusion" and getattr(session, "runtime", None) != "taichi_aot":
                     engine.sync()
                 if processed_count % 2 == 0 or processed_count == total_supp:
                     gc.collect()
@@ -4345,6 +5532,83 @@ def run_gpu_resident_pipeline(
                     if pipeline_error is not None:
                         raise pipeline_error
                     break
+
+                if len(item) == 9:
+                    (
+                        curr_idx,
+                        curr_name,
+                        candidate_carrier_gpu,
+                        weight_work_gpu,
+                        candidate_alpha,
+                        candidate_index,
+                        candidate_count,
+                        candidate_telemetry,
+                        carrier_owned,
+                    ) = item
+                    alpha_total += float(candidate_alpha)
+                    is_last_candidate = candidate_index + 1 == candidate_count
+                    if is_last_candidate:
+                        processed_count += 1
+                    if progress_callback and is_last_candidate:
+                        align_lbl = (
+                            alignment_plan
+                            if alignment_plan not in ("none", "off", "")
+                            else "No Alignment"
+                        )
+                        progress_callback(
+                            _merge_percent(processed_count, total_supp),
+                            ui=f"Memproses {curr_idx}/{total_supp}...",
+                            console=(
+                                f"Memproses frame {curr_idx}/{total_supp} ({curr_name}) "
+                                f"[{align_lbl} + Deep Analysis]..."
+                            ),
+                        )
+                    with gpu_hardware_lock:
+                        if _is_stopped():
+                            if carrier_owned:
+                                _destroy_work_item(candidate_carrier_gpu)
+                            _destroy_work_item(weight_work_gpu)
+                            break
+                        accumulate_started = time.perf_counter()
+                        try:
+                            rgb_provider.accumulate(
+                                candidate_carrier_gpu,
+                                transform=None,
+                                weight_map=weight_work_gpu,
+                            )
+                            candidate_telemetry.record(
+                                "rgb_accumulation_device", accumulate_started
+                            )
+                            engine.sync()
+                        finally:
+                            if carrier_owned:
+                                _destroy_work_item(candidate_carrier_gpu)
+                            _destroy_work_item(weight_work_gpu)
+                    if is_last_candidate:
+                        backend_details = {}
+                        try:
+                            from taichi_vision.taichi_aot import backend_info
+
+                            backend_details = backend_info()
+                        except Exception:
+                            backend_details = {
+                                "backend": getattr(engine, "arch", "unknown")
+                            }
+                        print(
+                            "[FusionNet MultiPatch][RGB] "
+                            f"backend={getattr(engine, 'arch', 'unknown')} device={backend_details} "
+                            f"shape={geometry.weight_shape} dtype=float32 "
+                            f"weightnet={getattr(session, 'runtime', 'onnx')} "
+                            f"stages={candidate_telemetry.summary()}"
+                        )
+                        print(
+                            f"[GPU Flow Coordinator] Frame {curr_idx}/{total_supp} "
+                            f"({curr_name}) Deep Analysis blended "
+                            f"(candidates={candidate_count}, in_processing={len(in_processing_active)})"
+                        )
+                        pipeline_telemetry.emit(f"blend_{curr_idx}")
+                        _release_in_processing_slot(curr_idx)
+                    continue
 
                 (
                     curr_idx,
@@ -4422,7 +5686,15 @@ def run_gpu_resident_pipeline(
                     try:
                         val = q.get_nowait()
                         if val is not _SENTINEL and isinstance(val, tuple):
-                            for el in val:
+                            for index, el in enumerate(val):
+                                if (
+                                    len(val) == 9
+                                    and index == 2
+                                    and not bool(val[8])
+                                ):
+                                    # The weight worker owns the unshifted
+                                    # source carrier across candidate entries.
+                                    continue
                                 if _is_persistent_weight(el):
                                     _release_spatial_weight_slot(el)
                                     continue
@@ -4546,7 +5818,7 @@ def run_gpu_resident_pipeline(
     except Exception:
         pass
 
-    mean_alpha = alpha_total / max(1, total_supp)
+    mean_alpha = float(alpha_total / max(1, total_supp))
     _destroy_work_item(rgb_provider)
     print(
         f"[GPU Pipeline] Complete: shape={result_hwc.shape} "

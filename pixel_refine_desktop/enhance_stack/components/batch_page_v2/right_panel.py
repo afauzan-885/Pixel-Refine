@@ -9,8 +9,13 @@ from PySide6.QtWidgets import (
     QSplitter,
     QScrollArea,
     QMenu,
+    QAbstractItemView,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
 )
-from PySide6.QtCore import Signal, Qt, QTimer, QEvent
+from PySide6.QtCore import Signal, Qt, QTimer, QEvent, QRect
+from PySide6.QtGui import QColor, QFont
 import json
 import os
 import config
@@ -51,6 +56,115 @@ from resources.animations.animation_manager import (
 
 
 from UILibrary import live_update
+
+
+class _BatchQueueItemDelegate(QStyledItemDelegate):
+    """Paint queue status and cancel affordance inside a non-overlaid item row."""
+
+    ACTION_WIDTH = 40
+    CANCEL_BUTTON_SIZE = 16
+    CANCEL_HIT_PADDING = 2
+    CANCEL_VERTICAL_OFFSET = 2
+    STATUS_MARKER_WIDTH = ACTION_WIDTH - 8
+    STATUS_MARKER_HEIGHT = 6
+    STATUS_MARKER_BOTTOM_INSET = 3
+
+    def __init__(self, owner, parent=None):
+        super().__init__(parent)
+        self.owner = owner
+
+    def paint(self, painter, option, index):
+        full_option = QStyleOptionViewItem(option)
+        self.initStyleOption(full_option, index)
+        widget = full_option.widget
+        style = widget.style() if widget is not None else None
+
+        # Draw the standard item background across the full row so native
+        # selection and hover styling remain visible beneath the action area.
+        background_option = QStyleOptionViewItem(full_option)
+        background_option.text = ""
+        if style is not None:
+            style.drawControl(
+                QStyle.ControlElement.CE_ItemViewItem,
+                background_option,
+                painter,
+                widget,
+            )
+
+        text_option = QStyleOptionViewItem(full_option)
+        text_option.rect.setRight(
+            max(text_option.rect.left(), text_option.rect.right() - self.ACTION_WIDTH)
+        )
+        painter.save()
+        painter.setClipRect(text_option.rect)
+        super().paint(painter, text_option, index)
+        painter.restore()
+
+        batch_id = str(index.data(Qt.ItemDataRole.UserRole))
+        state = self.owner._batch_queue_states.get(batch_id)
+        if state is None:
+            return
+
+        rect = full_option.rect
+        action_left = rect.right() - self.ACTION_WIDTH + 1
+        action_rect = QRect(action_left, rect.top(), self.ACTION_WIDTH, rect.height())
+        painter.save()
+        painter.fillRect(action_rect, QColor("#FFFFFF"))
+        painter.setPen(QColor("#D9E1E8"))
+        painter.drawLine(action_left, rect.top() + 5, action_left, rect.bottom() - 5)
+
+        status_colors = {
+            "queued": "#EAB308",
+            "running": "#3B82F6",
+            "completed": "#22C55E",
+            "cancelling": "#3B82F6",
+        }
+        status_color = status_colors.get(state)
+        if status_color:
+            status_marker = self.status_marker_rect(rect)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(status_color))
+            painter.drawRect(status_marker)
+
+        if state in ("queued", "running"):
+            cancel_rect = self.cancel_button_rect(rect)
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.setPen(QColor("#D9E1E8"))
+            painter.drawRoundedRect(cancel_rect, 4, 4)
+            cancel_font = QFont(full_option.font)
+            if cancel_font.pointSizeF() > 0:
+                cancel_font.setPointSizeF(cancel_font.pointSizeF() * 1.25)
+            elif cancel_font.pixelSize() > 0:
+                cancel_font.setPixelSize(round(cancel_font.pixelSize() * 1.25))
+            cancel_font.setBold(True)
+            painter.setFont(cancel_font)
+            painter.setPen(QColor("#B42332"))
+            painter.drawText(
+                cancel_rect, Qt.AlignmentFlag.AlignCenter, "×"
+            )
+        painter.restore()
+
+    @classmethod
+    def cancel_button_rect(cls, row_rect):
+        action_left = row_rect.right() - cls.ACTION_WIDTH + 1
+        center_x = action_left + cls.ACTION_WIDTH // 2
+        half = cls.CANCEL_BUTTON_SIZE // 2
+        return QRect(
+            center_x - half,
+            row_rect.center().y() - half - cls.CANCEL_VERTICAL_OFFSET,
+            cls.CANCEL_BUTTON_SIZE,
+            cls.CANCEL_BUTTON_SIZE,
+        )
+
+    @classmethod
+    def status_marker_rect(cls, row_rect):
+        action_left = row_rect.right() - cls.ACTION_WIDTH + 1
+        return QRect(
+            action_left + (cls.ACTION_WIDTH - cls.STATUS_MARKER_WIDTH) // 2,
+            row_rect.bottom() - cls.STATUS_MARKER_BOTTOM_INSET - cls.STATUS_MARKER_HEIGHT + 1,
+            cls.STATUS_MARKER_WIDTH,
+            cls.STATUS_MARKER_HEIGHT,
+        )
 
 
 @live_update
@@ -94,6 +208,19 @@ class RightPanel(QWidget, SyncMixin):
         self._selection_timer.timeout.connect(self._do_handle_selection)
         self._pending_selection = None
         self._move_mode = False  # Track if we are in reorder 'Keyboard Move' mode
+        self._batch_queue_states = {}
+        self._completed_batch_ids = set()
+        self._hover_cancel_batch_id = None
+        self._active_process_dialog = None
+        self._batch_status_timer = QTimer(self)
+        self._batch_status_timer.setInterval(200)
+        self._batch_status_timer.timeout.connect(self._sync_batch_queue_rows)
+        self._batch_status_timer.start()
+        algorithm_panel = getattr(self.left_panel, "algorithm_panel", None)
+        if algorithm_panel is not None:
+            algorithm_panel.processing_completed.connect(
+                self._on_single_batch_processing_completed
+            )
 
         # Coalesce bursty add/remove signals onto one event-loop tick: each run
         # of ``_update_process_all_btn_visibility`` costs a full LEFT JOIN over
@@ -235,6 +362,18 @@ class RightPanel(QWidget, SyncMixin):
 
         # Batch List
         self.list_group = ListGroup(reordering=True)
+        # Batch names are edited through the context menu dialog. Prevent the
+        # QListWidget's inline editor from covering the row and intercepting hover.
+        self.list_group._list_widget.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        list_widget = self.list_group._list_widget
+        list_widget.setObjectName("BatchQueueList")
+        list_widget.setItemDelegate(_BatchQueueItemDelegate(self, list_widget))
+        list_widget.setMouseTracking(True)
+        list_widget.viewport().setMouseTracking(True)
+        list_widget.viewport().installEventFilter(self)
+        self._apply_batch_list_hover_style()
         self.list_group.selection_changed.connect(self._on_selection_changed)
         self.list_group.item_renamed.connect(self._on_batch_renamed)
         self.list_group.delete_key_pressed.connect(self._delete_batch)
@@ -514,6 +653,29 @@ class RightPanel(QWidget, SyncMixin):
         if callable(flush):
             flush()
 
+    def _flush_active_denoising_parameter_page(self):
+        """Persist current denoising controls before dispatching the batch."""
+        display_panel = getattr(self.left_panel, "display_panel", None)
+        parameter_panel = getattr(display_panel, "param_panel", None)
+        if parameter_panel is None:
+            return
+
+        denoising_name = self.denoise_card.get_value()
+        get_page = getattr(parameter_panel, "_get_denoising_page", None)
+        page_container = (
+            get_page(denoising_name)
+            if callable(get_page)
+            else getattr(parameter_panel, "denoise_page_container", None)
+        )
+        page = (
+            page_container.widget()
+            if hasattr(page_container, "widget")
+            else page_container
+        )
+        flush = getattr(page, "flush_pending_config", None)
+        if callable(flush):
+            flush()
+
     def flush_pending_batch_settings(self):
         """Synchronously persist card and algorithm settings for the active batch."""
         self._sync_store_timer.stop()
@@ -521,6 +683,7 @@ class RightPanel(QWidget, SyncMixin):
         self._is_syncing = True
         try:
             self._flush_active_alignment_parameter_page()
+            self._flush_active_denoising_parameter_page()
             self._save_batch_settings()
         finally:
             self._is_syncing = was_syncing
@@ -529,7 +692,6 @@ class RightPanel(QWidget, SyncMixin):
         save_to_file = getattr(store, "save_to_file", None)
         if callable(save_to_file):
             save_to_file()
-
         if self.current_batch_id is not None:
             store_path = getattr(store, "_file_path", None)
             if not store_path:
@@ -563,10 +725,15 @@ class RightPanel(QWidget, SyncMixin):
         self.list_group.blockSignals(True)
         try:
             self.list_group.clear()
+            self._batch_queue_states.clear()
             batches = self.controller.get_all_batches()
+            self._completed_batch_ids.intersection_update(
+                str(batch.id) for batch in batches
+            )
 
             for batch in batches:
-                self.list_group.add_item(batch.name, value=batch.id)
+                item = self.list_group.add_item(batch.name, value=batch.id)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         finally:
             self.list_group.blockSignals(False)
 
@@ -586,6 +753,142 @@ class RightPanel(QWidget, SyncMixin):
         # now that the list size has changed.
         QTimer.singleShot(0, self._balance_splitter_sizes)
         return batches
+
+    def _sync_batch_queue_rows(self):
+        """Refresh painted queue markers from the active processing owners."""
+        states = {batch_id: "completed" for batch_id in self._completed_batch_ids}
+        algorithm_panel = getattr(self.left_panel, "algorithm_panel", None)
+        if algorithm_panel is not None and getattr(
+            algorithm_panel, "_is_processing", False
+        ):
+            batch_id = getattr(algorithm_panel, "current_batch_id", None)
+            if batch_id is not None:
+                processor = getattr(algorithm_panel, "processor_thread", None)
+                cancelled = bool(
+                    processor is not None
+                    and getattr(processor, "is_cancelled", lambda: False)()
+                )
+                states[str(batch_id)] = "cancelling" if cancelled else "running"
+                self._completed_batch_ids.discard(str(batch_id))
+
+        dialog = self._active_process_dialog
+        if (
+            dialog is not None
+            and getattr(dialog, "processing_thread", None) is not None
+            and dialog.processing_thread.isRunning()
+        ):
+            thread = getattr(dialog, "processing_thread", None)
+            active_id = str(getattr(thread, "_active_batch_id", None))
+            cancelled_ids = {
+                str(cancelled_id)
+                for cancelled_id in getattr(thread, "_cancelled_batch_ids", set())
+            }
+            for batch, _row in getattr(dialog, "panels_to_process_with_rows", ()):
+                batch_id = getattr(batch, "id", None)
+                key = str(batch_id)
+                status_item = dialog.table_widget.item(_row, 2)
+                if status_item is not None and status_item.text() == "Success":
+                    states[key] = "completed"
+                    self._completed_batch_ids.add(key)
+                elif key in cancelled_ids:
+                    states[key] = "cancelling" if key == active_id else "cancelled"
+                elif key == active_id:
+                    states[key] = "running"
+                else:
+                    states[key] = "queued"
+
+        if states != self._batch_queue_states:
+            self._batch_queue_states = states
+            list_widget = self.list_group._list_widget
+            if (
+                self._hover_cancel_batch_id is not None
+                and states.get(self._hover_cancel_batch_id)
+                not in ("queued", "running")
+            ):
+                self._hover_cancel_batch_id = None
+                list_widget.viewport().unsetCursor()
+            for index in range(list_widget.count()):
+                item = list_widget.item(index)
+                state = states.get(str(item.data(Qt.ItemDataRole.UserRole)))
+                item.setToolTip(
+                    {
+                        "queued": "Menunggu giliran · klik × untuk membatalkan",
+                        "running": "Sedang diproses · klik × untuk membatalkan",
+                        "cancelling": "Pembatalan sedang diproses",
+                        "completed": "Proses selesai",
+                    }.get(state, "")
+                )
+            self.list_group._list_widget.viewport().update()
+
+    def _on_single_batch_processing_completed(self, completion_data):
+        """Keep successful single-batch processing visible in the batch list."""
+        batch_id = completion_data.get("batch_id")
+        if batch_id is None:
+            return
+        batch_key = str(batch_id)
+        if completion_data.get("is_cancelled"):
+            self._completed_batch_ids.discard(batch_key)
+        else:
+            self._completed_batch_ids.add(batch_key)
+        self._sync_batch_queue_rows()
+
+    def _apply_batch_list_hover_style(self):
+        """Use a muted green hover while keeping standard item hit-testing."""
+        list_widget = getattr(getattr(self, "list_group", None), "_list_widget", None)
+        if list_widget is None:
+            return
+        style = list_widget.styleSheet()
+        marker = "QListWidget#BatchQueueList::item:hover"
+        if marker in style:
+            return
+        list_widget.setStyleSheet(
+            style
+            + " QListWidget#BatchQueueList::item:hover:!selected "
+            "{ background-color: #B5DCC2; }"
+            + " QListWidget#BatchQueueList::item:selected:hover "
+            "{ background-color: #39A96B; }"
+        )
+
+    def _cancel_batch_job(self, batch_id):
+        """Cancel one queued batch or request cancellation of its active worker."""
+        dialog = self._active_process_dialog
+        if (
+            dialog is not None
+            and getattr(dialog, "processing_thread", None) is not None
+            and dialog.processing_thread.isRunning()
+        ):
+            dialog.cancel_batch_by_id(batch_id)
+            self._sync_batch_queue_rows()
+            return
+
+        algorithm_panel = getattr(self.left_panel, "algorithm_panel", None)
+        if (
+            algorithm_panel is not None
+            and getattr(algorithm_panel, "_is_processing", False)
+            and str(getattr(algorithm_panel, "current_batch_id", None)) == str(batch_id)
+        ):
+            algorithm_panel._on_cancel_requested()
+
+    def _batch_cancel_rect(self, item):
+        row_rect = self.list_group._list_widget.visualItemRect(item)
+        return _BatchQueueItemDelegate.cancel_button_rect(row_rect).adjusted(
+            -_BatchQueueItemDelegate.CANCEL_HIT_PADDING,
+            -_BatchQueueItemDelegate.CANCEL_HIT_PADDING,
+            _BatchQueueItemDelegate.CANCEL_HIT_PADDING,
+            _BatchQueueItemDelegate.CANCEL_HIT_PADDING,
+        )
+
+    def _batch_item_at(self, viewport_pos):
+        list_widget = self.list_group._list_widget
+        item = list_widget.itemAt(viewport_pos)
+        if item is None:
+            return None
+        batch_id = str(item.data(Qt.ItemDataRole.UserRole))
+        if self._batch_queue_states.get(batch_id) not in ("queued", "running"):
+            return None
+        if self._batch_cancel_rect(item).contains(viewport_pos):
+            return item
+        return None
 
     def select_batch_sync(self, batch_id):
         """Select a batch synchronously and cancel any pending debounced selection."""
@@ -659,7 +962,8 @@ class RightPanel(QWidget, SyncMixin):
         # 4. Create Batch
         batch_id = self.controller.create_batch(name)
         if batch_id:
-            self.list_group.add_item(name, value=batch_id)
+            item = self.list_group.add_item(name, value=batch_id)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             # Auto select new item untuk display di workspace
             self.list_group.reordering_animation = True
             self.list_group.select_item_by_value(batch_id)
@@ -746,6 +1050,37 @@ class RightPanel(QWidget, SyncMixin):
         self._layout_balance_timer.start(0)
 
     def eventFilter(self, watched, event):
+        list_widget = getattr(self, "list_group", None)
+        viewport = (
+            list_widget._list_widget.viewport() if list_widget is not None else None
+        )
+        if watched is viewport:
+            if event.type() == QEvent.Type.MouseMove:
+                item = self._batch_item_at(event.position().toPoint())
+                batch_id = (
+                    str(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
+                )
+                if batch_id != self._hover_cancel_batch_id:
+                    self._hover_cancel_batch_id = batch_id
+                    watched.setCursor(
+                        Qt.CursorShape.PointingHandCursor
+                        if batch_id is not None
+                        else Qt.CursorShape.ArrowCursor
+                    )
+                    watched.update()
+            elif event.type() == QEvent.Type.Leave:
+                if self._hover_cancel_batch_id is not None:
+                    self._hover_cancel_batch_id = None
+                    watched.unsetCursor()
+                    watched.update()
+            elif (
+                event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                item = self._batch_item_at(event.position().toPoint())
+                if item is not None:
+                    self._cancel_batch_job(item.data(Qt.ItemDataRole.UserRole))
+                    return True
         if event.type() == QEvent.Type.LayoutRequest or (
             watched is getattr(self, "splitter", None)
             and event.type() == QEvent.Type.Resize
@@ -896,7 +1231,26 @@ class RightPanel(QWidget, SyncMixin):
         # BatchProcessDialog now expects BatchModel objects
         # Pass self.parent() as batch_page_layout (may need adjustment)
         dialog = BatchProcessDialog(batches, self.parent(), self)
-        dialog.exec()
+        self._active_process_dialog = dialog
+        self._sync_batch_queue_rows()
+        try:
+            dialog.exec()
+        finally:
+            self._remember_successful_batch_rows(dialog)
+            self._active_process_dialog = None
+            self._sync_batch_queue_rows()
+
+    def _remember_successful_batch_rows(self, dialog):
+        """Retain successful Process All rows after its modal dialog closes."""
+        table = getattr(dialog, "table_widget", None)
+        if table is None:
+            return
+        for batch, row in getattr(dialog, "panels_to_process_with_rows", ()):
+            status_item = table.item(row, 2)
+            if status_item is not None and status_item.text() == "Success":
+                self._completed_batch_ids.add(str(batch.id))
+            else:
+                self._completed_batch_ids.discard(str(batch.id))
 
     def _on_batch_renamed(self, batch_id, new_name):
         """Handle batch rename from ListGroup."""
@@ -905,7 +1259,18 @@ class RightPanel(QWidget, SyncMixin):
 
         success = self.controller.update_batch_name(batch_id, new_name)
 
-        if not success:
+        if success:
+            list_widget = self.list_group._list_widget
+            blocked = list_widget.blockSignals(True)
+            try:
+                for index in range(list_widget.count()):
+                    item = list_widget.item(index)
+                    if str(item.data(Qt.ItemDataRole.UserRole)) == str(batch_id):
+                        item.setText(new_name)
+                        break
+            finally:
+                list_widget.blockSignals(blocked)
+        else:
             # If update fails (e.g., validation error), reload batches to revert name
             QMessageBox.warning(
                 self,
@@ -930,6 +1295,10 @@ class RightPanel(QWidget, SyncMixin):
             return
 
         menu = QMenu(self)
+        rename_act = menu.addAction("Rename batch")
+        rename_act.triggered.connect(self._rename_selected_batch)
+
+        menu.addSeparator()
         move_act = menu.addAction("Move batch")
         move_act.setCheckable(True)
         # Check if list_group is actually in move mode to reflect current state
@@ -946,6 +1315,19 @@ class RightPanel(QWidget, SyncMixin):
         # Sync from list_group state if possible, or toggle locally
         self._move_mode = not self.list_group._move_mode
         self.list_group.set_move_mode(self._move_mode)
+
+    def _rename_selected_batch(self):
+        """Rename the selected batch without opening an inline editor over its row."""
+        selected = self.list_group._list_widget.selectedItems()
+        if not selected:
+            return
+        item = selected[0]
+        batch_id = item.data(Qt.ItemDataRole.UserRole)
+        new_name, accepted = QInputDialog.getText(
+            self, "Rename batch", "Batch name:", text=item.text()
+        )
+        if accepted and new_name.strip():
+            self._on_batch_renamed(batch_id, new_name.strip())
 
     def retranslate_ui(self):
         """Update all text dynamically when language changes."""
@@ -974,7 +1356,8 @@ class RightPanel(QWidget, SyncMixin):
         self.list_group.set_move_mode(self._move_mode)
         if not self._move_mode:
             self._load_batches()  # Refresh style and order to be safe
-        
+
+        self._apply_batch_list_hover_style()
         self.update_theme()
 
     def update_theme(self):
@@ -998,3 +1381,5 @@ class RightPanel(QWidget, SyncMixin):
         for btn in [self.new_btn, self.del_btn, self.process_all_btn]:
             if btn:
                 apply_style(btn, create_button_style(btn.variant, theme).with_overrides(padding="4px 8px", font_size="8pt"))
+
+        self._apply_batch_list_hover_style()

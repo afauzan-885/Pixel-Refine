@@ -52,11 +52,15 @@ class AKAZEAlgorithm:
                 batch_params = batch_parameter_manager.load_json_state().get(
                     str(batch_id), {}
                 )
-                akaze_params = batch_params.get("akaze_params", {})
+                akaze_params = batch_parameter_manager.get_batch_algorithm_params(
+                    batch_id, "alignment", "AKAZE", batch_entry=batch_params
+                )
                 if isinstance(akaze_params, dict):
                     config.update(akaze_params)
             except Exception:
                 pass
+        # Ignore legacy global and per-batch APAP selections.
+        config["warp_method"] = "homography"
         return config
 
     def _get_config(self, batch_id=None):
@@ -83,8 +87,14 @@ class AKAZEAlgorithm:
     def calculate_global_motion(
         self, reference, target, config=None, stop_requested=None
     ):
+        H, mask, _, _ = self._estimate_motion(
+            reference, target, config=config, stop_requested=stop_requested
+        )
+        return H, mask
+
+    def _estimate_motion(self, reference, target, config=None, stop_requested=None):
         if stop_requested and stop_requested():
-            return None, None
+            return None, None, None, None
         config = config or self._get_config()
         mode = str(config.get("mode", "fast")).strip().lower()
         preset = self.PRESETS.get(mode, self.PRESETS["fast"])
@@ -92,7 +102,7 @@ class AKAZEAlgorithm:
         ref_gray = self._to_akaze_input(reference)
         tgt_gray = self._to_akaze_input(target)
         if ref_gray is None or tgt_gray is None:
-            return None, None
+            return None, None, None, None
 
         try:
             from taichi_vision import taichi_aot
@@ -112,11 +122,11 @@ class AKAZEAlgorithm:
                 num_fed_steps=max(1, int(config.get("num_fed_steps", 8))),
             )
             if matched is None or matched[0] is None or matched[1] is None:
-                return None, None
+                return None, None, None, None
 
             src_pts, dst_pts = matched[0], matched[1]
             if len(src_pts) < 4 or len(dst_pts) < 4:
-                return None, None
+                return None, None, None, None
             # The warp consumes a support -> reference matrix.
             H, mask = taichi_aot.find_homography(
                 np.ascontiguousarray(dst_pts, dtype=np.float32),
@@ -128,13 +138,21 @@ class AKAZEAlgorithm:
                 return_gpu=False,
             )
             if H is None:
-                return None, None
-            if mask is not None and int(np.asarray(mask).reshape(-1).sum()) < 4:
-                return None, None
-            return np.asarray(H, dtype=np.float32), mask
+                return None, None, None, None
+            keep = np.ones(len(src_pts), dtype=bool)
+            if mask is not None:
+                keep = np.asarray(mask).reshape(-1).astype(bool)
+                if int(keep.sum()) < 4:
+                    return None, mask, None, None
+            return (
+                np.asarray(H, dtype=np.float32),
+                mask,
+                np.ascontiguousarray(src_pts[keep], dtype=np.float32),
+                np.ascontiguousarray(dst_pts[keep], dtype=np.float32),
+            )
         except Exception as exc:
             print(f"[AKAZE] motion estimation error: {exc}")
-            return None, None
+            return None, None, None, None
 
     def align_frame(
         self,
@@ -147,8 +165,12 @@ class AKAZEAlgorithm:
         if stop_requested and stop_requested():
             return None
 
-        H, _ = self.calculate_global_motion(
-            reference, target, config=config, stop_requested=stop_requested
+        effective_config = config or self._get_config()
+        H, _, _, _ = self._estimate_motion(
+            reference,
+            target,
+            config=effective_config,
+            stop_requested=stop_requested,
         )
         img_to_warp = target if target_for_warping is None else target_for_warping
         if H is None:
@@ -158,7 +180,7 @@ class AKAZEAlgorithm:
 
         h, w = reference.shape[:2]
         warped = taichi_aot.warp_perspective(
-            np.ascontiguousarray(img_to_warp),
+            np.ascontiguousarray(img_to_warp, dtype=np.float32),
             H,
             (w, h),
             return_gpu=False,
@@ -168,6 +190,8 @@ class AKAZEAlgorithm:
             warped = np.clip(warped + 0.5, info.min, info.max).astype(
                 np.asarray(img_to_warp).dtype
             )
+        else:
+            warped = np.asarray(warped, dtype=np.asarray(img_to_warp).dtype)
         return warped
 
 

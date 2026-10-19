@@ -8,15 +8,51 @@ Mirrored dari panorama/working_left_panel.py untuk consistency.
 """
 
 import os
-from PySide6.QtCore import Qt, QObject, QMutex, QMutexLocker, QThread
+from PySide6.QtCore import Qt, QObject, QMutex, QMutexLocker, QThread, Slot
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import QGraphicsPixmapItem
 
 # Generic UI Library
 from UILibrary import ImageCompareItem
 
 # Image loading helper for RAW support
 from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import (
-    load_and_display_image,
+    ComparisonImageLoaderThread,
 )
+
+
+class _ComparisonLoadReceiver(QObject):
+    """Deliver worker results to the display panel's owning UI thread."""
+
+    def __init__(self, display_panel, request_id, update_dropdown, perf_mark):
+        super().__init__(display_panel)
+        self.display_panel = display_panel
+        self.request_id = request_id
+        self.update_dropdown = update_dropdown
+        self.perf_mark = perf_mark
+
+    @Slot(QImage, QImage, str, str)
+    def images_loaded(self, original, result, _original_path, result_path):
+        _finish_comparison_load(
+            self.display_panel,
+            self.request_id,
+            result_path,
+            original,
+            result,
+            self.update_dropdown,
+            self.perf_mark,
+        )
+
+    @Slot(int)
+    def load_progress(self, percent):
+        if self.request_id == getattr(
+            self.display_panel, "_comparison_request_id", None
+        ):
+            self.display_panel._show_comparison_loading(self.request_id, percent)
+
+    @Slot()
+    def start_pending(self):
+        _start_pending_comparison(self.display_panel)
 
 
 class DisplayThreadManager(QObject):
@@ -149,11 +185,7 @@ def reset_display_state(left_panel):
 
 
 def display_processed_result(display_panel, image_path, update_dropdown=True):
-    """
-    Refactored display_processed_result logic.
-    Display processed result image in Compare Mode (Default).
-    Loads Original + Processed into ComparisonGraphicsItem.
-    """
+    """Request an asynchronous decode, then install the comparison on the UI thread."""
     if not os.path.exists(image_path):
         print(f"[DisplayManager] Error: Result file not found at {image_path}")
         return
@@ -166,7 +198,7 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
     if not hasattr(display_panel, "zoom_states"):
         display_panel.zoom_states = {}
 
-    # SAVE current state if we are switching from another valid preview
+    # Save current state before replacing its scene.
     if (
         hasattr(display_panel, "current_preview_path")
         and display_panel.current_preview_path
@@ -179,82 +211,110 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
 
     display_panel.current_preview_path = image_path
     print(f"[DisplayManager] Showing processed result (Compare Mode): {image_path}")
-
-    # 1. Clear Preview Scene and release memory before loading new pixmaps
     display_panel.preview_scene.clear()
-    import gc
-
-    gc.collect()
-
-    # 2. Determine Original Image - Use helper that supports RAW files
-    original_pixmap = None
     original_path = None
     if display_panel.logic.current_images:
         original_path = display_panel.logic.current_images[0].path
         print(f"[DisplayManager] Original image path: {original_path}")
-        if os.path.exists(original_path):
-            # Use load_and_display_image at full native resolution (no downscaling)
-            original_pixmap = load_and_display_image(
-                original_path,
-                max_width=None,
-                max_height=None,
-                is_reference=True,
-                batch_id=display_panel.current_batch_id,
-            )
-            if original_pixmap is None or original_pixmap.isNull():
-                print(
-                    f"[DisplayManager] WARNING: Failed to load original pixmap from {original_path}"
-                )
-                original_pixmap = None
-            else:
-                print(
-                    f"[DisplayManager] Original pixmap loaded successfully: {original_pixmap.width()}x{original_pixmap.height()}"
-                )
-        else:
-            print(
-                f"[DisplayManager] WARNING: Original image file not found: {original_path}"
-            )
 
-    # Load processed image at full native resolution (no downscaling)
-    processed_pixmap = load_and_display_image(
-        image_path, max_width=None, max_height=None
-    )
-    if processed_pixmap is None or processed_pixmap.isNull():
-        print(
-            f"[DisplayManager] WARNING: Failed to load processed pixmap from {image_path}"
-        )
-        processed_pixmap = None
+    request_id = getattr(display_panel, "_comparison_request_id", 0) + 1
+    display_panel._comparison_request_id = request_id
+    display_panel._show_comparison_loading(request_id, 0)
+    request = (request_id, image_path, original_path, update_dropdown, _mark)
+    active = getattr(display_panel, "_comparison_loader_thread", None)
+    if active is not None and active.isRunning():
+        # Keep only the newest request and serialize full-resolution decoding
+        # so rapidly switching results cannot multiply peak memory use.
+        display_panel._pending_comparison_request = request
+        receiver = getattr(display_panel, "_comparison_load_receiver", None)
+        if receiver is not None:
+            active.finished.connect(receiver.start_pending)
     else:
+        _start_comparison_load(display_panel, request)
+
+    display_panel.show_preview(show_dropdown=True)
+
+
+def cancel_pending_comparison(display_panel):
+    """Invalidate late loader results when the user leaves result preview."""
+    display_panel._comparison_request_id = (
+        getattr(display_panel, "_comparison_request_id", 0) + 1
+    )
+    display_panel._pending_comparison_request = None
+    display_panel._hide_comparison_loading()
+
+
+def _start_pending_comparison(display_panel):
+    request = getattr(display_panel, "_pending_comparison_request", None)
+    display_panel._pending_comparison_request = None
+    active = getattr(display_panel, "_comparison_loader_thread", None)
+    if request is not None and (active is None or not active.isRunning()):
+        _start_comparison_load(display_panel, request)
+
+
+def _start_comparison_load(display_panel, request):
+    request_id, image_path, original_path, update_dropdown, perf_mark = request
+    if not original_path or not os.path.exists(original_path):
+        print(f"[DisplayManager] Original image unavailable: {original_path}")
+        original_path = ""
+
+    loader = ComparisonImageLoaderThread(
+        original_path,
+        image_path,
+        batch_id=display_panel.current_batch_id,
+    )
+    display_panel._comparison_loader_thread = loader
+    receiver = _ComparisonLoadReceiver(
+        display_panel, request_id, update_dropdown, perf_mark
+    )
+    display_panel._comparison_load_receiver = receiver
+    loader.load_progress.connect(receiver.load_progress)
+    loader.images_loaded.connect(receiver.images_loaded)
+    loader.error_occurred.connect(
+        lambda message: print(f"[DisplayManager] {message}")
+    )
+    DisplayThreadManager.instance().register_thread(loader)
+    loader.start()
+
+
+def _finish_comparison_load(
+    display_panel, request_id, image_path, original_image, result_image,
+    update_dropdown, perf_mark,
+):
+    perf_mark.end()
+    if (
+        request_id != getattr(display_panel, "_comparison_request_id", None)
+        or image_path != getattr(display_panel, "current_preview_path", None)
+    ):
+        return
+
+    if result_image.isNull():
+        print(f"[DisplayManager] Processed image could not be decoded: {image_path}")
+        display_panel._hide_comparison_loading(request_id)
+        return
+
+    original_pixmap = (
+        QPixmap.fromImage(original_image) if not original_image.isNull() else None
+    )
+    original_image = QImage()
+    processed_pixmap = QPixmap.fromImage(result_image)
+    result_image = QImage()
+    if processed_pixmap.isNull():
+        print(f"[DisplayManager] Processed image could not be converted: {image_path}")
+        display_panel._hide_comparison_loading(request_id)
+        return
+
+    display_panel.preview_scene.clear()
+    if original_pixmap is not None and not original_pixmap.isNull():
         print(
-            f"[DisplayManager] Processed pixmap loaded successfully: {processed_pixmap.width()}x{processed_pixmap.height()}"
+            f"[DisplayManager] Original pixmap loaded successfully: "
+            f"{original_pixmap.width()}x{original_pixmap.height()}"
         )
-
-    item = None
-
-    use_compare = True
-
-    is_comparison = bool(original_pixmap and processed_pixmap and use_compare)
-
-    if is_comparison:
-        # --- FIX: Scale Original to Match Processed (1:1 Comparison) ---
-        # Checks if dimensions differ (e.g. upscaling)
-        if (
-            original_pixmap.width() != processed_pixmap.width()
-            or original_pixmap.height() != processed_pixmap.height()
-        ):
-            print(
-                f"[DisplayManager] Scaling original ({original_pixmap.width()}x{original_pixmap.height()}) "
-                f"to match processed ({processed_pixmap.width()}x{processed_pixmap.height()})"
-            )
-            scaled_orig = original_pixmap.scaled(
-                processed_pixmap.size(),
-                Qt.AspectRatioMode.IgnoreAspectRatio,  # Match exact size
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            original_pixmap = scaled_orig
-
-        # 3. Create Comparison Item (Reusable from GenericUILibrary)
-        print(f"[DisplayManager] Creating ImageCompareItem for comparison mode")
+        print(
+            f"[DisplayManager] Processed pixmap loaded successfully: "
+            f"{processed_pixmap.width()}x{processed_pixmap.height()}"
+        )
+        print("[DisplayManager] Creating ImageCompareItem for comparison mode")
         item = ImageCompareItem(
             original_pixmap,
             processed_pixmap,
@@ -263,80 +323,38 @@ def display_processed_result(display_panel, image_path, update_dropdown=True):
         )
         display_panel.preview_scene.addItem(item)
         display_panel.preview_scene.setSceneRect(item.boundingRect())
-        print(f"[DisplayManager] Comparison mode activated successfully")
+        is_comparison = True
+        print("[DisplayManager] Comparison mode activated successfully")
     else:
-        # Fallback
-        print(
-            f"[DisplayManager] WARNING: Falling back to single image display (original_pixmap={original_pixmap is not None}, processed_pixmap={processed_pixmap is not None})"
-        )
-        display_panel.logic.display_preview(display_panel.zoomable_preview, image_path)
-        if display_panel.preview_scene.items():
-            item = display_panel.preview_scene.items()[0]
+        print("[DisplayManager] Showing processed image without comparison")
+        item = QGraphicsPixmapItem(processed_pixmap)
+        item.setShapeMode(QGraphicsPixmapItem.ShapeMode.BoundingRectShape)
+        display_panel.preview_scene.addItem(item)
+        display_panel.preview_scene.setSceneRect(item.boundingRect())
+        is_comparison = False
 
-    # RESTORE State or Fit to View
-    # For comparison mode, always fit to view on first display (ignore saved state)
-    # This ensures the full comparison is visible when first shown
     if image_path in display_panel.zoom_states and not is_comparison:
-        # Only restore zoom state for single image view, not comparison mode
-        print(
-            f"[DisplayManager] Restoring zoom state for {os.path.basename(image_path)}"
-        )
         display_panel.zoomable_preview.set_view_state(
             display_panel.zoom_states[image_path]
         )
     else:
-        # Always fit to view for comparison mode or first view
-        if is_comparison:
-            print(
-                f"[DisplayManager] Comparison mode: fitting to view (ignoring saved zoom state)"
-            )
-        else:
-            print(f"[DisplayManager] First view, fitting to view")
-        # Reset first to ensure clean state then fit
         display_panel.zoomable_preview.reset_zoom()
-        display_panel.zoomable_preview.zoom_to_fit()  # Uses scene rect
+        display_panel.zoomable_preview.zoom_to_fit()
 
-    # 3. Update Dropdown logic
     if update_dropdown and display_panel.logic.current_images:
-        # Show save button since we are displaying a result
         display_panel.save_overlay.show()
         display_panel.save_overlay.raise_()
         first_img_path = display_panel.logic.current_images[0].path
         results = display_panel.logic.detect_processed_results(first_img_path)
-
         display_panel.current_results_map = {r["name"]: r["path"] for r in results}
-        options = [r["name"] for r in results]
-
         block = display_panel.result_selector.blockSignals(True)
         display_panel.result_selector.clear()
-        display_panel.result_selector.addItems(options)
-
-        current_name = None
+        display_panel.result_selector.addItems(display_panel.current_results_map)
         for name, path in display_panel.current_results_map.items():
             if os.path.normpath(path) == os.path.normpath(image_path):
-                current_name = name
+                display_panel.result_selector.setCurrentText(name)
                 break
-
-        if current_name:
-            display_panel.result_selector.setCurrentText(current_name)
-
         display_panel.result_selector.blockSignals(block)
 
     display_panel.show_preview(show_dropdown=True)
-
-    try:
-        del original_pixmap, processed_pixmap
-    except Exception:
-        pass
-    try:
-        del scaled_orig
-    except Exception:
-        pass
-
-    # NOTE: this path used to clear the global QPixmapCache and trim the process
-    # working set on every result display.  Both forced a re-rasterise of every
-    # live pixmap and paged the process back out, which showed up as a
-    # multi-hundred-millisecond hitch each time the user opened a preview or
-    # switched result.  Releasing memory belongs to an explicit idle action, not
-    # to the display path; the reference drops above are enough here.
-    _mark.end()
+    display_panel._show_comparison_loading(request_id, 100)

@@ -69,7 +69,16 @@ def apply_stylesheet():
 from .buttons import Button, IconButton, ButtonGroup, ToggleButton, ToggleSwitch
 
 # Forms
-from .forms import FormGroup, Input, Select, Checkbox, Radio, RadioGroup, FormRow
+from .forms import (
+    FormGroup,
+    Input,
+    Select,
+    Checkbox,
+    Radio,
+    RadioGroup,
+    FormRow,
+    NumericStepper,
+)
 
 # Containers and Layouts
 from .containers import Container, Row, Col, Stack, ScrollContainer, GridLayout, Spacer
@@ -155,6 +164,7 @@ __all__ = [
     "ToggleButton",
     # Forms
     "FormGroup",
+    "NumericStepper",
     "Input",
     "Select",
     "Checkbox",

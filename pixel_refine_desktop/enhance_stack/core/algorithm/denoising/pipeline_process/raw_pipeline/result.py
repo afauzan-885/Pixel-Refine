@@ -21,7 +21,7 @@ from .metadata import (
 
 
 @dataclass
-class RawNativeResult:
+class RawPipelineResult:
     """One Bayer-domain fusion result plus its one-time RGB preview."""
 
     normalized_mosaic: np.ndarray
@@ -30,16 +30,19 @@ class RawNativeResult:
     source_paths: Sequence[str | Path]
     report: dict | None = None
 
-    def quantized_mosaic(self) -> np.ndarray:
-        """Encode the normalized result as a canonical zero-black DNG mosaic."""
+    def quantized_mosaic(self, bits_per_sample: int | None = None) -> np.ndarray:
+        """Encode the normalized result at the requested sensor-code precision."""
         normalized = np.asarray(self.normalized_mosaic, dtype=np.float32)
         frame = self.reference_frame
         if normalized.shape != tuple(frame.shape):
             raise ValueError("RAW Native result shape no longer matches its reference CFA")
         if not np.isfinite(normalized).all():
             raise ValueError("RAW Native result contains non-finite sensor values")
-        maximum = (1 << int(frame.bits_per_sample)) - 1
-        dtype = np.uint8 if int(frame.bits_per_sample) <= 8 else np.uint16
+        bits = int(frame.bits_per_sample if bits_per_sample is None else bits_per_sample)
+        if not 1 <= bits <= 16:
+            raise ValueError("DNG output bit depth must be between 1 and 16")
+        maximum = (1 << bits) - 1
+        dtype = np.uint8 if bits <= 8 else np.uint16
         values = normalized / np.float32(frame.exposure_scale)
         return np.clip(np.rint(values * np.float32(maximum)), 0, maximum).astype(dtype)
 
@@ -53,9 +56,9 @@ class RawNativeResult:
         from taichi_vision.taichi_algorithm.compression import save_dng_aot
 
         frame = self.reference_frame
-        bits = int(frame.bits_per_sample)
+        bits = 16
         mosaic = _apply_baked_orientation(
-            self.quantized_mosaic(), int(frame.orientation)
+            self.quantized_mosaic(bits_per_sample=bits), int(frame.orientation)
         )
         metadata = {
             "cfa_pattern": normalize_cfa_rgb_codes(_baked_cfa_pattern(frame)),
@@ -76,10 +79,12 @@ class RawNativeResult:
             mosaic,
             target,
             metadata=metadata,
+            # Keep RAW Native exports on the tested path: this writer's
+            # Deflate DNG currently fails the project's LibRaw round-trip.
             compression="none",
             bits_per_sample=bits,
         )
         return str(target)
 
 
-__all__ = ["RawNativeResult"]
+__all__ = ["RawPipelineResult"]

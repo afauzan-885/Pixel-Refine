@@ -8,14 +8,19 @@ use the same contract as Similarity.
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import gc
-from pathlib import Path
+import math
+import os
 import numpy as np
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
-    RAW_EXTENSIONS,
     load_weightnet_onnx,
     DEFAULT_WEIGHTNET_ONNX,
 )
+
+
+def _resolve_weightnet_runtime():
+    """Select the resident WeightNet backend, allowing an explicit override."""
+    return os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME") or "taichi_aot"
 
 
 class FusionNetDenoisingAlgorithm:
@@ -28,8 +33,12 @@ class FusionNetDenoisingAlgorithm:
 
     # Default Config Parameters (Configurable default parameters)
     DEFAULT_CONFIG = {
-        "work_scale": 0.50,  # Scaling factor for resident alignment and analysis
+        "fusionnet_denoising_mode": "standard",
+        "fusionnet_work_pixel_fraction": 0.50,
+        "work_scale": math.sqrt(0.50),  # Per-dimension scale derived from pixel area
         "tile_size": 512,  # WeightNet model block (256, 512, 1024)
+        "fusionnet_max_neighbor_candidates": 4,
+        "fusionnet_patch_search_radius": 5,
         "input_channels": 1,
         "tile_overlap": 0.20,  # Tile overlap ratio (20% optimal for speed & seamless blend)
         "analysis_auto_enhance_mode": "natural",
@@ -62,36 +71,72 @@ class FusionNetDenoisingAlgorithm:
                 load_fusionnet_config_for_batch,
             )
 
-            params = load_fusionnet_config_for_batch(getattr(ctx, "batch_id", None))
+            loaded_params = load_fusionnet_config_for_batch(
+                getattr(ctx, "batch_id", None)
+            )
         except Exception:
-            params = dict(self.DEFAULT_CONFIG)
+            loaded_params = dict(self.DEFAULT_CONFIG)
         context_params = dict(getattr(ctx, "params", {}) or {})
+        params = dict(loaded_params)
         params.update(context_params)
         nested = context_params.get("fusionnet_params")
+        all_algorithm_params = context_params.get("algorithm_params")
+        if isinstance(all_algorithm_params, dict):
+            denoising_params = all_algorithm_params.get("denoising")
+            if isinstance(denoising_params, dict):
+                canonical = denoising_params.get("fusionnet")
+                if isinstance(canonical, dict):
+                    params.update(canonical)
+                    nested = canonical
         if isinstance(nested, dict):
             params.update(nested)
 
-        work_scale = float(
-            params.get(
-                "fusionnet_work_resolution",
-                params.get(
-                    "work_scale",
-                    params.get(
+        # Prefer the new pixel-area value. Saved legacy FusionNet values were
+        # linear width/height scales, so convert them to area before deriving
+        # the scale still consumed by the existing processing pipeline.
+        resolution_sources = [
+            source
+            for source in (nested, context_params, loaded_params)
+            if isinstance(source, dict)
+        ]
+        work_pixel_fraction = None
+        for source in resolution_sources:
+            if source.get("fusionnet_work_pixel_fraction") is not None:
+                work_pixel_fraction = float(
+                    source["fusionnet_work_pixel_fraction"]
+                )
+                break
+            if source.get("fusionnet_work_resolution") is not None:
+                legacy_scale = float(source["fusionnet_work_resolution"])
+                legacy_scale = max(0.05, min(1.0, legacy_scale))
+                work_pixel_fraction = legacy_scale * legacy_scale
+                break
+
+        if work_pixel_fraction is None:
+            legacy_scale = next(
+                (
+                    float(params[key])
+                    for key in (
+                        "work_scale",
                         "flownet_work_scale",
-                        params.get(
-                            "weightnet_work_scale",
-                            params.get(
-                                "work_resolution_scale",
-                                params.get(
-                                    "proxy_scale", self.DEFAULT_CONFIG["work_scale"]
-                                ),
-                            ),
-                        ),
-                    ),
+                        "weightnet_work_scale",
+                        "work_resolution_scale",
+                        "proxy_scale",
+                    )
+                    if params.get(key) is not None
                 ),
+                None,
             )
-        )
-        work_scale = max(0.05, min(1.0, work_scale))
+            if legacy_scale is None:
+                work_pixel_fraction = self.DEFAULT_CONFIG[
+                    "fusionnet_work_pixel_fraction"
+                ]
+            else:
+                legacy_scale = max(0.05, min(1.0, legacy_scale))
+                work_pixel_fraction = legacy_scale * legacy_scale
+
+        work_pixel_fraction = max(0.0025, min(1.0, work_pixel_fraction))
+        work_scale = math.sqrt(work_pixel_fraction)
         requested_tile = int(
             params.get(
                 "fusionnet_tile_size",
@@ -123,7 +168,32 @@ class FusionNetDenoisingAlgorithm:
         # weight inference, and reference-noise estimation. Ignore stale
         # per-batch overrides so all paths remain consistent.
         analysis_auto_enhance_mode = "natural"
+        denoising_mode = str(
+            params.get(
+                "fusionnet_denoising_mode",
+                self.DEFAULT_CONFIG["fusionnet_denoising_mode"],
+            )
+        ).strip().lower().replace(" ", "_")
+        if denoising_mode not in ("standard", "deep_analysis"):
+            denoising_mode = self.DEFAULT_CONFIG["fusionnet_denoising_mode"]
         return {
+            "denoising_mode": denoising_mode,
+            "max_neighbor_candidates": max(
+                1,
+                min(
+                    16,
+                    int(
+                        params.get(
+                            "fusionnet_max_neighbor_candidates", 4
+                        )
+                    ),
+                ),
+            ),
+            "patch_search_radius": max(
+                1,
+                min(16, int(params.get("fusionnet_patch_search_radius", 5))),
+            ),
+            "work_pixel_fraction": work_pixel_fraction,
             "work_scale": work_scale,
             "tile_size": tile_size,
             # Keep the model feed on the quality-validated luminance baseline.
@@ -147,28 +217,24 @@ class FusionNetDenoisingAlgorithm:
             ),
         }
 
-    @staticmethod
-    def _is_raw(ctx, inputs):
-        if bool(getattr(ctx, "is_linear_mode", False)):
-            return True
-        paths = getattr(ctx, "image_paths", None)
-        return bool(paths) and any(
-            Path(p).suffix.lower() in RAW_EXTENSIONS for p in paths
-        )
-
-    def _run_resident_paths(self, ctx, inputs, config, batch_plan, is_raw):
+    def _run_resident_paths(self, ctx, inputs, config, batch_plan):
         """Run the single resident execution lane for path-based bursts."""
         from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.resident_pipeline import (
             run_resident_pipeline,
         )
 
+        source_descriptor = getattr(ctx, "source_descriptor", None)
+        is_raw = getattr(source_descriptor, "kind", None) == "raw"
+        weightnet_runtime = _resolve_weightnet_runtime()
         print(
-            f"[FusionNet] Resident route: frames={len(inputs)} is_raw={is_raw} "
-            f"tile={config['tile_size']} work_scale={config['work_scale']:.2f}"
+            f"[FusionNet] Resident route: frames={len(inputs)} source={getattr(source_descriptor, 'kind', 'rgb')} "
+            f"tile={config['tile_size']} pixel_resolution={config['work_pixel_fraction']:.0%} "
+            f"dimension_scale={config['work_scale']:.4f} "
+            f"denoising_mode={config['denoising_mode']} weightnet_runtime={weightnet_runtime}"
         )
         session = load_weightnet_onnx(
             DEFAULT_WEIGHTNET_ONNX,
-            runtime="dml",
+            runtime=weightnet_runtime,
             patch_size=config["tile_size"],
             input_channels=config["input_channels"],
         )
@@ -193,18 +259,20 @@ class FusionNetDenoisingAlgorithm:
             analysis_auto_enhance_mode=config["analysis_auto_enhance_mode"],
             ghost_cutoff=0.0,
             chroma_sensitivity=config["chroma_sensitivity"],
-            is_raw=is_raw,
+            source_descriptor=source_descriptor,
+            denoising_mode=config["denoising_mode"],
+            max_neighbor_candidates=config["max_neighbor_candidates"],
+            patch_search_radius=config["patch_search_radius"],
             storage_mode="direct",
             batch_queue=config["batch_queue"],
             batch_plan=batch_plan,
             stop_event=getattr(ctx, "stop_requested", None),
             progress_callback=getattr(ctx, "update_progress", None),
-            raw_native=bool(getattr(ctx, "is_raw_native", False)),
         )
         if result is None:
             return None
-        if bool(getattr(ctx, "is_raw_native", False)):
-            ctx.raw_native_result = result
+        if bool(getattr(ctx, "is_raw_pipeline", False)):
+            ctx.raw_pipeline_result = result
             preview = result.preview_rgb
             print(
                 f"[FusionNet][RAW Native] preview shape={preview.shape} "
@@ -241,12 +309,17 @@ class FusionNetDenoisingAlgorithm:
         overlap = config["overlap"]
         ghost_pen = config["ghost_penalty"]
         ghost_pen_min = config["ghost_penalty_min"]
-        is_raw = self._is_raw(ctx, inputs)
+        source_descriptor = getattr(ctx, "source_descriptor", None)
+        is_raw = getattr(source_descriptor, "kind", None) == "raw"
 
         print(
             f"[FusionNet] Starting resident alignment + WeightNet pipeline: "
-            f"source={source} frames={len(inputs)} is_raw={is_raw} "
-            f"tile_size={tile_size} work_scale={work_scale} "
+            f"source={source} frames={len(inputs)} source_kind={getattr(source_descriptor, 'kind', 'rgb')} "
+            f"tile_size={tile_size} pixel_resolution={config['work_pixel_fraction']:.0%} "
+            f"dimension_scale={work_scale:.4f} "
+            f"denoising_mode={config['denoising_mode']} "
+            f"max_neighbor_candidates={config['max_neighbor_candidates']} "
+            f"patch_search_radius={config['patch_search_radius']} "
             f"ghost_penalty_range=[{ghost_pen_min:.2f}, {ghost_pen:.2f}]"
         )
 
@@ -262,7 +335,12 @@ class FusionNetDenoisingAlgorithm:
 
         # ── GPU-Resident Pipeline (zero-copy path for file-based bursts) ──
         if source == "paths":
-            return self._run_resident_paths(ctx, inputs, config, batch_plan, is_raw)
+            return self._run_resident_paths(ctx, inputs, config, batch_plan)
+        if config["denoising_mode"] == "deep_analysis":
+            raise ValueError(
+                "FusionNet Deep Analysis requires the file-backed resident RGB/RAW "
+                "pipeline; in-memory compatibility inputs are unsupported."
+            )
         # Compatibility fallback for callers that still provide in-memory or
         # HDF5 frames.  File-based MFDenoiser execution never enters this
         # legacy lane; it uses resident_pipeline's alignment registry above.
@@ -355,7 +433,7 @@ class FusionNetDenoisingAlgorithm:
 
             session = load_weightnet_onnx(
                 DEFAULT_WEIGHTNET_ONNX,
-                runtime="dml",
+                runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "dml"),
                 patch_size=tile_size,
                 input_channels=config["input_channels"],
             )

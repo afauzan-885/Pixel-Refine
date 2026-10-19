@@ -132,7 +132,8 @@ class LegacyExportContractTests(unittest.TestCase):
     def _probe(self, mode: str) -> dict[str, object]:
         env = os.environ.copy()
         env["AOT_MODE"] = str(mode)
-        env["TAICHI_ARCH"] = "cpu"
+        env["PIXEL_REFINE_AOT_ARCH"] = "cpu"
+        env["PIXEL_REFINE_BACKEND"] = "cpu"
         env["TAICHI_ARCH"] = "cpu"
         env["AOT_ARCH"] = "cpu"
         env["DISABLE_AOT_WATCHDOG"] = "1"
@@ -186,6 +187,8 @@ class LegacyExportContractTests(unittest.TestCase):
         env.update(
             {
                 "AOT_MODE": "1",
+                "PIXEL_REFINE_AOT_ARCH": "cpu",
+                "PIXEL_REFINE_BACKEND": "cpu",
                 "TAICHI_ARCH": "cpu",
                 "AOT_ARCH": "cpu",
                 "DISABLE_AOT_WATCHDOG": "1",
@@ -212,7 +215,8 @@ class LegacyExportContractTests(unittest.TestCase):
         env.update(
             {
                 "AOT_MODE": "0",
-                "TAICHI_ARCH": "cpu",
+                "PIXEL_REFINE_AOT_ARCH": "cpu",
+                "PIXEL_REFINE_BACKEND": "cpu",
                 "TAICHI_ARCH": "cpu",
                 "AOT_ARCH": "cpu",
                 "DISABLE_AOT_WATCHDOG": "1",

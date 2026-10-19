@@ -126,22 +126,60 @@ class TargetRegistryTests(unittest.TestCase):
 
     def test_runtime_report_marks_targets_without_qualification_fail_closed(self):
         report = MODULE.target_runtime_report()
-        self.assertEqual(report["target_count"], 16)
-        self.assertEqual(report["unverified_count"], 8)
-        self.assertEqual(report["native_runtime_count"], 0)
-        self.assertEqual(report["compile_only_count"], 8)
-        self.assertEqual(report["native_runtime_percent"], 0.0)
-        self.assertEqual(report["non_native_count"], 16)
+        manifest = json.loads(MODULE.MANIFEST_PATH.read_text(encoding="utf-8"))
+        entries = manifest["target_matrix"]
+        requirements = manifest.get("runtime_requirements", {})
+        expected_target_ids = {
+            MODULE.target_id_from_entry(entry) for entry in entries
+        }
+        expected_compile_only = sum(
+            str(requirements.get(target_id, {}).get("qualification", ""))
+            .strip()
+            .lower()
+            == "compile_only"
+            for target_id in expected_target_ids
+        )
+        expected_native = sum(
+            requirements.get(target_id, {}).get("qualification") == "native_runtime"
+            and requirements.get(target_id, {}).get("native_runtime") is True
+            and bool(requirements.get(target_id, {}).get("runtime_evidence_id"))
+            for target_id in expected_target_ids
+        )
+        expected_unverified = len(expected_target_ids) - expected_compile_only - expected_native
+        self.assertEqual(report["target_count"], len(expected_target_ids))
+        self.assertEqual(
+            {record["target_id"] for record in report["records"]},
+            expected_target_ids,
+        )
+        self.assertEqual(report["unverified_count"], expected_unverified)
+        self.assertEqual(report["native_runtime_count"], expected_native)
+        self.assertEqual(report["compile_only_count"], expected_compile_only)
+        self.assertEqual(
+            report["native_runtime_percent"],
+            round(expected_native * 100.0 / len(expected_target_ids), 2),
+        )
+        self.assertEqual(report["non_native_count"], len(expected_target_ids) - expected_native)
         self.assertTrue(report["fail_closed"])
-        self.assertEqual(report["backend_summary"]["cuda"]["target_count"], 2)
+        expected_cuda_count = sum(
+            MODULE.validate_target_identity(entry)["backend"] == "cuda"
+            for entry in entries
+        )
+        self.assertEqual(
+            report["backend_summary"]["cuda"]["target_count"], expected_cuda_count
+        )
         self.assertEqual(report["backend_summary"]["cuda"]["native_runtime_percent"], 0.0)
         self.assertTrue(report["backend_summary"]["cuda"]["fail_closed"])
         records = {record["target_id"]: record for record in report["records"]}
-        self.assertEqual(records["opengl_x86_64_windows_nvidia"]["status"], "unverified")
-        self.assertTrue(records["opengl_x86_64_windows_nvidia"]["fail_closed"])
-        self.assertIn("runtime_requirements", records["opengl_x86_64_windows_nvidia"]["missing"])
-        self.assertEqual(records["cpu_arm64_android"]["status"], "compile_only")
-        self.assertTrue(records["cpu_arm64_android"]["fail_closed"])
+        unqualified_targets = [
+            target_id
+            for target_id in expected_target_ids
+            if target_id not in requirements
+        ]
+        self.assertTrue(unqualified_targets)
+        for target_id in unqualified_targets:
+            self.assertEqual(records[target_id]["status"], "unverified")
+            self.assertTrue(records[target_id]["fail_closed"])
+            self.assertIn("runtime_requirements", records[target_id]["missing"])
 
     def test_runtime_report_flags_orphan_requirement_identity(self):
         manifest = {

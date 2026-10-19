@@ -3,8 +3,8 @@
 The implementation keeps the APAP contract explicit while remaining usable as
 a deterministic reference path: local homographies are fitted at a sparse
 source grid using Gaussian correspondence weights, then smoothly blended for
-query points.  A global homography is retained as a fail-closed fallback for
-cells with insufficient support or degenerate geometry.
+query points. A global homography is only a residual comparator; unsupported
+or non-improving local regions are rejected instead of being mapped globally.
 """
 
 from dataclasses import dataclass
@@ -179,11 +179,12 @@ def _map_apap_points_kernel(
     sigma_x: ti.f32,
     sigma_y: ti.f32,
 ):
-    """Evaluate the APAP local-homography field on the active device."""
+    """Evaluate the APAP local-homography field on arbitrary points."""
     for index in range(query.shape[0]):
         x = query[index, 0]
         y = query[index, 1]
         total_weight = 0.0
+        max_weight = 0.0
         matrix = ti.Matrix.zero(ti.f32, 3, 3)
         for node in range(centers.shape[0]):
             if support_counts[node] > 0:
@@ -194,32 +195,80 @@ def _map_apap_points_kernel(
                     + dy * dy / (2.0 * sigma_y * sigma_y))
                 )
                 total_weight += weight
+                if weight > max_weight:
+                    max_weight = weight
                 scale = weight / ti.max(ti.abs(homographies[node, 8]), 1.0e-12)
                 for row in ti.static(range(3)):
                     for col in ti.static(range(3)):
                         matrix[row, col] += scale * homographies[node, row * 3 + col]
         denominator = 0.0
-        if total_weight > 1.0e-12:
+        if total_weight > 1.0e-12 and max_weight >= 0.15:
             matrix /= total_weight
             denominator = matrix[2, 0] * x + matrix[2, 1] * y + matrix[2, 2]
-        if ti.abs(denominator) <= 1.0e-12 or denominator != denominator:
-            matrix = ti.Matrix([
-                [global_homography[0, 0], global_homography[0, 1], global_homography[0, 2]],
-                [global_homography[1, 0], global_homography[1, 1], global_homography[1, 2]],
-                [global_homography[2, 0], global_homography[2, 1], global_homography[2, 2]],
-            ])
-            denominator = matrix[2, 0] * x + matrix[2, 1] * y + matrix[2, 2]
-        mapped_x = (matrix[0, 0] * x + matrix[0, 1] * y + matrix[0, 2]) / denominator
-        mapped_y = (matrix[1, 0] * x + matrix[1, 1] * y + matrix[1, 2]) / denominator
-        if mapped_x != mapped_x or mapped_y != mapped_y:
-            mapped_x = (global_homography[0, 0] * x + global_homography[0, 1] * y + global_homography[0, 2]) / (
-                global_homography[2, 0] * x + global_homography[2, 1] * y + global_homography[2, 2]
-            )
-            mapped_y = (global_homography[1, 0] * x + global_homography[1, 1] * y + global_homography[1, 2]) / (
-                global_homography[2, 0] * x + global_homography[2, 1] * y + global_homography[2, 2]
-            )
+        has_support = total_weight > 1.0e-12 and max_weight >= 0.15
+        mapped_x = x
+        mapped_y = y
+        if has_support:
+            valid = ti.abs(denominator) > 1.0e-12 and denominator == denominator
+            if valid:
+                mapped_x = (matrix[0, 0] * x + matrix[0, 1] * y + matrix[0, 2]) / denominator
+                mapped_y = (matrix[1, 0] * x + matrix[1, 1] * y + matrix[1, 2]) / denominator
+                valid = mapped_x == mapped_x and mapped_y == mapped_y
+            if not valid:
+                mapped_x = float("nan")
+                mapped_y = float("nan")
         output[index, 0] = mapped_x
         output[index, 1] = mapped_y
+
+
+@ti.kernel
+def _map_apap_mesh_kernel(
+    x_grid: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    y_grid: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    centers: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    homographies: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    support_counts: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    global_homography: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    output: ti.types.ndarray(dtype=ti.types.vector(2, ti.f32), ndim=2),
+    sigma_x: ti.f32,
+    sigma_y: ti.f32,
+):
+    """Build the APAP warp mesh directly on the active device."""
+    for row, col in output:
+        x = x_grid[col]
+        y = y_grid[row]
+        total_weight = 0.0
+        max_weight = 0.0
+        matrix = ti.Matrix.zero(ti.f32, 3, 3)
+        for node in range(centers.shape[0]):
+            if support_counts[node] > 0:
+                dx = x - centers[node, 0]
+                dy = y - centers[node, 1]
+                weight = ti.exp(
+                    -(dx * dx / (2.0 * sigma_x * sigma_x)
+                    + dy * dy / (2.0 * sigma_y * sigma_y))
+                )
+                total_weight += weight
+                if weight > max_weight:
+                    max_weight = weight
+                scale = weight / ti.max(ti.abs(homographies[node, 8]), 1.0e-12)
+                for matrix_row in ti.static(range(3)):
+                    for matrix_col in ti.static(range(3)):
+                        matrix[matrix_row, matrix_col] += scale * homographies[node, matrix_row * 3 + matrix_col]
+        mapped_x = x
+        mapped_y = y
+        if total_weight > 1.0e-12 and max_weight >= 0.15:
+            matrix /= total_weight
+            denominator = matrix[2, 0] * x + matrix[2, 1] * y + matrix[2, 2]
+            if ti.abs(denominator) > 1.0e-12 and denominator == denominator:
+                candidate_x = (matrix[0, 0] * x + matrix[0, 1] * y + matrix[0, 2]) / denominator
+                candidate_y = (matrix[1, 0] * x + matrix[1, 1] * y + matrix[1, 2]) / denominator
+                if candidate_x == candidate_x and candidate_y == candidate_y:
+                    mapped_x = candidate_x
+                    mapped_y = candidate_y
+        # Unsupported mesh nodes are neutral seeds for the explicit bounded
+        # image search path. They never inherit the global homography.
+        output[row, col] = ti.Vector([mapped_x, mapped_y])
 
 
 @ti.kernel
@@ -570,6 +619,77 @@ def _weighted_homography(source: np.ndarray, target: np.ndarray, weights: np.nda
     return estimate_homography(src, dst, weights=w)
 
 
+def _weighted_reprojection_error(
+    target: np.ndarray,
+    projected: np.ndarray,
+    weights: np.ndarray,
+    support_mask: np.ndarray,
+) -> float:
+    """Measure a candidate and its global control on the same local support."""
+    local_weights = np.asarray(weights, dtype=np.float64)[support_mask]
+    if local_weights.size == 0 or not np.isfinite(local_weights).all():
+        return float("inf")
+    errors = np.linalg.norm(projected[support_mask] - target[support_mask], axis=1)
+    weight_sum = float(np.sum(local_weights))
+    if not np.isfinite(errors).all() or weight_sum <= 0.0:
+        return float("inf")
+    return float(np.dot(errors, local_weights) / weight_sum)
+
+
+def _locally_improves_global(
+    local_error: float,
+    global_error: float,
+) -> bool:
+    """Accept local deformation only when it beats its same-support control."""
+    if not np.isfinite(local_error) or not np.isfinite(global_error):
+        return False
+    # The fit kernels use float32, so ignore improvements below their relative
+    # rounding noise. A ratio-based margin scales with the observed residual
+    # and does not impose a fixed pixel threshold.
+    return local_error < global_error * (1.0 - 1.0e-6)
+
+
+def _raise_for_unsupported_apap_queries(
+    points: np.ndarray,
+    centers: np.ndarray,
+    support_counts: np.ndarray,
+    sigma: float | tuple[float, float],
+) -> None:
+    """Reject queries outside every fitted APAP support region."""
+    query = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    if isinstance(sigma, (tuple, list, np.ndarray)):
+        sigma_x = max(float(sigma[0]), 1.0e-8)
+        sigma_y = max(float(sigma[1]), 1.0e-8)
+    else:
+        sigma_x = sigma_y = max(float(sigma), 1.0e-8)
+    center_array = np.asarray(centers, dtype=np.float64)
+    supported_nodes = np.asarray(support_counts) > 0
+    unsupported = 0
+    for start in range(0, len(query), 4096):
+        query_chunk = query[start : start + 4096]
+        delta = query_chunk[:, None, :] - center_array[None, :, :]
+        weights = np.exp(
+            -(
+                delta[:, :, 0] ** 2 / (2.0 * sigma_x * sigma_x)
+                + delta[:, :, 1] ** 2 / (2.0 * sigma_y * sigma_y)
+            )
+        )
+        weights *= supported_nodes[None, :]
+        totals = np.sum(weights, axis=1)
+        peaks = np.max(weights, axis=1) if weights.shape[1] else np.zeros(len(query_chunk))
+        unsupported += int(
+            np.count_nonzero((totals <= 1.0e-12) | (peaks < 0.15))
+        )
+    if unsupported:
+        raise TransformEstimationError(
+            "APAP cannot map "
+            f"{unsupported}/{len(query)} query point(s): no fitted local "
+            "correspondence support is available nearby. Add spatially "
+            "distributed matches; no global homography fallback is used "
+            "for unsupported regions."
+        )
+
+
 def filter_apap_correspondences(
     reference_points: np.ndarray,
     support_points: np.ndarray,
@@ -601,7 +721,7 @@ def filter_apap_correspondences(
 
 @dataclass
 class APAPWarp:
-    """Sparse local-homography field with global fallback and non-rigid residual support."""
+    """Sparse local-homography field with strict support and optional residual model."""
 
     source_points: np.ndarray
     target_points: np.ndarray
@@ -642,12 +762,27 @@ class APAPWarp:
         flow *= np.array((flow_w / full_w, flow_h / full_h))
         return np.ascontiguousarray(flow, dtype=np.float32)
 
-    def map_points(self, points: np.ndarray) -> np.ndarray:
+    def map_points(
+        self,
+        points: np.ndarray,
+        *,
+        unsupported: str = "error",
+    ) -> np.ndarray:
+        """Map query points through the local APAP field.
+
+        ``unsupported='identity'`` leaves points without nearby APAP support
+        at their input coordinates. It is intended for compositors that apply
+        an independent canvas transform; it never substitutes the global
+        homography. The default remains fail-closed.
+        """
         query = np.ascontiguousarray(points, dtype=np.float64)
         if query.ndim != 2 or query.shape[1:] != (2,):
             raise ValueError(f"points must have shape (N, 2), got {query.shape}")
         if len(query) == 0:
             return np.empty((0, 2), dtype=np.float64)
+        unsupported_mode = str(unsupported).strip().lower()
+        if unsupported_mode not in {"error", "identity"}:
+            raise ValueError("unsupported must be 'error' or 'identity'")
         if self.native:
             if isinstance(self.residual_field, APAPNativeTPSWarp):
                 return self.residual_field.map_points(query)
@@ -656,12 +791,18 @@ class APAPWarp:
                     "Native APAP received a non-native residual model; "
                     "provide target-native APAP residual graphs."
                 )
+            if unsupported_mode == "error":
+                _raise_for_unsupported_apap_queries(
+                    query, self.centers, self.support_counts, self.sigma
+                )
             return _map_apap_points_native(self, query)
         if self.residual_field is not None:
             return self.residual_field.map_points(query)
+        if unsupported_mode == "error":
+            _raise_for_unsupported_apap_queries(
+                query, self.centers, self.support_counts, self.sigma
+            )
         n_query = len(query)
-        global_mapped = project_points(query, self.global_homography)
-
         delta = query[:, None, :] - self.centers[None, :, :]
         if isinstance(self.sigma, (tuple, list, np.ndarray)):
             sig_x = max(float(self.sigma[0]), 1.0e-8)
@@ -676,31 +817,70 @@ class APAPWarp:
         weights *= (self.support_counts[None, :] > 0)
         sums = np.sum(weights, axis=1)
 
-        valid_sum = sums > 1.0e-12
-        if not np.any(valid_sum):
-            return global_mapped
-
-        safe_sums = np.where(valid_sum, sums, 1.0)
-        matrices = np.einsum('nm,mij->nij', weights, self.homographies) / safe_sums[:, None, None]
+        # Reject remote Gaussian tails so local APAP does not extrapolate
+        # deformation into regions without nearby correspondence support.
+        valid_sum = (sums > 1.0e-12) & (np.max(weights, axis=1) >= 0.15)
+        if unsupported_mode == "error" and not np.all(valid_sum):
+            raise TransformEstimationError(
+                "APAP local field has unsupported query points; no global "
+                "homography fallback is used."
+            )
+        outputs = query.copy()
+        supported_indices = np.flatnonzero(valid_sum)
+        if not len(supported_indices):
+            return outputs
+        supported_weights = weights[supported_indices]
+        matrices = np.einsum('nm,mij->nij', supported_weights, self.homographies)
+        matrices /= sums[supported_indices, None, None]
         m_22 = matrices[:, 2, 2]
-        valid_matrix = valid_sum & np.isfinite(matrices).all(axis=(1, 2)) & (np.abs(m_22) > 1.0e-12)
-
-        norm_matrices = np.zeros((n_query, 3, 3), dtype=np.float64)
-        norm_matrices[valid_matrix] = matrices[valid_matrix] / m_22[valid_matrix, None, None]
-        norm_matrices[~valid_matrix] = self.global_homography
-
-        homog = np.column_stack((query, np.ones(n_query, dtype=np.float64)))
+        valid_matrix = np.isfinite(matrices).all(axis=(1, 2)) & (np.abs(m_22) > 1.0e-12)
+        if not np.all(valid_matrix):
+            raise TransformEstimationError(
+                "APAP local field is singular at one or more query points; "
+                "no global homography fallback is used."
+            )
+        norm_matrices = matrices / m_22[:, None, None]
+        supported_query = query[supported_indices]
+        homog = np.column_stack((supported_query, np.ones(len(supported_query), dtype=np.float64)))
         projected = np.einsum('nij,nj->ni', norm_matrices, homog)
         denom = projected[:, 2]
         good_denom = np.abs(denom) > np.finfo(np.float64).eps
-        outputs = np.where(
-            good_denom[:, None],
-            projected[:, :2] / np.where(good_denom, denom, 1.0)[:, None],
-            global_mapped,
-        )
-        finite_out = np.isfinite(outputs).all(axis=1)
-        outputs = np.where(finite_out[:, None], outputs, global_mapped)
+        if not np.all(good_denom):
+            raise TransformEstimationError(
+                "APAP local field has a singular projective denominator; "
+                "no global homography fallback is used."
+            )
+        mapped = projected[:, :2] / denom[:, None]
+        finite_out = np.isfinite(mapped).all(axis=1)
+        if not np.all(finite_out):
+            raise TransformEstimationError(
+                "APAP local field produced non-finite coordinates; "
+                "no global homography fallback is used."
+            )
+        outputs[supported_indices] = mapped
         return outputs
+
+    def _map_mesh_buffer(
+        self,
+        dsize: tuple[int, int],
+        mesh_shape: tuple[int, int],
+        *,
+        allow_unsupported: bool = False,
+    ):
+        """Evaluate the sparse APAP mesh on-device for the native warp path."""
+        if not self.native or self.residual_field is not None:
+            raise RuntimeError("Device mesh mapping requires pure native APAP")
+        out_w, out_h = (int(value) for value in dsize)
+        mesh_h, mesh_w = (int(value) for value in mesh_shape)
+        x_grid = np.linspace(0.0, out_w - 1.0, mesh_w, dtype=np.float64)
+        y_grid = np.linspace(0.0, out_h - 1.0, mesh_h, dtype=np.float64)
+        grid_x, grid_y = np.meshgrid(x_grid, y_grid)
+        query = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+        if not allow_unsupported:
+            _raise_for_unsupported_apap_queries(
+                query, self.centers, self.support_counts, self.sigma
+            )
+        return _map_apap_mesh_native(self, dsize, mesh_shape)
 
     __call__ = map_points
 
@@ -836,7 +1016,7 @@ def _fit_apap_numpy_reference(
     sigma: float | tuple[float, float] | None = None,
     min_support: int = 4,
     max_controls_per_node: int = 64,
-    enable_residual_spline: bool = True,
+    enable_residual_spline: bool = False,
 ) -> APAPWarp:
     """Fit an APAP-style local homography field.
 
@@ -880,6 +1060,7 @@ def _fit_apap_numpy_reference(
 
     homographies = np.repeat(global_homography[None, :, :], len(centers), axis=0)
     supports = np.zeros(len(centers), dtype=np.int32)
+    global_projection = project_points(src, global_homography)
 
     for index, center in enumerate(centers):
         delta = src - center[None, :]
@@ -890,17 +1071,25 @@ def _fit_apap_numpy_reference(
             dist_sq = np.sum(delta ** 2, axis=1)
             weights = np.exp(-dist_sq / (2.0 * sigma * sigma))
 
-        supports[index] = int(np.count_nonzero(weights > 1.0e-3))
+        local_mask = weights > 1.0e-3
+        supports[index] = int(np.count_nonzero(local_mask))
         if supports[index] < int(min_support):
             continue
         try:
             H_cand = _weighted_homography(src, dst, weights)
-            mapped_cand = project_points(src, H_cand)
-            loc_mask = weights > 1.0e-3
-            err_cand = float(np.mean(np.linalg.norm(mapped_cand[loc_mask] - dst[loc_mask], axis=1)))
-            if np.isfinite(err_cand) and err_cand < 50.0:
+            local_projection = project_points(src, H_cand)
+            local_error = _weighted_reprojection_error(
+                dst, local_projection, weights, local_mask
+            )
+            global_error = _weighted_reprojection_error(
+                dst, global_projection, weights, local_mask
+            )
+            if _locally_improves_global(local_error, global_error):
                 homographies[index] = H_cand
             else:
+                # The global model is a quality comparator, not an APAP node
+                # fallback. Do not advertise a node whose local model failed
+                # to improve the same-support residual.
                 supports[index] = 0
         except (ValueError, np.linalg.LinAlgError, TransformEstimationError):
             supports[index] = 0
@@ -938,7 +1127,7 @@ def fit_apap_reference(
     sigma: float | tuple[float, float] | None = None,
     min_support: int = 4,
     max_controls_per_node: int = 64,
-    enable_residual_spline: bool = True,
+    enable_residual_spline: bool = False,
 ) -> APAPWarp:
     """Return the preserved NumPy APAP oracle for deterministic parity tests."""
     return _fit_apap_numpy_reference(
@@ -955,6 +1144,17 @@ def fit_apap_reference(
 
 def _load_apap_native_module():
     from taichi_vision.taichi_algorithm import aot_api
+    from taichi_vision.backend_config import requested_backend
+
+    backend, _explicit, _source = requested_backend()
+    if backend == "auto":
+        backend = aot_api.select_backend()
+    if backend == "opengl":
+        raise RuntimeError(
+            "Native APAP is not runtime-qualified on OpenGL. The OpenGL AOT "
+            "engine currently fails before APAP module loading; select CPU, "
+            "CUDA, or Vulkan. No CPU/NumPy fallback is used."
+        )
 
     try:
         return aot_api.load_tcm("apap_native")
@@ -1083,7 +1283,76 @@ def _map_apap_points_native(warp: APAPWarp, points: np.ndarray) -> np.ndarray:
             "APAP native field evaluation failed on the active backend/device. "
             "No CPU/NumPy fallback is used."
         ) from exc
-    return np.asarray(result, dtype=np.float64)
+    result = np.asarray(result, dtype=np.float64)
+    if not np.isfinite(result).all():
+        raise TransformEstimationError(
+            "APAP local field is singular at one or more query points; "
+            "no global homography fallback is used."
+        )
+    return result
+
+
+def _map_apap_mesh_native(
+    warp: APAPWarp,
+    dsize: tuple[int, int],
+    mesh_shape: tuple[int, int],
+):
+    """Generate a vector-field mesh without reading it back to NumPy."""
+    from taichi_vision.taichi_algorithm import aot_api
+
+    out_w, out_h = (int(value) for value in dsize)
+    mesh_h, mesh_w = (int(value) for value in mesh_shape)
+    if min(out_w, out_h, mesh_w, mesh_h) < 2:
+        raise ValueError("APAP mesh and image dimensions must be at least 2")
+
+    module = _load_apap_native_module()
+    x_grid = np.linspace(0.0, out_w - 1.0, mesh_w, dtype=np.float64).astype(np.float32)
+    y_grid = np.linspace(0.0, out_h - 1.0, mesh_h, dtype=np.float64).astype(np.float32)
+    centers = np.ascontiguousarray(warp.centers, dtype=np.float32)
+    homographies = np.ascontiguousarray(warp.homographies.reshape(-1, 9), dtype=np.float32)
+    support_counts = np.ascontiguousarray(warp.support_counts, dtype=np.int32)
+    global_homography = np.ascontiguousarray(warp.global_homography, dtype=np.float32)
+    sigma_x, sigma_y = (
+        (float(warp.sigma[0]), float(warp.sigma[1]))
+        if isinstance(warp.sigma, (tuple, list, np.ndarray))
+        else (float(warp.sigma), float(warp.sigma))
+    )
+    buffers = [
+        aot_api.upload(x_grid),
+        aot_api.upload(y_grid),
+        aot_api.upload(centers),
+        aot_api.upload(homographies),
+        aot_api.upload(support_counts),
+        aot_api.upload(global_homography),
+        aot_api.engine.allocate(
+            (mesh_h, mesh_w, 2),
+            dtype=np.float32,
+            is_vector=True,
+            vector_dim=2,
+        ),
+    ]
+    try:
+        module.run(
+            "algn_apap_map_mesh_f32",
+            x_grid=buffers[0],
+            y_grid=buffers[1],
+            centers=buffers[2],
+            homographies=buffers[3],
+            support_counts=buffers[4],
+            global_homography=buffers[5],
+            output=buffers[6],
+            sigma_x=sigma_x,
+            sigma_y=sigma_y,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Native APAP mesh evaluation failed on the active backend/device. "
+            "No CPU/NumPy fallback is used."
+        ) from exc
+    # Keep graph inputs leased until the consumer mesh-warp graph has completed
+    # and its readback synchronizes the shared native stream.
+    buffers[6]._apap_mesh_dependencies = tuple(buffers[:-1])
+    return buffers[6]
 
 
 def _map_apap_tps_points_native(warp: APAPNativeTPSWarp, points: np.ndarray) -> np.ndarray:
@@ -1244,7 +1513,7 @@ def fit_apap(
     sigma: float | tuple[float, float] | None = None,
     min_support: int = 4,
     max_controls_per_node: int = 64,
-    enable_residual_spline: bool = True,
+    enable_residual_spline: bool = False,
 ) -> APAPWarp:
     """Fit the APAP node models through the active target-qualified Taichi graph.
 
@@ -1254,6 +1523,11 @@ def fit_apap(
     ``max_controls_per_node`` remains in the signature for compatibility and
     is ignored so all supplied correspondence rows and their order are kept.
     """
+    if enable_residual_spline:
+        raise ValueError(
+            "Native APAP is pure Moving DLT and does not support a TPS residual; "
+            "use fit_apap_reference() explicitly for the NumPy TPS oracle."
+        )
     from taichi_vision.taichi_algorithm import aot_api
 
     src64, dst64 = _validate_apap_correspondences(
@@ -1321,6 +1595,7 @@ def fit_apap(
 
     dst_inverse = np.linalg.inv(dst_transform)
     homographies = np.repeat(global_h[None, :, :], len(centers), axis=0)
+    global_projection = project_points(src64, global_h)
     valid_support = supports >= int(min_support)
     for index in np.flatnonzero(valid_support):
         candidate = dst_inverse @ local_norm[index] @ src_transform
@@ -1328,12 +1603,19 @@ def fit_apap(
             supports[index] = 0
             continue
         candidate /= candidate[2, 2]
-        mapped = project_points(src64, candidate)
         local = weights[index] > 1.0e-3
-        error = float(np.mean(np.linalg.norm(mapped[local] - dst64[local], axis=1)))
-        if np.isfinite(error) and error < 50.0:
+        local_projection = project_points(src64, candidate)
+        local_error = _weighted_reprojection_error(
+            dst64, local_projection, weights[index], local
+        )
+        global_error = _weighted_reprojection_error(
+            dst64, global_projection, weights[index], local
+        )
+        if _locally_improves_global(local_error, global_error):
             homographies[index] = candidate
         else:
+            # A no-gain node remains unsupported; mapping it with the global
+            # control would silently turn pure APAP into global-to-local warp.
             supports[index] = 0
 
     warp = APAPWarp(
@@ -1347,21 +1629,6 @@ def fit_apap(
         residual_field=None,
         native=True,
     )
-    if enable_residual_spline and len(src64) >= 4:
-        mapped_check = warp.map_points(src64)
-        err_check = float(np.mean(np.linalg.norm(mapped_check - dst64, axis=1)))
-        if err_check > 0.05:
-            try:
-                warp.residual_field = _fit_apap_tps_native(
-                    src64,
-                    dst64,
-                    regularization=1.0e-4,
-                )
-            except TransformEstimationError:
-                # Match the existing algorithmic policy for degenerate TPS
-                # controls: keep the APAP model. Native/runtime errors above
-                # this layer are deliberately not caught or rerouted.
-                warp.residual_field = None
     return warp
 
 
@@ -1646,20 +1913,33 @@ def align_burst_stack(
 
         if len(inliers_ref) >= 4:
             m_lower = str(method).lower()
-            if m_lower == "tps":
+            if m_lower == "apap":
+                from .mesh_warp import warp_apap
+
+                warped_img, _ = warp_apap(
+                    image=img,
+                    src_points=inliers_ref,
+                    dst_points=inliers_mov,
+                    dsize=(ref_w, ref_h),
+                    ref_image=ref_img,
+                    enable_adaptive_refine=True,
+                    fit_grid_shape=grid_shape,
+                    global_homography=H_global,
+                    sigma=sigma,
+                )
+                used_method = "apap"
+            elif m_lower == "tps":
                 inv_warp, _ = fit_tps_checked(inliers_ref, inliers_mov, regularization=1e-4)
                 used_method = "tps"
             elif m_lower == "aanap":
                 inv_warp = fit_aanap(inliers_ref, inliers_mov, global_homography=H_global, grid_shape=grid_shape, sigma=sigma)
                 used_method = "aanap"
-            elif m_lower == "apap":
-                inv_warp = fit_apap_reference(inliers_ref, inliers_mov, global_homography=H_global, grid_shape=grid_shape, sigma=sigma)
-                used_method = "apap"
             else:
                 inv_warp = lambda pts: project_points(pts, H_global)
                 used_method = "homography"
 
-            warped_img, _ = warp_image(img, inv_warp, dsize=(ref_w, ref_h))
+            if m_lower != "apap":
+                warped_img, _ = warp_image(img, inv_warp, dsize=(ref_w, ref_h))
             aligned_stack.append(warped_img)
             reports.append({
                 "frame": idx,
@@ -1688,6 +1968,7 @@ def align_multi_image_panorama(
     method: str = "aanap",
     sub_grid_shape: tuple[int, int] = (4, 4),
     blend: str = "feather",
+    matcher: Callable[[np.ndarray, np.ndarray], object] | None = None,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Generic multi-image panorama stitching for single-row or multi-row configurations.
 
@@ -1701,6 +1982,7 @@ def align_multi_image_panorama(
         method: Alignment model ('aanap', 'apap', or None).
         sub_grid_shape: Moving DLT grid resolution per cell.
         blend: Blending mode ('feather' or 'average').
+        matcher: Optional pairwise feature matcher forwarded to panorama stages.
 
     Returns:
         (panorama_canvas, info_dict): Composed panorama and alignment diagnostics.
@@ -1713,9 +1995,16 @@ def align_multi_image_panorama(
     from ..panorama.stitch import stitch_panorama
 
     refine_choice = method if str(method).lower() in {"aanap", "apap"} else None
+    panorama_backend = "aot" if str(refine_choice).lower() == "apap" else "auto"
 
     if grid_layout is None or int(grid_layout[0]) <= 1:
-        canvas = stitch_panorama(images, refine=refine_choice, blend=blend)
+        canvas = stitch_panorama(
+            images,
+            refine=refine_choice,
+            blend=blend,
+            backend=panorama_backend,
+            matcher=matcher,
+        )
         return canvas, {
             "status": "success",
             "layout": "single_row",
@@ -1735,10 +2024,22 @@ def align_multi_image_panorama(
         if len(row_imgs) == 1:
             row_panoramas.append(row_imgs[0])
         else:
-            row_canvas = stitch_panorama(row_imgs, refine=refine_choice, blend=blend)
+            row_canvas = stitch_panorama(
+                row_imgs,
+                refine=refine_choice,
+                blend=blend,
+                backend=panorama_backend,
+                matcher=matcher,
+            )
             row_panoramas.append(row_canvas)
 
-    final_canvas = stitch_panorama(row_panoramas, refine=refine_choice, blend=blend)
+    final_canvas = stitch_panorama(
+        row_panoramas,
+        refine=refine_choice,
+        blend=blend,
+        backend=panorama_backend,
+        matcher=matcher,
+    )
     return final_canvas, {
         "status": "success",
         "layout": f"multi_row_{rows}x{cols}",

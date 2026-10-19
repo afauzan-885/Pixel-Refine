@@ -70,11 +70,27 @@ class ArmNativeMatrixTests(unittest.TestCase):
         self.assertFalse(with_id["fail_closed"])
 
     def test_manifest_rejects_contradictory_arm_qualification(self):
-        manifest_path = (
-            ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
-        )
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        payload["runtime_requirements"]["cpu_arm64_android"]["native_runtime"] = True
+        # Keep this contract test independent of optional qualifications in
+        # the checked-in release manifest.  A compile-only ARM target cannot
+        # simultaneously claim that native runtime has been qualified.
+        payload = {
+            "schema_version": 1,
+            "target_matrix": [
+                {
+                    "os": "android",
+                    "backend": "cpu",
+                    "arch": "arm64",
+                    "vendor": "unknown",
+                }
+            ],
+            "runtime_requirements": {
+                "cpu_arm64_android": {
+                    "qualification": "compile_only",
+                    "native_runtime": True,
+                    "runtime_evidence_required": True,
+                }
+            },
+        }
         with tempfile.TemporaryDirectory() as directory:
             candidate = Path(directory) / "manifest.json"
             candidate.write_text(json.dumps(payload), encoding="utf-8")

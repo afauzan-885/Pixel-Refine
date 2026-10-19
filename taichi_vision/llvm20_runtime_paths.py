@@ -130,10 +130,44 @@ def tcm_root(target_id: str) -> Optional[Path]:
     return None
 
 
+def application_assets_root(target_id: str) -> Optional[Path]:
+    """Resolve application TCMs alongside the selected target's artifacts."""
+    safe_target = str(target_id or "").strip()
+    if not safe_target or Path(safe_target).name != safe_target:
+        raise ValueError(f"unsafe runtime target id: {target_id!r}")
+    explicit = os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT", "").strip()
+    candidates = [safe_target]
+    if safe_target.startswith(("opengl_", "vulkan_")):
+        for suffix in ("_nvidia", "_intel", "_amd"):
+            base = safe_target.removesuffix(suffix)
+            if base != safe_target:
+                candidates.append(base)
+    if explicit:
+        # An explicit staging root must not fall through to older project TCMs.
+        selected_root = Path(explicit).expanduser().resolve()
+        for candidate in candidates:
+            assets = selected_root / candidate / "application_assets"
+            if assets.is_dir():
+                return assets
+        return selected_root / safe_target / "application_assets"
+    # Keep application assets with the project TCMs selected by the module
+    # loader before consulting a historical development runtime bundle.
+    for candidate in candidates:
+        assets = PROJECT_TCM_ROOT / candidate / "application_assets"
+        if assets.is_dir():
+            return assets
+    for candidate in candidates:
+        root = tcm_root(candidate)
+        if root is not None:
+            return root / "application_assets"
+    return None
+
+
 __all__ = [
     "LLVM20_STAGING_ROOT",
     "LLVM20_RELEASE_ROOT",
     "runtime_root",
     "bundle_root",
     "tcm_root",
+    "application_assets_root",
 ]

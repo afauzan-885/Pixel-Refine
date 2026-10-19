@@ -303,9 +303,23 @@ class TiledHannAccumulator:
         self.engine = taichi_aot.engine
         backend = str(getattr(self.engine, "arch", "cpu")).lower()
         backend = "opengl" if backend == "gles" else backend
-        asset_dir = asset_dir or os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "../../../../../ui/data/aot_assets")
-        )
+        if asset_dir is None:
+            from taichi_vision.taichi_aot.artifact_targets import detect_target
+            from taichi_vision.llvm20_runtime_paths import application_assets_root
+
+            target = detect_target(
+                backend=backend,
+                device=str(getattr(self.engine, "gpu_name", "") or ""),
+            )
+            resolved_assets = application_assets_root(target.target_id)
+            if resolved_assets is None:
+                resolved_assets = (
+                    os.path.dirname(os.path.abspath(__file__))
+                    + "/../../../../../../taichi_vision/taichi_algorithm/aot_tcm/"
+                    + target.target_id
+                    + "/application_assets"
+                )
+            asset_dir = os.path.abspath(resolved_assets)
         self.splat = SpatialSplatAOT(tcm_path=os.path.join(
             asset_dir, f"spatial_splat_tiled_packed_{backend}.tcm"
         ))
@@ -332,18 +346,10 @@ class TiledHannAccumulator:
 
         height = min(self.block_size, self.hr_h)
         width = min(self.block_size, self.hr_w)
-        source_h = min(self.lr_h, (self.block_size + self.scale - 1) // self.scale + 7)
-        source_w = min(self.lr_w, (self.block_size + self.scale - 1) // self.scale + 7)
         self.output_shape = (height, width)
         with _force_host_visible(self.engine, self.backend == "vulkan"):
             self.accumulation_tile = session.acquire_buffer(
                 (height, width, 4), tag="splat_sr.tiled.packed_accumulation"
-            )
-            self.confidence_scratch = session.acquire_buffer(
-                (source_h, source_w), tag="splat_sr.tiled.confidence"
-            )
-            self.zero_crop_flow = session.own(
-                self.engine.upload(np.zeros((1, 1, 2), dtype=np.float32))
             )
         self.host_packed = session.acquire_host(
             (height * width * 4,), tag="splat_sr.tiled.read_packed_accumulation"
@@ -391,8 +397,7 @@ class TiledHannAccumulator:
             SessionHannAccumulator._batched_confidence_view(
                 confidence, (self.lr_h, self.lr_w), self.engine
             )
-            if len(confidence.shape) != 2:
-                confidence = _packed_view(confidence, (self.lr_h, self.lr_w))
+            confidence = _packed_view(confidence, (self.lr_h, self.lr_w))
         elif confidence is not None:
             confidence = np.asarray(confidence, dtype=np.float32)
             if confidence.shape != (self.lr_h, self.lr_w):
@@ -415,22 +420,11 @@ class TiledHannAccumulator:
             try:
                 with _force_host_visible(self.engine, self.backend == "vulkan"):
                     if borrowed:
-                        local_conf = _packed_view(self.confidence_scratch, (sh, sw))
-                        if self.lr_h > 1 and self.lr_w > 1:
-                            taichi_aot.remap_with_flow_tile(
-                                confidence, self.zero_crop_flow,
-                                self.lr_h, self.lr_w, sy0, sx0, sh, sw,
-                                dst=local_conf,
-                            )
-                        else:
-                            mx, my = np.meshgrid(
-                                np.arange(sx0, sx1, dtype=np.float32),
-                                np.arange(sy0, sy1, dtype=np.float32),
-                            )
-                            local_conf = self.session.track_result(
-                                taichi_aot.remap(confidence, mx, my, return_gpu=True)
-                            )
-                            uploaded.append(local_conf)
+                        # Keep provider output resident and pass the original
+                        # full-frame map to the graph. The graph indexes it by
+                        # global source coordinates; no crop/remap output is
+                        # materialized for each reconstruction tile.
+                        local_conf = confidence
                     else:
                         local = np.ones((sh, sw), dtype=np.float32) if confidence is None else confidence[sy0:sy1, sx0:sx1]
                         local = np.clip(np.nan_to_num(local, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
@@ -457,7 +451,7 @@ class TiledHannAccumulator:
                     self.splat.module.run(
                         "deno_splat_rgb_hann_tile",
                         frames=_packed_view(local_frame, (sh, sw, 3)),
-                        confidence=local_conf, flow=local_flow,
+                        confidence=local_conf, flow=local_flow.view_as_vector(False),
                         hann_tile=window, accumulation=accumulation,
                         scale=self.scale, radius=self.radius, sigma=self.sigma,
                         source_y=sy0, source_x=sx0, output_y=y0, output_x=x0,

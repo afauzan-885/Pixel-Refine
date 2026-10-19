@@ -71,6 +71,8 @@ print("RESULT " + json.dumps(payload, sort_keys=True))
 """
         env = os.environ.copy()
         env["AOT_MODE"] = "1"
+        env["PIXEL_REFINE_AOT_ARCH"] = "cpu"
+        env["PIXEL_REFINE_BACKEND"] = "cpu"
         env["AOT_ARCH"] = "cpu"
         # The parent suite may disable the application's auto-destroy
         # watchdog for CPU-JIT runs.  This child intentionally exercises the

@@ -1,8 +1,31 @@
+# Preferensi kerja umum
+
+- Gunakan Bahasa Indonesia untuk komunikasi dan dokumentasi, kecuali pengguna
+  meminta bahasa lain. Komentar kode dan identifier mengikuti bahasa proyek.
+- Sebelum mengubah file, periksa status dan konteks terkait; pertahankan pekerjaan
+  pengguna yang tidak terkait dan batasi perubahan sesuai permintaan.
+- Pisahkan fakta yang diamati, dugaan, dan hal yang belum divalidasi. Jangan
+  melebihkan hasil pemeriksaan statis atau tes terbatas.
+- Gunakan memori sebagai petunjuk yang perlu diverifikasi bila source, konfigurasi,
+  atau bukti terkini bisa berbeda.
+
+## Saat bekerja pada Pixel Refine
+
+Ikuti aturan proyek di bawah dan `ai_governance/`. Aktifkan skill
+`pixel-refine-governance` untuk perubahan kode, pekerjaan Taichi AOT/TCM, atau
+klaim backend, akurasi, performa, maupun kesiapan produksi. Aturan proyek lebih
+spesifik daripada preferensi umum ini, tetapi tetap tunduk pada instruksi
+platform dan pengguna.
+
+---
+
 # Pixel Refine Agent Entry Point & Global Governance
 
 Dokumen ini adalah aturan global dan entry point terikat untuk setiap AI agent yang bekerja di Pixel Refine (termasuk Gemini, Antigravity, Codex, dan DeepSeek). Aturan ini otomatis dimuat pada setiap sesi percakapan.
 
 Kontrak proyek lengkap tertera pada [`agen.md`](agen.md), dan tata kelola normatif berada di [`ai_governance/`](ai_governance/).
+
+Peta harness, klasifikasi arsip, dan alur memilih dokumen governance yang relevan ada di [`ai_governance/AGENT_HARNESS_MAP.md`](ai_governance/AGENT_HARNESS_MAP.md). Baca peta itu saat memulai task; muat histori dan evidence sesuai cakupan, lalu verifikasi fakta historis terhadap source dan bukti terkini.
 
 ---
 
@@ -34,6 +57,7 @@ Kontrak proyek lengkap tertera pada [`agen.md`](agen.md), dan tata kelola normat
 - **Asumsi Komputasi**: Jangan menganggap preload batching sebagai komputasi GPU paralel, dan jangan memutuskan suatu graph aman ditile tanpa memeriksa halo, konteks global, reduksi, dan batas memori.
 - **Taichi AOT & ABI**: Patuhi panduan di `ai_governance/skills/taichi-aot-dev/SKILL.md`. Jangan mencampur ABI LLVM/Taichi/bridge/TCM yang berbeda.
 - **Lingkungan Pengujian**: Gunakan venv proyek (`venv`) untuk semua eksekusi dan pengujian Python.
+- **Uji aplikasi headless wajib**: setiap perubahan aplikasi desktop diuji tanpa membuka UI melalui venv proyek. Jalankan import headless `main_desktop.py` dan smoke integrasi headless yang mengeksekusi alur/fitur yang diubah. Import/lint saja tidak membuktikan fitur atau algoritma bekerja. Catat command, backend/device, shape, dtype, hasil, dan batas validasi; bila eksekusi integrasi tidak tersedia, tandai belum terverifikasi.
 
 ---
 
@@ -55,6 +79,9 @@ Kontrak proyek lengkap tertera pada [`agen.md`](agen.md), dan tata kelola normat
   2. Pengguna memberikan batas jumlah agent (`user_agent_limit`).
   3. Coordinator merumuskan cakupan kerja (coverage) tanpa tumpang tindih (dua agent tidak boleh mengedit file yang sama).
   4. Seluruh temuan dan penggabungan hasil diverifikasi oleh single coordinator.
+  5. Sebelum peluncuran, coordinator membuat atau menunjuk memori task persisten di `ai_governance/` yang berisi baseline, coverage tiap agent, handoff path, status, risiko, dan kriteria selesai. Semua agent membaca serta berbagi perubahan konteks melalui coordinator. Simpan temuan pada file terpisah dan daftarkan memori lintas sesi di `KNOWLEDGE_INDEX.md` serta `README.md`.
+
+Detail format memori bersama, update lintas agent, dan batas penyimpanan ada di [`ai_governance/MULTI_AGENT_PROTOCOL.md`](ai_governance/MULTI_AGENT_PROTOCOL.md).
 
 ---
 

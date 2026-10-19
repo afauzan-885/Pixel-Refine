@@ -29,7 +29,8 @@ def _run_probe(code: str, *, mode: str, timeout: int = 180) -> dict:
     env.update(
         {
             "AOT_MODE": str(mode),
-            "TAICHI_ARCH": "cpu",
+            "PIXEL_REFINE_AOT_ARCH": "cpu",
+            "PIXEL_REFINE_BACKEND": "cpu",
             "TAICHI_ARCH": "cpu",
             "AOT_ARCH": "cpu",
             "BACKEND": "cpu",
@@ -90,7 +91,7 @@ class DomainCatalogTests(unittest.TestCase):
                     leaf, JOBS, f"{stage} references unregistered AOT leaf {leaf}"
                 )
         self.assertIn("cpu_x86_64_windows", TARGET_BACKENDS)
-        self.assertIn("vulkan_x86_64_windows_nvidia", TARGET_BACKENDS)
+        self.assertIn("vulkan_x86_64_windows", TARGET_BACKENDS)
 
     def test_catalog_labels_keep_jit_and_aot_contracts_distinct(self):
         entries = {entry.name: entry for entry in ALGORITHM_CATALOG}

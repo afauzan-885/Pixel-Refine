@@ -50,15 +50,23 @@ ti_import_opengl_runtime(TiOpenglRuntimeInteropInfo *, bool) {
 #define EXPORT
 #endif
 
-// Forward declaration for WIC factory (global for performance)
+// Forward declaration for WIC factory (thread-safe global initialized once)
 #ifdef _WIN32
 static IWICImagingFactory *g_wic_factory = nullptr;
+static std::once_flag g_wic_init_flag;
+
 static void init_wic() {
-  if (!g_wic_factory) {
-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  thread_local bool s_com_initialized = false;
+  if (!s_com_initialized) {
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) {
+      s_com_initialized = true;
+    }
+  }
+  std::call_once(g_wic_init_flag, []() {
     CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
                      IID_PPV_ARGS(&g_wic_factory));
-  }
+  });
 }
 #endif
 
@@ -232,7 +240,7 @@ static_assert(offsetof(RawIcdGlcltProcTable, dispatch) == sizeof(void *),
               "Unexpected Windows ICD dispatch table layout");
 struct RawIcdContextTag {};
 using RawIcdSetProcTable = void(APIENTRY *)(const RawIcdGlcltProcTable *);
-static EngineContext *g_raw_icd_context = nullptr;
+static thread_local EngineContext *g_raw_icd_context = nullptr;
 
 static void APIENTRY raw_icd_set_proc_table(const RawIcdGlcltProcTable *) {}
 #endif
@@ -329,6 +337,13 @@ static void *APIENTRY raw_icd_get_proc_addr(const char *name) {
   return resolve_raw_icd_proc(g_raw_icd_context, name);
 }
 
+static std::string raw_icd_expected_vendor() {
+  const char *vendor = std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR");
+  if (!vendor || vendor[0] == '\0')
+    vendor = std::getenv("OPENGL_EXPECTED_VENDOR");
+  return vendor ? vendor : "";
+}
+
 static void append_registry_icd_candidates(std::vector<std::string> &result) {
   // Some Windows drivers register an ICD DLL whose filename does not contain
   // "icd", "ogl", or "opengl". Consult both registry views so those drivers
@@ -414,7 +429,98 @@ static void append_registry_icd_candidates(std::vector<std::string> &result) {
   }
 }
 
+static void append_active_display_icd_candidates(
+    std::vector<std::string> &result, const std::string &expected_vendor) {
+  if (expected_vendor.empty())
+    return;
+  constexpr const char *kDisplayClassKey =
+      "SYSTEM\\CurrentControlSet\\Control\\Class\\"
+      "{4d36e968-e325-11ce-bfc1-08002be10318}";
+  HKEY root = nullptr;
+  if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, kDisplayClassKey, 0,
+                    KEY_READ | KEY_WOW64_64KEY, &root) != ERROR_SUCCESS)
+    return;
+
+  DWORD subkey_count = 0;
+  DWORD max_subkey_name = 0;
+  RegQueryInfoKeyA(root, nullptr, nullptr, nullptr, &subkey_count,
+                   &max_subkey_name, nullptr, nullptr, nullptr, nullptr,
+                   nullptr, nullptr);
+  std::vector<char> subkey_name(max_subkey_name + 2, '\0');
+  for (DWORD i = 0; i < subkey_count; ++i) {
+    DWORD name_length = static_cast<DWORD>(subkey_name.size() - 1);
+    FILETIME last_write{};
+    if (RegEnumKeyExA(root, i, subkey_name.data(), &name_length, nullptr,
+                      nullptr, nullptr, &last_write) != ERROR_SUCCESS)
+      continue;
+    subkey_name[name_length] = '\0';
+    HKEY display = nullptr;
+    if (RegOpenKeyExA(root, subkey_name.data(), 0,
+                      KEY_READ | KEY_WOW64_64KEY, &display) != ERROR_SUCCESS)
+      continue;
+
+    DWORD desc_type = 0;
+    DWORD desc_bytes = 0;
+    std::string description;
+    if (RegQueryValueExA(display, "DriverDesc", nullptr, &desc_type, nullptr,
+                         &desc_bytes) == ERROR_SUCCESS &&
+        (desc_type == REG_SZ || desc_type == REG_EXPAND_SZ) &&
+        desc_bytes > 0 && desc_bytes <= 4096) {
+      std::vector<char> desc(desc_bytes + 1, '\0');
+      if (RegQueryValueExA(display, "DriverDesc", nullptr, &desc_type,
+                           reinterpret_cast<LPBYTE>(desc.data()),
+                           &desc_bytes) == ERROR_SUCCESS)
+        description.assign(desc.data());
+    }
+    if (!text_matches(description, expected_vendor)) {
+      RegCloseKey(display);
+      continue;
+    }
+
+    DWORD path_type = 0;
+    DWORD path_bytes = 0;
+    if (RegQueryValueExA(display, "OpenGLDriverName", nullptr, &path_type,
+                         nullptr, &path_bytes) == ERROR_SUCCESS &&
+        path_type == REG_MULTI_SZ && path_bytes > 1 &&
+        path_bytes <= 32 * 1024) {
+      std::vector<char> paths(path_bytes + 2, '\0');
+      if (RegQueryValueExA(display, "OpenGLDriverName", nullptr, &path_type,
+                           reinterpret_cast<LPBYTE>(paths.data()),
+                           &path_bytes) == ERROR_SUCCESS) {
+        for (std::size_t offset = 0; offset < path_bytes &&
+                                     paths[offset] != '\0';) {
+          const std::size_t remaining = path_bytes - offset;
+          const std::size_t length =
+              std::char_traits<char>::length(paths.data() + offset);
+          if (length >= remaining)
+            break;
+          std::string path(paths.data() + offset, length);
+          if (lower_ascii(path).find(".dll") != std::string::npos) {
+            std::vector<char> expanded(32768, '\0');
+            const DWORD expanded_length = ExpandEnvironmentStringsA(
+                path.c_str(), expanded.data(),
+                static_cast<DWORD>(expanded.size()));
+            if (expanded_length > 0 && expanded_length < expanded.size())
+              path.assign(expanded.data(), expanded_length - 1);
+            result.emplace_back(std::move(path));
+          }
+          offset += length + 1;
+        }
+      }
+    }
+    RegCloseKey(display);
+  }
+  RegCloseKey(root);
+}
+
 static std::vector<std::string> raw_icd_library_candidates() {
+  static std::mutex candidates_mutex;
+  static std::vector<std::string> cached_result;
+  static bool candidates_discovered = false;
+  std::lock_guard<std::mutex> lock(candidates_mutex);
+  if (candidates_discovered) {
+    return cached_result;
+  }
   std::vector<std::string> result;
   const auto narrow_path = [](const std::wstring &value) {
     if (value.empty())
@@ -440,12 +546,12 @@ static std::vector<std::string> raw_icd_library_candidates() {
       if (!path.empty())
         result.emplace_back(path);
   }
+  const std::string expected_vendor = raw_icd_expected_vendor();
+  append_active_display_icd_candidates(result, expected_vendor);
   std::vector<std::string> names = {"nvoglv64.dll", "ig11icd64.dll",
                                    "ig10icd64.dll", "ig9icd64.dll",
                                    "atio6axx.dll", "atio6axx64.dll"};
-  const char *expected_vendor =
-      std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR");
-  const std::string vendor = lower_ascii(expected_vendor ? expected_vendor : "");
+  const std::string vendor = lower_ascii(expected_vendor);
   if (vendor.find("nvidia") != std::string::npos)
     names = {"nvoglv64.dll"};
   else if (vendor.find("intel") != std::string::npos)
@@ -515,6 +621,8 @@ static std::vector<std::string> raw_icd_library_candidates() {
     }
   }
   append_registry_icd_candidates(result);
+  cached_result = result;
+  candidates_discovered = true;
   return result;
 }
 
@@ -564,10 +672,7 @@ static bool initialize_native_icd(EngineContext *ctx) {
       std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_NAME")
           ? std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_NAME")
           : "";
-  const std::string expected_vendor =
-      std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR")
-          ? std::getenv("PIXEL_REFINE_OPENGL_EXPECTED_VENDOR")
-          : "";
+  const std::string expected_vendor = raw_icd_expected_vendor();
   for (const auto &candidate : raw_icd_library_candidates()) {
     HMODULE module = LoadLibraryA(candidate.c_str());
     if (!module)
@@ -2189,10 +2294,15 @@ EXPORT bool ti_cast_buffer(void *src_ptr, void *dst_ptr,
     float *s = (float *)src_ptr;
     uint8_t *d = (uint8_t *)dst_ptr;
     int i = 0;
-    __m256 scale = _mm256_set1_ps(255.0f);
-    __m256 half = _mm256_set1_ps(0.5f);
+    const __m256 zero = _mm256_setzero_ps();
+    const __m256 one = _mm256_set1_ps(1.0f);
+    const __m256 scale = _mm256_set1_ps(255.0f);
+    const __m256 half = _mm256_set1_ps(0.5f);
     for (; i <= num_elements - 8; i += 8) {
       __m256 f = _mm256_loadu_ps(s + i);
+      const __m256 valid = _mm256_cmp_ps(f, f, _CMP_ORD_Q);
+      f = _mm256_and_ps(f, valid); // NaN -> 0.0f
+      f = _mm256_max_ps(zero, _mm256_min_ps(one, f));
       f = _mm256_mul_ps(f, scale);
       f = _mm256_add_ps(f, half);
       __m256i i32 = _mm256_cvttps_epi32(f);
@@ -2225,10 +2335,15 @@ EXPORT bool ti_cast_buffer(void *src_ptr, void *dst_ptr,
     float *s = (float *)src_ptr;
     uint16_t *d = (uint16_t *)dst_ptr;
     int i = 0;
-    __m256 scale = _mm256_set1_ps(65535.0f);
-    __m256 half = _mm256_set1_ps(0.5f);
+    const __m256 zero = _mm256_setzero_ps();
+    const __m256 one = _mm256_set1_ps(1.0f);
+    const __m256 scale = _mm256_set1_ps(65535.0f);
+    const __m256 half = _mm256_set1_ps(0.5f);
     for (; i <= num_elements - 8; i += 8) {
       __m256 f = _mm256_loadu_ps(s + i);
+      const __m256 valid = _mm256_cmp_ps(f, f, _CMP_ORD_Q);
+      f = _mm256_and_ps(f, valid); // NaN -> 0.0f
+      f = _mm256_max_ps(zero, _mm256_min_ps(one, f));
       f = _mm256_mul_ps(f, scale);
       f = _mm256_add_ps(f, half);
       __m256i i32 = _mm256_cvttps_epi32(f);

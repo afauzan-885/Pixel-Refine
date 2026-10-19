@@ -148,6 +148,39 @@ def test_playback_cache_respects_byte_budget(qapp):
     assert len(panel._batch_playback_cache) < 4
 
 
+def test_active_playback_cache_is_bounded_for_long_bursts(qapp):
+    """The active burst must stream through a bounded cache, not retain all frames."""
+    from collections import OrderedDict
+
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.display_panel import (
+        DisplayPanel,
+    )
+
+    pixmap = _tiny_solid_pixmap()
+    frame_bytes = _pixmap_bytes(pixmap)
+
+    class DummyDisplayPanel:
+        def __init__(self):
+            self.current_batch_id = "long-burst"
+            self.current_preview_path = "frame-89.jpg"
+            self._batch_playback_cache = OrderedDict()
+            self._batch_playback_cache_limit = 3
+            self._playback_cache_max_bytes = frame_bytes * 8
+            self._playback_cache_max_frames = 8
+
+        _store_playback_frame = DisplayPanel._store_playback_frame
+
+    panel = DummyDisplayPanel()
+    for index in range(90):
+        path = f"frame-{index}.jpg"
+        panel._store_playback_frame("long-burst", path, pixmap)
+
+    active = panel._batch_playback_cache["long-burst"]
+    assert len(active) == 8
+    assert "frame-89.jpg" in active
+    assert sum(_pixmap_bytes(item) for item in active.values()) <= panel._playback_cache_max_bytes
+
+
 def test_thumbnail_ram_cache_is_bounded(qapp):
     """The L1 thumbnail cache must evict instead of growing without limit."""
     from PySide6.QtCore import QThreadPool

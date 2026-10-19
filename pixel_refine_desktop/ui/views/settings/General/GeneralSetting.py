@@ -677,28 +677,6 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.language_group.bind_store(self.store, "language")
         form.add_row(self.language_group)
 
-        # Processing-domain selection is persisted now so the resident
-        # pipeline can opt into RAW-native fusion in a later change.  RGB
-        # Linear remains the current production-compatible route.
-        process_format_label = getattr(
-            language_config, "PROCESS_FORMAT_LABEL", "Process Format"
-        )
-        process_format_tip = getattr(
-            language_config,
-            "PROCESS_FORMAT_DESCRIPTION",
-            "Choose the image domain used by multi-frame processing.",
-        )
-        self.processing_format_group = FormGroup(
-            label=process_format_label,
-            input_type="select",
-            auto_sync=True,
-        )
-        if isinstance(self.processing_format_group.input, QComboBox):
-            self.processing_format_group.input.addItems(["RGB Linear", "RAW Native"])
-            self.processing_format_group.input.setToolTip(process_format_tip)
-        self.processing_format_group.bind_store(self.store, "processing_format")
-        form.add_row(self.processing_format_group)
-
         # Themes Selection temporarily disabled.
         # theme_label = "Theme:"
         # self.theme_group = FormGroup(label=theme_label, input_type="select")
@@ -799,17 +777,6 @@ class GeneralSettingsPage(Container, SyncMixin):
                 language_config,
                 "LANGUAGE_DROPDOWN_TIP",
                 "Select the display language for the application interface.",
-            )
-        )
-
-        self.processing_format_group.label.setText(
-            getattr(language_config, "PROCESS_FORMAT_LABEL", "Process Format")
-        )
-        self.processing_format_group.input.setToolTip(
-            getattr(
-                language_config,
-                "PROCESS_FORMAT_DESCRIPTION",
-                "Choose the image domain used by multi-frame processing.",
             )
         )
 

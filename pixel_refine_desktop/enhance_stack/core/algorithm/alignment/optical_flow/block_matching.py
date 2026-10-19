@@ -209,9 +209,9 @@ class BlockMatching(LucasKanade):
                     str(batch_id),
                     {},
                 )
-                section = batch_params.get("block_matching_params", {})
-                if not section:
-                    section = batch_params.get("block_matching_gpu_params", {})
+                section = batch_parameter_manager.get_batch_algorithm_params(
+                    batch_id, "alignment", "Block Matching GPU", batch_entry=batch_params
+                )
                 if isinstance(section, dict):
                     visible_config.update(section)
             except Exception as exc:

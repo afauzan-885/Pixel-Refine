@@ -121,9 +121,45 @@ if TAICHI_AVAILABLE:
 def zncc(image, template):
     """Entry point for ZNCC alignment."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_vision import taichi_aot
-        return taichi_aot.zncc(image, template, return_gpu=True)
-    return None
+        try:
+            from taichi_vision import taichi_aot
+            res = taichi_aot.zncc(image, template, return_gpu=True)
+            if res is not None:
+                return res
+        except Exception:
+            pass
+
+    # JIT / CPU path
+    image_f = np.ascontiguousarray(image, dtype=np.float32)
+    template_f = np.ascontiguousarray(template, dtype=np.float32)
+
+    if TAICHI_AVAILABLE:
+        try:
+            h, w = image_f.shape
+            ht, wt = template_f.shape
+            dst_h, dst_w = h - ht + 1, w - wt + 1
+            if dst_h > 0 and dst_w > 0:
+                sum_h = np.zeros((h, w), dtype=np.float32)
+                sq_sum_h = np.zeros((h, w), dtype=np.float32)
+                sum_2d = np.zeros((h, w), dtype=np.float32)
+                sq_sum_2d = np.zeros((h, w), dtype=np.float32)
+                dst = np.zeros((dst_h, dst_w), dtype=np.float32)
+
+                _integral_image_row_scan_kernel(image_f, sum_h, sq_sum_h, h, w)
+                _integral_image_col_scan_kernel(sum_h, sq_sum_h, sum_2d, sq_sum_2d, h, w)
+
+                n_t = float(ht * wt)
+                sum_t = float(np.sum(template_f))
+                sq_sum_t = float(np.sum(template_f ** 2))
+                var_t_n = float(max(0.0, sq_sum_t - (sum_t ** 2 / n_t)))
+
+                _zncc_spatial_kernel(image_f, template_f, sum_2d, sq_sum_2d, dst, sum_t, var_t_n, n_t, 1)
+                return dst
+        except Exception:
+            pass
+
+    import cv2
+    return cv2.matchTemplate(image_f, template_f, cv2.TM_CCOEFF_NORMED)
 
 def match_template(image, template, method="zncc"):
     """Compatibility wrapper for OpenCV-style template matching."""

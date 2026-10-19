@@ -21,16 +21,22 @@ PARAMETER_SCHEMA = [
 
 
 def load_akaze_config():
-    return load_section("AKAZE", AKAZE_DEFAULTS)
+    config = load_section("AKAZE", AKAZE_DEFAULTS)
+    config.pop("warp_method", None)
+    return config
 
 
 def save_akaze_config(config):
-    save_section("AKAZE", config)
+    saved_config = dict(config)
+    saved_config.pop("warp_method", None)
+    save_section("AKAZE", saved_config)
 
 
 def save_akaze_config_for_active_batch(config):
+    saved_config = dict(config)
+    saved_config.pop("warp_method", None)
     save_alignment_config_for_active_batch(
         "AKAZE",
         "akaze_params",
-        config,
+        saved_config,
     )

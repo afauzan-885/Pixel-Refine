@@ -68,7 +68,8 @@ class LegacyRemainingTests(unittest.TestCase):
         env.update(
             {
                 "AOT_MODE": "1",
-                "TAICHI_ARCH": "cpu",
+                "PIXEL_REFINE_AOT_ARCH": "cpu",
+                "PIXEL_REFINE_BACKEND": "cpu",
                 "TAICHI_ARCH": "cpu",
                 "AOT_ARCH": "cpu",
                 "DISABLE_AOT_WATCHDOG": "1",

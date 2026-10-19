@@ -55,6 +55,7 @@ class SwitchableParameterPanel(QWidget):
         self.active_tab = None # None initially, neither tab active
         self.current_denoising_algo = "No Denoising"
         self._last_settings_snapshot = None
+        self._last_alignment_batch_id = None
         self._resize_sync_pending = False
         self._setup_ui()
         self.set_expanded(False)
@@ -121,10 +122,6 @@ class SwitchableParameterPanel(QWidget):
             right_panel.align_form.set_value(selected_text)
             if hasattr(right_panel, "_on_settings_changed"):
                 right_panel._on_settings_changed(save_to_store=True)
-
-        provider = get_parameter_provider("alignment", selected_text)
-        if provider:
-            provider["save_batch"](provider["load"]())
 
         print(
             f"[SwitchableParameterPanel] persisted alignment='{selected_text}' "
@@ -712,13 +709,17 @@ class SwitchableParameterPanel(QWidget):
 
     def update_settings_state(self, settings):
         """Update active UI state when RightPanel settings change."""
+        right_panel = self._resolve_right_panel()
+        batch_id = self._resolve_active_batch_id(right_panel)
+        batch_changed = batch_id != self._last_alignment_batch_id
         snapshot = (
             settings.get(config.KEY_ALIGNMENT, "No Alignment"),
             settings.get(config.KEY_DENOISING, "No Denoising"),
         )
-        if snapshot == self._last_settings_snapshot:
+        if snapshot == self._last_settings_snapshot and not batch_changed:
             return
         self._last_settings_snapshot = snapshot
+        self._last_alignment_batch_id = batch_id
 
         # 1. Update alignment selection dropdown
         alignment_algo = self._normalize_alignment_name(settings.get(config.KEY_ALIGNMENT, "No Alignment"))
@@ -730,6 +731,12 @@ class SwitchableParameterPanel(QWidget):
                 self.align_param_stack.setCurrentWidget(self.alignment_pages[alignment_algo])
             self.align_dropdown.blockSignals(False)
 
+        selected_page = self.alignment_pages.get(alignment_algo)
+        if selected_page is not None:
+            page = selected_page.widget() if hasattr(selected_page, "widget") else selected_page
+            if hasattr(page, "reload_from_active_batch"):
+                page.reload_from_active_batch(batch_id)
+
         # 2. Handle visibility logic for denoising
         denoising_algo = str(settings.get(config.KEY_DENOISING, "No Denoising")).strip()
 
@@ -740,6 +747,14 @@ class SwitchableParameterPanel(QWidget):
             self.denoise_page_container = selected_page
             if self.active_tab == "denoising":
                 self.content_stack.setCurrentWidget(selected_page)
+        if batch_changed:
+            page = (
+                selected_page.widget()
+                if hasattr(selected_page, "widget")
+                else selected_page
+            )
+            if hasattr(page, "reload_from_active_batch"):
+                page.reload_from_active_batch(batch_id)
         
         # If denoising algo changed or is newly loaded, keep parameter panel closed by default
         if denoising_algo != self.current_denoising_algo:

@@ -22,15 +22,17 @@ from taichi_vision.taichi_algorithm.spatial_fusion.compile_spde_mr_hdr_tcm impor
 def compile_spde_mr(
     *, backend: str, output_path: str | Path | None = None, overwrite: bool = False
 ) -> str:
-    """Compile one backend to ui/data/aot_assets using the canonical kernels."""
+    """Compile one backend into its target-local application asset folder."""
     target = detect_target(backend=backend)
     output = (
         Path(output_path).resolve()
         if output_path is not None
-        else Path(__file__).resolve().parents[5]
-        / "ui"
-        / "data"
-        / "aot_assets"
+        else Path(__file__).resolve().parents[6]
+        / "taichi_vision"
+        / "taichi_algorithm"
+        / "aot_tcm"
+        / target.target_id
+        / "application_assets"
         / target.artifact_name("hdr_spde_mr")
     )
     return compile_spde_mr_hdr_tcm(
@@ -51,7 +53,7 @@ def main():
     parser.add_argument(
         "--output-path",
         default=None,
-        help="Optional exact TCM path; defaults to ui/data/aot_assets/<target artifact>.",
+        help="Optional exact TCM path; defaults to aot_tcm/<target>/application_assets/.",
     )
     parser.add_argument(
         "--overwrite",

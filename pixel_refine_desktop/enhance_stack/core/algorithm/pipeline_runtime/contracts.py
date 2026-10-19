@@ -10,6 +10,16 @@ TReference = TypeVar("TReference")
 TFrame = TypeVar("TFrame")
 TState = TypeVar("TState")
 TResult = TypeVar("TResult")
+TSourceFrame = TypeVar("TSourceFrame")
+TPreparedFrame = TypeVar("TPreparedFrame")
+
+
+@dataclass(frozen=True)
+class PipelineSourceDescriptor:
+    """Opaque input classification forwarded unchanged to a domain recipe."""
+
+    kind: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 class PipelineCancelledError(RuntimeError):
@@ -33,6 +43,7 @@ class PipelineExecutionContext:
     options: PipelineOptions
     stop_event: Any = None
     progress_callback: Callable[..., None] | None = None
+    source_descriptor: PipelineSourceDescriptor | None = None
 
     def is_cancelled(self) -> bool:
         event = self.stop_event
@@ -55,6 +66,8 @@ class PipelineExecutionContext:
 
 class PipelineSource(Protocol[TReference, TFrame]):
     """Lazy source of one reference and indexed support frames."""
+
+    descriptor: PipelineSourceDescriptor | None
 
     def load_reference(self) -> TReference:
         ...
@@ -86,10 +99,63 @@ class PipelineRecipe(Protocol[TReference, TFrame, TState, TResult]):
         ...
 
 
+class PreparedPipelineRecipe(
+    Protocol[TReference, TSourceFrame, TPreparedFrame, TState, TResult]
+):
+    """Optional recipe contract for bounded support preparation and cleanup."""
+
+    def prepare_reference(
+        self, reference: TReference, context: PipelineExecutionContext
+    ) -> TState:
+        ...
+
+    def prepare_support(
+        self,
+        index: int,
+        support: TSourceFrame,
+        reference_state: TState,
+        context: PipelineExecutionContext,
+    ) -> TPreparedFrame:
+        ...
+
+    def process_support(
+        self,
+        index: int,
+        support: TPreparedFrame,
+        reference_state: TState,
+        context: PipelineExecutionContext,
+    ) -> PipelineSupportCompletion | None:
+        ...
+
+    def release_support(
+        self,
+        support: TPreparedFrame,
+        reference_state: TState,
+        context: PipelineExecutionContext,
+    ) -> None:
+        ...
+
+    def finalize(
+        self, reference_state: TState, context: PipelineExecutionContext
+    ) -> TResult:
+        ...
+
+
+class PipelineSupportCompletion(Protocol):
+    """Completion token for support work submitted to a staged pipeline."""
+
+    def result(self) -> Any:
+        """Wait for all consumers to finish and raise any stage failure."""
+        ...
+
+
 __all__ = [
     "PipelineCancelledError",
     "PipelineExecutionContext",
     "PipelineOptions",
+    "PipelineSourceDescriptor",
     "PipelineRecipe",
+    "PipelineSupportCompletion",
+    "PreparedPipelineRecipe",
     "PipelineSource",
 ]

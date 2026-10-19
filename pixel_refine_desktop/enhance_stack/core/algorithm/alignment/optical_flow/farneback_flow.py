@@ -139,7 +139,9 @@ class FarnebackFlow:
                 batch_params = batch_parameter_manager.load_json_state().get(
                     str(batch_id), {}
                 )
-                fb_params = batch_params.get("farneback_params", {})
+                fb_params = batch_parameter_manager.get_batch_algorithm_params(
+                    batch_id, "alignment", "Farneback", batch_entry=batch_params
+                )
                 if isinstance(fb_params, dict):
                     config.update(fb_params)
             except Exception:

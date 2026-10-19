@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QAbstractSpinBox,
+    QToolButton,
     QTextEdit,
     QButtonGroup,
 )
@@ -49,43 +50,122 @@ def _numeric_spinbox_style():
         QSpinBox::up-button, QDoubleSpinBox::up-button {
             subcontrol-origin: border;
             subcontrol-position: top right;
-            width: 20px;
-            border-left: 1px solid #E8EDF2;
-            border-bottom: 1px solid #E8EDF2;
+            width: 26px;
+            height: 50%;
+            border-left: 1px solid #B9E8CB;
+            border-bottom: 1px solid #B9E8CB;
             border-top-right-radius: 4px;
-            background-color: #F5F8FA;
+            background-color: #E5F7EC;
         }
         QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {
-            background-color: #E8EDF2;
+            background-color: #C8F0D8;
         }
         QSpinBox::down-button, QDoubleSpinBox::down-button {
             subcontrol-origin: border;
             subcontrol-position: bottom right;
-            width: 20px;
-            border-left: 1px solid #E8EDF2;
+            width: 26px;
+            height: 50%;
+            border-left: 1px solid #C7DDF4;
             border-bottom-right-radius: 4px;
-            background-color: #F5F8FA;
+            background-color: #E7F2FF;
         }
         QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
-            background-color: #E8EDF2;
+            background-color: #D1E6FF;
         }
         QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
             image: none;
-            width: 0px;
-            height: 0px;
+            width: 9px;
+            height: 6px;
             border-left: 4px solid transparent;
             border-right: 4px solid transparent;
-            border-bottom: 5px solid #666666;
+            border-bottom: 6px solid #249653;
         }
         QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
             image: none;
-            width: 0px;
-            height: 0px;
+            width: 9px;
+            height: 6px;
             border-left: 4px solid transparent;
             border-right: 4px solid transparent;
-            border-top: 5px solid #666666;
+            border-top: 6px solid #3479C5;
         }
     """
+
+
+def apply_numeric_spinbox_style(widget):
+    """Apply the shared, accessible numeric stepper style to a spin box."""
+    style = _numeric_spinbox_style()
+    if isinstance(widget, NumericStepper):
+        style += " QSpinBox { padding-right: 58px; }"
+    widget.setStyleSheet(style)
+
+
+class NumericStepper(QSpinBox):
+    """Integer input with separate, accessible up/down buttons."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.setMinimumWidth(118)
+        self.up_button = QToolButton(self)
+        self.up_button.setText("△")
+        self.up_button.setAccessibleName("Increase value")
+        self.up_button.setToolTip("Increase")
+        self.down_button = QToolButton(self)
+        self.down_button.setText("▽")
+        self.down_button.setAccessibleName("Decrease value")
+        self.down_button.setToolTip("Decrease")
+        self.up_button.clicked.connect(lambda checked=False: self.stepUp())
+        self.down_button.clicked.connect(lambda checked=False: self.stepDown())
+        self.up_button.setStyleSheet(
+            "QToolButton { color: #21834B; background: #E5F7EC; "
+            "border: 1px solid #B9E8CB; border-radius: 4px; padding: 0; "
+            "font-size: 13px; font-weight: 600; }"
+            "QToolButton:hover { background: #C8F0D8; }"
+            "QToolButton:pressed { background: #B5E8CA; }"
+            "QToolButton:disabled { color: #9AB6A4; background: #F1F7F3; }"
+        )
+        self.down_button.setStyleSheet(
+            "QToolButton { color: #3479C5; background: #E7F2FF; "
+            "border: 1px solid #C7DDF4; border-radius: 4px; padding: 0; "
+            "font-size: 13px; font-weight: 600; }"
+            "QToolButton:hover { background: #D1E6FF; }"
+            "QToolButton:pressed { background: #BDDCFA; }"
+            "QToolButton:disabled { color: #9DB3CA; background: #F2F7FC; }"
+        )
+        self.valueChanged.connect(self._sync_step_buttons)
+        self._sync_step_buttons()
+        self.setStyleSheet(
+            _numeric_spinbox_style()
+            + " QSpinBox { padding-right: 58px; }"
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        margin = 3
+        gap = 3
+        button_width = max(22, min(28, (self.height() - margin * 2)))
+        button_height = max(18, self.height() - margin * 2)
+        left = self.width() - margin - button_width * 2 - gap
+        self.up_button.setGeometry(left, margin, button_width, button_height)
+        self.down_button.setGeometry(
+            left + button_width + gap, margin, button_width, button_height
+        )
+
+    def setRange(self, minimum, maximum):
+        super().setRange(minimum, maximum)
+        self._sync_step_buttons()
+
+    def setMinimum(self, minimum):
+        super().setMinimum(minimum)
+        self._sync_step_buttons()
+
+    def setMaximum(self, maximum):
+        super().setMaximum(maximum)
+        self._sync_step_buttons()
+
+    def _sync_step_buttons(self, *_args):
+        self.up_button.setEnabled(self.value() < self.maximum())
+        self.down_button.setEnabled(self.value() > self.minimum())
 
 
 class FormGroup(QWidget, RealtimeMixin):
@@ -125,17 +205,17 @@ class FormGroup(QWidget, RealtimeMixin):
             self.input.setPlaceholderText(placeholder)
             self.input.textChanged.connect(lambda v: self.value_changed.emit(v))
         elif input_type == "number":
-            self.input = QSpinBox()
+            self.input = NumericStepper()
             self.input.setMinimum(0)
             self.input.setMaximum(999)
             # Apply modern styling to match other inputs
-            self.input.setStyleSheet(_numeric_spinbox_style())
+            apply_numeric_spinbox_style(self.input)
             self.input.valueChanged.connect(lambda v: self.value_changed.emit(v))
         elif input_type == "decimal":
             self.input = QDoubleSpinBox()
             self.input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
             self.input.setAccelerated(True)
-            self.input.setStyleSheet(_numeric_spinbox_style())
+            apply_numeric_spinbox_style(self.input)
             self.input.valueChanged.connect(lambda v: self.value_changed.emit(v))
         elif input_type == "select":
             self.input = QComboBox()

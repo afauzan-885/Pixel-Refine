@@ -551,6 +551,25 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
         normalize_tcm(artifact)
 
 
+def _partial_timeout_output(error: subprocess.TimeoutExpired) -> str:
+    """Preserve worker output captured before its timeout.
+
+    ``TimeoutExpired`` may expose bytes even when ``text=True`` was passed to
+    ``subprocess.run``. Decode defensively so a timed-out AOT compile still
+    reports its last phase markers and native/compiler diagnostics.
+    """
+    sections = []
+    for label, value in (("stdout", error.stdout), ("stderr", error.stderr)):
+        if value is None:
+            continue
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        value = value.strip()
+        if value:
+            sections.append(f"partial {label}:\n{value}")
+    return "\n".join(sections)
+
+
 def _run_subprocess(
     backend: str, name: str, target_id: str | None = None, timeout: float = 900.0
 ) -> tuple[bool, str]:
@@ -616,7 +635,11 @@ def _run_subprocess(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
-        return False, f"worker timed out after {error.timeout}s"
+        message = f"worker timed out after {error.timeout}s"
+        partial_output = _partial_timeout_output(error)
+        if partial_output:
+            message = f"{message}\n{partial_output}"
+        return False, message
     output = (result.stdout + result.stderr).strip()
     return result.returncode == 0, output
 

@@ -164,6 +164,7 @@
     "*.inc": "cpp"
   },
   "C_Cpp.errorSquiggles": "disabled",
-  "python.languageServer": "None",
-  "python.pyrefly.configPath": "${workspaceFolder}/pyrefly.toml"
+  "python.languageServer": "Default",
+  "python.pyrefly.configPath": "${workspaceFolder}/pyrefly.toml",
+  "python.analysis.diagnosticsSource": "Pylance + Pyrefly"
 }

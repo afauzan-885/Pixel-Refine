@@ -1148,23 +1148,32 @@ def compile_spatial_tcm(arch=None, suffix="vulkan"):
 
     file_dir = os.path.dirname(os.path.abspath(__file__))
     # Test/build automation can redirect the packaged artifact without
-    # touching the checked-in application assets.  Normal callers retain the
-    # historical output location.
+    # touching the checked-in application assets. Normal callers write to the
+    # active target's application_assets directory below.
     output_override = os.environ.get("PIXEL_REFINE_SPATIAL_TCM_OUTPUT_DIR")
     output_root = (
         os.path.abspath(output_override)
         if output_override
         else file_dir
     )
-    # Find the pixel_refine_desktop root folder to ensure correct assets output path
+    # Find the project root so application graphs stay grouped by AOT target.
     cur = os.path.abspath(file_dir)
     while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
         cur = os.path.dirname(cur)
-    out_dir = (
-        output_root
-        if output_override
-        else os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
-    )
+    target_ids = {
+        "cpu": "cpu_x86_64_windows",
+        "cuda": "cuda_x86_64_windows_nvidia",
+        "opengl": "opengl_x86_64_windows",
+        "vulkan": "vulkan_x86_64_windows",
+        "gles": "gles_arm64_android",
+    }
+    target_id = target_ids.get(str(suffix).lower())
+    if target_id is None:
+        raise ValueError(f"Unsupported spatial TCM target: {suffix!r}")
+    out_dir = output_root if output_override else os.path.abspath(os.path.join(
+        cur, "..", "taichi_vision", "taichi_algorithm", "aot_tcm",
+        target_id, "application_assets"
+    ))
     tcm_path = os.path.join(out_dir, f"spatial_{suffix}.tcm")
     archive_module(module, tcm_path)
     print(f"Spatial AOT packaged successfully to: {tcm_path}")
@@ -1241,23 +1250,36 @@ def _log_resolved_spatial_tcm(path, source):
 def _resolve_spatial_tcm(engine):
     """Resolve the spatial AOT TCM for the active target.
 
-    The application bundle (``ui/data/aot_assets/spatial_<arch>.tcm``) is the
-    authoritative source for the similarity wrapper: it ships with the app and
-    carries the complete graph set for this family.  The canonical
-    target-qualified tree under ``taichi_vision`` is kept as a fallback and can
-    be made primary again with ``PIXEL_REFINE_SPATIAL_TCM_SOURCE=target``.
-    ``PIXEL_REFINE_AOT_TCM_ROOT`` still overrides both, for build/test
-    automation.
+    Application-specific graph generations are stored below
+    ``aot_tcm/<target>/application_assets``. Canonical target artifacts remain
+    available as the shared fallback, and ``PIXEL_REFINE_AOT_TCM_ROOT`` can
+    override both locations for build/test automation.
     """
     arch = str(getattr(engine, "arch", "cpu")).lower()
     target_cache = {}
 
     def _assets_dir():
-        file_dir = os.path.dirname(os.path.abspath(__file__))
-        cur = os.path.abspath(file_dir)
-        while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
-            cur = os.path.dirname(cur)
-        return os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
+        try:
+            from taichi_vision.llvm20_runtime_paths import application_assets_root
+
+            target = _detect_target()
+            resolved = application_assets_root(target.target_id)
+            if resolved is not None:
+                return os.path.abspath(str(resolved))
+            return os.path.abspath(
+                os.path.join(
+                    os.path.dirname(__file__),
+                    "../../../../../../../taichi_vision/taichi_algorithm/aot_tcm",
+                    target.target_id,
+                    "application_assets",
+                )
+            )
+        except (ImportError, OSError, RuntimeError, ValueError):
+            file_dir = os.path.dirname(os.path.abspath(__file__))
+            cur = os.path.abspath(file_dir)
+            while os.path.basename(cur) != "pixel_refine_desktop" and len(cur) > 4:
+                cur = os.path.dirname(cur)
+            return os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
 
     def _detect_target():
         from taichi_vision.taichi_aot.artifact_targets import detect_target
@@ -1322,8 +1344,9 @@ def _resolve_spatial_tcm(engine):
         return None
 
     def _resolve_streaming_asset():
-        # Keep experimental graph generations versioned beside the legacy app
-        # bundle so an in-progress build never overwrites user-owned TCMs.
+        # Keep experimental graph generations versioned under this backend's
+        # application asset directory so an in-progress build never overwrites
+        # the canonical target artifact.
         for generation in (
             "spatial_rgb_mean_v1",
             "spatial_compact_v1",
@@ -1334,6 +1357,13 @@ def _resolve_spatial_tcm(engine):
             )
             if os.path.isfile(candidate):
                 return os.path.abspath(candidate)
+            if generation == "spatial_rgb_mean_v1":
+                # The RGB-mean archive is byte-identical to the canonical
+                # target spatial artifact; use that single copy after
+                # deduplicating the old app-assets copy.
+                resolved = _resolve_target_tree()
+                if resolved is not None:
+                    return resolved
         return None
 
     override = os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT", "").strip()
@@ -1360,7 +1390,12 @@ def _resolve_spatial_tcm(engine):
                 "spatial_compact_v1": "app-asset-compact",
                 "spatial_streaming": "app-asset-streaming",
             }
-            source = source_by_generation.get(generation, "app-asset-versioned")
+            source = source_by_generation.get(
+                generation,
+                "target-tree-rgb-mean"
+                if generation.startswith(("cpu_", "cuda_", "opengl_", "vulkan_"))
+                else "app-asset-versioned",
+            )
             _log_resolved_spatial_tcm(resolved, source)
             return resolved
         resolved = _resolve_from_assets((arch,))

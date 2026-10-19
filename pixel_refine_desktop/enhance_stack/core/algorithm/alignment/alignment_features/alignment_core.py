@@ -1690,7 +1690,10 @@ def perform_alignment_gpu(
                             )
                         else:
                             aligned_gpu = taichi_aot.remap(
-                                full_res_img, map_x_gpu, map_y_gpu, return_gpu=True
+                                full_res_img,
+                                map_x_gpu,
+                                map_y_gpu,
+                                return_gpu=True,
                             )
                         if save_align_image:
                             save_img = aligned_gpu.to_numpy()

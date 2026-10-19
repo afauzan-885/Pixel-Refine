@@ -73,15 +73,17 @@ cross = np.array([
 essential = cross @ rotation
 candidates = solve_five_point(points1, points2)
 assert candidates
-residual = min(
+candidate_residuals = [
     float(np.max(np.abs(np.einsum(
         "ni,ij,nj->n",
         np.c_[points2, np.ones(5)], candidate,
         np.c_[points1, np.ones(5)],
     ))))
     for candidate in candidates
-)
+]
+residual = min(candidate_residuals)
 assert residual < 1.0e-4, residual
+assert max(candidate_residuals) < 1.0e-4, candidate_residuals
 minimal_valid, _, _ = check_cheirality_minimal(
     essential, np.eye(3), np.eye(3), points1, points2
 )

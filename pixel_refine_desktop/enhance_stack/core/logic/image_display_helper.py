@@ -136,56 +136,60 @@ class ImageLoaderThread(QThread):
     def run(self):
         """Metode utama untuk loading gambar di background thread."""
         try:
-            if not os.path.exists(self.image_path):
-                self.error_occurred.emit(f"File not found: {self.image_path}")
-                return
-
-            # --- OPTIMIZATION: Check Cache if it's a reference ---
-            if self.is_reference:
-                cached_file = ComparisonCache.instance().get_cached_path(
-                    self.batch_id, self.image_path
+            q_image = self.load_qimage()
+            if q_image is None or q_image.isNull():
+                self.error_occurred.emit(
+                    getattr(self, "_load_error", None)
+                    or f"Failed to load image: {self.image_path}"
                 )
-                if cached_file:
-                    print(
-                        f"[ComparisonCache] Thread loading from cache (Batch {self.batch_id}): {self.image_path}"
-                    )
-                    pixmap = QImage(cached_file)
-                    if not pixmap.isNull():
-                        if self.max_width or self.max_height:
-                            pixmap = self._resize_image(pixmap)
-                        self.image_loaded.emit(pixmap, self.image_path)
-                        return
-
-            # Load image sesuai format
-            image_array = self._load_image()
-            if image_array is None:
-                self.error_occurred.emit(f"Failed to load image: {self.image_path}")
                 return
-
-            # --- OPTIMIZATION: Save to Cache if it's a reference ---
-            if self.is_reference:
-                print(
-                    f"[ComparisonCache] Thread saving to cache (Batch {self.batch_id}): {self.image_path}"
-                )
-                ComparisonCache.instance().save_to_cache(
-                    self.batch_id, self.image_path, image_array
-                )
-
-            # Convert to QImage (QPixmap conversion happens on the GUI thread)
-            pixmap = self._array_to_image(image_array)
-
-            if pixmap is None or pixmap.isNull():
-                self.error_occurred.emit(f"Failed to convert image to pixmap")
-                return
-
-            # Resize jika diperlukan (untuk large images)
-            if self.max_width or self.max_height:
-                pixmap = self._resize_image(pixmap)
-
-            self.image_loaded.emit(pixmap, self.image_path)
+            self.image_loaded.emit(q_image, self.image_path)
 
         except Exception as e:
             self.error_occurred.emit(f"Error loading image: {str(e)}")
+
+    def load_qimage(self):
+        """Decode to an owned QImage without creating a GUI-thread QPixmap."""
+        self._load_error = None
+        if not os.path.exists(self.image_path):
+            self._load_error = f"File not found: {self.image_path}"
+            return None
+
+        if self.is_reference:
+            cached_file = ComparisonCache.instance().get_cached_path(
+                self.batch_id, self.image_path
+            )
+            if cached_file:
+                print(
+                    f"[ComparisonCache] Thread loading from cache (Batch {self.batch_id}): {self.image_path}"
+                )
+                q_image = QImage(cached_file)
+                if not q_image.isNull():
+                    return self._resize_image(q_image) if (
+                        self.max_width or self.max_height
+                    ) else q_image
+
+        image_array = self._load_image()
+        if image_array is None:
+            self._load_error = f"Failed to load image: {self.image_path}"
+            return None
+
+        if self.is_reference:
+            print(
+                f"[ComparisonCache] Thread saving to cache (Batch {self.batch_id}): {self.image_path}"
+            )
+            ComparisonCache.instance().save_to_cache(
+                self.batch_id, self.image_path, image_array
+            )
+
+        q_image = self._array_to_image(image_array)
+        del image_array
+        if q_image is None or q_image.isNull():
+            self._load_error = f"Failed to convert image: {self.image_path}"
+            return None
+        return self._resize_image(q_image) if (
+            self.max_width or self.max_height
+        ) else q_image
 
     def _load_image(self):
         """Load image file dan return numpy array."""
@@ -302,6 +306,61 @@ class ImageLoaderThread(QThread):
             )
 
         return q_image
+
+
+class ComparisonImageLoaderThread(QThread):
+    """Decode both sides of a result comparison away from the UI event loop."""
+
+    images_loaded = Signal(QImage, QImage, str, str)
+    load_progress = Signal(int)
+    error_occurred = Signal(str)
+
+    def __init__(self, original_path, result_path, batch_id=None, parent=None):
+        super().__init__(parent)
+        self.original_path = original_path
+        self.result_path = result_path
+        self.batch_id = batch_id
+
+    def run(self):
+        original = QImage()
+        result = QImage()
+        try:
+            self.load_progress.emit(5)
+            original_loader = ImageLoaderThread(
+                self.original_path, is_reference=True, batch_id=self.batch_id
+            )
+            original = original_loader.load_qimage()
+            if original is None:
+                original = QImage()
+            self.load_progress.emit(45)
+
+            result_loader = ImageLoaderThread(self.result_path)
+            result = result_loader.load_qimage()
+            if result is None:
+                result = QImage()
+            self.load_progress.emit(85)
+
+            if original.isNull() and original_loader._load_error:
+                print(f"[DisplayManager] {original_loader._load_error}")
+            if result.isNull() and result_loader._load_error:
+                self.error_occurred.emit(result_loader._load_error)
+
+            if not original.isNull() and not result.isNull() and original.size() != result.size():
+                original = original.scaled(
+                    result.size(),
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            self.load_progress.emit(95)
+
+            self.images_loaded.emit(
+                original, result, self.original_path, self.result_path
+            )
+        except Exception as exc:
+            self.error_occurred.emit(f"Comparison image load failed: {exc}")
+            self.images_loaded.emit(
+                QImage(), result, self.original_path, self.result_path
+            )
 
 
 def setup_zoomable_preview(

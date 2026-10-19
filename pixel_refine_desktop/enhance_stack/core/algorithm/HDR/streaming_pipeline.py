@@ -25,12 +25,8 @@ from .card_content import (
     SPDE_MR_NAME,
 )
 from .hdr_fusion import (
-    WeightedHDRFusion,
-    estimate_noise_taichi,
     rgb_to_gray,
-    srgb_to_linear,
 )
-from .spde_mr import SPDEMRAlgorithm
 
 
 _RAW_EXTENSIONS = {
@@ -265,16 +261,6 @@ def _metadata_gate(analyses: list[FrameAnalysis]) -> tuple[bool, str, list[float
     return True, "complete EXIF exposure data passed consistency checks", numeric_exposures
 
 
-def _alignment_validity(shape: tuple[int, int], dx: int, dy: int) -> np.ndarray:
-    height, width = shape
-    mask = np.zeros((height, width), dtype=bool)
-    x0, x1 = max(0, -dx), min(width, width - dx)
-    y0, y1 = max(0, -dy), min(height, height - dy)
-    if x1 > x0 and y1 > y0:
-        mask[y0:y1, x0:x1] = True
-    return mask
-
-
 def _write_tiff_atomic(path: Path, image: np.ndarray, *, radiance=False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.stem}.partial{path.suffix}")
@@ -331,7 +317,7 @@ def run_hdr_pipeline(
     if algorithm_key not in {CARD_NAME, LEGACY_CARD_NAME, "Weighted HDR (Streaming)"} and not is_spde_mr:
         raise ValueError(f"Unknown HDR algorithm: {algorithm_name}")
 
-    from taichi_vision.taichi_algorithm.aot_api import align_mtb, warp_affine_aot
+    from .runtime_recipe import HDRFusionRecipe, HDRPathSource
 
     progress = progress_callback
     if progress is not None:
@@ -346,101 +332,28 @@ def run_hdr_pipeline(
         if not metadata_is_reliable:
             progress(20, f"Radiance HDR dilewati: {metadata_reason}; menyimpan LDR fusion")
 
-    if is_spde_mr:
-        fusion = SPDEMRAlgorithm().create_fusion(
-            reference_rgb, radiance_enabled=radiance_enabled
-        )
-        add_frame = fusion.add_spde_frame
-    else:
-        fusion = WeightedHDRFusion(
-            reference_rgb.shape, radiance_enabled=radiance_enabled
-        )
-        add_frame = fusion.add_frame
-
     ordered_paths = [analysis.path for analysis in analyses]
     support_paths = [path for path in ordered_paths if path != selected.path]
-    selected_exposure = (
-        effective_exposures[selected_index] if radiance_enabled else None
+    source = HDRPathSource(reference_rgb, support_paths)
+    recipe = HDRFusionRecipe(
+        analyses=analyses,
+        selected_index=selected_index,
+        support_paths=support_paths,
+        effective_exposures=effective_exposures,
+        radiance_enabled=radiance_enabled,
+        is_spde_mr=is_spde_mr,
+        progress_callback=progress,
     )
-
-    with PipelineRuntime(
+    runtime = PipelineRuntime(
         prefetch_depth=0,
         stop_event=stop_callback,
         progress_callback=progress_callback,
-    ) as runtime:
-        session = runtime.ensure_session()
-
-        def add_aligned_frame(rgb, *, valid_mask=None, is_reference=False, index=0):
-            gray = rgb_to_gray(rgb)
-            sigma = estimate_noise_taichi(gray, session)
-            radiance_rgb = None
-            if radiance_enabled:
-                source_exposure = effective_exposures[index]
-                scale = selected_exposure / source_exposure
-                radiance_rgb = srgb_to_linear(rgb) * np.float32(scale)
-            if is_spde_mr:
-                fusion.add_spde_frame(
-                    rgb,
-                    noise_sigma=sigma,
-                    valid_mask=valid_mask,
-                    radiance_rgb=radiance_rgb,
-                    is_reference=is_reference,
-                )
-            else:
-                fusion.add_frame(
-                    rgb,
-                    noise_sigma=sigma,
-                    valid_mask=valid_mask,
-                    radiance_rgb=radiance_rgb,
-                )
-
-        # User/reference frame is always the first candidate and anchors MTB.
-        add_aligned_frame(reference_rgb, is_reference=True, index=selected_index)
-
-        path_to_index = {analysis.path: i for i, analysis in enumerate(analyses)}
-
-        def load_support(index):
-            return _load_rgb(support_paths[index])
-
-        for processed, (support_index, support_rgb) in enumerate(
-            runtime.iter_supports(
-                range(len(support_paths)),
-                load_support,
-                raise_on_cancel=True,
-            ),
-            start=1,
-        ):
-            if stop_callback is not None and stop_callback():
-                raise PipelineCancelledError("HDR fusion cancelled")
-            if support_rgb.shape != reference_rgb.shape:
-                raise ValueError(
-                    f"HDR frame shape changed during processing: {support_paths[support_index]}"
-                )
-            dx, dy = align_mtb(
-                np.ascontiguousarray(reference_rgb * 255.0, dtype=np.float32),
-                np.ascontiguousarray(support_rgb * 255.0, dtype=np.float32),
-            )
-            height, width = reference_rgb.shape[:2]
-            aligned = warp_affine_aot(
-                support_rgb,
-                np.asarray([[1.0, 0.0, -dx], [0.0, 1.0, -dy]], dtype=np.float32),
-                (width, height),
-            )
-            valid = _alignment_validity((height, width), int(dx), int(dy))
-            source_index = path_to_index[support_paths[support_index]]
-            add_aligned_frame(
-                aligned,
-                valid_mask=valid,
-                index=source_index,
-            )
-            del support_rgb, aligned, valid
-            if progress is not None:
-                progress(
-                    20 + int(70 * processed / max(len(support_paths), 1)),
-                    f"HDR MTB alignment dan fusion {processed}/{len(support_paths)}",
-                )
-
-        ldr, radiance = fusion.finalize(reference_rgb)
+    )
+    ldr, radiance = runtime.execute(
+        source,
+        recipe,
+        range(len(support_paths)),
+    )
 
     output_directory = Path(output_directory)
     output_name = Path(selected.path).stem

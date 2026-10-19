@@ -12,9 +12,20 @@ from config import ALGORITHM_PARAMETER_SETTINGS_FILE, CONFIG_DIR
 
 
 FUSIONNET_DEFAULTS = {
+    "fusionnet_denoising_mode": "standard",
     "fusionnet_tile_size": 512,
-    "fusionnet_work_resolution": 0.50,
+    "fusionnet_work_pixel_fraction": 0.50,
+    "fusionnet_max_neighbor_candidates": 4,
+    "fusionnet_patch_search_radius": 5,
 }
+
+FUSIONNET_DENOISING_MODES = ("standard", "deep_analysis")
+
+_LEGACY_LINEAR_RESOLUTION_KEYS = (
+    "fusionnet_work_resolution",
+    "work_resolution_scale",
+    "work_scale",
+)
 
 
 def _normalize_fusionnet_config(config):
@@ -27,35 +38,103 @@ def _normalize_fusionnet_config(config):
     """
     source = dict(config or {})
     normalized = dict(FUSIONNET_DEFAULTS)
-    aliases = {
-        "fusionnet_tile_size": ("fusionnet_tile_size", "tile_size", "ai_tile_size"),
-        "fusionnet_work_resolution": (
-            "fusionnet_work_resolution",
-            "work_resolution_scale",
-            "work_scale",
-        ),
-    }
-    for canonical, names in aliases.items():
-        for name in names:
-            if name in source and source[name] is not None:
-                normalized[canonical] = source[name]
-                break
+    requested_mode = str(
+        source.get("fusionnet_denoising_mode", normalized["fusionnet_denoising_mode"])
+    ).strip().lower().replace(" ", "_")
+    normalized["fusionnet_denoising_mode"] = (
+        requested_mode
+        if requested_mode in FUSIONNET_DENOISING_MODES
+        else FUSIONNET_DEFAULTS["fusionnet_denoising_mode"]
+    )
+    for name in ("fusionnet_tile_size", "tile_size", "ai_tile_size"):
+        if name in source and source[name] is not None:
+            normalized["fusionnet_tile_size"] = source[name]
+            break
     try:
         normalized["fusionnet_tile_size"] = int(float(normalized["fusionnet_tile_size"]))
     except (TypeError, ValueError):
         normalized["fusionnet_tile_size"] = FUSIONNET_DEFAULTS["fusionnet_tile_size"]
+    for key, lower, upper in (
+        ("fusionnet_max_neighbor_candidates", 1, 16),
+        ("fusionnet_patch_search_radius", 1, 16),
+    ):
+        try:
+            normalized[key] = max(
+                lower,
+                min(upper, int(round(float(source.get(key, normalized[key]))))),
+            )
+        except (TypeError, ValueError):
+            normalized[key] = FUSIONNET_DEFAULTS[key]
     try:
-        normalized["fusionnet_work_resolution"] = max(
-            0.05, min(1.0, float(normalized["fusionnet_work_resolution"]))
-        )
+        pixel_fraction = source.get("fusionnet_work_pixel_fraction")
+        if pixel_fraction is not None:
+            pixel_fraction = max(0.0025, min(1.0, float(pixel_fraction)))
+        else:
+            # Existing settings stored a per-dimension scale. Squaring it
+            # preserves the same effective width/height after the UI switches
+            # to a percentage of total working pixels.
+            legacy_scale = next(
+                (
+                    source[name]
+                    for name in _LEGACY_LINEAR_RESOLUTION_KEYS
+                    if name in source and source[name] is not None
+                ),
+                None,
+            )
+            if legacy_scale is None:
+                pixel_fraction = FUSIONNET_DEFAULTS[
+                    "fusionnet_work_pixel_fraction"
+                ]
+            else:
+                legacy_scale = max(0.05, min(1.0, float(legacy_scale)))
+                pixel_fraction = legacy_scale * legacy_scale
+        normalized["fusionnet_work_pixel_fraction"] = pixel_fraction
     except (TypeError, ValueError):
-        normalized["fusionnet_work_resolution"] = FUSIONNET_DEFAULTS[
-            "fusionnet_work_resolution"
+        normalized["fusionnet_work_pixel_fraction"] = FUSIONNET_DEFAULTS[
+            "fusionnet_work_pixel_fraction"
         ]
     return normalized
 
 
 PARAMETER_SCHEMA = [
+    {
+        "key": "fusionnet_denoising_mode",
+        "label": "Denoising Mode",
+        "type": "dropdown",
+        "default": "standard",
+        "options": ["standard", "deep_analysis"],
+        "option_labels": {
+            "standard": "Standard",
+            "deep_analysis": "Deep Analysis",
+        },
+        "value_type": "str",
+        "tooltip": (
+            "Standard runs the existing temporal FusionNet pipeline. Deep Analysis "
+            "selects similar local patches and uses WeightNet confidence for fusion."
+        ),
+    },
+    {
+        "key": "fusionnet_max_neighbor_candidates",
+        "label": "Max Neighbor Patches",
+        "type": "slider",
+        "default": 4,
+        "min": 1,
+        "max": 16,
+        "value_type": "int",
+        "visible_if": {"fusionnet_denoising_mode": "deep_analysis"},
+        "tooltip": "Maximum top-ranked neighbor patches per location and frame in Deep Analysis.",
+    },
+    {
+        "key": "fusionnet_patch_search_radius",
+        "label": "Patch Search Distance",
+        "type": "slider",
+        "default": 5,
+        "min": 1,
+        "max": 16,
+        "value_type": "int",
+        "visible_if": {"fusionnet_denoising_mode": "deep_analysis"},
+        "tooltip": "Patch search radius in WeightNet analysis-grid pixels; larger values inspect farther neighbors.",
+    },
     {
         "key": "fusionnet_tile_size",
         "label": "Model Block",
@@ -66,13 +145,23 @@ PARAMETER_SCHEMA = [
         "tooltip": "WeightNet model block size.",
     },
     {
-        "key": "fusionnet_work_resolution",
-        "label": "Work Resolution",
+        "key": "fusionnet_work_pixel_fraction",
+        "label": "Pixel Resolution",
         "type": "dropdown",
         "default": 0.50,
         "options": [1.0, 0.75, 0.50, 0.33, 0.25],
+        "option_labels": {
+            "1.0": "100%",
+            "0.75": "75%",
+            "0.5": "50%",
+            "0.33": "33%",
+            "0.25": "25%",
+        },
         "value_type": "float",
-        "tooltip": "Resolution scale used for resident alignment and WeightNet analysis.",
+        "tooltip": (
+            "Percentage of total working pixels. For example, 25% uses about "
+            "half the width and half the height; output remains full resolution."
+        ),
     },
 ]
 
@@ -114,12 +203,26 @@ def load_fusionnet_config_for_batch(batch_id=None):
         state = batch_parameter_manager.load_json_state()
         batch = state.get(str(batch_id), {}) if isinstance(state, dict) else {}
         if isinstance(batch, dict):
-            nested = batch.get("fusionnet_params")
+            nested = batch_parameter_manager.get_batch_algorithm_params(
+                batch_id, "denoising", "FusionNet", batch_entry=batch
+            )
+            if not nested:
+                nested = batch.get("fusionnet_params")
             if isinstance(nested, dict):
                 # Do not let a partial batch payload reset the other global
                 # value to its default; override only keys present in the
                 # snapshot.
                 normalized_nested = _normalize_fusionnet_config(nested)
+                if "fusionnet_denoising_mode" in nested:
+                    config["fusionnet_denoising_mode"] = normalized_nested[
+                        "fusionnet_denoising_mode"
+                    ]
+                for key in (
+                    "fusionnet_max_neighbor_candidates",
+                    "fusionnet_patch_search_radius",
+                ):
+                    if key in nested:
+                        config[key] = normalized_nested[key]
                 if any(
                     key in nested
                     for key in ("fusionnet_tile_size", "tile_size", "ai_tile_size")
@@ -130,20 +233,40 @@ def load_fusionnet_config_for_batch(batch_id=None):
                 if any(
                     key in nested
                     for key in (
-                        "fusionnet_work_resolution",
-                        "work_resolution_scale",
-                        "work_scale",
+                        "fusionnet_work_pixel_fraction",
+                        *_LEGACY_LINEAR_RESOLUTION_KEYS,
                     )
                 ):
-                    config["fusionnet_work_resolution"] = normalized_nested[
-                        "fusionnet_work_resolution"
+                    config["fusionnet_work_pixel_fraction"] = normalized_nested[
+                        "fusionnet_work_pixel_fraction"
                     ]
             else:
                 # Accept a flattened legacy snapshot if one is encountered.
                 normalized_batch = _normalize_fusionnet_config(batch)
-                for key in ("fusionnet_tile_size", "fusionnet_work_resolution"):
+                if "fusionnet_denoising_mode" in batch:
+                    config["fusionnet_denoising_mode"] = normalized_batch[
+                        "fusionnet_denoising_mode"
+                    ]
+                for key in (
+                    "fusionnet_max_neighbor_candidates",
+                    "fusionnet_patch_search_radius",
+                ):
                     if key in batch:
                         config[key] = normalized_batch[key]
+                if any(
+                    key in batch
+                    for key in (
+                        "fusionnet_work_pixel_fraction",
+                        *_LEGACY_LINEAR_RESOLUTION_KEYS,
+                    )
+                ):
+                    config["fusionnet_work_pixel_fraction"] = normalized_batch[
+                        "fusionnet_work_pixel_fraction"
+                    ]
+                if any(key in batch for key in ("fusionnet_tile_size", "tile_size", "ai_tile_size")):
+                    config["fusionnet_tile_size"] = normalized_batch[
+                        "fusionnet_tile_size"
+                    ]
     except Exception as exc:
         print(f"[FusionNetSettings] Batch override unavailable: {exc}")
     return _normalize_fusionnet_config(config)
@@ -161,10 +284,23 @@ def save_fusionnet_config(config_to_save):
     section = data.get("FusionNet", {})
     if not isinstance(section, dict):
         section = {}
+    normalized = _normalize_fusionnet_config(config_to_save)
+    linear_scale = normalized["fusionnet_work_pixel_fraction"] ** 0.5
     section.update(
         {
-            "fusionnet_tile_size": int(float(config_to_save.get("fusionnet_tile_size", FUSIONNET_DEFAULTS["fusionnet_tile_size"]))),
-            "fusionnet_work_resolution": float(config_to_save.get("fusionnet_work_resolution", FUSIONNET_DEFAULTS["fusionnet_work_resolution"])),
+            "fusionnet_denoising_mode": normalized["fusionnet_denoising_mode"],
+            "fusionnet_tile_size": normalized["fusionnet_tile_size"],
+            "fusionnet_max_neighbor_candidates": normalized[
+                "fusionnet_max_neighbor_candidates"
+            ],
+            "fusionnet_patch_search_radius": normalized[
+                "fusionnet_patch_search_radius"
+            ],
+            "fusionnet_work_pixel_fraction": normalized[
+                "fusionnet_work_pixel_fraction"
+            ],
+            # Keep equivalent linear scale for older app versions.
+            "fusionnet_work_resolution": linear_scale,
         }
     )
     data["FusionNet"] = section
@@ -184,15 +320,32 @@ def save_fusionnet_config_for_active_batch(config_to_save):
         if not right_panel or not getattr(right_panel, "current_batch_id", None):
             return
         batch_id = str(right_panel.current_batch_id)
+        normalized = _normalize_fusionnet_config(config_to_save)
+        batch_config = {
+            **normalized,
+            # Compatibility for older versions that still interpret this as a
+            # per-dimension scale.
+            "fusionnet_work_resolution": normalized[
+                "fusionnet_work_pixel_fraction"
+            ] ** 0.5,
+        }
         settings = {"denoising_algo": "FusionNet", "checkbox_denoising": True}
         if hasattr(right_panel, "_store") and right_panel._store:
+            batch_parameter_manager.save_batch_algorithm_params(
+                batch_id,
+                "denoising",
+                "FusionNet",
+                batch_config,
+                store=right_panel._store,
+            )
             bulk = {f"{batch_id}.{key}": value for key, value in settings.items()}
-            bulk[f"{batch_id}.fusionnet_params"] = dict(config_to_save)
             right_panel._store.update_bulk(bulk, save=True)
         else:
+            batch_parameter_manager.save_batch_algorithm_params(
+                batch_id, "denoising", "FusionNet", batch_config
+            )
             data = batch_parameter_manager.load_json_state()
             data.setdefault(batch_id, {}).update(settings)
-            data[batch_id]["fusionnet_params"] = dict(config_to_save)
             batch_parameter_manager.save_json_state(data=data)
     except Exception as exc:
         print(f"[FusionNetSettings] Failed to save active batch config: {exc}")

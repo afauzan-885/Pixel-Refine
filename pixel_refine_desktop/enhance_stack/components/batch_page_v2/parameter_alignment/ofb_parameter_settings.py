@@ -21,16 +21,22 @@ PARAMETER_SCHEMA = [
 
 
 def load_ofb_config():
-    return load_section("OFB", OFB_DEFAULTS)
+    config = load_section("OFB", OFB_DEFAULTS)
+    config.pop("warp_method", None)
+    return config
 
 
 def save_ofb_config(config):
-    save_section("OFB", config)
+    saved_config = dict(config)
+    saved_config.pop("warp_method", None)
+    save_section("OFB", saved_config)
 
 
 def save_ofb_config_for_active_batch(config):
+    saved_config = dict(config)
+    saved_config.pop("warp_method", None)
     save_alignment_config_for_active_batch(
         "OFB",
         "ofb_params",
-        config,
+        saved_config,
     )

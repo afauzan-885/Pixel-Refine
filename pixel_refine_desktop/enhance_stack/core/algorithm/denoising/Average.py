@@ -32,7 +32,8 @@ class AverageDenoisingAlgorithm:
                 run_resident_pipeline,
             )
 
-            is_raw = bool(getattr(ctx, "is_linear_mode", False))
+            source_descriptor = getattr(ctx, "source_descriptor", None)
+            is_raw = getattr(source_descriptor, "kind", None) == "raw"
             work_scale = float(
                 getattr(ctx, "params", {}).get("work_resolution_scale", 0.50)
             ) if hasattr(ctx, "params") else 0.50
@@ -67,18 +68,17 @@ class AverageDenoisingAlgorithm:
                 alignment_plan=alignment_plan,
                 alignment_config=alignment_config,
                 work_scale=work_scale,
-                is_raw=is_raw,
+                source_descriptor=source_descriptor,
                 batch_queue=batch_queue,
                 stop_event=stop_req,
                 progress_callback=getattr(ctx, "update_progress", None),
-                raw_native=bool(getattr(ctx, "is_raw_native", False)),
             )
 
             if result_fp32 is None:
                 return None
 
-            if bool(getattr(ctx, "is_raw_native", False)):
-                ctx.raw_native_result = result_fp32
+            if bool(getattr(ctx, "is_raw_pipeline", False)):
+                ctx.raw_pipeline_result = result_fp32
                 result = result_fp32.preview_rgb
                 print(
                     f"[Average][RAW Native] preview shape={result.shape} "

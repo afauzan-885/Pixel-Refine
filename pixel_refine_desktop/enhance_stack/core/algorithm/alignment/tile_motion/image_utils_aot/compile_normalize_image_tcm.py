@@ -64,11 +64,12 @@ def compile_normalize_image_aot(arch=ti.vulkan, save_path="normalize_image_vulka
     ti.reset()
 
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    # 6 levels up to reach pixel_refine_desktop then into ui/data/aot_assets
-    assets_dir = os.path.abspath(os.path.join(script_dir, "../../../../../../ui/data/aot_assets"))
-    os.makedirs(assets_dir, exist_ok=True)
-    
+    target_ids = {
+        "vulkan": "vulkan_x86_64_windows",
+        "cuda": "cuda_x86_64_windows_nvidia",
+        "opengl": "opengl_x86_64_windows",
+        "cpu": "cpu_x86_64_windows",
+    }
     archs = [
         (ti.vulkan, "vulkan"),
         (ti.cuda, "cuda"),
@@ -76,6 +77,11 @@ if __name__ == "__main__":
         (ti.cpu, "cpu"),
     ]
     for arch, suffix in archs:
+        assets_dir = os.path.abspath(os.path.join(
+            project_root, "..", "taichi_vision", "taichi_algorithm", "aot_tcm",
+            target_ids[suffix], "application_assets"
+        ))
+        os.makedirs(assets_dir, exist_ok=True)
         save_path = os.path.join(assets_dir, f"normalize_image_{suffix}.tcm")
         try:
             compile_normalize_image_aot(arch=arch, save_path=save_path)

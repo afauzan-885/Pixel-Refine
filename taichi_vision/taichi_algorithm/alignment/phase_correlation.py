@@ -100,11 +100,20 @@ def phase_correlation(
         where response is the correlation peak value [0.0, 1.0].
     """
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_vision import taichi_aot
-        return taichi_aot.phase_correlation(ref_layer, comp_layer)
+        try:
+            from taichi_vision import taichi_aot
+            return taichi_aot.phase_correlation(ref_layer, comp_layer)
+        except Exception:
+            pass
 
-    if not TAICHI_AVAILABLE:
-        raise RuntimeError("Taichi is not available")
+    if TAICHI_AVAILABLE:
+        try:
+            return phase_correlate_fft(ref_layer, comp_layer)
+        except Exception:
+            pass
 
-    # Call GPU implementation
-    return phase_correlate_fft(ref_layer, comp_layer)
+    import cv2
+    ref_f = np.asarray(ref_layer, dtype=np.float32)
+    comp_f = np.asarray(comp_layer, dtype=np.float32)
+    (dx, dy), response = cv2.phaseCorrelate(ref_f, comp_f)
+    return float(dx), float(dy), float(response)

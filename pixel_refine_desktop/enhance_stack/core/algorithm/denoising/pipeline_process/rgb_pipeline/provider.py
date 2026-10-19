@@ -31,17 +31,32 @@ class _RGBHostBytePayload:
 
 
 class RGBFrameProvider:
-    """Load RGB (or demosaiced RAW) carriers and bind the shared accumulator."""
+    """Load already-RGB carriers and bind the shared accumulator."""
 
     source_mode: SourceMode = "rgb"
     carrier_kind = "rgb"
 
-    def __init__(self, image_paths: Sequence[str | Path], *, is_raw: bool = False):
+    def __init__(self, image_paths: Sequence[str | Path]):
         self.image_paths = tuple(str(path) for path in image_paths)
         if not self.image_paths:
             raise ValueError("RGBFrameProvider requires at least one source frame")
-        self.is_raw = bool(is_raw)
-        self.source_mode = "raw_rgb" if self.is_raw else "rgb"
+        from config import SUPPORTED_FORMATS
+
+        raw_extensions = {
+            str(extension).lower()
+            for extension in SUPPORTED_FORMATS.get("raw", ())
+        }
+        raw_paths = [
+            path
+            for path in self.image_paths
+            if Path(path).suffix.lower() in raw_extensions
+        ]
+        if raw_paths:
+            raise ValueError(
+                "RGBFrameProvider accepts already-RGB inputs only; RAW sources "
+                "must be routed through RawPipelineProvider"
+            )
+        self.source_mode = "rgb"
         self._sum_gpu = None
         self._weight_sum_gpu = None
 
@@ -58,7 +73,7 @@ class RGBFrameProvider:
         """Load the reference through the canonical resident RGB loader."""
         from ..resident_pipeline import load_frame_to_gpu
 
-        return load_frame_to_gpu(self.image_paths[0], is_raw=self.is_raw)
+        return load_frame_to_gpu(self.image_paths[0])
 
     def load_reference(self) -> ProviderFrame:
         carrier = self.load_reference_gpu()
@@ -70,13 +85,13 @@ class RGBFrameProvider:
     def load_support_host(self, index: int):
         """Load one support frame for the bounded host staging queue.
 
-        The resident executor still owns resizing and GPU upload.  Keeping the
-        source decode here gives RGB images and legacy demosaiced RAW frames a
-        single provider boundary without changing the queue contract.
+        The resident executor still owns resizing and GPU upload.  This
+        provider decodes only RGB inputs and leaves RAW handling to the RAW
+        provider, without changing the queue contract.
         """
         from ...fusionet_engine.weightnet_inference import load_rgb_linear_image
 
-        return load_rgb_linear_image(self.image_paths[int(index)], is_raw=self.is_raw)
+        return load_rgb_linear_image(self.image_paths[int(index)])
 
     def load_support_bytes_host(self, index: int) -> _RGBHostBytePayload:
         """Read original source bytes without decoding for the bounded RAM queue."""
@@ -96,7 +111,7 @@ class RGBFrameProvider:
             )
 
             return load_rgb_linear_image_bytes(
-                self.image_paths[int(index)], encoded, is_raw=self.is_raw
+                self.image_paths[int(index)], encoded
             )
         finally:
             encoded = None

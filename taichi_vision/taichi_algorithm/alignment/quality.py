@@ -285,7 +285,7 @@ def estimate_homography(source: np.ndarray, target: np.ndarray, *, weights: np.n
         design *= np.repeat(np.sqrt(np.clip(w, 0.0, None)), 2)[:, None]
     if np.linalg.matrix_rank(design) < 8:
         raise TransformEstimationError("homography correspondences are rank deficient")
-    _, singular_values, vh = np.linalg.svd(design, full_matrices=False)
+    _, singular_values, vh = np.linalg.svd(design, full_matrices=True)
     if singular_values[-1] > max(singular_values[0], 1.0) * 1.0e-10:
         # A non-zero smallest singular value is normal for noisy data; only a
         # clearly rank-deficient design should be rejected above.

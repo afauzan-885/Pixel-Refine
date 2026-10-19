@@ -150,6 +150,132 @@ def test_saved_block_flow_parameters_are_selected_through_catalog(monkeypatch, a
     assert result["params"] == {"smooth": False}
 
 
+def test_mfdenoiser_forces_homography_for_legacy_apap_batch_settings(monkeypatch):
+    from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising import (
+        similarity_parameter_settings,
+    )
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import (
+        MFDenoiserAlgorithm,
+    )
+
+    monkeypatch.setattr(
+        batch_parameter_manager,
+        "load_json_state",
+        lambda: {
+            "7": {
+                config.KEY_ALIGNMENT_ALGO: "OFB",
+                config.KEY_CHECKBOX_ALIGN: True,
+                "ofb_params": {"warp_method": "apap", "mode": "balance"},
+            }
+        },
+    )
+    # Global preferences intentionally disagree: runtime must only use batch 7.
+    monkeypatch.setattr(
+        similarity_parameter_settings,
+        "load_similarity_config",
+        lambda: {"mfdenoiser_alignment_plan": "No Alignment"},
+    )
+
+    params = MFDenoiserAlgorithm(db_path=":memory:")._load_params(batch_id=7)
+
+    assert params["alignment_params"]["warp_method"] == "homography"
+    assert params["alignment_params"]["mode"] == "balance"
+
+
+def test_alignment_parameter_page_hides_legacy_warp_setting(monkeypatch, qapp):
+    from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.MFDenoiser_parameter_settings import (
+        AlignmentParameterPage,
+    )
+
+    monkeypatch.setattr(
+        batch_parameter_manager,
+        "load_json_state",
+        lambda: {
+            "7": {
+                config.KEY_ALIGNMENT_ALGO: "OFB",
+                config.KEY_CHECKBOX_ALIGN: True,
+                "ofb_params": {"warp_method": "apap", "mode": "balance"},
+            }
+        },
+    )
+    page = AlignmentParameterPage("OFB")
+    try:
+        page.reload_from_active_batch(7)
+        assert "warp_method" not in page.controls
+        assert page._load_config_for_batch(7) == {"mode": "balance"}
+
+        saved = []
+        page._active_batch_id = lambda: 7
+        monkeypatch.setattr(
+            batch_parameter_manager,
+            "save_json_state",
+            lambda data=None, **kwargs: saved.append(data),
+        )
+        page._save_config_for_batch(
+            {"warp_method": "apap", "mode": "fast"}
+        )
+        saved_entry = saved[0]["7"]
+        assert saved_entry["ofb_params"] == {"mode": "fast"}
+        assert saved_entry["algorithm_params"]["alignment"]["ofb"] == {
+            "mode": "fast"
+        }
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+@pytest.mark.parametrize(
+    "algorithm_module,algorithm_name",
+    (
+        (
+            "pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.OFB",
+            "OFBAlgorithm",
+        ),
+        (
+            "pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.AKAZE",
+            "AKAZEAlgorithm",
+        ),
+    ),
+)
+def test_ofb_and_akaze_ignore_legacy_apap_warp_config(
+    monkeypatch, algorithm_module, algorithm_name
+):
+    import importlib
+    import numpy as np
+
+    module = importlib.import_module(algorithm_module)
+    algorithm = getattr(module, algorithm_name)()
+    reference = np.zeros((12, 16, 3), dtype=np.uint8)
+    target = np.full_like(reference, 7)
+    homography = np.eye(3, dtype=np.float32)
+    expected = np.full_like(target, 11)
+    calls = []
+
+    monkeypatch.setattr(
+        algorithm,
+        "_estimate_motion",
+        lambda *_args, **_kwargs: (homography, None, None, None),
+    )
+
+    def warp_perspective(image, matrix, dsize, **_kwargs):
+        calls.append((image, matrix, dsize))
+        return expected
+
+    from taichi_vision import taichi_aot
+
+    monkeypatch.setattr(taichi_aot, "warp_perspective", warp_perspective)
+    result = algorithm.align_frame(
+        reference, target, config={"warp_method": "apap"}
+    )
+
+    assert np.array_equal(result, expected)
+    assert len(calls) == 1
+    assert calls[0][2] == (16, 12)
+    assert np.array_equal(calls[0][1], homography)
+
+
 def test_start_flushes_active_batch_warp_settings_before_runtime_snapshot(
     monkeypatch, qapp, tmp_path
 ):
@@ -169,7 +295,7 @@ def test_start_flushes_active_batch_warp_settings_before_runtime_snapshot(
             "7.ofb_params": {"warp_method": "homography", "mode": "fast"},
             "8.alignment_algo": "OFB",
             "8.checkbox_align_images": True,
-            "8.ofb_params": {"warp_method": "homography", "mode": "fast"},
+            "8.ofb_params": {"warp_method": "apap", "mode": "fast"},
         },
         save=False,
     )
@@ -197,6 +323,9 @@ def test_start_flushes_active_batch_warp_settings_before_runtime_snapshot(
         flush_pending_batch_settings = RightPanel.flush_pending_batch_settings
         _flush_active_alignment_parameter_page = (
             RightPanel._flush_active_alignment_parameter_page
+        )
+        _flush_active_denoising_parameter_page = (
+            RightPanel._flush_active_denoising_parameter_page
         )
 
         current_batch_id = 7
@@ -242,7 +371,7 @@ def test_start_flushes_active_batch_warp_settings_before_runtime_snapshot(
     other_batch = batch_parameter_manager.get_batch_alignment_runtime_snapshot(8)
 
     assert snapshot[config.KEY_ALIGNMENT] == "OFB"
-    assert saved["params"] == {"warp_method": "apap", "mode": "balance"}
+    assert saved["params"] == {"warp_method": "homography", "mode": "balance"}
     assert other_batch["params"] == {"warp_method": "homography", "mode": "fast"}
 
     from pixel_refine_desktop.enhance_stack.components.batch_page_v2 import (
@@ -256,10 +385,10 @@ def test_start_flushes_active_batch_warp_settings_before_runtime_snapshot(
     try:
         reload_page._active_batch_id = lambda: 8
         reload_page.reload_from_active_batch()
-        assert reload_page.controls["warp_method"][1].input.currentText() == "Homography"
+        assert "warp_method" not in reload_page.controls
         reload_page._active_batch_id = lambda: 7
         reload_page.reload_from_active_batch()
-        assert reload_page.controls["warp_method"][1].input.currentText() == "APAP"
+        assert reload_page._load_config_for_batch(7) == {"mode": "balance"}
     finally:
         reload_page.close()
         reload_page.deleteLater()
@@ -288,7 +417,9 @@ def test_start_flushes_active_batch_warp_settings_before_runtime_snapshot(
 
     monkeypatch.setattr(right_panel_module, "BatchProcessDialog", ProcessDialog)
     ProcessAllHarness()._on_process_all_clicked()
-    assert process_all_observations == [{"warp_method": "apap", "mode": "balance"}]
+    assert process_all_observations == [
+        {"warp_method": "homography", "mode": "balance"}
+    ]
 
 
 def test_apap_full_input_keeps_all_841_control_rows_without_sampling():
@@ -367,6 +498,200 @@ def test_apap_caller_reads_gpu_ransac_mask_before_cleanup():
     np.testing.assert_array_equal(selected_target, target[[0, 2, 5, 7]])
 
 
+@pytest.mark.parametrize(
+    "algorithm_name,parameter_key", (("OFB", "ofb_params"), ("AKAZE", "akaze_params"))
+)
+def test_alignment_page_uses_homography_for_legacy_apap_batches(
+    monkeypatch, qapp, tmp_path, algorithm_name, parameter_key
+):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QScrollArea, QWidget
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2 import (
+        right_panel as right_panel_module,
+    )
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising.MFDenoiser_parameter_settings import (
+        AlignmentParameterPage,
+    )
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.right_panel import (
+        RightPanel,
+    )
+    from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
+    from UILibrary import DataStore
+
+    parameter_path = tmp_path / "batch_parameter.json"
+    monkeypatch.setattr(batch_parameter_manager, "BATCH_PARAMETER_PATH", str(parameter_path))
+    store = DataStore()
+    store.bind_to_file(str(parameter_path))
+    store.update_bulk(
+        {
+        f"7.{config.KEY_ALIGNMENT_ALGO}": algorithm_name,
+        "7.checkbox_align_images": True,
+        f"7.{parameter_key}": {"warp_method": "apap", "mode": "balance"},
+        f"8.{config.KEY_ALIGNMENT_ALGO}": algorithm_name,
+        "8.checkbox_align_images": True,
+        f"8.{parameter_key}": {"warp_method": "apap", "mode": "fast"},
+        },
+        save=False,
+    )
+    store.save_to_file()
+
+    class Card:
+        def __init__(self, value):
+            self.is_checked = False
+            self.value = value
+
+        def get_value(self):
+            return self.value
+
+    class Form:
+        value = "OFB"
+
+        def get_value(self):
+            return self.value
+
+        def set_value(self, value):
+            self.value = value
+
+    class SelectionHandler:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def handle_selection(self, selected):
+            self.owner.current_batch_id = int(selected[0])
+
+    class ListGroup:
+        def blockSignals(self, _blocked):
+            return False
+
+        def select_item_by_value(self, _batch_id):
+            return True
+
+    class Host(QWidget):
+        snapshot_settings_for_start = RightPanel.snapshot_settings_for_start
+        flush_pending_batch_settings = RightPanel.flush_pending_batch_settings
+        _flush_active_alignment_parameter_page = (
+            RightPanel._flush_active_alignment_parameter_page
+        )
+        _flush_active_denoising_parameter_page = (
+            RightPanel._flush_active_denoising_parameter_page
+        )
+        _save_batch_settings = RightPanel._save_batch_settings
+        select_batch_sync = RightPanel.select_batch_sync
+        _on_process_all_clicked = RightPanel._on_process_all_clicked
+
+        def __init__(self):
+            super().__init__()
+            self.current_batch_id = 7
+            self._store = store
+            self._sync_store_timer = QTimer(self)
+            self._sync_store_timer.setSingleShot(True)
+            self._is_syncing = False
+            self._last_emitted_settings = None
+            self.align_form = Form()
+            self.align_form.value = algorithm_name
+            self.sr_card = Card("No Super Resolution")
+            self.hdr_card = Card("No HDR")
+            self.denoise_card = Card("No Denoising")
+            self.logic = SimpleNamespace(set_settings=lambda _settings: None)
+            self.list_group = ListGroup()
+            self._selection_timer = SimpleNamespace(stop=lambda: None)
+            self._pending_selection = None
+            self.selection_handler = SelectionHandler(self)
+            self._active_process_dialog = None
+            self.controller = SimpleNamespace(
+                get_all_batches=lambda: [SimpleNamespace(id=7), SimpleNamespace(id=8)]
+            )
+            self._collect_ui_settings = lambda: {
+                config.KEY_ALIGNMENT: algorithm_name,
+                config.KEY_SUPER_RESOLUTION: "No Super Resolution",
+                config.KEY_DENOISING: "No Denoising",
+                config.KEY_HDR: "No HDR",
+                config.KEY_CHECKBOX_ALIGN: True,
+                config.KEY_CHECKBOX_SUPER_RES: False,
+                config.KEY_CHECKBOX_DENOISING: False,
+                config.KEY_CHECKBOX_HDR: False,
+            }
+            self._publish_settings = lambda settings: setattr(
+                self, "_last_emitted_settings", dict(settings)
+            )
+            self._sync_batch_queue_rows = lambda: None
+            self._remember_successful_batch_rows = lambda _dialog: None
+
+    class ProcessDialog:
+        observed = []
+
+        def __init__(self, batches, _parent, _owner):
+            self.batches = batches
+            self.panels_to_process_with_rows = []
+
+        def exec(self):
+            self.observed.append(
+                {
+                    str(batch.id): batch_parameter_manager.get_batch_alignment_runtime_snapshot(
+                        batch.id
+                    )["params"].get("warp_method")
+                    for batch in self.batches
+                }
+            )
+            return 0
+
+    host = Host()
+    scroll = QScrollArea(host)
+    page = AlignmentParameterPage(algorithm_name, parent=scroll)
+    scroll.setWidget(page)
+    host.left_panel = SimpleNamespace(
+        display_panel=SimpleNamespace(
+            param_panel=SimpleNamespace(alignment_pages={algorithm_name: scroll})
+        )
+    )
+    try:
+        assert "warp_method" not in page.controls
+        assert page._load_config_for_batch(7) == {"mode": "balance"}
+        assert batch_parameter_manager.get_batch_alignment_runtime_snapshot(7)[
+            "params"
+        ]["warp_method"] == "homography"
+
+        assert host.select_batch_sync(8)
+        page.reload_from_active_batch(8)
+        assert page._load_config_for_batch(8) == {"mode": "fast"}
+        assert host.select_batch_sync(7)
+        page.reload_from_active_batch(7)
+        assert page._load_config_for_batch(7) == {"mode": "balance"}
+
+        host.snapshot_settings_for_start()
+        saved = batch_parameter_manager.get_batch_alignment_runtime_snapshot(7)
+        assert saved["params"]["warp_method"] == "homography"
+        assert batch_parameter_manager.get_batch_alignment_runtime_snapshot(8)[
+            "params"
+        ]["warp_method"] == "homography"
+
+        monkeypatch.setattr(right_panel_module, "BatchProcessDialog", ProcessDialog)
+        host._on_process_all_clicked()
+        assert ProcessDialog.observed[-1] == {
+            "7": "homography",
+            "8": "homography",
+        }
+
+        page.controls["mode"][1].input.setCurrentText("high")
+        load_state = batch_parameter_manager.load_json_state
+        monkeypatch.setattr(store, "save_to_file", lambda: None)
+        monkeypatch.setattr(
+            batch_parameter_manager,
+            "load_json_state",
+            lambda path=None, default=None: (
+                {"forced_mismatch": {}}
+                if path is not None
+                else load_state(path=path, default=default)
+            ),
+        )
+        with pytest.raises(RuntimeError, match="not fully written to JSON"):
+            host.snapshot_settings_for_start()
+    finally:
+        page.close()
+        page.deleteLater()
+        host.close()
+
+
 @pytest.mark.parametrize("key", ("block_matching_gpu_params", "block_matching_params"))
 def test_block_matching_parameter_storage_aliases_are_retained(monkeypatch, key):
     from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager as params
@@ -383,16 +708,77 @@ def test_parameter_saver_uses_catalog_name_for_ui_and_storage(monkeypatch):
     from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_alignment import alignment_config_provider as provider
 
     selected, saved = [], []
+    stored = {}
+
+    def update_bulk(data, **_kwargs):
+        stored.update(data)
+        saved.append(data)
+
     panel = SimpleNamespace(
         current_batch_id=7,
         align_form=SimpleNamespace(set_value=selected.append),
-        _store=SimpleNamespace(update_bulk=lambda data, **kwargs: saved.append(data)),
+        _store=SimpleNamespace(update_bulk=update_bulk),
     )
     monkeypatch.setattr(provider, "find_active_right_panel", lambda: panel)
     provider.save_alignment_config_for_active_batch("Block Matching", "block_matching_params", {"mode": "high"})
     assert selected == ["Block Matching GPU"]
-    assert saved[0]["7.alignment_algo"] == "Block Matching GPU"
-    assert saved[0]["7.block_matching_params"] == {"mode": "high"}
+    assert stored["7.alignment_algo"] == "Block Matching GPU"
+    assert stored["7.block_matching_params"] == {"mode": "high"}
+    assert stored["7.algorithm_params"]["alignment"]["block_matching"] == {
+        "mode": "high"
+    }
+
+
+def test_canonical_algorithm_parameter_container_wins_over_legacy_keys(monkeypatch):
+    from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
+
+    monkeypatch.setattr(
+        batch_parameter_manager,
+        "load_json_state",
+        lambda: {
+            "7": {
+                config.KEY_ALIGNMENT_ALGO: "OFB",
+                config.KEY_CHECKBOX_ALIGN: True,
+                "ofb_params": {"mode": "legacy"},
+                "algorithm_params": {
+                    "alignment": {"ofb": {"mode": "canonical"}}
+                },
+            }
+        },
+    )
+
+    result = batch_parameter_manager.get_batch_alignment_runtime_snapshot(7)
+
+    assert result["params"] == {
+        "mode": "canonical",
+        "warp_method": "homography",
+    }
+
+
+def test_algorithm_parameter_container_migrates_existing_alignment_and_denoising_keys():
+    from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
+
+    entry = {
+        "ofb_params": {"mode": "fast"},
+        "akaze_params": {"mode": "accurate"},
+        "farneback_params": {"pyr_scale": 0.5},
+        "block_flow_params": {"smooth": True},
+        "similarity_params": {"similarity_spatial_work_resolution": 0.5},
+        "fusionnet_params": {"fusionnet_denoising_mode": "deep_analysis"},
+    }
+
+    normalized = batch_parameter_manager.normalize_batch_algorithm_params(entry)
+
+    assert normalized["alignment"]["ofb"] == {"mode": "fast"}
+    assert normalized["alignment"]["akaze"] == {"mode": "accurate"}
+    assert normalized["alignment"]["farneback"] == {"pyr_scale": 0.5}
+    assert normalized["alignment"]["block_flow"] == {"smooth": True}
+    assert normalized["denoising"]["similarity"] == {
+        "similarity_spatial_work_resolution": 0.5
+    }
+    assert normalized["denoising"]["fusionnet"]["fusionnet_denoising_mode"] == (
+        "deep_analysis"
+    )
 
 
 @pytest.mark.parametrize("category,name,extra", [

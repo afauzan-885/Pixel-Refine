@@ -52,15 +52,48 @@ class OFBAlgorithm:
                 batch_params = batch_parameter_manager.load_json_state().get(
                     str(batch_id), {}
                 )
-                ofb_params = batch_params.get("ofb_params", batch_params.get("orb_params", {}))
+                ofb_params = batch_parameter_manager.get_batch_algorithm_params(
+                    batch_id, "alignment", "OFB", batch_entry=batch_params
+                )
                 if isinstance(ofb_params, dict):
                     config.update(ofb_params)
             except Exception:
                 pass
+        # Ignore legacy global and per-batch APAP selections.
+        config["warp_method"] = "homography"
         return config
 
     def _get_config(self, batch_id=None):
         return self._runtime_config or self.load_config(batch_id=batch_id)
+
+    @staticmethod
+    def _find_homography(
+        src_points, dst_points, *, threshold=5.0, hypotheses=256, refinements=2
+    ):
+        """Estimate support-to-reference motion through the public AOT API."""
+        from taichi_vision import taichi_aot
+
+        return taichi_aot.find_homography(
+            np.ascontiguousarray(src_points, dtype=np.float32),
+            np.ascontiguousarray(dst_points, dtype=np.float32),
+            method="RANSAC",
+            ransacReprojThreshold=float(threshold),
+            n_hypotheses=max(64, int(hypotheses)),
+            max_iters=max(1, int(refinements)),
+            return_gpu=False,
+        )
+
+    @staticmethod
+    def _warp_perspective(image, homography, dsize):
+        """Warp an array through the backend-neutral AOT route used by OFB."""
+        from taichi_vision import taichi_aot
+
+        return taichi_aot.warp_perspective(
+            np.ascontiguousarray(image, dtype=np.float32),
+            np.ascontiguousarray(homography, dtype=np.float32),
+            (int(dsize[0]), int(dsize[1])),
+            return_gpu=False,
+        )
 
     @staticmethod
     def _to_gray_f32(image):
@@ -84,8 +117,14 @@ class OFBAlgorithm:
     def calculate_global_motion(
         self, reference, target, config=None, stop_requested=None
     ):
+        H, mask, _, _ = self._estimate_motion(
+            reference, target, config=config, stop_requested=stop_requested
+        )
+        return H, mask
+
+    def _estimate_motion(self, reference, target, config=None, stop_requested=None):
         if stop_requested and stop_requested():
-            return None, None
+            return None, None, None, None
 
         config = config or self._get_config()
         mode = str(config.get("mode", "fast")).strip().lower()
@@ -94,7 +133,7 @@ class OFBAlgorithm:
         ref_gray = self._to_gray_f32(reference)
         tgt_gray = self._to_gray_f32(target)
         if ref_gray is None or tgt_gray is None:
-            return None, None
+            return None, None, None, None
 
         try:
             from taichi_vision import taichi_aot
@@ -109,10 +148,10 @@ class OFBAlgorithm:
                 max_keypoints=int(preset["max_kps"]),
             )
             if matched is None or matched[0] is None or matched[1] is None:
-                return None, None
+                return None, None, None, None
             src_pts, dst_pts = matched[0], matched[1]
             if len(src_pts) < 4 or len(dst_pts) < 4:
-                return None, None
+                return None, None, None, None
 
             H, mask = taichi_aot.find_homography(
                 np.ascontiguousarray(dst_pts, dtype=np.float32),
@@ -124,13 +163,21 @@ class OFBAlgorithm:
                 return_gpu=False,
             )
             if H is None:
-                return None, None
-            if mask is not None and int(np.asarray(mask).reshape(-1).sum()) < 4:
-                return None, None
-            return np.asarray(H, dtype=np.float32), mask
+                return None, None, None, None
+            keep = np.ones(len(src_pts), dtype=bool)
+            if mask is not None:
+                keep = np.asarray(mask).reshape(-1).astype(bool)
+                if int(keep.sum()) < 4:
+                    return None, mask, None, None
+            return (
+                np.asarray(H, dtype=np.float32),
+                mask,
+                np.ascontiguousarray(src_pts[keep], dtype=np.float32),
+                np.ascontiguousarray(dst_pts[keep], dtype=np.float32),
+            )
         except Exception as exc:
             print(f"[OFB] Motion estimation error: {exc}")
-            return None, None
+            return None, None, None, None
 
     def align_frame(
         self,
@@ -143,25 +190,26 @@ class OFBAlgorithm:
         if stop_requested and stop_requested():
             return None
 
-        H, _ = self.calculate_global_motion(
-            reference, target, config=config, stop_requested=stop_requested
+        effective_config = config or self._get_config()
+        H, _, _, _ = self._estimate_motion(
+            reference,
+            target,
+            config=effective_config,
+            stop_requested=stop_requested,
         )
         img_to_warp = target if target_for_warping is None else target_for_warping
         if H is None:
             return img_to_warp
 
-        from taichi_vision import taichi_aot
-
         h, w = reference.shape[:2]
-        warped = taichi_aot.warp_perspective(
-            np.ascontiguousarray(img_to_warp),
-            H,
-            (w, h),
-            return_gpu=False,
+        warped = self._warp_perspective(
+            np.ascontiguousarray(img_to_warp), H, (w, h)
         )
         if np.issubdtype(np.asarray(img_to_warp).dtype, np.integer):
             info = np.iinfo(np.asarray(img_to_warp).dtype)
             warped = np.clip(warped + 0.5, info.min, info.max).astype(
                 np.asarray(img_to_warp).dtype
             )
+        else:
+            warped = np.asarray(warped, dtype=np.asarray(img_to_warp).dtype)
         return warped

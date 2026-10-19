@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QMenu,
     QGraphicsPixmapItem,
+    QStyle,
 )
 from PySide6.QtCore import (
     Slot,
@@ -221,7 +222,9 @@ class BurstPreloadWorker(QThread):
     def __init__(self, image_paths, parent=None, max_workers=4, batch_id=None):
         super().__init__(parent)
         self.image_paths = list(image_paths)
-        self.max_workers = max(1, min(max_workers, 4))
+        # RAW decode can hold a full-resolution sensor buffer before producing
+        # the display-sized QImage. Keep this fan-out small to bound peak RAM.
+        self.max_workers = max(1, min(max_workers, 2))
         self.batch_id = str(batch_id) if batch_id is not None else ""
         self._is_aborted = False
         self._executor = None
@@ -411,29 +414,36 @@ def _drop_playback_frames(panel, batch_id):
 
 
 def _evict_playback_budget(panel, keep_bid=None):
-    """Drop whole non-active batches until the playback frame budget is met.
-
-    The active batch (and the transient one) is never dropped here, so burst
-    playback never loses the frames it is currently cycling through.
-    """
+    """Bound playback memory, including frames belonging to the active batch."""
     max_bytes = getattr(panel, "_playback_cache_max_bytes", 0) or 0
-    if max_bytes <= 0:
-        return
+    max_frames = getattr(panel, "_playback_cache_max_frames", 0) or 0
     tally = _playback_tally(panel)
-    total = sum(tally.values())
 
-    while total > max_bytes and len(panel._batch_playback_cache) > 1:
-        victim = None
-        for candidate in list(panel._batch_playback_cache.keys()):
-            if candidate in (keep_bid, "__transient__"):
-                continue
-            victim = candidate
-            break
+    def total_bytes():
+        return sum(tally.values())
+
+    # Old inactive batches are the cheapest eviction targets.
+    while max_bytes > 0 and total_bytes() > max_bytes:
+        victim = next(
+            (bid for bid in panel._batch_playback_cache if bid != keep_bid), None
+        )
         if victim is None:
             break
-        total -= tally.pop(victim, 0)
-        panel._batch_playback_cache.pop(victim, None)
-        print(f"[PlaybackCache] Budget evicted batch {victim} from RAM")
+        _drop_playback_frames(panel, victim)
+
+    active = panel._batch_playback_cache.get(keep_bid, {})
+    protected = getattr(panel, "current_preview_path", None)
+    while active and (
+        (max_frames > 0 and len(active) > max_frames)
+        or (max_bytes > 0 and total_bytes() > max_bytes)
+    ):
+        victim = next((path for path in active if path != protected), None)
+        if victim is None:
+            break
+        pixmap = active.pop(victim, None)
+        tally[keep_bid] = max(
+            0, tally.get(keep_bid, 0) - _pixmap_bytes(pixmap)
+        )
 
 
 @live_update("refresh_responsive_layout", on_resize=True)
@@ -518,14 +528,16 @@ class DisplayPanel(QWidget):
             OrderedDict()
         )
         self._batch_playback_cache_limit: int = 3
-        # Total frame budget across every cached batch.  The active batch is
-        # never evicted, so burst playback keeps its frames; this only stops
-        # several non-active batches from holding hundreds of MB each.
-        self._playback_cache_max_bytes: int = 640 * 1024 * 1024
+        # Shared byte budget plus a stricter active-burst frame limit keep
+        # long sequences from retaining every decoded frame in RAM.
+        self._playback_cache_max_bytes: int = 160 * 1024 * 1024
+        self._playback_cache_max_frames: int = 16
         self._playback_cache_bytes: dict[str, int] = {}
         self._preview_pixmap_item = None
         self._needs_playback_fit: bool = False
         self._layout_refresh_pending: bool = False
+        self._burst_preload_active = False
+        self._controls_resize_pending = False
         self.toast = ToastManager(self)
         self.active_deletions = {}  # {batch_id: [paths]} for resume logic
         self.right_panel: Any = None
@@ -660,7 +672,7 @@ class DisplayPanel(QWidget):
 
         # Right Column Layout (Tools and Actions aligned to the right)
         self.right_header_layout = QHBoxLayout()
-        self.right_header_layout.setContentsMargins(0, 0, 0, 0)
+        self.right_header_layout.setContentsMargins(0, 4, 0, 4)
         self.right_header_layout.setSpacing(10)
         self.right_header_layout.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -704,19 +716,33 @@ class DisplayPanel(QWidget):
         self.right_header_layout.addWidget(self.result_selector)
 
         # 1. Back to Grid Button
-        self.back_btn = Button(language_config.BTN_BACK_TO_GRID, variant="secondary")
-        self.back_btn.setFixedWidth(120)
+        self.back_btn = IconButton(
+            "Grid",
+            icon=self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogListView),
+            variant="secondary",
+        )
+        self.back_btn.setToolTip("Return to image grid")
+        self.back_btn.setAccessibleName("Return to image grid")
+        self.back_btn.setFixedSize(92, 32)
+        self.back_btn.setStyleSheet(
+            self.back_btn.styleSheet() + " QPushButton { padding: 4px; }"
+        )
         self.back_btn.clicked.connect(self.show_grid)
         self.back_btn.setVisible(False)
         self.right_header_layout.addWidget(self.back_btn)
 
         # 2. Preview Process Button (Shortcut from Grid)
         self.preview_process_btn = IconButton(
-            icon_path="resources/assets/icons/play-preview_black.png",
-            variant="primary",
+            "Preview",
+            icon=self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView),
+            variant="secondary",
         )
-        self.preview_process_btn.setToolTip("Image Process")
-        self.preview_process_btn.setFixedWidth(40)
+        self.preview_process_btn.setToolTip("Preview processed result")
+        self.preview_process_btn.setAccessibleName("Preview processed result")
+        self.preview_process_btn.setFixedSize(104, 32)
+        self.preview_process_btn.setStyleSheet(
+            self.preview_process_btn.styleSheet() + " QPushButton { padding: 4px; }"
+        )
         self.preview_process_btn.clicked.connect(self._on_preview_process_clicked)
         self.preview_process_btn.setVisible(False)
         self.right_header_layout.addWidget(self.preview_process_btn)
@@ -817,6 +843,21 @@ class DisplayPanel(QWidget):
         # Zoomable Preview View (Directly added, no more stack or controls)
         self.preview_scene = QGraphicsScene()
         self.zoomable_preview = Zoomable(self.preview_scene, self)
+        self.comparison_loading_label = QLabel(
+            "Loading [0%]", self.zoomable_preview.viewport()
+        )
+        self.comparison_loading_label.setObjectName("ComparisonLoadingLabel")
+        self.comparison_loading_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self.comparison_loading_label.setStyleSheet(
+            "QLabel#ComparisonLoadingLabel {"
+            "background-color: rgba(25, 32, 42, 210); color: #FFFFFF;"
+            "font-size: 12px; font-weight: 600;"
+            "padding: 8px 14px; border-radius: 8px;"
+            "}"
+        )
+        self.comparison_loading_label.hide()
         preview_wrapper_layout.addWidget(self.zoomable_preview)
 
         # Connect scroll/zoom to update (Force redraw for sticky labels in Comparison mode)
@@ -873,7 +914,7 @@ class DisplayPanel(QWidget):
 
         self.play_btn = QPushButton("▶")
         # No fixed size — button auto-sizes to emoji font
-        self.play_btn.setStyleSheet(
+        self._play_btn_base_style = (
             """
             QPushButton {
                 background: transparent;
@@ -887,6 +928,7 @@ class DisplayPanel(QWidget):
             }
         """
         )
+        self.play_btn.setStyleSheet(self._play_btn_base_style)
         self.play_btn.setFixedSize(36, 36)
         self.play_btn.clicked.connect(self._toggle_playback)
 
@@ -918,25 +960,6 @@ class DisplayPanel(QWidget):
         playback_layout.addWidget(self.prev_frame_btn)
         playback_layout.addWidget(self.play_btn)
         playback_layout.addWidget(self.next_frame_btn)
-
-        # Loading [%] progress indicator badge
-        self.burst_loading_label = QLabel("")
-        self.burst_loading_label.setObjectName("BurstLoadingLabel")
-        self.burst_loading_label.setStyleSheet(
-            """
-            QLabel#BurstLoadingLabel {
-                background-color: rgba(30, 30, 30, 190);
-                color: #FFFFFF;
-                font-size: 11px;
-                font-weight: bold;
-                padding: 4px 10px;
-                border-radius: 10px;
-                margin-left: 6px;
-            }
-        """
-        )
-        self.burst_loading_label.setVisible(False)
-        playback_layout.addWidget(self.burst_loading_label)
 
         self.controls_bar_layout.addWidget(self.playback_container)
 
@@ -1023,6 +1046,11 @@ class DisplayPanel(QWidget):
 
         # Set default active page (Enhance Stack)
         self.sidebar.set_current_page(0)
+        self._settings_activity_timer = QTimer(self)
+        self._settings_activity_timer.setInterval(200)
+        self._settings_activity_timer.timeout.connect(self._sync_settings_enabled)
+        self._settings_activity_timer.start()
+        self._sync_settings_enabled()
 
     def _setup_settings_overlay(self):
         """Setup independent overlay for Settings View."""
@@ -1123,6 +1151,9 @@ class DisplayPanel(QWidget):
         """
 
         if index == 1:  # Settings Index (Now at 1)
+            if self._is_processing_active():
+                self.sidebar.set_current_page(0)
+                return
             self.show_settings()
             # Close sidebar for better UX (optional, but cleaner)
             self.sidebar_overlay.hide()
@@ -1137,6 +1168,9 @@ class DisplayPanel(QWidget):
 
     def show_settings(self):
         """Show settings overlay with FADE animation."""
+
+        if self._is_processing_active():
+            return
 
         # Reparent to global window to cover EVERYTHING (Left/Right panels too)
         # Check if we have a top window
@@ -1153,6 +1187,40 @@ class DisplayPanel(QWidget):
         # self.settings_overlay.raise_()
         self.settings_overlay.show()
         self.settings_overlay.raise_()
+
+    def _is_processing_active(self):
+        """Return whether a domain processing worker is currently running."""
+        top_window = self.window()
+        if top_window is not None:
+            processing_thread_names = {
+                "AlgorithmProcessorThread",
+                "BatchProcessingThread",
+                "ProcessingThread",
+            }
+            for thread in top_window.findChildren(QThread):
+                if (
+                    type(thread).__name__ in processing_thread_names
+                    and thread.isRunning()
+                ):
+                    return True
+        try:
+            from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_manager import (
+                BackendWorkerManager,
+            )
+
+            return BackendWorkerManager.instance().is_task_active()
+        except Exception:
+            return False
+
+    def _sync_settings_enabled(self):
+        """Mirror backend activity in the Settings sidebar control."""
+        buttons = getattr(getattr(self, "sidebar", None), "side_buttons", ())
+        if len(buttons) < 2:
+            return
+        enabled = not self._is_processing_active()
+        buttons[1].setEnabled(enabled)
+        if not enabled and self.settings_overlay.isVisible():
+            self.settings_overlay.hide()
 
     def toggle_sidebar(self):
         """Toggle floating sidebar visibility directly without fade animation."""
@@ -1495,8 +1563,7 @@ class DisplayPanel(QWidget):
             self._retained_workers.add(worker)
             worker.finished.connect(lambda w=worker: self._retained_workers.discard(w))
 
-        if hasattr(self, "burst_loading_label"):
-            self.burst_loading_label.setVisible(False)
+        self._reset_burst_preload_indicator()
 
         # Release pooled engine buffers after the switch has painted.  Deferred
         # and warm-up aware: see _trim_engine_memory.
@@ -1525,6 +1592,7 @@ class DisplayPanel(QWidget):
         Clear display ketika tidak ada batch yang dipilih.
         Reset ke state default dengan placeholder widget dan tombol "New Batch".
         """
+        display_manager.cancel_pending_comparison(self)
         self.current_batch_id = None
 
         # Hide any active toast when batch is unselected
@@ -1540,6 +1608,7 @@ class DisplayPanel(QWidget):
             worker.abort()
             self._retained_workers.add(worker)
             worker.finished.connect(lambda w=worker: self._retained_workers.discard(w))
+        self._reset_burst_preload_indicator()
 
         # Clear transient playback frames if present
         if "__transient__" in self._batch_playback_cache:
@@ -2014,6 +2083,39 @@ class DisplayPanel(QWidget):
         self._enter_result_mode()
         self.update_save_button_state()
 
+    def _show_comparison_loading(self, request_id, percent):
+        """Show staged decode and render progress over the comparison preview."""
+        if request_id != getattr(self, "_comparison_request_id", None):
+            return
+        percent = max(0, min(100, int(percent)))
+        self.comparison_loading_label.setText(f"Loading [{percent}%]")
+        self.comparison_loading_label.adjustSize()
+        self._position_comparison_loading_label()
+        self.comparison_loading_label.show()
+        self.comparison_loading_label.raise_()
+        if percent >= 100:
+            QTimer.singleShot(
+                300,
+                lambda request=request_id: self._hide_comparison_loading(request),
+            )
+
+    def _hide_comparison_loading(self, request_id=None):
+        """Hide comparison progress without affecting a newer preview request."""
+        if (
+            request_id is not None
+            and request_id != getattr(self, "_comparison_request_id", None)
+        ):
+            return
+        self.comparison_loading_label.hide()
+
+    def _position_comparison_loading_label(self):
+        viewport = self.zoomable_preview.viewport()
+        label = self.comparison_loading_label
+        label.move(
+            max(0, (viewport.width() - label.width()) // 2),
+            max(0, (viewport.height() - label.height()) // 2),
+        )
+
     def _scan_current_results(self):
         """Scan the stack folder once for the current batch's processed results."""
         if not self.logic.current_images:
@@ -2022,16 +2124,21 @@ class DisplayPanel(QWidget):
 
     def check_result_availability(self, results=None):
         """Check if results exist for current batch and update 'Preview Process' button."""
-        if not self.logic.current_images:
-            self.preview_process_btn.setVisible(False)
-            return
-
         if results is None:
-            results = self._scan_current_results()
-        self.preview_process_btn.setVisible(bool(results))
+            results = self._scan_current_results() if self.logic.current_images else []
+        self._current_has_results = bool(results)
+        self._sync_result_navigation()
+
+    def _sync_result_navigation(self):
+        """Keep preview actions consistent with the active grid/preview page."""
+        is_grid = self.display_stack.currentIndex() == 0
+        has_results = bool(self._current_has_results and self.logic.current_images)
+        self.preview_process_btn.setVisible(is_grid and has_results)
+        self.back_btn.setVisible(not is_grid and self.display_stack.currentIndex() == 1)
 
     def show_grid(self):
         """Switch ke Grid View."""
+        display_manager.cancel_pending_comparison(self)
         # Stop playback if playing
         if hasattr(self, "playback_timer") and self.playback_timer.isActive():
             self.playback_timer.stop()
@@ -2058,7 +2165,6 @@ class DisplayPanel(QWidget):
         self._schedule_layout_refresh()
 
         # Update Header buttons
-        self.back_btn.setVisible(False)
         self.result_selector.setVisible(False)  # Hide dropdown
         # One filesystem scan per switch: the preview button and the Save state
         # consume the same result set, so the value is threaded through instead
@@ -2077,10 +2183,9 @@ class DisplayPanel(QWidget):
     def show_preview(self, show_dropdown=True):
         """Switch ke Preview View."""
         self.display_stack.setCurrentIndex(1)
-        self.back_btn.setVisible(True)
         self.result_selector.setVisible(show_dropdown)  # Only show if requested
         self.import_button.setVisible(False)
-        self.preview_process_btn.setVisible(False)
+        self._sync_result_navigation()
         self.update_controls_visibility_and_states()
 
     def remove_selected_images(self):
@@ -2311,6 +2416,12 @@ class DisplayPanel(QWidget):
         if hasattr(self, "param_panel"):
             self.param_panel.refresh_responsive_layout()
 
+        if (
+            hasattr(self, "comparison_loading_label")
+            and self.comparison_loading_label.isVisible()
+        ):
+            self._position_comparison_loading_label()
+
         # If in preview mode and user has not zoomed in, keep image fitted to the new window size
         if hasattr(self, "display_stack") and self.display_stack.currentIndex() == 1:
             if (
@@ -2382,7 +2493,7 @@ class DisplayPanel(QWidget):
         if hasattr(self, "import_button"):
             self.import_button.setText(language_config.TOPBAR_BATCH_IMPORT_BUTTON_TEXT)
         if hasattr(self, "back_btn"):
-            self.back_btn.setText(language_config.BTN_BACK_TO_GRID)
+            self.back_btn.setText("Grid")
         if hasattr(self, "new_batch_header_btn"):
             self.new_batch_header_btn.setText(language_config.BTN_NEW_BATCH)
 
@@ -2491,7 +2602,7 @@ class DisplayPanel(QWidget):
             )
 
     def _store_playback_frame(self, batch_id: str, path: str, pixmap: QPixmap):
-        """Store a decoded frame into the FIFO RAM cache."""
+        """Store a decoded frame in the bounded playback window."""
         bid = (
             str(batch_id)
             if batch_id
@@ -2513,18 +2624,25 @@ class DisplayPanel(QWidget):
                     f"[PlaybackCache] FIFO evicted batch {evicted_bid} from RAM"
                 )
             self._batch_playback_cache[bid] = {}
-        self._batch_playback_cache[bid][path] = pixmap
+        frames = self._batch_playback_cache[bid]
+        previous = frames.pop(path, None)
+        frames[path] = pixmap
 
-        # Track the frame bytes and drop whole non-active batches if the total
-        # exceeds the budget; the batch being viewed keeps all of its frames.
+        # Prefer dropping inactive batches, then trim old frames from the
+        # active sliding window while preserving the currently displayed one.
         tally = _playback_tally(self)
-        tally[bid] = tally.get(bid, 0) + _pixmap_bytes(pixmap)
+        tally[bid] = max(0, tally.get(bid, 0) - _pixmap_bytes(previous))
+        tally[bid] += _pixmap_bytes(pixmap)
         _evict_playback_budget(self, keep_bid=bid)
 
     def _on_image_pre_cached(self, path, q_image, batch_id=""):
         """Callback when an image is successfully pre-loaded and decoded in the background."""
         pixmap = QPixmap.fromImage(q_image)
         self._store_playback_frame(batch_id, path, pixmap)
+        if getattr(self, "current_preview_path", None) == path:
+            self._update_preview_pixmap(pixmap)
+            if getattr(self, "is_playing", False):
+                self.playback_timer.start()
 
     def _start_background_preload(self, batch_id):
         """
@@ -2658,7 +2776,7 @@ class DisplayPanel(QWidget):
 
     def _show_next_frame(self):
         """Show the next frame in the burst sequence."""
-        if not self.logic.current_images:
+        if not self.logic.current_images or not getattr(self, "is_playing", False):
             return
         current_idx = self._get_current_image_index()
         next_idx = (current_idx + 1) % len(self.logic.current_images)
@@ -2674,15 +2792,83 @@ class DisplayPanel(QWidget):
         prev_path = self.logic.current_images[prev_idx].path
         self._display_fast_preview(prev_path)
 
+    @Slot(int, int)
     def _on_burst_preload_progress(self, loaded, total):
-        """Update burst loading percentage in controls bar."""
-        if hasattr(self, "burst_loading_label"):
-            if total > 0:
-                pct = int((loaded / total) * 100)
-                self.burst_loading_label.setText(f"Loading [{pct}%]")
-                self.burst_loading_label.setVisible(pct < 100)
-            else:
-                self.burst_loading_label.setVisible(False)
+        """Show preload percentage in the playback button slot."""
+        active_worker = self.sender()
+        if active_worker is not None and active_worker is not self._burst_preloader:
+            return
+        if total <= 0:
+            self._reset_burst_preload_indicator()
+            return
+
+        pct = max(0, min(100, int((loaded / total) * 100)))
+        if pct >= 100:
+            self._reset_burst_preload_indicator()
+            return
+
+        self._burst_preload_active = True
+        self.play_btn.setText(f"{pct}%")
+        self.play_btn.setEnabled(True)
+        self.play_btn.setFixedSize(56, 36)
+        fill_stop = pct / 100
+        self.play_btn.setStyleSheet(
+            "QPushButton {"
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+            f"stop:0 #BFDBFE, stop:{fill_stop:.3f} #BFDBFE, "
+            f"stop:{min(1.0, fill_stop + 0.01):.3f} #F1F5F9, stop:1 #F1F5F9);"
+            "border: 1px solid #93C5FD; border-radius: 6px;"
+            "color: #1E3A5F; font-size: 10px; font-weight: bold; padding: 0;"
+            "}"
+        )
+        self.play_btn.setToolTip(f"Menyiapkan frame preview: {pct}%")
+        self._schedule_controls_bar_resize()
+
+    def _reset_burst_preload_indicator(self):
+        """Restore the compact play/pause control after preload ends or aborts."""
+        self._burst_preload_active = False
+        if not hasattr(self, "play_btn"):
+            return
+        self.play_btn.setText("⏸" if getattr(self, "is_playing", False) else "▶")
+        self.play_btn.setEnabled(True)
+        self.play_btn.setFixedSize(36, 36)
+        self.play_btn.setStyleSheet(self._play_btn_base_style)
+        self.play_btn.setToolTip("")
+        self._schedule_controls_bar_resize()
+
+    @Slot()
+    def _on_burst_preload_finished(self):
+        """Finish only the active preloader so stale workers cannot reset new UI."""
+        worker = self.sender()
+        if worker is not self._burst_preloader:
+            return
+        self._burst_preloader = None
+        self._reset_burst_preload_indicator()
+        if getattr(self, "is_playing", False):
+            QTimer.singleShot(
+                0, lambda: self._trigger_preview_preload(self.current_preview_path)
+            )
+
+    def _schedule_controls_bar_resize(self):
+        """Recalculate the overlay after the play control changes width."""
+        if self._controls_resize_pending:
+            return
+        self._controls_resize_pending = True
+        QTimer.singleShot(0, self._resize_controls_bar)
+
+    def _resize_controls_bar(self):
+        self._controls_resize_pending = False
+        if not hasattr(self, "controls_bar") or not hasattr(self, "controls_overlay"):
+            return
+
+        self.controls_bar_layout.invalidate()
+        self.controls_bar_layout.activate()
+        self.controls_bar.adjustSize()
+        self.controls_overlay.content_wrapper.adjustSize()
+        self.controls_overlay.adjustSize()
+        self.controls_overlay._update_position()
+        if self.controls_overlay.isVisible():
+            self.controls_overlay.raise_()
 
     def _trigger_preview_preload(self, center_path=None):
         """Preloads burst sequence images into self.playback_cache in background."""
@@ -2699,37 +2885,30 @@ class DisplayPanel(QWidget):
         paths = [img.path for img in self.logic.current_images if hasattr(img, "path")]
         paths_to_load = [p for p in paths if p not in self.playback_cache]
         if not paths_to_load:
-            if hasattr(self, "burst_loading_label"):
-                self.burst_loading_label.setVisible(False)
+            self._reset_burst_preload_indicator()
             return
 
-        # Sort by distance from center_path for snappy next/prev navigation
-        if center_path and center_path in paths:
-            c_idx = paths.index(center_path)
-            paths_to_load.sort(key=lambda p: abs(paths.index(p) - c_idx))
+        # Decode a small forward window, wrapping around the burst. Refill it
+        # after each wave so bursts of any length stream without full preloading.
+        if center_path in paths:
+            center_idx = paths.index(center_path)
+        else:
+            center_idx = -1
+        paths_to_load.sort(
+            key=lambda path: (paths.index(path) - center_idx - 1) % len(paths)
+        )
+        paths_to_load = paths_to_load[:12]
 
-        # Cap preload budget to 30 frames around center to avoid huge RAM bursts on 100+ frame sequences
-        max_preload_frames = 30
-        if len(paths_to_load) > max_preload_frames:
-            paths_to_load = paths_to_load[:max_preload_frames]
-
-        self._burst_preloader = BurstPreloadWorker(
+        worker = BurstPreloadWorker(
             paths_to_load, parent=self, batch_id=self.current_batch_id
         )
-        self._burst_preloader.frame_cached.connect(self._on_image_pre_cached)
-        self._burst_preloader.preload_progress.connect(self._on_burst_preload_progress)
-        self._burst_preloader.preload_finished.connect(
-            lambda: (
-                self.burst_loading_label.setVisible(False)
-                if hasattr(self, "burst_loading_label")
-                else None
-            )
-        )
-        if hasattr(self, "burst_loading_label"):
-            self.burst_loading_label.setText("Loading [0%]")
-            self.burst_loading_label.setVisible(True)
+        self._burst_preloader = worker
+        worker.frame_cached.connect(self._on_image_pre_cached)
+        worker.preload_progress.connect(self._on_burst_preload_progress)
+        worker.preload_finished.connect(self._on_burst_preload_finished)
+        self._on_burst_preload_progress(0, len(paths_to_load))
 
-        self._burst_preloader.start(QThread.Priority.LowestPriority)
+        worker.start(QThread.Priority.LowestPriority)
 
     def _update_preview_pixmap(self, pixmap: QPixmap):
         """
@@ -2795,40 +2974,13 @@ class DisplayPanel(QWidget):
         if image_path in self.playback_cache:
             pixmap = self.playback_cache[image_path]
             self._update_preview_pixmap(pixmap)
+            self._trigger_preview_preload(image_path)
         else:
-            # Fallback loader with on-the-fly caching without blocking UI thread
-            from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import (
-                ImageLoaderThread,
-            )
-
-            def _on_fast_loaded(q_image, path):
-                if q_image is None or q_image.isNull():
-                    return
-                # Created on the GUI thread; the loader only produces QImage.
-                pixmap = QPixmap.fromImage(q_image)
-                if pixmap.isNull():
-                    return
-                self._store_playback_frame("", path, pixmap)
-                if getattr(self, "current_preview_path", None) == path:
-                    self._update_preview_pixmap(pixmap)
-
-            if (
-                self.logic.image_loader_thread
-                and self.logic.image_loader_thread.isRunning()
-            ):
-                self.logic.image_loader_thread.quit()
-                self.logic.image_loader_thread.wait()
-
-            loader = ImageLoaderThread(
-                image_path,
-                max_width=2560,
-                max_height=1440,
-                half_res=True,
-                parent=self,
-            )
-            loader.image_loaded.connect(_on_fast_loaded)
-            self.logic.image_loader_thread = loader
-            loader.start()
+            # Share the bounded background decoder. Never wait for an image
+            # loader on the GUI thread when playback outruns decoding.
+            if getattr(self, "is_playing", False) and self.playback_timer.isActive():
+                self.playback_timer.stop()
+            self._trigger_preview_preload(image_path)
 
         if self.display_stack.currentIndex() != 1:
             self.show_preview(show_dropdown=False)

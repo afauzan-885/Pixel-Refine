@@ -74,10 +74,12 @@ def compile_weighted_average_tcm(
     output = (
         Path(output_path).resolve()
         if output_path is not None
-        else Path(__file__).resolve().parents[5]
-        / "ui"
-        / "data"
-        / "aot_assets"
+        else Path(__file__).resolve().parents[6]
+        / "taichi_vision"
+        / "taichi_algorithm"
+        / "aot_tcm"
+        / target.target_id
+        / "application_assets"
         / target.artifact_name("hdr_weighted_average")
     )
     if output.exists() and not overwrite:
@@ -115,7 +117,7 @@ def main():
     parser.add_argument(
         "--output-path",
         default=None,
-        help="Optional exact TCM path; defaults to ui/data/aot_assets/<target artifact>.",
+        help="Optional exact TCM path; defaults to aot_tcm/<target>/application_assets/.",
     )
     parser.add_argument(
         "--overwrite",

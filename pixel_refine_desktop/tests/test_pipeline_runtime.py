@@ -12,6 +12,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
     PREFETCH_SETTING_KEY,
     PipelineCancelledError,
     PipelineRuntime,
+    PipelineSourceDescriptor,
     normalize_in_processing_depth,
     normalize_prefetch_depth,
     resolve_in_processing_depth,
@@ -37,6 +38,7 @@ def test_invalid_prefetch_depth_disables_prefetch(value):
 def test_performance_store_defaults_to_no_prefetch():
     assert DEFAULTS[PREFETCH_SETTING_KEY] == 0
     assert DEFAULTS[IN_PROCESSING_SETTING_KEY] == 1
+    assert "processing_format" not in DEFAULTS
 
 
 @pytest.mark.parametrize("depth", range(1, 5))
@@ -229,6 +231,244 @@ def test_recipe_executes_reference_supports_and_finalize_in_order():
     assert calls[0] == "reference"
     assert calls[-1] == "finalize"
     assert [entry[1] for entry in calls if isinstance(entry, tuple) and entry[0] == "process"] == [1, 2, 3]
+
+
+def test_prepared_recipe_executes_support_lifecycle_in_order():
+    calls = []
+
+    class Session:
+        def close(self):
+            pass
+
+    class Source:
+        def load_reference(self):
+            return "ref"
+
+        def load_support(self, index):
+            calls.append(("load", index))
+            return f"source-{index}"
+
+    class Recipe:
+        def prepare_reference(self, reference, context):
+            return {"reference": reference, "supports": []}
+
+        def prepare_support(self, index, support, state, context):
+            calls.append(("prepare", index, support))
+            return f"prepared-{support}"
+
+        def process_support(self, index, support, state, context):
+            calls.append(("process", index, support))
+            state["supports"].append(support)
+
+        def release_support(self, support, state, context):
+            calls.append(("release", support))
+
+        def finalize(self, state, context):
+            calls.append(("finalize",))
+            return state
+
+    session = Session()
+    runtime = PipelineRuntime(
+        prefetch_depth=1,
+        in_processing_depth=2,
+        session_factory=lambda _engine: session,
+    )
+    result = runtime.execute(Source(), Recipe(), range(1, 4))
+
+    assert result == {
+        "reference": "ref",
+        "supports": ["prepared-source-1", "prepared-source-2", "prepared-source-3"],
+    }
+    assert [call[1] for call in calls if call[0] == "process"] == [1, 2, 3]
+    assert [call[1] for call in calls if call[0] == "release"] == [
+        "prepared-source-1",
+        "prepared-source-2",
+        "prepared-source-3",
+    ]
+    assert calls.index(("release", "prepared-source-1")) > calls.index(
+        ("process", 1, "prepared-source-1")
+    )
+    assert calls.index(("finalize",)) > calls.index(
+        ("release", "prepared-source-3")
+    )
+    assert runtime.in_processing_frames == 0
+    assert runtime._closed
+
+
+@pytest.mark.parametrize("descriptor_source", ["execute", "source", "runtime"])
+def test_runtime_forwards_opaque_source_descriptor(descriptor_source):
+    descriptor = PipelineSourceDescriptor("raw", {"extension": ".DNG"})
+    received = []
+
+    class Session:
+        def close(self):
+            pass
+
+    class Source:
+        def load_reference(self):
+            return "ref"
+
+        def load_support(self, index):
+            return index
+
+    if descriptor_source == "source":
+        Source.descriptor = descriptor
+
+    class Recipe:
+        def prepare_reference(self, reference, context):
+            received.append(context.source_descriptor)
+            return reference
+
+        def process_support(self, index, support, state, context):
+            received.append(context.source_descriptor)
+
+        def finalize(self, state, context):
+            received.append(context.source_descriptor)
+            return state
+
+    runtime_kwargs = (
+        {"source_descriptor": descriptor} if descriptor_source == "runtime" else {}
+    )
+    runtime = PipelineRuntime(session_factory=lambda _engine: Session(), **runtime_kwargs)
+    execute_kwargs = (
+        {"source_descriptor": descriptor} if descriptor_source == "execute" else {}
+    )
+    assert runtime.execute(Source(), Recipe(), [0], **execute_kwargs) == "ref"
+    assert received == [descriptor, descriptor, descriptor]
+
+
+def test_prepared_recipe_requires_prepare_and_release_hooks_as_a_pair():
+    class Source:
+        def load_reference(self):
+            return None
+
+        def load_support(self, index):
+            return index
+
+    class Recipe:
+        def prepare_reference(self, reference, context):
+            return None
+
+        def prepare_support(self, index, support, state, context):
+            return support
+
+        def process_support(self, index, support, state, context):
+            pass
+
+        def finalize(self, state, context):
+            return state
+
+    runtime = PipelineRuntime(session_factory=lambda _engine: object())
+    with pytest.raises(TypeError, match=r"both prepare_support\(\) and release_support\(\)"):
+        runtime.execute(Source(), Recipe(), [1])
+    assert runtime._closed
+
+
+def test_prepared_recipe_waits_for_staged_completion_before_releasing_support():
+    calls = []
+
+    class Session:
+        def close(self):
+            pass
+
+    class Completion:
+        def __init__(self, index):
+            self.index = index
+
+        def result(self):
+            calls.append(("complete", self.index))
+
+    class Source:
+        def load_reference(self):
+            return "ref"
+
+        def load_support(self, index):
+            calls.append(("load", index))
+            return index
+
+    class Recipe:
+        def prepare_reference(self, reference, context):
+            return reference
+
+        def prepare_support(self, index, support, state, context):
+            return support
+
+        def process_support(self, index, support, state, context):
+            calls.append(("submit", index))
+            return Completion(index)
+
+        def release_support(self, support, state, context):
+            calls.append(("release", support))
+
+        def finalize(self, state, context):
+            calls.append(("finalize",))
+            return state
+
+    runtime = PipelineRuntime(
+        prefetch_depth=0,
+        in_processing_depth=2,
+        session_factory=lambda _engine: Session(),
+    )
+    assert runtime.execute(Source(), Recipe(), range(1, 4)) == "ref"
+
+    assert calls.index(("complete", 1)) < calls.index(("release", 1))
+    assert calls.index(("release", 1)) < calls.index(("load", 3))
+    assert calls.index(("complete", 2)) < calls.index(("release", 2))
+    assert calls.index(("complete", 3)) < calls.index(("release", 3))
+    assert calls.index(("finalize",)) > calls.index(("release", 3))
+    assert runtime.in_processing_frames == 0
+    assert runtime._closed
+
+
+def test_prepared_recipe_drains_pending_supports_after_stage_failure():
+    released = []
+
+    class Session:
+        def close(self):
+            pass
+
+    class Completion:
+        def __init__(self, index):
+            self.index = index
+
+        def result(self):
+            if self.index == 1:
+                raise RuntimeError("stage failed")
+
+    class Source:
+        def load_reference(self):
+            return None
+
+        def load_support(self, index):
+            return index
+
+    class Recipe:
+        def prepare_reference(self, reference, context):
+            return None
+
+        def prepare_support(self, index, support, state, context):
+            return support
+
+        def process_support(self, index, support, state, context):
+            return Completion(index)
+
+        def release_support(self, support, state, context):
+            released.append(support)
+
+        def finalize(self, state, context):
+            raise AssertionError("finalize should not run after a stage failure")
+
+    runtime = PipelineRuntime(
+        prefetch_depth=0,
+        in_processing_depth=2,
+        session_factory=lambda _engine: Session(),
+    )
+    with pytest.raises(RuntimeError, match="stage failed"):
+        runtime.execute(Source(), Recipe(), range(1, 4))
+
+    assert released == [1, 2]
+    assert runtime.in_processing_frames == 0
+    assert runtime._closed
 
 
 def test_runtime_closes_owned_session_when_recipe_raises():

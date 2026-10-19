@@ -363,16 +363,22 @@ def save_similarity_config_for_active_batch(config_to_save):
             "denoising_algo": "Similarity",
             "checkbox_denoising": True,
         }
-
         if hasattr(right_panel, "_store") and right_panel._store:
+            batch_parameter_manager.save_batch_algorithm_params(
+                batch_id,
+                "denoising",
+                "Similarity",
+                config_to_save,
+                store=right_panel._store,
+            )
             bulk_data = {f"{str_id}.{key}": value for key, value in settings.items()}
-            bulk_data[f"{str_id}.similarity_params"] = config_to_save
             right_panel._store.update_bulk(bulk_data, save=True)
         else:
+            batch_parameter_manager.save_batch_algorithm_params(
+                batch_id, "denoising", "Similarity", config_to_save
+            )
             data = batch_parameter_manager.load_json_state()
-            data.setdefault(str_id, {})
-            data[str_id].update(settings)
-            data[str_id]["similarity_params"] = config_to_save
+            data.setdefault(str_id, {}).update(settings)
             batch_parameter_manager.save_json_state(data=data)
     except Exception as exc:
         print(f"Error saving Similarity config for active batch: {exc}")

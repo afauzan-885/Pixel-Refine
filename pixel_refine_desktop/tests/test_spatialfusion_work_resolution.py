@@ -50,7 +50,7 @@ def test_spatial_resolution_reaches_both_analysis_grids(monkeypatch, scale):
         params={"similarity_spatial_work_resolution": scale},
         alignment_selection_name="Farneback",
         is_linear_mode=True,
-        is_raw_native=True,
+        is_raw_pipeline=True,
         stop_requested=None,
         update_progress=None,
     )

@@ -31,9 +31,6 @@ DEFAULTS = {
     "pipeline_prefetch_depth": 0,
     # Bound the current support plus host-prepared support frames awaiting work.
     "pipeline_in_processing_depth": 1,
-    # The current resident pipeline processes decoded RGB.  Keep that route as
-    # the compatible default while the pre-demosaic RAW fusion route is added.
-    "processing_format": "RGB Linear",
     "onnx_runtime": "auto",
 }
 

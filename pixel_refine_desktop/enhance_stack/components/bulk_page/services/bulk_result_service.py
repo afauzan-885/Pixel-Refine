@@ -37,22 +37,26 @@ def expected_output_names(stages, image_paths, settings):
         return None
     stem = os.path.splitext(os.path.basename(image_paths[0]))[0]
     safe_name = "".join(c for c in stem if c.isalnum() or c in ("_", "-")).rstrip()
-    native = str(settings.get("processing_format", "RGB Linear")).strip().lower() == "raw native"
     extensions = [os.path.splitext(path)[1].lower() for path in image_paths]
-    linear = settings.get("enable_linear_mode", False) or native
-    extension = ".dng" if linear and extensions[0] in (
-        ".dng", ".cr2", ".cr3", ".nef", ".arw"
-    ) else ".tif"
-    # Do not hide an invalid RAW Native input behind a cache hit.
-    if native and any(ext != ".dng" for ext in extensions):
+    raw_extensions = {
+        str(extension).lower()
+        for extension in config.SUPPORTED_FORMATS.get("raw", ())
+    }
+    raw_flags = [extension in raw_extensions for extension in extensions]
+    if any(raw_flags) and not all(raw_flags):
         return None
+    is_raw_input = bool(raw_flags and all(raw_flags))
+    if is_raw_input and any(extension != ".dng" for extension in extensions):
+        return None
+    extension = ".dng" if is_raw_input else ".tif"
     names = []
     for spec in stages:
         kwargs = dict(spec.entrypoint_kwargs)
         if spec.category == "denoising" and "output_suffix" in kwargs:
             names.append(f"{safe_name or 'stack'}_{kwargs['output_suffix']}{extension}")
         elif spec.category == "super_resolution" and spec.key == "splatting_sr":
-            # SplatSR's RGB writer follows enable_linear_mode, not RAW Native.
+            # Keep SplatSR's existing optional DNG writer policy independent
+            # from denoising's input-type-based RAW/RGB routing.
             sr_extension = ".dng" if settings.get("enable_linear_mode", False) and extensions[0] in (
                 ".dng", ".cr2", ".cr3", ".nef", ".arw"
             ) else ".tif"

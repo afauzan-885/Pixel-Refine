@@ -3238,6 +3238,8 @@ def box_filter(src, kernel_size=3, return_gpu=False, dst=None):
     """AOT Implementation of Box Filter."""
     if kernel_size < 1 or kernel_size % 2 == 0:
         raise ValueError("kernel_size must be a positive odd integer")
+    if kernel_size // 2 >= (1 << 24):
+        raise ValueError("kernel_size exceeds the exact float32 radius range")
 
     # The rebuilt artifact is stable for scalar and small RGB fp32 frames.
     # Intel OpenGL still rejects large RGB SSBO bindings; retain the validated
@@ -3353,7 +3355,7 @@ def box_filter(src, kernel_size=3, return_gpu=False, dst=None):
             )
         try:
             _mod("box_filter").run(
-                target, src=src_buf, tmp=tmp_buf, dst=dst_arg, h=h, w=w, radius=radius
+                target, src=src_buf, tmp=tmp_buf, dst=dst_arg, h=h, w=w, radius=float(radius)
             )
         finally:
             tmp_buf.release()
@@ -12969,6 +12971,10 @@ def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
     """AOT Guided Filter (edge-preserving smoothing).
     Uses box_filter module for box averaging and guided_filter module for element-wise ops.
     """
+    radius_value = int(radius)
+    if radius_value < 0 or radius_value >= (1 << 24) or radius_value != radius:
+        raise ValueError("radius must be an integer in the exact float32 range")
+
     from taichi_vision.taichi_aot.capabilities import opengl_native_probe
 
     if engine.arch.lower() in ("opengl", "gles") and (
@@ -13079,7 +13085,7 @@ def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
             dst=out,
             h=h,
             w=w,
-            radius=radius_bf,
+            radius=float(radius_bf),
         )
         # Graphics dispatch is asynchronous; do not recycle the temporary
         # allocation until the command that consumed it has completed.
@@ -15466,4 +15472,21 @@ from taichi_vision.taichi_algorithm.compression.raw_pipeline import (  # noqa: E
     phase_safe_integer_warp,
     raw_optical_flow,
     raw_optical_flow_dng,
+)
+
+
+# ── APAP & Sparse Mesh Warping ──
+from taichi_vision.taichi_algorithm.alignment.mesh_warp import warp_apap as warp_apap_aot
+from taichi_vision.taichi_algorithm.alignment.apap import fit_apap
+
+def warp_apap(*args, **kwargs):
+    """As-Projective-As-Possible (APAP) image warping with GPU Catmull-Rom and Adaptive Refine."""
+    return warp_apap_aot(*args, **kwargs)
+
+
+# FusionNet's local candidate ranking uses the target-qualified AOT loader and
+# is exposed through the compatibility facade at taichi_vision.taichi_aot.
+from taichi_vision.taichi_algorithm.denoising.multi_patch_aot import (
+    compose_multi_patch_dense_flow_aot as compose_multi_patch_dense_flow,
+    select_multi_patch_topk_aot as select_multi_patch_topk,
 )

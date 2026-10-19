@@ -20,9 +20,24 @@ class SpatialSplatAOT:
         if backend not in {"cpu", "cuda", "vulkan", "opengl"}:
             raise RuntimeError(f"unsupported spatial splat backend: {backend}")
         self.backend = backend
-        self.asset_dir = asset_dir or os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "../../../../../ui/data/aot_assets")
-        )
+        if asset_dir is None:
+            from taichi_vision.taichi_aot.artifact_targets import detect_target
+            from taichi_vision.llvm20_runtime_paths import application_assets_root
+
+            target = detect_target(
+                backend=backend,
+                device=str(getattr(self.engine, "gpu_name", "") or ""),
+            )
+            resolved_assets = application_assets_root(target.target_id)
+            if resolved_assets is None:
+                resolved_assets = (
+                    os.path.dirname(os.path.abspath(__file__))
+                    + "/../../../../../../taichi_vision/taichi_algorithm/aot_tcm/"
+                    + target.target_id
+                    + "/application_assets"
+                )
+            asset_dir = os.path.abspath(resolved_assets)
+        self.asset_dir = asset_dir
         self.tcm_path = tcm_path or os.path.join(self.asset_dir, f"spatial_splat_{backend}.tcm")
         if not os.path.isfile(self.tcm_path):
             raise FileNotFoundError(

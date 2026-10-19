@@ -78,8 +78,8 @@ def main():
              patch.object(TaichiGPUBuffer, "to_numpy", record_download), \
              patch.object(pipeline, "load_frame_to_gpu", lambda *_a, **_k: engine.upload(rgb(0))), \
              patch.object(RGBFrameProvider, "load_support_host", lambda _s, index: rgb(index)), \
-             patch.object(raw.RawNativeProvider, "_read_frame", lambda _s, index: raw_frame(index)):
-            for mode in ("rgb", "raw_native"):
+             patch.object(raw.RawPipelineProvider, "_read_frame", lambda _s, index: raw_frame(index)):
+            for mode in ("rgb", "raw"):
                 for weight_engine in args.engines.split(","):
                     baseline = None
                     for repeat in range(args.repeats):
@@ -92,7 +92,7 @@ def main():
                             spatial_config={"tile_size": 8, "noise_sigma": 0.01},
                             prefetch_depth=depth,
                         )
-                        actual = output.normalized_mosaic if mode == "raw_native" else output
+                        actual = output.normalized_mosaic if mode == "raw" else output
                         assert actual is not None and np.isfinite(actual).all()
                         if baseline is None:
                             baseline = actual.copy()
@@ -101,7 +101,7 @@ def main():
                         oracle_error = None
                         if weight_engine == "average" and args.alignment == "No Alignment":
                             values = [raw._normalized_for_rgb_parity(raw_frame(index))
-                                      if mode == "raw_native" else rgb(index)
+                                      if mode == "raw" else rgb(index)
                                       for index in range(args.frames)]
                             expected = np.mean(np.stack(values), axis=0, dtype=np.float32)
                             oracle_error = float(np.max(np.abs(actual - expected)))
@@ -143,16 +143,16 @@ def main():
                                     stop.set()
                                 elif fault == "decode":
                                     raise OSError("injected decode failure")
-                            return raw_frame(index) if mode == "raw_native" else rgb(index)
+                            return raw_frame(index) if mode == "raw" else rgb(index)
 
                         def fail(*_a, **_k):
                             raise OSError(f"injected {fault} failure")
 
                         loader_patch = patch.object(
-                            raw.RawNativeProvider if mode == "raw_native" else RGBFrameProvider,
-                            "_read_frame" if mode == "raw_native" else "load_support_host", load_fault)
-                        target = raw.RawNativeProvider if mode == "raw_native" else pipeline
-                        blend_patch = patch.object(target, "accumulate" if mode == "raw_native"
+                            raw.RawPipelineProvider if mode == "raw" else RGBFrameProvider,
+                            "_read_frame" if mode == "raw" else "load_support_host", load_fault)
+                        target = raw.RawPipelineProvider if mode == "raw" else pipeline
+                        blend_patch = patch.object(target, "accumulate" if mode == "raw"
                                                    else "_gpu_blend_frame", fail) if fault == "blend" else nullcontext()
                         read_patch = patch.object(TaichiGPUBuffer, "to_numpy", fail) if fault == "readback" else nullcontext()
                         caught = None

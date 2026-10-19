@@ -8,7 +8,7 @@ from typing import Any, Literal, Mapping, Protocol
 import numpy as np
 
 
-SourceMode = Literal["rgb", "raw_rgb", "raw_native", "video_rgb"]
+SourceMode = Literal["rgb", "raw", "video_rgb"]
 CarrierKind = Literal["rgb", "cfa"]
 
 
