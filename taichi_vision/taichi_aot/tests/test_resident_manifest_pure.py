@@ -1,5 +1,6 @@
 """Pure resident-manifest checks; no Taichi, native bridge, or device import."""
 import importlib.util
+import hashlib
 from pathlib import Path
 import unittest
 
@@ -26,14 +27,15 @@ class ResidentManifestTests(unittest.TestCase):
             "target_id": "cpu_x86_64_windows",
         }
         self.members = {"graphs.tcb": "a" * 64}
+        self.weights = b"resident-weights"
         self.metadata = {
             "format": 2,
             "backend": "cpu",
             "model_sha256": "b" * 64,
             "target_identity": dict(self.target),
             "runtime_abi": 1,
-            "compiler_version": "test-compiler",
-            "runtime_version": "test-runtime",
+            "taichi_version": "test-taichi",
+            "weights_sha256": hashlib.sha256(self.weights).hexdigest(),
             "io_schema": {"input": {"shape": [1], "dtype": "float32", "layout": "flat-contiguous"}},
             "artifact_members_sha256": dict(self.members),
         }
@@ -45,6 +47,7 @@ class ResidentManifestTests(unittest.TestCase):
             target_identity=self.target,
             model_sha256="b" * 64,
             artifact_members=self.members,
+            weights_sha256=hashlib.sha256(self.weights).hexdigest(),
             **kwargs,
         )
 
@@ -74,26 +77,15 @@ class ResidentManifestTests(unittest.TestCase):
                 model_sha256="b" * 64, artifact_members={"graphs.tcb": "c" * 64},
             )
 
-    def test_artifact_only_mode_is_explicit_and_legacy_is_bounded(self):
+    def test_artifact_only_requires_identity_and_legacy_fails_closed(self):
         with self.assertRaisesRegex(RuntimeError, "requires model_sha256"):
             manifest.validate_resident_metadata(
                 self.metadata, backend="cpu", target_identity=self.target
             )
         legacy = {"format": 1, "backend": "cpu", "model_sha256": "b" * 64}
-        self.assertEqual(
+        with self.assertRaisesRegex(RuntimeError, "lacks target/ABI integrity"):
             manifest.validate_resident_metadata(
                 legacy, backend="cpu", target_identity=self.target,
-                artifact_only=True,
-            ),
-            "legacy-artifact-only",
-        )
-        with self.assertRaisesRegex(RuntimeError, "explicit artifact-only"):
-            manifest.validate_resident_metadata(
-                legacy, backend="cpu", target_identity=self.target
-            )
-        with self.assertRaisesRegex(RuntimeError, "backend mismatch"):
-            manifest.validate_resident_metadata(
-                legacy, backend="vulkan", target_identity=self.target,
                 artifact_only=True,
             )
 

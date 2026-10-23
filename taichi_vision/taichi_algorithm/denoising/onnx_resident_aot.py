@@ -294,8 +294,8 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         "target_identity": target_identity,
         "device_capabilities": "not-recorded-at-compile-time",
         "runtime_abi": RUNTIME_ABI_VERSION,
-        "compiler_version": str(ti.__version__),
-        "runtime_version": str(ti.__version__),
+        "taichi_version": str(ti.__version__),
+        "weights_sha256": hashlib.sha256(weights.getvalue()).hexdigest(),
         "opsets": {item.domain or "ai.onnx": int(item.version) for item in model.opset_import},
         "io_schema": io_schema,
         "artifact_members_sha256": artifact_members_sha256,
@@ -357,6 +357,7 @@ class ResidentONNXGraph:
             artifact_only=artifact_only,
             runtime_abi=RUNTIME_ABI_VERSION,
             artifact_members=member_hashes,
+            weights_sha256=hashlib.sha256(weights).hexdigest(),
         )
         self.module = engine.load(str(self.path))
         try:
