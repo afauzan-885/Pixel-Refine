@@ -26,9 +26,7 @@ from ..contracts import (
     scale_homography,
 )
 
-
 _NO_ALIGNMENT = {"", "none", "no alignment", "no_alignment", "off"}
-
 
 def _release(buffer) -> None:
     if buffer is None:
@@ -48,14 +46,12 @@ def _release(buffer) -> None:
             method()
             return
 
-
 def _is_cancelled(stop_event) -> bool:
     if stop_event is None:
         return False
     if hasattr(stop_event, "is_set"):
         return bool(stop_event.is_set())
     return bool(stop_event()) if callable(stop_event) else False
-
 
 def _phase_planes(frame, normalized: np.ndarray) -> tuple[np.ndarray, ...]:
     """Return contiguous, phase-correct Bayer planes in tile order."""
@@ -68,7 +64,6 @@ def _phase_planes(frame, normalized: np.ndarray) -> tuple[np.ndarray, ...]:
         col = (plane_x - phase_x) & 1
         planes.append(np.ascontiguousarray(normalized[row::2, col::2], dtype=np.float32))
     return tuple(planes)
-
 
 def _normalize_phase_planes_into(frame, destinations) -> tuple[np.ndarray, ...]:
     """Normalize each CFA lattice with its own sensor black/white levels."""
@@ -108,7 +103,6 @@ def _normalize_phase_planes_into(frame, destinations) -> tuple[np.ndarray, ...]:
         )
     return tuple(destinations)
 
-
 def _normalized_for_rgb_parity(frame) -> np.ndarray:
     """Normalize a CFA carrier while preserving per-plane sensor levels.
 
@@ -143,7 +137,6 @@ def _normalized_for_rgb_parity(frame) -> np.ndarray:
         np.clip(destination, np.float32(0.0), np.float32(1.0), out=destination)
     return np.ascontiguousarray(normalized, dtype=np.float32)
 
-
 def _plane_homography(matrix: np.ndarray, frame, index: int) -> np.ndarray:
     """Conjugate a support-to-reference homography into one Bayer lattice."""
     plane_y, plane_x = divmod(int(index), 2)
@@ -157,7 +150,6 @@ def _plane_homography(matrix: np.ndarray, frame, index: int) -> np.ndarray:
         np.linalg.inv(plane_to_sensor) @ np.asarray(matrix, dtype=np.float32) @ plane_to_sensor,
         dtype=np.float32,
     )
-
 
 def _analysis_proxy(
     path: str | Path,
@@ -198,7 +190,6 @@ def _analysis_proxy(
         _release(proxy)
     return work
 
-
 def _warp_analysis_proxy(proxy_gpu, transform, *, height: int, width: int):
     """Warp a work-resolution analysis proxy for SpatialFusion weights."""
     from taichi_vision import taichi_aot
@@ -219,7 +210,6 @@ def _warp_analysis_proxy(proxy_gpu, transform, *, height: int, width: int):
         int(width),
         return_gpu=True,
     )
-
 
 def _analysis_transform(transform, *, full_shape, proxy_shape):
     """Return the transform in the proxy coordinate system.
@@ -242,7 +232,6 @@ def _analysis_transform(transform, *, full_shape, proxy_shape):
         source_shape=(int(full_shape[0]), int(full_shape[1])),
         destination_shape=(int(proxy_shape[0]), int(proxy_shape[1])),
     )
-
 
 def _accumulate_homography_cfa(
     source_planes,
@@ -311,7 +300,6 @@ def _accumulate_homography_cfa(
         for plane in warped_planes:
             _release(plane)
 
-
 def _validate_support(reference, support, path: str | Path) -> None:
     """Fail before mixing sensor contracts that cannot be fused safely."""
     checks = {
@@ -327,7 +315,6 @@ def _validate_support(reference, support, path: str | Path) -> None:
             f"RAW Native requires an identical DNG sensor contract; {Path(path).name} "
             f"differs in {', '.join(mismatches)}"
         )
-
 
 def _preview_from_mosaic(
     mosaic,
@@ -374,7 +361,6 @@ def _preview_from_mosaic(
         return_gpu=bool(return_gpu),
     )
 
-
 def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None, half_res=False):
     """Demosaic an already-decoded carrier without a second file decode.
 
@@ -402,650 +388,6 @@ def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None, half_res=Fals
         **extra_kwargs,
     )
 
-
-def _legacy_run_raw_resident_pipeline(
-    image_paths: Sequence[str | Path],
-    *,
-    session=None,
-    weight_engine: str,
-    alignment_plan: str,
-    alignment_config: Optional[dict] = None,
-    spatial_config: Optional[dict] = None,
-    work_scale: float = 0.50,
-    flownet_work_scale: Optional[float] = None,
-    weightnet_work_scale: Optional[float] = None,
-    max_work_dimension: Optional[int] = 2048,
-    tile_size: int = 256,
-    overlap: float = 0.30,
-    ghost_penalty: float = 1.0,
-    ghost_penalty_min: Optional[float] = None,
-    ghost_cutoff: float = 0.05,
-    chroma_sensitivity: float = 6.0,
-    stop_event=None,
-    progress_callback: Optional[Callable[[int, str], None]] = None,
-    **_unused,
-) -> Tuple[RawPipelineResult, float]:
-    """Fuse a DNG burst directly in Bayer CFA space.
-
-    RGB is used only to estimate an alignment transform.  The transform is
-    then applied to same-colour Bayer lattices; no warped RGB value is ever
-    sampled back into the sensor carrier.
-    """
-    normalized_engine = str(weight_engine).strip().lower()
-    normalized_alignment = str(alignment_plan).strip().lower()
-    if normalized_engine not in ("average", "spatial_fusion", "fusionet"):
-        raise NotImplementedError(
-            "RAW Native supports Average, SpatialFusion, and FusionNet."
-        )
-    if normalized_engine == "fusionet" and session is None:
-        raise ValueError("RAW Native FusionNet requires an initialized WeightNet session")
-    if len(image_paths) < 2:
-        raise ValueError("RAW Native fusion requires at least two DNG frames")
-    if any(Path(path).suffix.lower() != ".dng" for path in image_paths):
-        raise ValueError("RAW Native is currently restricted to homogeneous DNG bursts")
-
-    from taichi_vision import taichi_aot
-
-    from ..resident_pipeline import _managed_api
-
-    taichi_aot = _managed_api(taichi_aot)
-    from taichi_vision.taichi_algorithm.compression import RawMosaicFrame, read_dng_aot
-    from taichi_vision.taichi_algorithm.spatial_fusion import (
-        SpatialScratchCache,
-        generate_spatial_weights_taichi,
-        normalize_accumulator_cfa_taichi,
-        postprocess_spatial_weight_taichi,
-        remap_accumulate_cfa_weighted_taichi,
-        resolve_spatial_thresholds,
-    )
-    from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
-        _compute_tile_starts,
-    )
-    if normalized_engine == "fusionet":
-        from ...fusionet_engine.weightnet_inference import (
-            infer_single_support_weight_map,
-        )
-
-    engine = taichi_aot.get_engine()
-    from ..telemetry import PipelineTelemetry
-
-    pipeline_telemetry = PipelineTelemetry(
-        engine,
-        enabled=_unused.get("telemetry"),
-    )
-    pipeline_telemetry.emit("start")
-    reference = RawMosaicFrame.from_dng(read_dng_aot(image_paths[0]), source_id=str(image_paths[0]))
-    geometry = ResidentGeometry.resolve(
-        reference.shape,
-        align_scale=(
-            float(flownet_work_scale)
-            if flownet_work_scale is not None
-            else float(work_scale)
-        ),
-        weight_scale=(
-            float(weightnet_work_scale)
-            if weightnet_work_scale is not None
-            else float(work_scale)
-        ),
-        max_work_dimension=max_work_dimension,
-    )
-    analysis_context = ResidentAnalysisContext(geometry=geometry)
-    print(
-        "[RAW Native] Shared analysis geometry: "
-        f"full={geometry.full_shape} "
-        f"align={geometry.align_shape} "
-        f"weight={geometry.weight_shape} "
-        f"requested=({geometry.requested_align_scale:.3f},"
-        f"{geometry.requested_weight_scale:.3f})"
-    )
-    unsupported_codes = sorted(set(int(value) for value in reference.cfa_pattern).difference({0, 1, 2, 3}))
-    if unsupported_codes:
-        raise ValueError(
-            "RAW Native CFA fusion currently requires DNG RGB CFA codes [0, 1, 2]; "
-            f"got {reference.cfa_pattern}"
-        )
-
-    ref_normalized = reference.normalized_headroom()
-    sum_gpu = engine.upload(np.ascontiguousarray(ref_normalized, dtype=np.float32))
-    weight_gpu = engine.upload(np.ones(reference.shape, dtype=np.float32))
-    zero_flow_gpu = engine.upload(np.zeros((1, 1, 2), dtype=np.float32), is_vector=False)
-    one_weight_gpu = engine.upload(np.ones((1, 1, 3), dtype=np.float32), is_vector=False)
-    del ref_normalized
-
-    aligner = None
-    ref_analysis_gpu = None
-    analysis_params = None
-    ref_spatial_gray_gpu = None
-    spatial_weight_work_gpu = None
-    spatial_weight_post_gpu = None
-    spatial_rows_gpu = None
-    spatial_cols_gpu = None
-    spatial_scratch = None
-    spatial_row_starts = []
-    spatial_col_starts = []
-    spatial_cfg = dict(spatial_config or {})
-    fusion_ref_work_chw = None
-    fusion_weight_transfer_map = None
-    fusion_tile_size = max(256, int(tile_size))
-    fusion_overlap = float(np.clip(overlap, 0.0, 0.95))
-    alpha_total = 0.0
-    needs_analysis = (
-        normalized_alignment not in _NO_ALIGNMENT
-        or normalized_engine in ("spatial_fusion", "fusionet")
-    )
-    if needs_analysis:
-        # Cap the analysis side at 2048 pixels, matching the resident RGB
-        # pipeline's bounded alignment footprint.
-        capped_scale = geometry.effective_align_scale
-        # FusionNet retains reference-derived AutoEnhance, while SpatialFusion
-        # deliberately keeps its reference/support analysis proxies linear.
-        from taichi_vision import taichi_aot
-        from ..resident_pipeline import _managed_api
-        taichi_aot = _managed_api(taichi_aot)
-        from ..resident_pipeline import (
-            analyze_auto_enhance_on_gpu,
-            prepare_analysis_proxy_gpu,
-            resolve_noise_adaptive_penalty,
-        )
-
-        ref_proxy_full_gpu = taichi_aot.demosaic(
-            str(image_paths[0]), method="hamilton", return_gpu=True
-        )
-        try:
-            if normalized_engine == "spatial_fusion":
-                analysis_params = None
-                print(
-                    "[RAW Native] SpatialFusion analysis: linear reference/support "
-                    "proxies; AutoEnhance skipped"
-                )
-            else:
-                analysis_params = analyze_auto_enhance_on_gpu(
-                    ref_proxy_full_gpu, mode="natural"
-                )
-                print(
-                    "[RAW Native] AutoEnhance natural alignment/weight analysis: "
-                    f"Gain={float(analysis_params.get('gain', 1.0)):.2f}x "
-                    "(reference parameters reused)"
-                )
-            ref_analysis_gpu = prepare_analysis_proxy_gpu(
-                ref_proxy_full_gpu,
-                work_shape=geometry.align_shape,
-                analysis_params=analysis_params,
-            )
-            analysis_context.analysis_params = analysis_params or {}
-            analysis_context.reference_proxy = ref_analysis_gpu
-            analysis_context.alignment_reference = ref_analysis_gpu
-            noise_proxy_gpu = ref_analysis_gpu
-            owns_noise_proxy = False
-            if normalized_engine == "fusionet":
-                noise_analysis_params = analyze_auto_enhance_on_gpu(
-                    ref_proxy_full_gpu, mode="analysis"
-                )
-                noise_proxy_gpu = prepare_analysis_proxy_gpu(
-                    ref_proxy_full_gpu,
-                    work_shape=geometry.align_shape,
-                    analysis_params=noise_analysis_params,
-                )
-                owns_noise_proxy = noise_proxy_gpu is not ref_proxy_full_gpu
-            try:
-                ref_noise_score, ghost_penalty = resolve_noise_adaptive_penalty(
-                    noise_proxy_gpu,
-                    ghost_penalty=ghost_penalty,
-                    ghost_penalty_min=ghost_penalty_min,
-                )
-            finally:
-                if owns_noise_proxy and noise_proxy_gpu is not ref_analysis_gpu:
-                    _release(noise_proxy_gpu)
-            analysis_context.noise_score = ref_noise_score
-            print(
-                "[RAW Native] Reference noise estimate source="
-                f"{'autoenhanced_analysis' if normalized_engine == 'fusionet' else 'linear_unenhanced' if normalized_engine == 'spatial_fusion' else 'autoenhanced_natural'}"
-            )
-            print(
-                "[RAW Native] Alignment proxy ready: "
-                f"shape={tuple(ref_analysis_gpu.shape[:2])} CLAHE=off"
-            )
-        finally:
-            _release(ref_proxy_full_gpu)
-        if normalized_alignment not in _NO_ALIGNMENT:
-            from ..resident_pipeline import create_resident_aligner
-            aligner = create_resident_aligner(
-                alignment_plan,
-                ref_analysis_gpu,
-                work_scale=capped_scale,
-                full_shape=reference.shape,
-                alignment_config=alignment_config,
-            )
-
-        if normalized_engine == "spatial_fusion":
-            # SpatialFusion consumes the aligned analysis luminance, while
-            # CFA accumulation remains scalar and phase-locked.
-            ref_spatial_gray_gpu = taichi_aot.cvtColor(
-                ref_analysis_gpu, taichi_aot.COLOR_RGB2GRAY
-            )
-            analysis_context.weight_reference = ref_spatial_gray_gpu
-            spatial_tile = int(
-                spatial_cfg.get(
-                    "similarity_spatial_tile_size",
-                    spatial_cfg.get("tile_size", 12),
-                )
-            )
-            spatial_tile = max(4, spatial_tile)
-            spatial_overlap = float(
-                spatial_cfg.get(
-                    "similarity_spatial_overlap_percent",
-                    spatial_cfg.get("overlap_percent", 0.70),
-                )
-            )
-            spatial_motion = float(
-                spatial_cfg.get(
-                    "similarity_spatial_motion_sensitivity",
-                    spatial_cfg.get("motion_sensitivity", 150.0),
-                )
-            )
-            spatial_noise_offset = float(
-                spatial_cfg.get(
-                    "similarity_spatial_noise_mad_offset_factor",
-                    spatial_cfg.get("noise_offset_factor", 0.15),
-                )
-            )
-            noise_sigma = spatial_cfg.get("noise_sigma")
-            if noise_sigma in (None, 0, 0.0):
-                noise_sigma = (
-                    float(ref_noise_score)
-                    if ref_noise_score is not None
-                    else 0.025
-                )
-            noise_sigma = float(np.clip(noise_sigma, 1.0e-4, 0.99999))
-            spatial_row_starts = _compute_tile_starts(
-                int(ref_spatial_gray_gpu.shape[0]), spatial_tile,
-                overlap=spatial_overlap,
-            )
-            spatial_col_starts = _compute_tile_starts(
-                int(ref_spatial_gray_gpu.shape[1]), spatial_tile,
-                overlap=spatial_overlap,
-            )
-            spatial_rows_gpu = taichi_aot.upload(
-                np.asarray(spatial_row_starts, dtype=np.int32)
-            )
-            spatial_cols_gpu = taichi_aot.upload(
-                np.asarray(spatial_col_starts, dtype=np.int32)
-            )
-            work_shape = tuple(int(v) for v in ref_spatial_gray_gpu.shape[:2])
-            spatial_weight_work_gpu = engine.allocate(work_shape, dtype=np.float32)
-            spatial_weight_post_gpu = engine.allocate(work_shape, dtype=np.float32)
-            spatial_scratch = SpatialScratchCache()
-            spatial_cfg["_tile_size"] = spatial_tile
-            spatial_cfg["_overlap"] = spatial_overlap
-            spatial_cfg["_motion_sensitivity"] = spatial_motion
-            spatial_cfg["_noise_offset_factor"] = spatial_noise_offset
-            spatial_cfg["_noise_sigma"] = noise_sigma
-            print(
-                "[RAW Native][SpatialFusion] weights resident: "
-                f"tile={spatial_tile} overlap={spatial_overlap:.3f} "
-                f"motion={spatial_motion:.3f} noise_sigma={noise_sigma:.6f}"
-            )
-        elif normalized_engine == "fusionet":
-            # Keep the alignment proxy CLAHE-free, matching RGB Linear.
-            # WeightNet receives the same canonical reference tensor and one
-            # cached transfer map as the shared RGB resident path.
-            from ..resident_pipeline import prepare_weightnet_reference_input
-
-            fusion_ref_work_chw, fusion_weight_transfer_map = (
-                prepare_weightnet_reference_input(
-                    ref_analysis_gpu,
-                    work_shape=geometry.weight_shape,
-                    clip_limit=2.0,
-                    tile_grid_size=(8, 8),
-                )
-            )
-            analysis_context.weight_reference = fusion_ref_work_chw
-            analysis_context.clahe_transfer_map = fusion_weight_transfer_map
-            print(
-                "[RAW Native][FusionNet] WeightNet proxy cache ready: "
-                f"shape={tuple(fusion_ref_work_chw.shape)} tile={fusion_tile_size} "
-                f"overlap={fusion_overlap:.3f} CLAHE=off"
-            )
-
-        _release(ref_analysis_gpu)
-        ref_analysis_gpu = None
-
-    total_supports = len(image_paths) - 1
-    try:
-        engine_label = {
-            "spatial_fusion": "SpatialFusion",
-            "fusionet": "FusionNet",
-        }.get(normalized_engine, "Average")
-        print(
-            f"[RAW Native] CFA {engine_label} start: shape={reference.shape} "
-            f"cfa={reference.cfa_pattern} supports={total_supports} "
-            f"backend={getattr(engine, 'arch', 'unknown')}"
-        )
-        pipeline_telemetry.emit("reference_loaded")
-        for index, path in enumerate(image_paths[1:], start=1):
-            if _is_cancelled(stop_event):
-                raise RuntimeError("RAW Native processing cancelled")
-            support = RawMosaicFrame.from_dng(read_dng_aot(path), source_id=str(path))
-            _validate_support(reference, support, path)
-            normalized = support.normalized_headroom()
-            cpu_planes = _phase_planes(support, normalized)
-            del normalized
-            gpu_planes = []
-            transform = None
-            aligned_proxy = None
-            aligned_analysis_gpu = None
-            aligned_weight_gray_gpu = None
-            supp_analysis_gpu = None
-            try:
-                gpu_planes = [engine.upload(plane) for plane in cpu_planes]
-                if normalized_engine in ("spatial_fusion", "fusionet"):
-                    supp_analysis_gpu = _analysis_proxy(
-                        path, width=reference.width, height=reference.height,
-                        scale=capped_scale,
-                        auto_enhance_params=analysis_params,
-                    )
-                if aligner is None and normalized_engine == "average":
-                    remap_accumulate_cfa_weighted_taichi(
-                        gpu_planes, zero_flow_gpu, one_weight_gpu, sum_gpu, weight_gpu,
-                        full_shape=reference.shape,
-                        cfa_pattern=normalize_cfa_rgb_codes(reference.cfa_pattern),
-                        phase_origin=reference.phase_origin,
-                    )
-                elif aligner is not None:
-                    if supp_analysis_gpu is None:
-                        supp_analysis_gpu = _analysis_proxy(
-                            path, width=reference.width, height=reference.height,
-                            scale=capped_scale,
-                            auto_enhance_params=analysis_params,
-                        )
-                    if hasattr(aligner, "take_last_flow"):
-                        aligned_proxy = aligner.align_frame(
-                            supp_analysis_gpu,
-                            analysis_frame_gpu=supp_analysis_gpu,
-                            stop_event=stop_event,
-                            return_gpu=True,
-                            keep_flow=True,
-                        )
-                        transform = aligner.take_last_flow()
-                    else:
-                        aligned_proxy, _ignored, transform = aligner.align_frame(
-                            supp_analysis_gpu,
-                            analysis_frame_gpu=supp_analysis_gpu,
-                            stop_event=stop_event,
-                            return_gpu=True,
-                            return_transform=True,
-                        )
-                if normalized_engine == "spatial_fusion":
-                    if transform is None:
-                        aligned_analysis_gpu = supp_analysis_gpu
-                    else:
-                        analysis_transform = _analysis_transform(
-                            transform,
-                            full_shape=reference.shape,
-                            proxy_shape=ref_spatial_gray_gpu.shape[:2],
-                        )
-                        aligned_analysis_gpu = _warp_analysis_proxy(
-                            supp_analysis_gpu,
-                            analysis_transform,
-                            height=int(ref_spatial_gray_gpu.shape[0]),
-                            width=int(ref_spatial_gray_gpu.shape[1]),
-                        )
-                    aligned_weight_gray_gpu = taichi_aot.cvtColor(
-                        aligned_analysis_gpu, taichi_aot.COLOR_RGB2GRAY
-                    )
-                    generate_spatial_weights_taichi(
-                        current_image=aligned_weight_gray_gpu,
-                        reference_image=ref_spatial_gray_gpu,
-                        weight_map_sum=spatial_weight_work_gpu,
-                        base_window=0,
-                        stability_map=None,
-                        row_starts=spatial_row_starts,
-                        col_starts=spatial_col_starts,
-                        tile_h=spatial_cfg["_tile_size"],
-                        tile_w=spatial_cfg["_tile_size"],
-                        noise_sigma=spatial_cfg["_noise_sigma"],
-                        motion_sensitivity=spatial_cfg["_motion_sensitivity"],
-                        noise_offset_factor=spatial_cfg["_noise_offset_factor"],
-                        equalize_brightness=False,
-                        buffer_provider=None,
-                        scratch_cache=spatial_scratch,
-                        row_starts_gpu=spatial_rows_gpu,
-                        col_starts_gpu=spatial_cols_gpu,
-                    )
-                    postprocess_spatial_weight_taichi(
-                        spatial_weight_work_gpu,
-                        ghost_penalty=float(ghost_penalty),
-                        ghost_cutoff=float(ghost_cutoff),
-                        dst=spatial_weight_post_gpu,
-                    )
-                    # SpatialFusion produces a scalar confidence map.  Keep
-                    # it scalar all the way into the CFA graph; expanding to
-                    # RGB would allocate 3x the weight storage and was never
-                    # needed by the phase-safe accumulator.
-                    spatial_weight_graph_gpu = spatial_weight_post_gpu
-                    if isinstance(transform, np.ndarray):
-                        _accumulate_homography_cfa(
-                            gpu_planes,
-                            transform,
-                            frame=reference,
-                            zero_flow_gpu=zero_flow_gpu,
-                            weight_map_gpu=spatial_weight_graph_gpu,
-                            sum_gpu=sum_gpu,
-                            weight_gpu=weight_gpu,
-                        )
-                    else:
-                        remap_accumulate_cfa_weighted_taichi(
-                            gpu_planes,
-                            transform if transform is not None else zero_flow_gpu,
-                            spatial_weight_graph_gpu,
-                            sum_gpu,
-                            weight_gpu,
-                            full_shape=reference.shape,
-                            cfa_pattern=normalize_cfa_rgb_codes(reference.cfa_pattern),
-                            phase_origin=reference.phase_origin,
-                        )
-                    print(
-                        f"[RAW Native][SpatialFusion] Frame {index}: "
-                        "weight map -> CFA accumulator"
-                    )
-                elif normalized_engine == "fusionet":
-                    if transform is None:
-                        aligned_analysis_gpu = supp_analysis_gpu
-                    else:
-                        analysis_transform = _analysis_transform(
-                            transform,
-                            full_shape=reference.shape,
-                            proxy_shape=(
-                                int(fusion_ref_work_chw.shape[1]),
-                                int(fusion_ref_work_chw.shape[2]),
-                            ),
-                        )
-                        aligned_analysis_gpu = _warp_analysis_proxy(
-                            supp_analysis_gpu,
-                            analysis_transform,
-                            height=int(fusion_ref_work_chw.shape[1]),
-                            width=int(fusion_ref_work_chw.shape[2]),
-                        )
-                    from ..resident_pipeline import prepare_weightnet_support_input
-
-                    supp_work_chw = prepare_weightnet_support_input(
-                        aligned_analysis_gpu,
-                        fusion_weight_transfer_map,
-                    )
-                    weight_map_chw, alpha_mean = infer_single_support_weight_map(
-                        session,
-                        fusion_ref_work_chw,
-                        supp_work_chw,
-                        tile_size=fusion_tile_size,
-                        overlap=fusion_overlap,
-                        ghost_penalty=float(ghost_penalty),
-                        ghost_cutoff=float(ghost_cutoff),
-                        chroma_sensitivity=float(chroma_sensitivity),
-                        stop_event=stop_event,
-                    )
-                    alpha_total += float(alpha_mean)
-                    weight_map_gpu = engine.upload(
-                        np.ascontiguousarray(
-                            np.transpose(weight_map_chw, (1, 2, 0)),
-                            dtype=np.float32,
-                        ),
-                        is_vector=False,
-                    )
-                    try:
-                        if isinstance(transform, np.ndarray):
-                            _accumulate_homography_cfa(
-                                gpu_planes,
-                                transform,
-                                frame=reference,
-                                zero_flow_gpu=zero_flow_gpu,
-                                weight_map_gpu=weight_map_gpu,
-                                sum_gpu=sum_gpu,
-                                weight_gpu=weight_gpu,
-                            )
-                        else:
-                            remap_accumulate_cfa_weighted_taichi(
-                                gpu_planes,
-                                transform if transform is not None else zero_flow_gpu,
-                                weight_map_gpu,
-                                sum_gpu,
-                                weight_gpu,
-                                full_shape=reference.shape,
-                                cfa_pattern=normalize_cfa_rgb_codes(reference.cfa_pattern),
-                                phase_origin=reference.phase_origin,
-                            )
-                    finally:
-                        _release(weight_map_gpu)
-                    del supp_work_chw, weight_map_chw
-                    print(
-                        f"[RAW Native][FusionNet] Frame {index}: "
-                        f"WeightNet alpha={float(alpha_mean):.4f} -> CFA accumulator"
-                    )
-                elif aligner is not None and isinstance(transform, np.ndarray):
-                        print(
-                            f"[RAW Native] Alignment {alignment_plan}: "
-                            "feature homography -> phase-safe CFA warp"
-                        )
-                        _accumulate_homography_cfa(
-                            gpu_planes, transform, frame=reference,
-                            zero_flow_gpu=zero_flow_gpu, weight_map_gpu=one_weight_gpu,
-                            sum_gpu=sum_gpu, weight_gpu=weight_gpu,
-                        )
-                elif aligner is not None and transform is None:
-                        # A feature matcher may reject an unreliable H.  The
-                        # established RGB route also keeps that support as an
-                        # identity warp, so preserve the same fail-closed rule.
-                        print(
-                            f"[RAW Native] Alignment {alignment_plan}: "
-                            "no trusted feature transform; identity CFA warp"
-                        )
-                        remap_accumulate_cfa_weighted_taichi(
-                            gpu_planes, zero_flow_gpu, one_weight_gpu, sum_gpu, weight_gpu,
-                            full_shape=reference.shape,
-                            cfa_pattern=normalize_cfa_rgb_codes(reference.cfa_pattern),
-                            phase_origin=reference.phase_origin,
-                        )
-                elif aligner is not None:
-                        print(
-                            f"[RAW Native] Alignment {alignment_plan}: "
-                            f"dense flow {tuple(transform.shape)} -> CFA remap"
-                        )
-                        remap_accumulate_cfa_weighted_taichi(
-                            gpu_planes, transform, one_weight_gpu, sum_gpu, weight_gpu,
-                            full_shape=reference.shape,
-                            cfa_pattern=normalize_cfa_rgb_codes(reference.cfa_pattern),
-                            phase_origin=reference.phase_origin,
-                        )
-                engine.sync()
-            finally:
-                if aligned_proxy is not None and aligned_proxy is not supp_analysis_gpu:
-                    _release(aligned_proxy)
-                if aligned_analysis_gpu is not None and aligned_analysis_gpu is not supp_analysis_gpu:
-                    _release(aligned_analysis_gpu)
-                if aligned_weight_gray_gpu is not None:
-                    _release(aligned_weight_gray_gpu)
-                _release(supp_analysis_gpu)
-                if transform is not None and not isinstance(transform, np.ndarray):
-                    _release(transform)
-                for plane in gpu_planes:
-                    _release(plane)
-
-            if progress_callback:
-                progress_callback(
-                    int(25 + (65 * index / total_supports)),
-                    ui=f"RAW Native CFA {index}/{total_supports}",
-                    console=f"RAW Native CFA accumulated {index}/{total_supports}",
-                )
-            print(f"[RAW Native] Frame {index}/{total_supports} CFA accumulated ({Path(path).name})")
-            pipeline_telemetry.emit(f"blend_{index}")
-
-        normalize_accumulator_cfa_taichi(sum_gpu, weight_gpu)
-        engine.sync()
-        preview_gpu = None
-        try:
-            preview_gpu = _preview_from_mosaic(
-                sum_gpu,
-                reference,
-                image_paths[0],
-                return_gpu=True,
-            )
-            fused_mosaic = np.empty(sum_gpu.shape, dtype=np.float32)
-            sum_gpu.to_numpy(out=fused_mosaic)
-            preview = preview_gpu.to_numpy()
-        finally:
-            _release(preview_gpu)
-    finally:
-        if aligner is not None:
-            try:
-                aligner.close()
-            except Exception:
-                pass
-        _release(ref_analysis_gpu)
-        _release(ref_spatial_gray_gpu)
-        if spatial_scratch is not None:
-            try:
-                spatial_scratch.clear()
-            except Exception:
-                pass
-        _release(spatial_weight_work_gpu)
-        _release(spatial_weight_post_gpu)
-        _release(spatial_rows_gpu)
-        _release(spatial_cols_gpu)
-        _release(zero_flow_gpu)
-        _release(one_weight_gpu)
-        _release(weight_gpu)
-        _release(sum_gpu)
-        if fusion_ref_work_chw is not None:
-            del fusion_ref_work_chw
-        if fusion_weight_transfer_map is not None:
-            del fusion_weight_transfer_map
-
-    result_mean_alpha = (
-        alpha_total / max(1, total_supports)
-        if normalized_engine == "fusionet"
-        else 1.0
-    )
-    result = RawPipelineResult(
-        normalized_mosaic=fused_mosaic,
-        preview_rgb=np.ascontiguousarray(preview, dtype=np.float32),
-        reference_frame=reference,
-        source_paths=tuple(str(path) for path in image_paths),
-        report={
-            "mean_alpha": result_mean_alpha,
-            "supports": total_supports,
-            "mode": (
-                f"cfa_{'fusionet' if normalized_engine == 'fusionet' else ('spatial_fusion' if normalized_engine == 'spatial_fusion' else 'average')}_"
-                f"{normalized_alignment or 'no_alignment'}"
-            ),
-        },
-    )
-    print(
-        f"[RAW Native] CFA {'FusionNet' if normalized_engine == 'fusionet' else ('SpatialFusion' if normalized_engine == 'spatial_fusion' else 'Average')} "
-        "complete: one final Hamilton preview demosaic"
-    )
-    pipeline_telemetry.emit("complete")
-    return result, float(result_mean_alpha)
-
-
 class _RawDngHostPayload:
     """Queue-owned RAW bytes that can be dropped immediately after decoding."""
 
@@ -1066,7 +408,6 @@ class _RawDngHostPayload:
 
     def close(self) -> None:
         self._data = None
-
 
 class RawPipelineProvider:
     """RAW Native carrier boundary used by the resident dispatcher.
@@ -1415,12 +756,10 @@ class RawPipelineProvider:
         self._engine = None
         return None
 
-
 def run_raw_resident_pipeline(image_paths, **kwargs):
     """Run the canonical RAW path through the shared resident executor."""
     from ..resident_pipeline import _run_shared_raw_provider_pipeline
 
     return _run_shared_raw_provider_pipeline(image_paths, **kwargs)
-
 
 __all__ = ["RawPipelineProvider", "run_raw_resident_pipeline"]
