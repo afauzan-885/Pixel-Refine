@@ -106,6 +106,9 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         archive_member_hashes,
         configured_runtime_abi,
     )
+    from taichi_vision.taichi_algorithm.denoising.resident_capabilities import (
+        capability_identity,
+    )
 
     target_identity = detect_target(backend=backend).as_dict()
     runtime_abi = configured_runtime_abi(RUNTIME_ABI_VERSION)
@@ -324,10 +327,7 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         "tile_step_cached_graph": tile_step_cached_graph_name,
         "model_sha256": hashlib.sha256(model_bytes).hexdigest(),
         "target_identity": target_identity,
-        "device_capabilities": {
-            "status": "unknown",
-            "reason": "compiler path has no validated target feature identity",
-        },
+        "device_capabilities": capability_identity(backend),
         "runtime_abi": runtime_abi,
         "taichi_version": str(ti.__version__),
         "weights_sha256": hashlib.sha256(weights.getvalue()).hexdigest(),
@@ -372,6 +372,9 @@ class ResidentONNXGraph:
             read_resident_archive,
             validate_resident_metadata,
         )
+        from taichi_vision.taichi_algorithm.denoising.resident_capabilities import (
+            runtime_capabilities,
+        )
         import taichi as ti
 
         self.metadata, weights, member_hashes = read_resident_archive(self.path)
@@ -388,7 +391,9 @@ class ResidentONNXGraph:
             artifact_members=member_hashes,
             weights_sha256=hashlib.sha256(weights).hexdigest(),
             runtime_taichi_version=str(getattr(ti, "__version__", "")),
-            runtime_capabilities=None,
+            runtime_capabilities=runtime_capabilities(
+                str(engine.arch).lower(), getattr(engine, "gpu_name", "")
+            ),
         )
         self.module = engine.load(str(self.path))
         try:

@@ -699,7 +699,7 @@ def _run_shared_raw_provider_pipeline(
                     )
                     weight_gpu = spatial_weight_work_gpu
                     alpha = 1.0
-                    if aligned_weight_rgb is not support_analysis:
+                    if aligned_weight_rgb is not support_analysis and aligned_weight_rgb is not _demosaic_scratch and aligned_weight_rgb is not _work_scratch:
                         _facade()._destroy_work_item(aligned_weight_rgb)
                     aligned_weight_rgb = None
                     if support_analysis is not None:
@@ -1026,7 +1026,8 @@ def _run_shared_raw_provider_pipeline(
                         if aligned_analysis_weight is not None:
                             if support_analysis is aligned_analysis_weight:
                                 support_analysis = None
-                            _facade()._destroy_work_item(aligned_analysis_weight)
+                            if aligned_analysis_weight is not _demosaic_scratch and aligned_analysis_weight is not _work_scratch:
+                                _facade()._destroy_work_item(aligned_analysis_weight)
                             aligned_analysis_weight = None
                         del support_chw, weight_chw
                 else:
@@ -1056,7 +1057,8 @@ def _run_shared_raw_provider_pipeline(
                         _facade()._destroy_work_item(support_analysis)
                     support_analysis = None
                 if aligned_analysis_weight is not None:
-                    _facade()._destroy_work_item(aligned_analysis_weight)
+                    if aligned_analysis_weight is not _demosaic_scratch and aligned_analysis_weight is not _work_scratch:
+                        _facade()._destroy_work_item(aligned_analysis_weight)
                     aligned_analysis_weight = None
 
                 if not deep_analysis_accumulated:

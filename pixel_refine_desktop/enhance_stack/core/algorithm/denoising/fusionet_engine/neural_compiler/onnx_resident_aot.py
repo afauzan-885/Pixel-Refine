@@ -57,6 +57,36 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         enable_weightnet_phase_gate_concat23_fusion=True,
         enable_weightnet_fused_tile_statistics=True,
     )
+    io_names = set(plan.inputs) | set(plan.outputs)
+    declared_io = {}
+    for value_info in (*model.graph.input, *model.graph.output):
+        if value_info.name not in io_names:
+            continue
+        tensor_type = value_info.type.tensor_type
+        if tensor_type.elem_type != onnx.TensorProto.FLOAT:
+            raise ValueError(
+                f"Resident ONNX supports float32 IO only: {value_info.name}"
+            )
+        dimensions = []
+        for dimension in tensor_type.shape.dim:
+            if not dimension.HasField("dim_value") or int(dimension.dim_value) <= 0:
+                raise ValueError(
+                    f"Resident ONNX requires positive static IO dimensions: {value_info.name}"
+                )
+            dimensions.append(int(dimension.dim_value))
+        declared_io[value_info.name] = tuple(dimensions)
+    if io_names - declared_io.keys():
+        raise ValueError("Resident ONNX model is missing declared input/output metadata")
+    for name in io_names:
+        if tuple(plan.shapes.get(name, ())) != declared_io[name]:
+            raise ValueError(f"Resident ONNX planned IO shape mismatch: {name}")
+    opsets = {}
+    for item in model.opset_import:
+        domain = item.domain or "ai.onnx"
+        version = int(item.version)
+        if not domain.strip() or version <= 0 or domain in opsets:
+            raise ValueError("Resident ONNX model has invalid or duplicate opset metadata")
+        opsets[domain] = version
     arch = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan,
             "opengl": ti.opengl}[backend]
     if backend == "cpu":
@@ -67,6 +97,18 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         ti.init(arch=arch, offline_cache=False)
     if ti.lang.impl.current_cfg().arch != arch:
         raise RuntimeError(f"Compiler did not initialize requested backend {backend}")
+    from taichi_vision.taichi_aot.artifact_targets import detect_target
+    from taichi_vision.taichi_aot.tcm_contract import RUNTIME_ABI_VERSION
+    from taichi_vision.taichi_algorithm.denoising.resident_manifest import (
+        archive_member_hashes,
+        configured_runtime_abi,
+    )
+    from taichi_vision.taichi_algorithm.denoising.resident_capabilities import (
+        capability_identity,
+    )
+
+    target_identity = detect_target(backend=backend).as_dict()
+    runtime_abi = configured_runtime_abi(RUNTIME_ABI_VERSION)
     plan.backend = backend
     bindings, sizes, symbols = {}, {}, {}
 
@@ -265,11 +307,30 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         archive_module(module, output_path)
     weights = io.BytesIO()
     np.savez(weights, **constants)
+    artifact_members_sha256 = archive_member_hashes(
+        output_path, excluded={"resident_onnx.json", "resident_weights.npz"}
+    )
+    io_schema = {
+        name: {
+            "shape": list(plan.shapes[name]),
+            "dtype": "float32",
+            "layout": "flat-contiguous",
+        }
+        for name in (*plan.inputs, *plan.outputs)
+    }
     metadata = {
-        "format": 1, "backend": backend, "graph": GRAPH_NAME, "patch_tools": patch_tools,
+        "format": 2, "backend": backend, "graph": GRAPH_NAME, "patch_tools": patch_tools,
         "tile_step_graph": tile_step_graph_name,
         "tile_step_cached_graph": tile_step_cached_graph_name,
         "model_sha256": hashlib.sha256(model_bytes).hexdigest(),
+        "target_identity": target_identity,
+        "device_capabilities": capability_identity(backend),
+        "runtime_abi": runtime_abi,
+        "taichi_version": str(ti.__version__),
+        "weights_sha256": hashlib.sha256(weights.getvalue()).hexdigest(),
+        "opsets": opsets,
+        "io_schema": io_schema,
+        "artifact_members_sha256": artifact_members_sha256,
         "bindings": bindings, "sizes": sizes, "arguments": sorted(used),
         "constants": sorted(constants), "inputs": plan.inputs,
         "outputs": plan.outputs, "shapes": {k: list(v) for k, v in plan.shapes.items()},
