@@ -60,6 +60,36 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         enable_weightnet_phase_gate_concat23_fusion=True,
         enable_weightnet_fused_tile_statistics=True,
     )
+    io_names = set(plan.inputs) | set(plan.outputs)
+    declared_io = {}
+    for value_info in (*model.graph.input, *model.graph.output):
+        if value_info.name not in io_names:
+            continue
+        tensor_type = value_info.type.tensor_type
+        if tensor_type.elem_type != onnx.TensorProto.FLOAT:
+            raise ValueError(
+                f"Resident ONNX supports float32 IO only: {value_info.name}"
+            )
+        dimensions = []
+        for dimension in tensor_type.shape.dim:
+            if not dimension.HasField("dim_value") or int(dimension.dim_value) <= 0:
+                raise ValueError(
+                    f"Resident ONNX requires positive static IO dimensions: {value_info.name}"
+                )
+            dimensions.append(int(dimension.dim_value))
+        declared_io[value_info.name] = tuple(dimensions)
+    if io_names - declared_io.keys():
+        raise ValueError("Resident ONNX model is missing declared input/output metadata")
+    for name in io_names:
+        if tuple(plan.shapes.get(name, ())) != declared_io[name]:
+            raise ValueError(f"Resident ONNX planned IO shape mismatch: {name}")
+    opsets = {}
+    for item in model.opset_import:
+        domain = item.domain or "ai.onnx"
+        version = int(item.version)
+        if not domain.strip() or version <= 0 or domain in opsets:
+            raise ValueError("Resident ONNX model has invalid or duplicate opset metadata")
+        opsets[domain] = version
     arch = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan,
             "opengl": ti.opengl}[backend]
     if backend == "cpu":
@@ -72,8 +102,13 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         raise RuntimeError(f"Compiler did not initialize requested backend {backend}")
     from taichi_vision.taichi_aot.artifact_targets import detect_target
     from taichi_vision.taichi_aot.tcm_contract import RUNTIME_ABI_VERSION
+    from taichi_vision.taichi_algorithm.denoising.resident_manifest import (
+        archive_member_hashes,
+        configured_runtime_abi,
+    )
 
     target_identity = detect_target(backend=backend).as_dict()
+    runtime_abi = configured_runtime_abi(RUNTIME_ABI_VERSION)
     plan.backend = backend
     bindings, sizes, symbols = {}, {}, {}
 
@@ -272,12 +307,9 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         archive_module(module, output_path)
     weights = io.BytesIO()
     np.savez(weights, **constants)
-    with zipfile.ZipFile(output_path) as archive:
-        artifact_members_sha256 = {
-            name: hashlib.sha256(archive.read(name)).hexdigest()
-            for name in archive.namelist()
-            if name not in {"resident_onnx.json", "resident_weights.npz"}
-        }
+    artifact_members_sha256 = archive_member_hashes(
+        output_path, excluded={"resident_onnx.json", "resident_weights.npz"}
+    )
     io_schema = {
         name: {
             "shape": list(plan.shapes[name]),
@@ -292,11 +324,14 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         "tile_step_cached_graph": tile_step_cached_graph_name,
         "model_sha256": hashlib.sha256(model_bytes).hexdigest(),
         "target_identity": target_identity,
-        "device_capabilities": "not-recorded-at-compile-time",
-        "runtime_abi": RUNTIME_ABI_VERSION,
+        "device_capabilities": {
+            "status": "unknown",
+            "reason": "compiler path has no validated target feature identity",
+        },
+        "runtime_abi": runtime_abi,
         "taichi_version": str(ti.__version__),
         "weights_sha256": hashlib.sha256(weights.getvalue()).hexdigest(),
-        "opsets": {item.domain or "ai.onnx": int(item.version) for item in model.opset_import},
+        "opsets": opsets,
         "io_schema": io_schema,
         "artifact_members_sha256": artifact_members_sha256,
         "bindings": bindings, "sizes": sizes, "arguments": sorted(used),
@@ -330,22 +365,16 @@ class ResidentONNXGraph:
         self._view_thread = threading.get_ident()
         self._invocations = SerialDeviceInvocations(self._view_guard, self._view_sync, engine._lock)
         self.buffers = {}
-        with zipfile.ZipFile(self.path) as archive:
-            self.metadata = json.loads(archive.read("resident_onnx.json"))
-            weights = archive.read("resident_weights.npz")
-            member_hashes = {
-                name: hashlib.sha256(archive.read(name)).hexdigest()
-                for name in archive.namelist()
-                if name not in {"resident_onnx.json", "resident_weights.npz"}
-            }
-            if len(archive.namelist()) != len(set(archive.namelist())):
-                raise RuntimeError("Resident ONNX artifact contains duplicate ZIP members")
         from taichi_vision.taichi_aot.artifact_targets import detect_target
         from taichi_vision.taichi_aot.tcm_contract import RUNTIME_ABI_VERSION
         from taichi_vision.taichi_algorithm.denoising.resident_manifest import (
+            configured_runtime_abi,
+            read_resident_archive,
             validate_resident_metadata,
         )
+        import taichi as ti
 
+        self.metadata, weights, member_hashes = read_resident_archive(self.path)
         target = detect_target(
             backend=str(engine.arch).lower(), device=getattr(engine, "gpu_name", "")
         ).as_dict()
@@ -355,9 +384,11 @@ class ResidentONNXGraph:
             target_identity=target,
             model_sha256=model_sha256,
             artifact_only=artifact_only,
-            runtime_abi=RUNTIME_ABI_VERSION,
+            runtime_abi=configured_runtime_abi(RUNTIME_ABI_VERSION),
             artifact_members=member_hashes,
             weights_sha256=hashlib.sha256(weights).hexdigest(),
+            runtime_taichi_version=str(getattr(ti, "__version__", "")),
+            runtime_capabilities=None,
         )
         self.module = engine.load(str(self.path))
         try:

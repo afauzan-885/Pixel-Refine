@@ -68,7 +68,10 @@ def test_resident_patch_stitch_matches_existing_helper_and_never_downloads(tmp_p
     model.ir_version = 10
     source = model.SerializeToString()
     artifact = compile_resident_onnx(source, tmp_path / "patches.tcm", "cpu", patch_tools=True)
-    executor = ResidentWeightNet(artifact)
+    import hashlib
+    executor = ResidentWeightNet(
+        artifact, model_sha256=hashlib.sha256(source).hexdigest()
+    )
     rng = np.random.default_rng(4)
     reference = rng.uniform(0, 1, (1, 14, 14)).astype(np.float32)
     support = rng.uniform(0, 1, reference.shape).astype(np.float32)

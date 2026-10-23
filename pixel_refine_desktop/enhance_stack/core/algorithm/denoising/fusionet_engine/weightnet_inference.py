@@ -364,7 +364,8 @@ def load_weightnet_onnx(
     # Direct TCM file path loading
     if source.is_file() and source.suffix.lower() == ".tcm":
         from taichi_vision.taichi_algorithm.denoising.resident_weightnet import ResidentWeightNet
-        session = ResidentWeightNet(source)
+        from taichi_vision.taichi_algorithm.denoising.weightnet_artifact_identity import resident_weightnet_load_kwargs
+        session = ResidentWeightNet(source, **resident_weightnet_load_kwargs())
         session.max_safety = float(max_safety)
         return session
 
@@ -373,9 +374,19 @@ def load_weightnet_onnx(
     if norm_runtime in ("auto", "default", "", "taichi_aot", "taichi_cuda"):
         from taichi_vision import taichi_aot
         from taichi_vision.taichi_algorithm.denoising.resident_weightnet import ResidentWeightNet
+        from taichi_vision.taichi_algorithm.denoising.weightnet_artifact_identity import (
+            resident_weightnet_load_kwargs,
+            selected_weightnet_model_bytes,
+        )
         from taichi_vision.taichi_aot import neural
 
         backend = taichi_aot.get_backend_name()
+        search_dirs = [
+            source.parent if source.is_file() else source,
+            Path("database/Learning_Model/nanoFlow"),
+            Path("database/Learning_Model/weightNet"),
+            Path("pixel_refine_desktop/ui/data/models"),
+        ]
         # 1. First priority: direct prebaked TCM from aot_assets/neural
         custom_artifact = os.environ.get("PIXEL_REFINE_WEIGHTNET_AOT_ARTIFACT", "")
         if custom_artifact and Path(custom_artifact).is_file():
@@ -388,18 +399,17 @@ def load_weightnet_onnx(
                 artifact = neural.find_prebaked_tcm(f"weightnet_{patch_size}", backend)
 
         if artifact is not None and Path(artifact).is_file():
-            session = ResidentWeightNet(Path(artifact))
+            model_bytes = selected_weightnet_model_bytes(
+                source, patch_size, search_dirs
+            )
+            session = ResidentWeightNet(
+                Path(artifact), **resident_weightnet_load_kwargs(model_bytes)
+            )
             print(f"[WeightNet AOT] backend={session.engine.arch} patch={patch_size} model={Path(artifact).name} host_patch_readback=0")
             session.max_safety = float(max_safety)
             return session
 
         # 2. If TCM not pre-baked, resolve or compile from bundle
-        search_dirs = [
-            source.parent if source.is_file() else source,
-            Path("database/Learning_Model/nanoFlow"),
-            Path("database/Learning_Model/weightNet"),
-            Path("pixel_refine_desktop/ui/data/models"),
-        ]
         if source.is_file() and source.suffix.lower() == ".bundle":
             bundle = source
         else:
@@ -418,7 +428,9 @@ def load_weightnet_onnx(
                         model_name=f"weightnet_{patch_size}",
                         patch_tools=True,
                     )
-                    session = ResidentWeightNet(artifact)
+                    session = ResidentWeightNet(
+                        artifact, **resident_weightnet_load_kwargs(model_bytes)
+                    )
                     session.max_safety = float(max_safety)
                     return session
 
@@ -451,7 +463,6 @@ def load_weightnet_onnx(
                 raise ValueError(f"Native WeightNet profile {member} is missing from {bundle}")
             model_bytes = archive.read(member)
             if str(runtime).strip().lower() == "taichi_aot":
-                import hashlib
                 from taichi_vision import taichi_aot
                 from taichi_vision.taichi_aot import neural
                 from taichi_vision.taichi_algorithm.denoising.resident_weightnet import ResidentWeightNet
@@ -468,7 +479,9 @@ def load_weightnet_onnx(
                     )
                 if not artifact.is_file():
                     raise FileNotFoundError(f"Pre-baked WeightNet artifact is missing for {backend}: {artifact}")
-                session = ResidentWeightNet(artifact, model_sha256=hashlib.sha256(model_bytes).hexdigest())
+                session = ResidentWeightNet(
+                    artifact, **resident_weightnet_load_kwargs(model_bytes)
+                )
                 print(f"[WeightNet AOT] backend={session.engine.arch} patch={patch_size} model={artifact.name} host_patch_readback=0")
                 session.max_safety = float(max_safety)
                 return session
