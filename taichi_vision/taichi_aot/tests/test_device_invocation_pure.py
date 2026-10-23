@@ -283,6 +283,26 @@ class RunnerTests(unittest.TestCase):
         result = second.run_leased({"x": lease.view("y")})
         result.release(); lease.release()
 
+    def test_resident_weightnet_scalar_alpha_and_logical_weight_map(self):
+        # Match the actual WeightNet-shaped source fixture in
+        # test_onnx_resident_aot.py: rank-4 map, scalar ReduceMean alpha.
+        runner = self.resident()
+        shape = [1, 1, 4, 4]
+        runner.metadata = {"inputs": ["ref_img", "support_img"], "outputs": ["weight_map", "alpha"],
+            "shapes": {"ref_img": shape, "support_img": shape, "weight_map": shape, "alpha": []},
+            "bindings": {name:name for name in ("ref_img", "support_img", "weight_map", "alpha")},
+            "constants": [], "graph": "graph"}
+        runner.buffers = {"weight_map":Buffer(runner.engine, 2, (16,)), "alpha":Buffer(runner.engine, 3, (1,))}
+        views = {name:runner.device_view(Buffer(runner.engine, handle, (16,)), shape=shape)
+                 for name,handle in (("ref_img", 4), ("support_img", 5))}
+        with runner.run_leased(views) as lease:
+            descriptors = lease.descriptors
+            self.assertEqual(descriptors["alpha"].shape, ())
+            self.assertEqual(descriptors["alpha"].byte_range, (0,4))
+            self.assertEqual(descriptors["weight_map"].shape, (1,1,4,4))
+            self.assertEqual(descriptors["weight_map"].byte_range, (0,64))
+            lease.consume(lambda values: self.assertEqual(values["alpha"].shape, (1,)))
+
     def test_real_resident_rejects_stale_offsets_owner_and_wrong_thread(self):
         runner = self.resident(); buffer = Buffer(runner.engine, ctypes.c_void_p(1))
         with self.assertRaises(ValueError): runner.device_view(buffer, offset_bytes=4)
