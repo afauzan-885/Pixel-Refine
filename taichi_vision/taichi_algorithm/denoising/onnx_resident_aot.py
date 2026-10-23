@@ -343,11 +343,13 @@ class ResidentONNXGraph:
         engine._assert_native_context_owner("resident leased invocation")
 
     def _view_sync(self):
-        self._view_guard()
-        self.engine.sync()
-        error = self.engine.last_error()
-        if error:
-            raise RuntimeError(f"Resident invocation completion failed: {error}")
+        from taichi_vision.taichi_aot.engine import _raise_native_engine_error
+        with self.engine._lock:
+            self._view_guard()
+            self.engine.sync()
+            # Use the owner's existing read/consume/raise policy. Never clear
+            # before sync: a fresh completion failure must keep the slot held.
+            _raise_native_engine_error(self.engine.runtime, "Resident invocation completion")
 
     def device_view(self, buffer, *, shape=None, offset_bytes=0, strides_bytes=()):
         from taichi_vision.taichi_aot.engine import TaichiGPUBuffer

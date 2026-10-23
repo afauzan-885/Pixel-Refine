@@ -3,6 +3,7 @@
 Run this file directly with -B. No Taichi/engine package import, JIT or native
 initialization occurs; module import names are temporarily backed by fakes.
 """
+import ast
 import ctypes
 import importlib.util
 from pathlib import Path
@@ -196,13 +197,40 @@ class Buffer:
 
 
 class Engine:
+    _instances = {}
+    _next_runtime = 17
+
     def __init__(self):
         self._lock = threading.RLock()
-        self.runtime, self._generation, self.arch, self.device_id = 17, 1, "vulkan", 0
+        self.runtime = Engine._next_runtime
+        Engine._next_runtime += 1
+        Engine._instances[self.runtime] = self
+        self._generation, self.arch, self.device_id = 1, "vulkan", 0
         self._destroyed, self.events = False, []
+        self.sticky_error, self.sync_errors, self.clear_count = "", [], 0
     def _assert_native_context_owner(self, op): self.events.append("guard")
-    def sync(self): self.events.append("sync")
-    def last_error(self): return ""
+    def sync(self):
+        self.events.append("sync")
+        # Like the owner channel: a successful wait alone does not guarantee
+        # an older reported diagnostic has been consumed.
+        if self.sync_errors:
+            error = self.sync_errors.pop(0)
+            if error:
+                self.sticky_error = error
+    def last_error(self): return self.sticky_error
+    def clear_last_error(self):
+        self.clear_count += 1
+        self.events.append("clear_error")
+        self.sticky_error = ""
+
+
+class StickyErrorLibrary:
+    """Only the native error channel; no real ctypes/native library loaded."""
+    def get_last_engine_error(self, runtime):
+        return Engine._instances[runtime].last_error().encode("utf-8")
+
+    def clear_last_engine_error(self, runtime):
+        Engine._instances[runtime].clear_last_error()
 
 
 class RunnerTests(unittest.TestCase):
@@ -223,6 +251,20 @@ class RunnerTests(unittest.TestCase):
         fusions = ModuleType("fusions")
         fusions._fused_mul_clip_kernel = fusions._weightnet_gate_flat_kernel = lambda *a: None
         engine = ModuleType("engine"); engine.TaichiGPUBuffer = Buffer
+        # Execute only these exact pure function definitions from production
+        # source. Do not import engine.py, its imports, or runtime initialization.
+        # No compile()/py_compile/build/JIT/native operation is used.
+        source = (ROOT / "taichi_aot/engine.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(source)
+        names = {"_get_native_engine_error", "_clear_native_engine_error", "_raise_native_engine_error"}
+        engine._LIB = StickyErrorLibrary()
+        engine._EXPERIMENT_MODE = False
+        engine.recorded_errors = []
+        engine._record_error = lambda: engine.recorded_errors.append("native_error")
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name in names:
+                exec(ast.get_source_segment(source, node), engine.__dict__)
+        cls.error_module = engine
         cls.mapping = {
             "taichi": fake,
             "taichi_vision.taichi_aot.device_invocation": contract,
@@ -330,6 +372,69 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(runner.engine.events, previous)
         runner.engine._destroyed = False
         lease.release()
+
+    def test_resident_sticky_release_consumes_original_error_and_keeps_upstream_pin(self):
+        upstream = self.resident()
+        downstream = self.resident(upstream.engine, handle=3)
+        root = upstream.run_leased({"x":upstream.device_view(Buffer(upstream.engine, 1))})
+        result = downstream.run_leased({"x":root.view("y")})
+        root.release()
+        engine = upstream.engine
+        engine.sticky_error = "transient completion: original detail \u03b1"
+        with self.assertRaisesRegex(RuntimeError, "transient completion: original detail \u03b1"):
+            result.release()
+        self.assertEqual(engine.clear_count, 1)
+        self.assertEqual(engine.last_error(), "")
+        self.assertIsNotNone(upstream._invocations.slot.token)
+        self.assertIsNotNone(downstream._invocations.slot.token)
+        result.release()
+        self.assertIsNone(upstream._invocations.slot.token)
+        self.assertIsNone(downstream._invocations.slot.token)
+
+    def test_resident_fresh_repeated_sync_errors_never_release_lease_early(self):
+        runner = self.resident()
+        result = runner.run_leased({"x":runner.device_view(Buffer(runner.engine,1))})
+        runner.engine.sync_errors = ["fresh wait failure", "fresh wait failure"]
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, "fresh wait failure"): result.release()
+            self.assertIsNotNone(runner._invocations.slot.token)
+            self.assertEqual(runner.engine.last_error(), "")
+        self.assertEqual(runner.engine.clear_count, 2)
+        result.release()
+        self.assertIsNone(runner._invocations.slot.token)
+
+    def test_resident_failed_submission_drain_consumes_sticky_and_fresh_errors(self):
+        upstream = self.resident()
+        runner = self.resident(upstream.engine, handle=3)
+        root = upstream.run_leased({"x":upstream.device_view(Buffer(upstream.engine,1))})
+        def dispatch(*args, **kwargs):
+            raise ValueError("dispatch aborted")
+        runner.module.run = dispatch
+        runner.engine.sync_errors = ["initial completion failure"]
+        with self.assertRaisesRegex(RuntimeError, "initial completion failure"):
+            runner.run_leased({"x":root.view("y")})
+        root.release()  # Root pin alone remains until failed invocation drains.
+        token = runner._invocations.slot.token
+        self.assertTrue(token.orphaned_submission)
+        self.assertIsNotNone(upstream._invocations.slot.token)
+        runner.engine.sync_errors = ["fresh drain failure", "fresh drain failure"]
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, "fresh drain failure"): runner.drain_failed_invocation()
+            self.assertIs(runner._invocations.slot.token, token)
+            self.assertIsNotNone(upstream._invocations.slot.token)
+            self.assertEqual(runner.engine.last_error(), "")
+        runner.drain_failed_invocation()
+        self.assertIsNone(runner._invocations.slot.token)
+        self.assertIsNone(upstream._invocations.slot.token)
+
+    def test_real_owner_raise_helper_has_no_observed_error_ignore_return(self):
+        engine = Engine()
+        for message in ("captured old failure", "newly observed fresh failure"):
+            engine.sticky_error = message
+            with self.assertRaisesRegex(RuntimeError, message):
+                self.error_module._raise_native_engine_error(engine.runtime, "pure control path")
+            self.assertEqual(engine.last_error(), "")
+        self.assertEqual(engine.clear_count, 2)
 
     def jit(self):
         runner = self.jit_module.NativeGraph.__new__(self.jit_module.NativeGraph)
