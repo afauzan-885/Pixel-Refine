@@ -178,6 +178,7 @@ struct BufferRecord {
   uint64_t capacity;
   bool mapped = false;
   bool release_failed = false;
+  bool host_read = false;
 };
 
 struct EngineContext {
@@ -1392,6 +1393,144 @@ static bool free_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
   return true;
 }
 
+static void *allocate_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
+                                   uint64_t size, bool host_write, bool host_read) {
+  if (!size || size > (std::numeric_limits<size_t>::max)()) {
+    memory_error(ctx, "allocate_gpu_buffer", "size must be positive and fit size_t");
+    return nullptr;
+  }
+  // Prepare node and buckets before native allocation; reinsertion after
+  // extract restores the same map size and cannot need another rehash/node.
+  ctx->buffers.emplace(nullptr, BufferRecord{size, false, false, host_read});
+  auto node = ctx->buffers.extract(nullptr);
+  TiMemoryAllocateInfo info = {};
+  info.size = size;
+  info.usage = TI_MEMORY_USAGE_STORAGE_BIT;
+  info.host_write = host_write;
+  info.host_read = host_read;
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  TiMemory memory = ti_allocate_memory(rt->runtime(), &info);
+  if (memory) {
+    node.key() = memory;
+    ctx->buffers.insert(std::move(node));
+  }
+  if (!memory_call_ok(ctx, "allocate_gpu_buffer")) {
+    if (memory)
+      free_owned_buffer(ctx, rt, memory, "allocate_gpu_buffer cleanup");
+    return nullptr;
+  }
+  if (!memory)
+    memory_error(ctx, "allocate_gpu_buffer", "Taichi returned a null allocation");
+  return memory;
+}
+
+static bool copy_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
+                               void *src, void *dst, uint64_t size) {
+  BufferRecord *source = checked_buffer(ctx, src, size, "copy_gpu_buffer source");
+  BufferRecord *destination = checked_buffer(ctx, dst, size, "copy_gpu_buffer destination");
+  if (!source || !destination)
+    return false;
+  if (source->mapped || destination->mapped) {
+    memory_error(ctx, "copy_gpu_buffer", "source or destination is mapped");
+    return false;
+  }
+  if (!size || src == dst)
+    return true;
+  TiMemorySlice source_slice = {};
+  source_slice.memory = static_cast<TiMemory>(src);
+  source_slice.size = size;
+  TiMemorySlice destination_slice = {};
+  destination_slice.memory = static_cast<TiMemory>(dst);
+  destination_slice.size = size;
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  ti_copy_memory_device_to_device(rt->runtime(), &destination_slice, &source_slice);
+  if (!memory_call_ok(ctx, "copy_gpu_buffer"))
+    return false;
+  rt->wait(); // Completion is required before host mapping or temporary free.
+  return memory_call_ok(ctx, "copy_gpu_buffer wait");
+}
+
+// The upload-only public allocation policy stays unchanged. Host readback uses
+// a separate host-read allocation unless the source already has that contract.
+// Vulkan's existing map implementation invalidates allocations with host_read.
+// Wait alone does not invalidate a non-coherent upload allocation.
+class ReadbackMapping {
+ public:
+  ReadbackMapping(EngineContext *ctx, ti::Runtime *rt) : ctx_(ctx), rt_(rt) {}
+  ReadbackMapping(const ReadbackMapping &) = delete;
+  ReadbackMapping &operator=(const ReadbackMapping &) = delete;
+  ~ReadbackMapping() noexcept { close(); }
+
+  void *map(void *source, uint64_t size) {
+    BufferRecord *record = checked_buffer(ctx_, source, size, "readback source");
+    if (!record)
+      return nullptr;
+    if (record->mapped) {
+      memory_error(ctx_, "readback", "source is already mapped");
+      return nullptr;
+    }
+    if (record->host_read) {
+      memory_ = source;
+    } else {
+      memory_ = allocate_owned_buffer(ctx_, rt_, size, false, true);
+      if (!memory_)
+        return nullptr;
+      temporary_ = true;
+      if (!copy_owned_buffer(ctx_, rt_, source, memory_, size))
+        return nullptr;
+    }
+    ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+    rt_->wait(); // Preserve completion before direct or staged host reads.
+    if (!memory_call_ok(ctx_, "readback wait"))
+      return nullptr;
+    return map_owned_buffer(ctx_, rt_, memory_, "readback map");
+  }
+
+  bool close() noexcept {
+    void *memory = memory_;
+    const bool temporary = temporary_;
+    memory_ = nullptr;
+    temporary_ = false;
+    if (!memory)
+      return true;
+    std::string original;
+    try {
+      {
+        std::lock_guard<std::mutex> lock(ctx_->mutex);
+        original = ctx_->last_error;
+      }
+      bool okay = true;
+      auto it = ctx_->buffers.find(static_cast<TiMemory>(memory));
+      if (it != ctx_->buffers.end() && it->second.mapped)
+        okay = unmap_owned_buffer(ctx_, rt_, memory, "readback unmap");
+      if (temporary && okay)
+        okay = free_owned_buffer(ctx_, rt_, memory, "readback staging cleanup");
+      if (!okay && !original.empty()) {
+        std::lock_guard<std::mutex> lock(ctx_->mutex);
+        ctx_->last_error = original + "; cleanup: " + ctx_->last_error;
+      }
+      return okay;
+    } catch (const std::exception &error) {
+      try {
+        memory_error(ctx_, "readback cleanup", original.empty() ? error.what()
+            : original + "; cleanup exception: " + error.what());
+      } catch (...) {}
+    } catch (...) {
+      try { memory_error(ctx_, "readback cleanup", original + "; unknown cleanup exception"); }
+      catch (...) {}
+    }
+    // The registry still owns any remaining mapping/allocation. Unknown free
+    // outcomes are quarantined by free_owned_buffer, never retried here.
+    return false;
+  }
+
+ private:
+  EngineContext *ctx_;
+  ti::Runtime *rt_;
+  void *memory_ = nullptr;
+  bool temporary_ = false;
+};
+
 // -----------------------------------------------------------------------
 // Runtime & Module Management
 // -----------------------------------------------------------------------
@@ -1802,37 +1941,10 @@ EXPORT void *allocate_gpu_buffer(void *runtime, uint64_t size,
                                  int host_accessible) {
   return memory_boundary<void *>(runtime, "allocate_gpu_buffer", nullptr,
       [=](EngineContext *engine, ti::Runtime *rt) -> void * {
-  if (!size || size > (std::numeric_limits<size_t>::max)()) {
-    memory_error(engine, "allocate_gpu_buffer", "size must be positive and fit size_t");
-    return nullptr;
-  }
-  // Allocate the registry node BEFORE native allocation. Rekeying this node
-  // after success cannot allocate, so host OOM cannot orphan a native handle.
-  engine->buffers.emplace(nullptr, BufferRecord{size, false});
-  auto node = engine->buffers.extract(nullptr);
-  TiMemoryAllocateInfo allocate_info = {};
-  allocate_info.size = size;
-  allocate_info.usage = TI_MEMORY_USAGE_STORAGE_BIT;
-  if (host_accessible) {
-    allocate_info.host_write = true;
     // Upload buffers only need host-write visibility. Requesting both
     // directions can make Vulkan reject the allocation on discrete/Dozen
-    // drivers even when a host-visible storage heap is available.
-    allocate_info.host_read = false;
-  }
-  TiMemory mem = ti_allocate_memory(rt->runtime(), &allocate_info);
-  if (mem) {
-    node.key() = mem;
-    engine->buffers.insert(std::move(node));
-  }
-  if (!memory_call_ok(engine, "allocate_gpu_buffer")) {
-    if (mem)
-      free_owned_buffer(engine, rt, mem, "allocate_gpu_buffer cleanup");
-    return nullptr;
-  }
-  if (!mem)
-    memory_error(engine, "allocate_gpu_buffer", "Taichi returned a null allocation");
-  return (void *)mem;
+    // drivers; read_from_gpu_buffer uses a separate host-read staging buffer.
+    return allocate_owned_buffer(engine, rt, size, host_accessible != 0, false);
   });
 }
 
@@ -1878,14 +1990,12 @@ EXPORT void read_from_gpu_buffer(void *runtime, void *memory, void *data,
     }
     if (!size)
       return true;
-    rt->wait(); // Preserve the completion barrier before host access.
-    if (!memory_call_ok(engine, "read_from_gpu_buffer wait"))
-      return false;
-    void *ptr = map_owned_buffer(engine, rt, memory, "read_from_gpu_buffer map");
+    ReadbackMapping readback(engine, rt);
+    void *ptr = readback.map(memory, size);
     if (!ptr)
       return false;
     memcpy(data, ptr, static_cast<size_t>(size));
-    return unmap_owned_buffer(engine, rt, memory, "read_from_gpu_buffer unmap");
+    return readback.close();
   });
 }
 
@@ -1910,32 +2020,7 @@ EXPORT void copy_gpu_buffer(void *runtime, void *src, void *dst,
                             uint64_t size) {
   memory_boundary<bool>(runtime, "copy_gpu_buffer", false,
       [=](EngineContext *engine, ti::Runtime *rt) {
-  BufferRecord *source = checked_buffer(engine, src, size, "copy_gpu_buffer source");
-  BufferRecord *destination = checked_buffer(engine, dst, size, "copy_gpu_buffer destination");
-  if (!source || !destination)
-    return false;
-  if (source->mapped || destination->mapped) {
-    memory_error(engine, "copy_gpu_buffer", "source or destination is mapped");
-    return false;
-  }
-  if (!size || src == dst)
-    return true;
-
-  TiMemorySlice src_slice = {};
-  src_slice.memory = (TiMemory)src;
-  src_slice.offset = 0;
-  src_slice.size = size;
-
-  TiMemorySlice dst_slice = {};
-  dst_slice.memory = (TiMemory)dst;
-  dst_slice.offset = 0;
-  dst_slice.size = size;
-
-  ti_copy_memory_device_to_device(rt->runtime(), &dst_slice, &src_slice);
-  if (!memory_call_ok(engine, "copy_gpu_buffer"))
-    return false;
-  rt->wait(); // Synchronize to prevent race conditions
-  return memory_call_ok(engine, "copy_gpu_buffer wait");
+    return copy_owned_buffer(engine, rt, src, dst, size);
   });
 }
 
@@ -2142,18 +2227,14 @@ EXPORT bool ti_imwrite_from_gpu(void *runtime, const char *path, void *gpu_mem,
     WICPixelFormatGUID negotiated = requested;
     if (FAILED(frame->SetPixelFormat(&negotiated)) || negotiated != requested)
       return false;
-    rt->wait(); // Preserve completion before encoder reads the mapping.
-    if (!memory_call_ok(engine, "ti_imwrite_from_gpu wait"))
-      return false;
-    void *pixels = map_owned_buffer(engine, rt, gpu_mem, "ti_imwrite_from_gpu map");
+    ReadbackMapping readback(engine, rt);
+    void *pixels = readback.map(gpu_mem, size);
     if (!pixels)
       return false;
-    ImageBufferCleanup cleanup{engine, rt, gpu_mem, false};
     hr = frame->WritePixels(static_cast<UINT>(height), static_cast<UINT>(stride),
                             static_cast<UINT>(size), static_cast<BYTE *>(pixels));
-    if (!unmap_owned_buffer(engine, rt, gpu_mem, "ti_imwrite_from_gpu unmap"))
+    if (!readback.close())
       return false;
-    cleanup.memory = nullptr;
     return SUCCEEDED(hr) && SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
 #else
     memory_error(engine, "ti_imwrite_from_gpu", "native image writing unavailable on this platform");

@@ -4,6 +4,11 @@ DO NOT RUN while the user's no-compilation/native-execution restriction applies.
 This file has no Taichi import or import-time native initialization. After the
 restriction is lifted and a matching bridge/C API is built, set both
 PIXEL_REFINE_RUN_NATIVE_S1=1 and PIXEL_REFINE_S1_TEST_BRIDGE to that bridge path.
+PIXEL_REFINE_S1_ARCH_ID selects the bridge backend (2 CPU, 0 Vulkan); run each
+profile separately on an actual device, including non-coherent Vulkan memory.
+Allocation through the CPU/CUDA profiles reaches LlvmRuntime::allocate_memory;
+the Vulkan profile reaches Runtime::allocate_memory. The same integration source
+therefore exercises both virtual allocation dispatch paths when run later.
 The tests cannot safely be used against an old binary without boundary guards.
 """
 
@@ -40,13 +45,13 @@ class NativeMemoryBoundary(unittest.TestCase):
             fn.argtypes, fn.restype = args, result
 
     def setUp(self):
-        # CPU is the bridge's historical arch id 2. No TCM or graph compilation.
-        self.ctx = self.lib.init_aot_engine(2, 0)
-        self.assertTrue(self.ctx, "CPU context creation failed")
+        self.arch = int(os.environ.get("PIXEL_REFINE_S1_ARCH_ID", "2"))
+        self.ctx = self.lib.init_aot_engine(self.arch, 0)
+        self.assertTrue(self.ctx, f"backend {self.arch} context creation failed")
         self.addCleanup(self.lib.destroy_aot_engine, self.ctx)
 
-    def alloc(self, size=16):
-        result = self.lib.allocate_gpu_buffer(self.ctx, size, 1)
+    def alloc(self, size=16, host_accessible=1):
+        result = self.lib.allocate_gpu_buffer(self.ctx, size, host_accessible)
         self.assertTrue(result, self.error())
         return result
 
@@ -83,7 +88,7 @@ class NativeMemoryBoundary(unittest.TestCase):
             self.assertIn("capacity", self.error())
 
     def test_foreign_and_freed_handles_are_rejected(self):
-        foreign_ctx = self.lib.init_aot_engine(2, 0)
+        foreign_ctx = self.lib.init_aot_engine(self.arch, 0)
         self.assertTrue(foreign_ctx)
         self.addCleanup(self.lib.destroy_aot_engine, foreign_ctx)
         memory = self.alloc()
@@ -132,6 +137,25 @@ class NativeMemoryBoundary(unittest.TestCase):
         self.assertIn("null host", self.error())
         self.lib.read_from_gpu_buffer(self.ctx, memory, None, (1 << 64) - 1)
         self.assertIn("capacity", self.error())
+
+    def test_readback_after_device_copy_uses_host_read_staging(self):
+        upload = self.alloc(257)
+        device_buffer = self.alloc(257, host_accessible=0)
+        for generation in range(5):
+            payload = bytes((index + generation * 37) % 256 for index in range(257))
+            expected = c.create_string_buffer(payload, 257)
+            self.lib.write_to_gpu_buffer(self.ctx, upload, expected, 257)
+            self.assertEqual(self.error(), "")
+            self.lib.copy_gpu_buffer(self.ctx, upload, device_buffer, 257)
+            self.assertEqual(self.error(), "")
+            for memory in (device_buffer, upload):
+                actual = c.create_string_buffer(257)
+                self.lib.read_from_gpu_buffer(self.ctx, memory, actual, 257)
+                self.assertEqual(self.error(), "")
+                self.assertEqual(actual.raw, payload)
+        # Both public buffers must remain usable after temporary staging cleanup.
+        self.lib.copy_gpu_buffer(self.ctx, device_buffer, upload, 257)
+        self.assertEqual(self.error(), "")
 
 
 if __name__ == "__main__":
