@@ -276,20 +276,27 @@ class SerialDeviceInvocations:
     def __init__(self, guard, synchronize, owner_lock=None):
         self.lock = _OwnerLock(owner_lock)
         self.slot = InvocationSlot()
+        self.slots = [self.slot]
+        self.bundles = None
+        self.shared_ids = set()
+        self.pending_resources = []
+        self.extra_resources = []
+        self.configuration_failed = False
+        self.requested_bytes = None
         self.guard, self.synchronize = guard, synchronize
 
     def check_legacy(self):
         self.guard()
         self.slot.idle()
 
-    def submit(self, views, accesses, resources, execute, describe_output):
+    def submit(self, views, accesses, resources, execute, describe_output, *, slot=None):
         with self.lock:
             self.guard()
             pins = []
             try:
                 for view in views.values():
                     pins.append(view._pin())
-                token = self.slot.begin(accesses, (self,) + tuple(resources) + tuple(views.values()))
+                token = (slot or self.slot).begin(accesses, (self,) + tuple(resources) + tuple(views.values()))
             except BaseException:
                 for release in reversed(pins):
                     release()
@@ -314,11 +321,234 @@ class SerialDeviceInvocations:
     def drain_failed(self):
         with self.lock:
             self.guard()
-            token = self.slot.token
-            if token is not None and token.orphaned_submission:
-                self.synchronize()
-                token.complete()
-                token.release()
+            for slot in self.slots:
+                token = slot.token
+                if token is not None and token.orphaned_submission:
+                    self.synchronize()
+                    token.complete()
+                    token.release()
+
+    def all_idle(self):
+        for slot in self.slots:
+            slot.idle()
+
+    def available_slot(self):
+        if self.configuration_failed:
+            raise InvocationBusyError("Slot configuration failed; close explicitly before reuse")
+        if self.slot.closed:
+            raise RuntimeError("Invocation owner is closed")
+        for index, slot in enumerate(self.slots):
+            if slot.token is None:
+                return index, slot
+        raise InvocationBusyError("All bounded invocation slots are leased or awaiting completion")
+
+    def configure_storage(self, base, immutable, *, count, max_requested_bytes,
+                          identity, nbytes, clone):
+        """Configure once while idle. Count requested bytes before any clone.
+
+        Failed partial allocation is deliberately retained for owner-thread
+        close, never reclaimed by a finalizer or silently reused.
+        """
+        with self.lock:
+            self.guard()
+            self.all_idle()
+            if type(count) is not int or not 1 <= count <= 8:
+                raise ValueError("Invocation slot count must be an integer in [1, 8]")
+            if len(self.slots) != 1 or self.configuration_failed:
+                raise RuntimeError("Invocation pool already configured or allocation failed")
+            cap = _uint(max_requested_bytes, "max_requested_bytes")
+            if not cap:
+                raise ValueError("An explicit nonzero requested-byte cap is required")
+            shared = {identity(base[key]) for key in immutable}
+            groups = {}
+            for value in base.values():
+                groups.setdefault(identity(value), value)
+            shared_bytes = mutable_bytes = 0
+            for key, value in groups.items():
+                amount = _uint(nbytes(value), "storage requested bytes")
+                if not amount:
+                    raise ValueError("Storage must have nonzero requested bytes")
+                if key in shared:
+                    shared_bytes = checked_sum(shared_bytes, amount)
+                else:
+                    mutable_bytes = checked_sum(mutable_bytes, amount)
+            total = checked_sum(shared_bytes, checked_product(mutable_bytes, count))
+            if total > cap:
+                raise ValueError("Invocation pool exceeds requested-byte cap")
+            bundles = [dict(base)]
+            # Preflight covers every subsequent slot; the bounded total is
+            # fixed before clone invokes any device allocator.
+            try:
+                for _ in range(1, count):
+                    copies = {}
+                    for key, value in groups.items():
+                        if key not in shared:
+                            copies[key] = clone(value)
+                            self.pending_resources.append(copies[key])
+                    bundles.append({name: value if identity(value) in shared else copies[identity(value)]
+                                    for name, value in base.items()})
+            except BaseException:
+                self.configuration_failed = True
+                raise
+            self.bundles, self.shared_ids = bundles, shared
+            self.slots += [InvocationSlot() for _ in range(count - 1)]
+            self.extra_resources = self.pending_resources
+            self.pending_resources = []
+            self.requested_bytes = {"shared_weights": shared_bytes, "mutable_per_slot": mutable_bytes,
+                                    "slot_count": count, "total": total, "cap": cap}
+            return dict(self.requested_bytes)
+
+    def capabilities(self):
+        return {"slot_count": len(self.slots), "max_slot_count": 8,
+                "submission": "synchronous_owner_thread_serial", "device_overlap": False,
+                "experimental_opt_in": True,
+                "requested_bytes": self.requested_bytes,
+                "allocation_failed": self.configuration_failed}
+
+    def legacy_idle(self):
+        if self.configuration_failed:
+            raise InvocationBusyError("Failed pool allocation requires explicit owner close")
+        # Legacy paths do not expose per-range access declarations. Keep them
+        # conservative while any safe invocation owns storage in this runner.
+        self.all_idle()
+
+    def close_slots(self):
+        self.all_idle()
+        for slot in self.slots:
+            slot.close()
+
+
+def checked_sum(a, b):
+    _uint(a, "byte sum"); _uint(b, "byte sum")
+    if b > _MAX - a:
+        raise ValueError("Requested-byte sum overflows uint64")
+    return a + b
+
+
+def checked_product(a, b):
+    _uint(a, "byte product"); _uint(b, "byte product")
+    if a and b > _MAX // a:
+        raise ValueError("Requested-byte product overflows uint64")
+    return a * b
+
+
+@dataclass(frozen=True)
+class InvocationInput:
+    node: str
+    output: str
+
+
+class InvocationDAG:
+    """Bounded explicit host DAG, with serial synchronous runner submission.
+
+    Edges refer only to earlier nodes, making cycles impossible at admission.
+    No executor threads, native fences or implicit device concurrency exist.
+    """
+    def __init__(self, max_nodes=16):
+        if type(max_nodes) is not int or not 1 <= max_nodes <= 64:
+            raise ValueError("DAG capacity must be in [1, 64]")
+        self.max_nodes, self.nodes = max_nodes, {}
+        self.sealed = False
+        self.thread = threading.get_ident()
+
+    def _owner(self):
+        if threading.get_ident() != self.thread:
+            raise RuntimeError("Invocation DAG is owner-thread only")
+
+    def add(self, name, runner, inputs, *, retain_output=False):
+        self._owner()
+        if self.sealed or not isinstance(name, str) or not name or name in self.nodes:
+            raise ValueError("DAG sealed or node name invalid/duplicate")
+        if len(self.nodes) >= self.max_nodes:
+            raise InvocationBusyError("Bounded DAG capacity exceeded")
+        inputs = dict(inputs)
+        parents = {value.node for value in inputs.values() if isinstance(value, InvocationInput)}
+        if any(parent not in self.nodes for parent in parents):
+            raise ValueError("Dependency must refer to an earlier admitted node")
+        if not callable(getattr(runner, "run_leased", None)):
+            raise ValueError("DAG requires a real leased-invocation runner")
+        # Pins retain the full producer ancestry until the last consumer lease
+        # completes. Reject a topology whose own dependency closure can never
+        # fit, rather than accepting a chain that can only be cancelled.
+        ancestors = set(parents)
+        for parent in parents:
+            ancestors.update(self.nodes[parent]["ancestors"])
+        needed = {}
+        owners = {}
+        for parent in ancestors:
+            owner = self.nodes[parent]["runner"]
+            needed[id(owner)] = needed.get(id(owner), 0) + 1
+            owners[id(owner)] = owner
+        needed[id(runner)] = needed.get(id(runner), 0) + 1
+        owners[id(runner)] = runner
+        for key, amount in needed.items():
+            capability = getattr(owners[key], "invocation_capabilities", None)
+            if not callable(capability) or amount > capability()["slot_count"]:
+                raise InvocationBusyError("DAG dependency closure exceeds configured runner slot capacity")
+        self.nodes[name] = {"runner":runner, "inputs":inputs, "parents":parents,
+                            "ancestors":ancestors,
+                            "remaining":0, "retain":bool(retain_output), "state":"queued",
+                            "lease":None, "error":None}
+        for parent in parents:
+            self.nodes[parent]["remaining"] += 1
+
+    def run_ready(self):
+        self._owner()
+        self.sealed = True
+        progress = 0
+        for node in self.nodes.values():
+            if node["state"] != "queued":
+                continue
+            if any(self.nodes[p]["state"] in {"failed", "cancelled"} for p in node["parents"]):
+                node["state"] = "cancelled"
+                continue
+            if any(self.nodes[p]["state"] != "completed" for p in node["parents"]):
+                continue
+            try:
+                values = {name:self.nodes[value.node]["lease"].view(value.output)
+                          if isinstance(value, InvocationInput) else value
+                          for name,value in node["inputs"].items()}
+                node["lease"] = node["runner"].run_leased(values)
+            except InvocationBusyError:
+                # No waiting on caller-owned leases: retry after explicit release.
+                continue
+            except BaseException as error:
+                node["state"], node["error"] = "failed", error
+                raise
+            node["state"] = "completed"
+            progress += 1
+            for parent in node["parents"]:
+                upstream = self.nodes[parent]
+                upstream["remaining"] -= 1
+                if not upstream["remaining"] and not upstream["retain"]:
+                    upstream["lease"].release()
+        return {"progress":progress, "states":{k:v["state"] for k,v in self.nodes.items()}}
+
+    def result(self, name):
+        self._owner()
+        node = self.nodes[name]
+        if node["state"] != "completed" or (not node["retain"] and node["remaining"] == 0
+                                              and any(name in v["parents"] for v in self.nodes.values())):
+            raise RuntimeError("No retained output for this node")
+        if any(v["state"] == "queued" and name in v["parents"] for v in self.nodes.values()):
+            raise InvocationBusyError("Dependency consumers have not submitted yet")
+        node["lease"]._live()
+        return node["lease"]
+
+    def cancel(self):
+        self._owner()
+        self.sealed = True
+        # Reverse topology releases children before producers. If completion
+        # fails, leave the failing lease stored and propagate for explicit retry.
+        for node in reversed(list(self.nodes.values())):
+            if node["lease"] is not None:
+                node["lease"].release()
+            elif node["state"] == "failed":
+                drain = getattr(node["runner"], "drain_failed_invocation", None)
+                if not callable(drain):
+                    raise RuntimeError("Failed invocation requires an explicit runner completion drain")
+                drain()
+            node["state"] = "cancelled"
 
 
 class _OwnerLock:

@@ -379,7 +379,7 @@ class ResidentONNXGraph:
         """Synchronous one-slot invocation; checked views in, explicit lease out."""
         with self._invocations.lock, self.engine._lock:
             self._view_guard()
-            self._invocations.slot.idle()
+            index, slot = self._invocations.available_slot()
             if set(inputs) != set(self.metadata["inputs"]) or not all(isinstance(v, DeviceView) for v in inputs.values()):
                 raise ValueError("run_leased requires checked views for every model input")
             values = {}
@@ -387,13 +387,42 @@ class ResidentONNXGraph:
                 if math.prod(view.descriptor.shape) != max(1, math.prod(self.metadata["shapes"][name])):
                     raise ValueError(f"{name}: device view element count mismatch")
                 values[name] = view._bind(self._view_owner, self._view_device)
-            accesses = [Access(view.descriptor) for view in inputs.values()]
-            for name, value in self.buffers.items():
-                constant = name in self.metadata["constants"]
-                accesses.append(Access(self.device_view(value).descriptor, write=not constant, immutable=constant))
-            return self._invocations.submit(inputs, accesses, (self,),
-                lambda: self._run_device_impl(values),
-                lambda name, value: self.device_view(value, shape=self.metadata["shapes"][name]))
+            if self._invocations.bundles is not None:
+                old = self.buffers
+                self.buffers = dict(self._invocations.bundles[index])
+                try:
+                    return self._submit_leased(inputs, values, slot)
+                finally:
+                    self.buffers = old
+            return self._submit_leased(inputs, values, slot)
+
+    def _submit_leased(self, inputs, values, slot):
+        accesses = [Access(view.descriptor) for view in inputs.values()]
+        shared = {getattr(value.handle, "value", value.handle)
+                  for name,value in self.buffers.items() if name in self.metadata["constants"]}
+        for name, value in self.buffers.items():
+            constant = getattr(value.handle, "value", value.handle) in shared
+            accesses.append(Access(self.device_view(value).descriptor, write=not constant, immutable=constant))
+        return self._invocations.submit(inputs, accesses, (self,),
+            lambda: self._run_device_impl(values),
+            lambda name, value: self.device_view(value, shape=self.metadata["shapes"][name]), slot=slot)
+
+    def configure_invocation_slots(self, count=1, *, max_requested_bytes, mode="serial"):
+        """Bounded opt-in storage pool on the existing synchronous owner queue."""
+        with self._invocations.lock:
+            self._view_guard()
+            if mode != "serial":
+                raise ValueError("Device overlap/parallel streams are unsupported")
+            return self._invocations.configure_storage(self.buffers,
+                set(self.metadata["constants"]) & set(self.buffers), count=count,
+                max_requested_bytes=max_requested_bytes,
+                identity=lambda value:getattr(value.handle, "value", value.handle),
+                nbytes=lambda value:int(value.size_bytes),
+                clone=lambda value:self.engine.allocate(tuple(value.shape), dtype=np.float32,
+                    is_vector=False, host_accessible=getattr(value,"host_accessible",False)))
+
+    def invocation_capabilities(self):
+        return self._invocations.capabilities()
 
     def drain_failed_invocation(self):
         with self.engine._lock:
@@ -409,7 +438,7 @@ class ResidentONNXGraph:
 
     def run_device(self, inputs):
         with self._invocations.lock:
-            self._invocations.slot.idle()
+            self._invocations.legacy_idle()
             return self._run_device_impl(inputs)
 
     def _run_device_impl(self, inputs):
@@ -440,7 +469,7 @@ class ResidentONNXGraph:
 
     def prepare_static_device_bindings(self, inputs):
         with self._invocations.lock:
-            self._invocations.slot.idle()
+            self._invocations.legacy_idle()
             return self._prepare_static_device_bindings_impl(inputs)
 
     def _prepare_static_device_bindings_impl(self, inputs):
@@ -477,13 +506,13 @@ class ResidentONNXGraph:
     def run_device_fast(self):
         """Zero-allocation, zero-validation fast path executing pre-bound static graph."""
         with self._invocations.lock, self._lock:
-            self._invocations.slot.idle()
+            self._invocations.legacy_idle()
             self.module.run(self.metadata["graph"], **self._static_args)
             return self._static_outputs
 
     def run(self, output_names=None, input_feed=None, return_gpu=False, borrowed_outputs=False):
         with self._invocations.lock:
-            self._invocations.slot.idle()
+            self._invocations.legacy_idle()
             return self._run_impl(output_names, input_feed, return_gpu, borrowed_outputs)
 
     def _run_impl(self, output_names=None, input_feed=None, return_gpu=False, borrowed_outputs=False):
@@ -543,10 +572,17 @@ class ResidentONNXGraph:
         with self._invocations.lock:
             if self._invocations.slot.closed:
                 return
-            self._invocations.slot.idle()
+            self._invocations.all_idle()
             self._view_sync()
+            # Failed pool construction retains every known partial allocation
+            # until this explicit, synchronized owner-thread cleanup.
+            for resources in (self._invocations.pending_resources, self._invocations.extra_resources):
+                while resources:
+                    resources[-1].destroy()
+                    resources.pop()
             self._close_impl()
-            self._invocations.slot.close()
+            self._invocations.close_slots()
+            self._invocations.bundles = None
 
     def _close_impl(self):
         if hasattr(self, "_default_max_safety_buf") and self._default_max_safety_buf is not None:

@@ -14,7 +14,7 @@ import taichi as ti
 from taichi_vision.taichi_aot.fused_mul_clip import _fused_mul_clip_kernel
 from taichi_vision.taichi_aot.weightnet_gate_fusions import _weightnet_gate_flat_kernel
 from taichi_vision.taichi_aot.device_invocation import (
-    Access, DeviceView, DeviceViewDescriptor, SerialDeviceInvocations,
+    Access, DeviceView, DeviceViewDescriptor, SerialDeviceInvocations, checked_sum, checked_product,
 )
 
 
@@ -1502,7 +1502,7 @@ class NativeGraph:
     def consume_input(self, view, callback):
         """Fill/use a graph-created input on its owner thread, then synchronize."""
         with self._invocations.lock:
-            self._invocations.slot.idle()
+            self._invocations.legacy_idle()
             context = self._view_guard()
             value = view._bind(context, context)
             if self._view_inputs.get(id(value)) is not value:
@@ -1524,7 +1524,7 @@ class NativeGraph:
         """
         with self._invocations.lock:
             context = self._view_guard()
-            self._invocations.slot.idle()
+            index, slot = self._invocations.available_slot()
             if set(inputs) != set(self.inputs) or not all(isinstance(v, DeviceView) for v in inputs.values()):
                 raise ValueError("run_leased requires checked device views for every input")
             values = {}
@@ -1533,16 +1533,65 @@ class NativeGraph:
                     raise ValueError(f"{name}: device view element count mismatch")
                 values[name] = view._bind(context, context)
             self.allocate()
-            accesses = [Access(view.descriptor) for view in inputs.values()]
-            for name, value in self.buffers.items():
-                view = self.device_view(value)
-                constant = name in self.constants
-                accesses.append(Access(view.descriptor, write=not constant, immutable=constant))
-            for value in self.scratch.values():
-                accesses.append(Access(self.device_view(value).descriptor, write=True))
-            return self._invocations.submit(inputs, accesses, (self,),
-                lambda: self._run_impl(values, return_gpu=True, borrowed_outputs=True),
-                lambda name, value: self.device_view(value, shape=self.shapes[name]))
+            if self._invocations.bundles is not None:
+                bundle = self._invocations.bundles[index]
+                old = self.buffers, self.scratch, self.dummy
+                self.buffers = {key[1]:value for key,value in bundle.items() if key[0] == "buffer"}
+                self.scratch = {key[1]:value for key,value in bundle.items() if key[0] == "scratch"}
+                self.dummy = bundle[("dummy", "dummy")]
+                try:
+                    return self._submit_leased(inputs, values, slot)
+                finally:
+                    self.buffers, self.scratch, self.dummy = old
+            return self._submit_leased(inputs, values, slot)
+
+    def _submit_leased(self, inputs, values, slot):
+        accesses = [Access(view.descriptor) for view in inputs.values()]
+        shared = {id(value.arr) for name,value in self.buffers.items() if name in self.constants}
+        for name, value in self.buffers.items():
+            view = self.device_view(value)
+            constant = id(value.arr) in shared
+            accesses.append(Access(view.descriptor, write=not constant, immutable=constant))
+        for value in self.scratch.values():
+            accesses.append(Access(self.device_view(value).descriptor, write=True))
+        return self._invocations.submit(inputs, accesses, (self,),
+            lambda: self._run_impl(values, return_gpu=True, borrowed_outputs=True),
+            lambda name, value: self.device_view(value, shape=self.shapes[name]), slot=slot)
+
+    def configure_invocation_slots(self, count=1, *, max_requested_bytes, mode="serial"):
+        """Opt-in isolated storage slots; submission remains owner-thread serial."""
+        with self._invocations.lock:
+            self._view_guard()
+            self._invocations.all_idle()
+            if mode != "serial":
+                raise ValueError("Device overlap/parallel streams are unsupported")
+            if type(count) is not int or not 1 <= count <= 8:
+                raise ValueError("Invocation slot count must be in [1, 8]")
+            # Preflight the existing planner before even the first slot is
+            # allocated. Actual allocated groups are checked again below.
+            groups = {}
+            for name, slot_id in self.buffer_plan.items():
+                groups[slot_id] = max(groups.get(slot_id, 0), max(1, math.prod(self.shapes[name])) * 4)
+            shared = sum(int(self.constants[name].size) * 4 for name in self.runtime_constant_names)
+            reduction = max(((math.prod(self.shapes[step["inputs"][0]]) + 255) // 256 * 4
+                for step in self.steps if step["op"] == "ReduceMean"
+                and len(step.get("axes", [])) == len(self.shapes[step["inputs"][0]])), default=0)
+            mutable = checked_sum(checked_sum(sum(groups.values()), reduction), 4)
+            estimate = checked_sum(shared, checked_product(mutable, count))
+            if checked_sum(0, max_requested_bytes) < estimate:
+                raise ValueError("Invocation pool exceeds requested-byte cap before allocation")
+            self.allocate()
+            base = {("buffer",name):value for name,value in self.buffers.items()}
+            base.update({("scratch",name):value for name,value in self.scratch.items()})
+            base[("dummy","dummy")] = self.dummy
+            return self._invocations.configure_storage(base,
+                {("buffer",name) for name in self.constants if name in self.buffers},
+                count=count, max_requested_bytes=max_requested_bytes,
+                identity=lambda value:id(value.arr), nbytes=lambda value:int(value.shape[0]) * 4,
+                clone=lambda value:ti.ndarray(ti.f32, tuple(value.shape)))
+
+    def invocation_capabilities(self):
+        return self._invocations.capabilities()
 
     def drain_failed_invocation(self):
         self._invocations.drain_failed()
@@ -1553,13 +1602,16 @@ class NativeGraph:
             if self._invocations.slot.closed:
                 return
             self._view_guard()
-            self._invocations.slot.idle()
+            self._invocations.all_idle()
             ti.sync()
-            self._invocations.slot.close()
+            self._invocations.close_slots()
             self.buffers.clear()
             self.scratch.clear()
             self.dummy = None
             self._view_inputs.clear()
+            self._invocations.bundles = None
+            self._invocations.pending_resources.clear()
+            self._invocations.extra_resources.clear()
 
     def _lower_constant_pow2_to_square(self):
         """Use one multiply for a scalar FP32 Pow exponent exactly equal to 2.
@@ -3356,7 +3408,7 @@ class NativeGraph:
 
     def run(self, inputs, return_gpu=False, borrowed_outputs=False):
         with self._invocations.lock:
-            self._invocations.slot.idle()
+            self._invocations.legacy_idle()
             return self._run_impl(inputs, return_gpu=return_gpu, borrowed_outputs=borrowed_outputs)
 
     def _run_impl(self, inputs, return_gpu=False, borrowed_outputs=False):

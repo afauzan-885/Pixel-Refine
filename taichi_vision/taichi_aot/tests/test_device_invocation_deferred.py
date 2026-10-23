@@ -10,6 +10,29 @@ import unittest
 @unittest.skipUnless(os.environ.get("PIXEL_REFINE_RUN_DEVICE_LEASE_TESTS") == "1",
                      "Real-device/JIT gate explicitly deferred")
 class RealDeviceLeaseTests(unittest.TestCase):
+    def test_native_two_storage_slots_and_serial_dependency_dag(self):
+        import numpy as np
+        from onnx import TensorProto, helper
+        import taichi as ti
+        from taichi_vision.taichi_aot.onnx_native_graph import NativeGraph
+        from taichi_vision.taichi_aot.device_invocation import InvocationDAG, InvocationInput
+        ti.init(arch=ti.cpu)
+        graph = helper.make_graph([helper.make_node("Add", ["x","x"], ["y"])], "pool",
+            [helper.make_tensor_value_info("x",TensorProto.FLOAT,[4])],
+            [helper.make_tensor_value_info("y",TensorProto.FLOAT,[4])])
+        runner = NativeGraph(graph,[helper.make_opsetid("",13)])
+        runner.configure_invocation_slots(2,max_requested_bytes=1024*1024)
+        view = runner.allocate_device_view((4,))
+        runner.consume_input(view,lambda value:value.from_numpy(np.arange(4,dtype=np.float32)))
+        dag = InvocationDAG()
+        dag.add("first",runner,{"x":view})
+        dag.add("second",runner,{"x":InvocationInput("first","y")})
+        self.assertEqual(dag.run_ready()["progress"],2)
+        with dag.result("second") as output:
+            actual = output.consume(lambda values:values["y"].to_numpy())
+            np.testing.assert_array_equal(actual,4*np.arange(4,dtype=np.float32))
+        dag.cancel(); runner.close()
+
     def test_native_graph_reshape_downstream_and_busy(self):
         import numpy as np
         import onnx
