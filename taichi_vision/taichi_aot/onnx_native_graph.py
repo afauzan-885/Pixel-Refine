@@ -13,6 +13,9 @@ import taichi as ti
 
 from taichi_vision.taichi_aot.fused_mul_clip import _fused_mul_clip_kernel
 from taichi_vision.taichi_aot.weightnet_gate_fusions import _weightnet_gate_flat_kernel
+from taichi_vision.taichi_aot.device_invocation import (
+    Access, DeviceView, DeviceViewDescriptor, SerialDeviceInvocations,
+)
 
 
 class UnsupportedONNXOperatorError(ValueError):
@@ -1445,6 +1448,118 @@ class NativeGraph:
         self._lock = threading.Lock()
         self.optimized = True
         self.backend = None
+        self._view_context = None
+        self._view_inputs = {}
+        self._invocations = SerialDeviceInvocations(self._view_guard, ti.sync)
+
+    def _view_guard(self):
+        if self._invocations.slot.closed:
+            raise RuntimeError("NativeGraph view owner is closed")
+        runtime = ti.lang.impl.get_runtime()
+        context = (id(runtime), id(runtime.prog))
+        if runtime.prog is None:
+            raise RuntimeError("Taichi view owner runtime is closed")
+        if self._view_context is None:
+            self._view_context = (context, threading.get_ident())
+            self._view_runtime, self._view_program = runtime, runtime.prog
+        if self._view_context != (context, threading.get_ident()):
+            raise RuntimeError("Device view runtime changed or called from a non-owner thread")
+        return context
+
+    def device_view(self, buffer, *, shape=None, offset_bytes=0, strides_bytes=()):
+        """Describe only a live flat float32 ndarray, without host transfer."""
+        with self._invocations.lock:
+            context = self._view_guard()
+            if not isinstance(buffer, ti.Ndarray) or buffer.dtype != ti.f32 or len(buffer.shape) != 1:
+                raise ValueError("NativeGraph views require flat float32 Taichi ndarrays")
+            known = any(buffer is value for value in self.buffers.values()) or any(
+                buffer is value for value in self.scratch.values())
+            if known and getattr(self, "_allocation_context", None) != context:
+                raise RuntimeError("Graph storage belongs to a previous Taichi runtime")
+            if not known and self._view_inputs.get(id(buffer)) is not buffer:
+                raise ValueError("External ndarray ownership is unprovable; use allocate_device_view or an upstream lease")
+            descriptor = DeviceViewDescriptor(context, context, id(buffer.arr),
+                int(buffer.shape[0]) * 4, tuple(shape if shape is not None else buffer.shape),
+                offset_bytes=offset_bytes, strides_bytes=tuple(strides_bytes))
+            descriptor.require_flat_binding()
+            if descriptor.byte_range[1] != int(buffer.shape[0]) * 4:
+                raise ValueError("Partial ndarray ranges cannot be bound without a native offset/extent API")
+            def validate():
+                if self._view_guard() != context:
+                    raise RuntimeError("Stale Taichi device view")
+            return DeviceView(descriptor, buffer, validate)
+
+    def allocate_device_view(self, shape):
+        """Allocate a proven-current flat device input; fill via consume_input."""
+        with self._invocations.lock:
+            self._view_guard()
+            shape = tuple(shape)
+            checked = DeviceViewDescriptor(0, 0, 0, (1 << 64) - 1, shape)
+            buffer = ti.ndarray(ti.f32, (checked.byte_range[1] // 4,))
+            self._view_inputs[id(buffer)] = buffer
+            return self.device_view(buffer, shape=shape)
+
+    def consume_input(self, view, callback):
+        """Fill/use a graph-created input on its owner thread, then synchronize."""
+        with self._invocations.lock:
+            self._invocations.slot.idle()
+            context = self._view_guard()
+            value = view._bind(context, context)
+            if self._view_inputs.get(id(value)) is not value:
+                raise ValueError("consume_input accepts only this graph's allocated input views")
+            result = []
+            def execute():
+                result.append(callback(value))
+                return {}
+            lease = self._invocations.submit({"input": view}, [Access(view.descriptor, write=True)],
+                (self,), execute, lambda name, value: None)
+            lease.release()
+            return result[0]
+
+    def run_leased(self, inputs):
+        """Opt-in synchronous one-slot execution with explicit output leases.
+
+        Inputs are checked device_view/OutputLease.view objects. No host copy,
+        offset binding or asynchronous overlap is implied by this API.
+        """
+        with self._invocations.lock:
+            context = self._view_guard()
+            self._invocations.slot.idle()
+            if set(inputs) != set(self.inputs) or not all(isinstance(v, DeviceView) for v in inputs.values()):
+                raise ValueError("run_leased requires checked device views for every input")
+            values = {}
+            for name, view in inputs.items():
+                if math.prod(view.descriptor.shape) != max(1, math.prod(self.shapes[name])):
+                    raise ValueError(f"{name}: device view element count mismatch")
+                values[name] = view._bind(context, context)
+            self.allocate()
+            accesses = [Access(view.descriptor) for view in inputs.values()]
+            for name, value in self.buffers.items():
+                view = self.device_view(value)
+                constant = name in self.constants
+                accesses.append(Access(view.descriptor, write=not constant, immutable=constant))
+            for value in self.scratch.values():
+                accesses.append(Access(self.device_view(value).descriptor, write=True))
+            return self._invocations.submit(inputs, accesses, (self,),
+                lambda: self._run_impl(values, return_gpu=True, borrowed_outputs=True),
+                lambda name, value: self.device_view(value, shape=self.shapes[name]))
+
+    def drain_failed_invocation(self):
+        self._invocations.drain_failed()
+
+    def close(self):
+        """Explicit owner-thread close; rejects held output leases."""
+        with self._invocations.lock:
+            if self._invocations.slot.closed:
+                return
+            self._view_guard()
+            self._invocations.slot.idle()
+            ti.sync()
+            self._invocations.slot.close()
+            self.buffers.clear()
+            self.scratch.clear()
+            self.dummy = None
+            self._view_inputs.clear()
 
     def _lower_constant_pow2_to_square(self):
         """Use one multiply for a scalar FP32 Pow exponent exactly equal to 2.
@@ -3193,6 +3308,9 @@ class NativeGraph:
         with self._allocation_lock:
             if self._allocated:
                 return
+            runtime = ti.lang.impl.get_runtime()
+            self._allocation_context = (id(runtime), id(runtime.prog))
+            self._allocation_program = runtime.prog
             buffers = {}
             slot_buffers = {}
             for name, shape in self.shapes.items():
@@ -3237,6 +3355,11 @@ class NativeGraph:
             self._allocated = True
 
     def run(self, inputs, return_gpu=False, borrowed_outputs=False):
+        with self._invocations.lock:
+            self._invocations.slot.idle()
+            return self._run_impl(inputs, return_gpu=return_gpu, borrowed_outputs=borrowed_outputs)
+
+    def _run_impl(self, inputs, return_gpu=False, borrowed_outputs=False):
         """Execute the graph.
 
         ``return_gpu=True`` returns caller-owned output copies queued on the

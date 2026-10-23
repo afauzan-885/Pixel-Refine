@@ -22,6 +22,9 @@ import threading
 import zipfile
 
 import numpy as np
+from taichi_vision.taichi_aot.device_invocation import (
+    Access, DeviceView, DeviceViewDescriptor, SerialDeviceInvocations,
+)
 
 
 GRAPH_NAME = "deno_onnx_resident_f32_v1"
@@ -296,6 +299,10 @@ class ResidentONNXGraph:
         self.engine = engine
         self.path = Path(path).resolve()
         self._lock = threading.RLock()
+        self._view_owner = (id(engine), engine.runtime, getattr(engine, "_generation", 0))
+        self._view_device = (str(engine.arch).lower(), getattr(engine, "device_id", 0), engine.runtime)
+        self._view_thread = threading.get_ident()
+        self._invocations = SerialDeviceInvocations(self._view_guard, self._view_sync, engine._lock)
         self.buffers = {}
         with zipfile.ZipFile(self.path) as archive:
             self.metadata = json.loads(archive.read("resident_onnx.json"))
@@ -327,6 +334,69 @@ class ResidentONNXGraph:
         return [SimpleNamespace(name=name, shape=self.metadata["shapes"][name])
                 for name in self.metadata["inputs"]]
 
+    def _view_guard(self):
+        engine = self.engine
+        if (self._invocations.slot.closed or threading.get_ident() != self._view_thread or not engine.runtime
+                or getattr(engine, "_destroyed", False)
+                or self._view_owner != (id(engine), engine.runtime, getattr(engine, "_generation", 0))):
+            raise RuntimeError("Resident device view owner closed, reinitialized or wrong thread")
+        engine._assert_native_context_owner("resident leased invocation")
+
+    def _view_sync(self):
+        self._view_guard()
+        self.engine.sync()
+        error = self.engine.last_error()
+        if error:
+            raise RuntimeError(f"Resident invocation completion failed: {error}")
+
+    def device_view(self, buffer, *, shape=None, offset_bytes=0, strides_bytes=()):
+        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        with self._invocations.lock, self.engine._lock:
+            self._view_guard()
+            if (not isinstance(buffer, TaichiGPUBuffer) or buffer.engine is not self.engine
+                    or np.dtype(buffer.dtype) != np.float32 or buffer.is_vector or len(buffer.shape) != 1):
+                raise ValueError("Resident views require same-owner flat scalar float32 buffers")
+            runtime, handle = buffer._require_live("resident device view")
+            identity = getattr(handle, "value", handle)
+            if not identity:
+                raise ValueError("Resident device view requires a non-null native handle")
+            descriptor = DeviceViewDescriptor(self._view_owner, self._view_device, identity,
+                int(buffer.size_bytes), tuple(shape if shape is not None else buffer.shape),
+                offset_bytes=offset_bytes, strides_bytes=tuple(strides_bytes))
+            descriptor.require_flat_binding()
+            if descriptor.byte_range[1] != int(buffer.shape[0]) * 4:
+                raise ValueError("Partial buffer ranges cannot be bound without native offset/extent support")
+            def validate():
+                self._view_guard()
+                live_runtime, live_handle = buffer._require_live("resident device view")
+                if live_runtime != runtime or getattr(live_handle, "value", live_handle) != identity:
+                    raise RuntimeError("Resident device view storage changed")
+            return DeviceView(descriptor, buffer, validate)
+
+    def run_leased(self, inputs):
+        """Synchronous one-slot invocation; checked views in, explicit lease out."""
+        with self._invocations.lock, self.engine._lock:
+            self._view_guard()
+            self._invocations.slot.idle()
+            if set(inputs) != set(self.metadata["inputs"]) or not all(isinstance(v, DeviceView) for v in inputs.values()):
+                raise ValueError("run_leased requires checked views for every model input")
+            values = {}
+            for name, view in inputs.items():
+                if math.prod(view.descriptor.shape) != max(1, math.prod(self.metadata["shapes"][name])):
+                    raise ValueError(f"{name}: device view element count mismatch")
+                values[name] = view._bind(self._view_owner, self._view_device)
+            accesses = [Access(view.descriptor) for view in inputs.values()]
+            for name, value in self.buffers.items():
+                constant = name in self.metadata["constants"]
+                accesses.append(Access(self.device_view(value).descriptor, write=not constant, immutable=constant))
+            return self._invocations.submit(inputs, accesses, (self,),
+                lambda: self._run_device_impl(values),
+                lambda name, value: self.device_view(value, shape=self.metadata["shapes"][name]))
+
+    def drain_failed_invocation(self):
+        with self.engine._lock:
+            self._invocations.drain_failed()
+
     def get_outputs(self):
         from types import SimpleNamespace
         return [SimpleNamespace(name=name, shape=self.metadata["shapes"][name])
@@ -336,6 +406,11 @@ class ResidentONNXGraph:
         return [f"TaichiAOT_{str(self.engine.arch).upper()}ExecutionProvider"]
 
     def run_device(self, inputs):
+        with self._invocations.lock:
+            self._invocations.slot.idle()
+            return self._run_device_impl(inputs)
+
+    def _run_device_impl(self, inputs):
         from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
         inputs = dict(inputs)
         if "max_safety" in self.metadata.get("inputs", []) and "max_safety" not in inputs:
@@ -362,6 +437,11 @@ class ResidentONNXGraph:
                     for name in self.metadata["outputs"]}
 
     def prepare_static_device_bindings(self, inputs):
+        with self._invocations.lock:
+            self._invocations.slot.idle()
+            return self._prepare_static_device_bindings_impl(inputs)
+
+    def _prepare_static_device_bindings_impl(self, inputs):
         """Pre-bind persistent GPU input buffers once to eliminate Python allocation/validation in hot tile loops."""
         from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
         inputs = dict(inputs)
@@ -394,11 +474,17 @@ class ResidentONNXGraph:
 
     def run_device_fast(self):
         """Zero-allocation, zero-validation fast path executing pre-bound static graph."""
-        with self._lock:
+        with self._invocations.lock, self._lock:
+            self._invocations.slot.idle()
             self.module.run(self.metadata["graph"], **self._static_args)
             return self._static_outputs
 
     def run(self, output_names=None, input_feed=None, return_gpu=False, borrowed_outputs=False):
+        with self._invocations.lock:
+            self._invocations.slot.idle()
+            return self._run_impl(output_names, input_feed, return_gpu, borrowed_outputs)
+
+    def _run_impl(self, output_names=None, input_feed=None, return_gpu=False, borrowed_outputs=False):
         """Execute model with support for NumPy, PyTorch, and TaichiGPUBuffer inputs."""
         from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
         if input_feed is None:
@@ -452,6 +538,15 @@ class ResidentONNXGraph:
             return [results.get(name) for name in output_names]
 
     def close(self):
+        with self._invocations.lock:
+            if self._invocations.slot.closed:
+                return
+            self._invocations.slot.idle()
+            self._view_sync()
+            self._close_impl()
+            self._invocations.slot.close()
+
+    def _close_impl(self):
         if hasattr(self, "_default_max_safety_buf") and self._default_max_safety_buf is not None:
             try:
                 self._default_max_safety_buf.destroy()
