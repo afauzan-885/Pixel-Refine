@@ -1351,10 +1351,12 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
         # The native pyramid returns L0 as the caller-owned reference buffer.
         # Keep a single ownership path so close() cannot double-retire it.
         self.ref_gray_gpu = self.reference_pyramid[0]
+        from taichi_vision.taichi_algorithm.aot_wrapper import FlowScratchCache
+        self._flow_scratch = FlowScratchCache()
         print(
             "[GPU Pipeline] Aligner: Block Matching GPU "
             f"(mode={mode}, window={self.config.get('win_size')}, "
-            f"levels={len(self.reference_pyramid)}, resident-reference=true)"
+            f"levels={len(self.reference_pyramid)}, resident-reference=true, scratch-cache=true)"
         )
 
     def _flow_params(self):
@@ -1434,6 +1436,7 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                 return_gpu=True,
                 reference_pyramid=self.reference_pyramid,
                 dst=flow_destination,
+                scratch=getattr(self, "_flow_scratch", None),
             )
             flow_gpu = self._normalize_resident_flow(flow_gpu, flow_destination)
             warped_primary = None
@@ -1482,6 +1485,9 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                 pass
         self.reference_pyramid = ()
         self.ref_gray_gpu = None
+        if hasattr(self, "_flow_scratch") and self._flow_scratch is not None:
+            self._flow_scratch.clear()
+            self._flow_scratch = None
         self._close_resident_flow_buffer()
 
 
@@ -1542,10 +1548,12 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
             )
         )
         self.ref_gray_gpu = self.reference_pyramid[0]
+        from taichi_vision.taichi_algorithm.aot_wrapper import FlowScratchCache
+        self._flow_scratch = FlowScratchCache()
         print(
             "[GPU Pipeline] Aligner: Lucas Kanade GPU "
             f"(mode={mode}, window={self.config.get('win_size')}, "
-            f"levels={len(self.reference_pyramid)}, resident-reference=true)"
+            f"levels={len(self.reference_pyramid)}, resident-reference=true, scratch-cache=true)"
         )
 
     def _flow_params(self):
@@ -1623,6 +1631,7 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                 return_gpu=True,
                 reference_pyramid=self.reference_pyramid,
                 dst=flow_destination,
+                scratch=getattr(self, "_flow_scratch", None),
             )
             flow_gpu = self._normalize_resident_flow(flow_gpu, flow_destination)
             warped_primary = None
@@ -1671,6 +1680,9 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                 pass
         self.reference_pyramid = ()
         self.ref_gray_gpu = None
+        if hasattr(self, "_flow_scratch") and self._flow_scratch is not None:
+            self._flow_scratch.clear()
+            self._flow_scratch = None
         self._close_resident_flow_buffer()
 
 
@@ -3182,6 +3194,17 @@ def _run_shared_raw_provider_pipeline(
                 f"stages={reference_telemetry.summary()}"
             )
 
+        # Persistent scratch destination for support demosaic to prevent VRAM churn
+        _demosaic_scratch = None
+        if needs_analysis:
+            try:
+                half_h, half_w = geometry.full_shape[0] // 2, geometry.full_shape[1] // 2
+                _demosaic_scratch = buffer_session.own(
+                    engine.allocate((half_h, half_w, 3), dtype=np.float32, host_accessible=False)
+                )
+            except Exception:
+                _demosaic_scratch = None
+
         def _load_support_dng_payload(index):
             return provider.load_support_dng_payload_host(index)
 
@@ -3220,7 +3243,9 @@ def _run_shared_raw_provider_pipeline(
                     from .raw_pipeline.provider import _demosaic_carrier_gpu
 
                     support_linear_full = _demosaic_carrier_gpu(
-                        support_frame.carrier, half_res=use_half_res
+                        support_frame.carrier,
+                        half_res=use_half_res,
+                        dst=_demosaic_scratch,
                     )
 
                     share_support_weight_proxy = (
@@ -3252,7 +3277,7 @@ def _run_shared_raw_provider_pipeline(
                         in_place=True,
                         source_is_disposable=True,
                     )
-                    if support_linear_full is not support_analysis:
+                    if support_linear_full is not support_analysis and support_linear_full is not _demosaic_scratch:
                         _destroy_work_item(support_linear_full)
                     support_linear_full = None
                     if share_support_weight_proxy:
@@ -3287,7 +3312,8 @@ def _run_shared_raw_provider_pipeline(
                             alignment_preview = None
 
                 if normalized_engine not in ("fusionet", "spatial_fusion"):
-                    _destroy_work_item(support_analysis)
+                    if support_analysis is not _demosaic_scratch:
+                        _destroy_work_item(support_analysis)
                     support_analysis = None
 
                 if normalized_engine in ("spatial_fusion", "fusionet"):
@@ -3322,7 +3348,8 @@ def _run_shared_raw_provider_pipeline(
                     else:
                         aligned_analysis_weight = aligned_weight_proxy
                     if aligned_weight_proxy is not support_analysis:
-                        _destroy_work_item(support_analysis)
+                        if support_analysis is not _demosaic_scratch:
+                            _destroy_work_item(support_analysis)
                         support_analysis = None
                     support_weight_analysis = None
     
@@ -3362,7 +3389,8 @@ def _run_shared_raw_provider_pipeline(
                         _destroy_work_item(aligned_weight_rgb)
                     aligned_weight_rgb = None
                     if support_analysis is not None:
-                        _destroy_work_item(support_analysis)
+                        if support_analysis is not _demosaic_scratch:
+                            _destroy_work_item(support_analysis)
                         support_analysis = None
                 elif normalized_engine == "fusionet":
                     if getattr(session, "runtime", None) == "taichi_aot":
@@ -3710,7 +3738,8 @@ def _run_shared_raw_provider_pipeline(
                 # only needs the mosaic frame, the transform and the weight map,
                 # so both full-resolution RGB proxies can go before it runs.
                 if support_analysis is not None:
-                    _destroy_work_item(support_analysis)
+                    if support_analysis is not _demosaic_scratch:
+                        _destroy_work_item(support_analysis)
                     support_analysis = None
                 if aligned_analysis_weight is not None:
                     _destroy_work_item(aligned_analysis_weight)

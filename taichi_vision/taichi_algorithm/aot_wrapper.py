@@ -41,6 +41,61 @@ _OPENGL_FLOW_GPU_OUTPUTS = []
 _BLOCK_MATCHING_SPECIALIZED_GRAPHS = {}
 
 
+class FlowScratchCache:
+    """Reusable per-burst GPU scratch buffers for optical flow operations.
+
+    Optical flow execution (Lucas-Kanade and Block Matching) runs sequentially
+    per frame, allowing intermediate support pyramids, coarse flow seeds, and
+    tracking grids to be safely reused across frames instead of being allocated
+    and destroyed dozens of times per second.
+    """
+
+    def __init__(self):
+        self._slots = {}
+
+    def acquire(
+        self,
+        engine,
+        name: str,
+        shape,
+        dtype=np.float32,
+        is_vector: bool = False,
+        vector_dim: int = 1,
+    ):
+        shape = tuple(int(v) for v in shape)
+        buf = self._slots.get(name)
+        if (
+            buf is not None
+            and getattr(buf, "handle", None) is not None
+            and tuple(getattr(buf, "shape", ())) == shape
+            and np.dtype(getattr(buf, "dtype", dtype)) == np.dtype(dtype)
+        ):
+            return buf
+        if buf is not None and hasattr(buf, "destroy"):
+            try:
+                buf.destroy()
+            except Exception:
+                pass
+        buf = engine.allocate(
+            shape,
+            dtype=dtype,
+            is_vector=is_vector,
+            vector_dim=vector_dim,
+            host_accessible=False,
+        )
+        self._slots[name] = buf
+        return buf
+
+    def clear(self):
+        for buf in list(self._slots.values()):
+            if buf is not None and hasattr(buf, "destroy"):
+                try:
+                    buf.destroy()
+                except Exception:
+                    pass
+        self._slots.clear()
+
+
 def _register_opengl_flow_output(buffer):
     if buffer is not None:
         _OPENGL_FLOW_GPU_OUTPUTS.append(buffer)
@@ -1738,6 +1793,7 @@ def calcOpticalFlowPyrLK(
     return_diagnostics=False,
     reference_pyramid=None,
     dst=None,
+    scratch=None,
 ):
     """Dense grid Lucas-Kanade optical flow with cv2-style function name.
 
@@ -1989,7 +2045,10 @@ def calcOpticalFlowPyrLK(
                 dst_w = src_w // 2
                 if dst_h < 32 or dst_w < 32:
                     break
-                next_dst = _own(_OutputArray((dst_h, dst_w), np.float32))
+                if scratch is not None:
+                    next_dst = scratch.acquire(engine, f"lk_supp_pyr_{_level}", (dst_h, dst_w), np.float32)
+                else:
+                    next_dst = _own(_OutputArray((dst_h, dst_w), np.float32))
                 pyramid_mod.run(
                     "downsample_2x_f32",
                     src=next_levels[-1],
@@ -2009,10 +2068,11 @@ def calcOpticalFlowPyrLK(
             current_flow = None
             for level in range(len(level_shapes) - 1, -1, -1):
                 lh, lw = level_shapes[level]
-                if current_flow is None:
-                    init_flow = _own(_OutputArray((lh, lw, 2), np.float32))
+                if scratch is not None:
+                    init_flow = scratch.acquire(engine, f"lk_init_flow_{level}", (lh, lw, 2), np.float32)
                 else:
                     init_flow = _own(_OutputArray((lh, lw, 2), np.float32))
+                if current_flow is not None:
                     prev_h, _prev_w = level_shapes[level + 1]
                     scale = float(lh) / float(prev_h)
                     pyramid_mod.run(
@@ -2030,13 +2090,18 @@ def calcOpticalFlowPyrLK(
                 grid_h = max(
                     1, (lh - 2 * level_margin + level_grid_step - 1) // level_grid_step
                 )
-                grid_flow = _own(_OutputArray((grid_h, grid_w, 3), np.float32))
-                grid_meta = _own(_OutputArray((grid_h, grid_w, 4), np.float32))
-                flow_out = (
-                    dst
-                    if level == 0 and dst is not None
-                    else _own(_OutputArray((lh, lw, 2), np.float32))
-                )
+                if scratch is not None:
+                    grid_flow = scratch.acquire(engine, f"lk_grid_flow_{level}", (grid_h, grid_w, 3), np.float32)
+                    grid_meta = scratch.acquire(engine, f"lk_grid_meta_{level}", (grid_h, grid_w, 4), np.float32)
+                else:
+                    grid_flow = _own(_OutputArray((grid_h, grid_w, 3), np.float32))
+                    grid_meta = _own(_OutputArray((grid_h, grid_w, 4), np.float32))
+                if level == 0 and dst is not None:
+                    flow_out = dst
+                elif scratch is not None and level > 0:
+                    flow_out = scratch.acquire(engine, f"lk_flow_out_{level}", (lh, lw, 2), np.float32)
+                else:
+                    flow_out = _own(_OutputArray((lh, lw, 2), np.float32))
 
                 track_args = {
                     "prev": prev_levels[level],
@@ -2459,6 +2524,7 @@ def calcOpticalFlowBlockMatching(
     return_diagnostics=False,
     reference_pyramid=None,
     dst=None,
+    scratch=None,
 ):
     """Dense block matching with parabolic fit sub-pixel estimation."""
     _prepare_opengl_flow_family("block_matching")
@@ -2731,7 +2797,10 @@ def calcOpticalFlowBlockMatching(
                 dst_w = src_w // 2
                 if dst_h < 32 or dst_w < 32:
                     break
-                next_dst = _own(_OutputArray((dst_h, dst_w), np.float32))
+                if scratch is not None:
+                    next_dst = scratch.acquire(engine, f"bm_supp_pyr_{_level}", (dst_h, dst_w), np.float32)
+                else:
+                    next_dst = _own(_OutputArray((dst_h, dst_w), np.float32))
                 pyramid_mod.run(
                     "downsample_2x_f32",
                     src=next_levels[-1],
@@ -2761,13 +2830,18 @@ def calcOpticalFlowBlockMatching(
                 grid_h = max(
                     1, (lh - 2 * level_margin + level_grid_step - 1) // level_grid_step
                 )
-                grid_flow = _own(_OutputArray((grid_h, grid_w, 3), np.float32))
-                grid_meta = _own(_OutputArray((grid_h, grid_w, 4), np.float32))
-                flow_out = (
-                    dst
-                    if level == 0 and dst is not None
-                    else _own(_OutputArray((lh, lw, 2), np.float32))
-                )
+                if scratch is not None:
+                    grid_flow = scratch.acquire(engine, f"bm_grid_flow_{level}", (grid_h, grid_w, 3), np.float32)
+                    grid_meta = scratch.acquire(engine, f"bm_grid_meta_{level}", (grid_h, grid_w, 4), np.float32)
+                else:
+                    grid_flow = _own(_OutputArray((grid_h, grid_w, 3), np.float32))
+                    grid_meta = _own(_OutputArray((grid_h, grid_w, 4), np.float32))
+                if level == 0 and dst is not None:
+                    flow_out = dst
+                elif scratch is not None and level > 0:
+                    flow_out = scratch.acquire(engine, f"bm_flow_out_{level}", (lh, lw, 2), np.float32)
+                else:
+                    flow_out = _own(_OutputArray((lh, lw, 2), np.float32))
 
                 if coarse_grid_flow is None:
                     dummy_prev = _own(_OutputArray((1, 1, 3), np.float32))

@@ -14,6 +14,8 @@
 #include <vector>
 #include <mutex>
 #include <limits>
+#include "native_memory_control.h"
+#include "native_memory_ledger.h"
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
 #endif
@@ -179,12 +181,19 @@ struct BufferRecord {
   bool mapped = false;
   bool release_failed = false;
   bool host_read = false;
+  bool private_staging = false;
+  bool cached = false;
+  bool leased = false;
+  bool complete = false;
 };
 
 struct EngineContext {
   TiArch arch;
   ti::Runtime *runtime;
   std::unordered_map<TiMemory, BufferRecord> buffers;
+  pixel_refine::MemoryLedger memory_ledger;
+  TiAotMemoryLimitsV1 memory_limits{};
+  uint64_t memory_cache_hits = 0, memory_cache_misses = 0;
   std::unordered_set<ModuleContext *> modules;
   std::unordered_map<std::string, Pipeline> pipelines;
   std::mutex mutex;
@@ -1241,7 +1250,8 @@ static bool memory_call_ok(EngineContext *ctx, const char *operation) {
 }
 
 static BufferRecord *checked_buffer(EngineContext *ctx, void *memory,
-                                    uint64_t size, const char *operation) {
+                                    uint64_t size, const char *operation,
+                                    bool allow_private = false) {
   auto it = ctx->buffers.find(static_cast<TiMemory>(memory));
   if (!memory || it == ctx->buffers.end()) {
     memory_error(ctx, operation, "buffer is not owned by this runtime or is freed");
@@ -1249,6 +1259,10 @@ static BufferRecord *checked_buffer(EngineContext *ctx, void *memory,
   }
   if (it->second.release_failed) {
     memory_error(ctx, operation, "buffer release outcome is unknown; allocation quarantined");
+    return nullptr;
+  }
+  if (it->second.private_staging && !allow_private) {
+    memory_error(ctx, operation, "private staging is not a caller buffer");
     return nullptr;
   }
   if (size > it->second.capacity || size > (std::numeric_limits<size_t>::max)()) {
@@ -1325,7 +1339,7 @@ static Result memory_boundary(void *runtime, const char *operation,
 
 static void *map_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
                               void *memory, const char *operation) {
-  BufferRecord *record = checked_buffer(ctx, memory, 0, operation);
+  BufferRecord *record = checked_buffer(ctx, memory, 0, operation, true);
   if (!record)
     return nullptr;
   if (record->mapped) {
@@ -1355,7 +1369,7 @@ static void *map_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
 
 static bool unmap_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
                                void *memory, const char *operation) {
-  BufferRecord *record = checked_buffer(ctx, memory, 0, operation);
+  BufferRecord *record = checked_buffer(ctx, memory, 0, operation, true);
   if (!record)
     return false;
   if (!record->mapped) {
@@ -1372,9 +1386,13 @@ static bool unmap_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
 
 static bool free_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
                               void *memory, const char *operation) {
-  BufferRecord *record = checked_buffer(ctx, memory, 0, operation);
+  BufferRecord *record = checked_buffer(ctx, memory, 0, operation, true);
   if (!record)
     return false;
+  if (record->private_staging && record->leased) {
+    memory_error(ctx, operation, "private staging is leased");
+    return false;
+  }
   // Do not deallocate storage still being used by queued kernels/copies.
   ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
   rt->wait();
@@ -1386,22 +1404,32 @@ static bool free_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
   // The backend has a void release API. Any failure after entering it has an
   // indeterminate outcome; retain bookkeeping but forbid future access/retry.
   record->release_failed = true;
+  record->cached = false;
   ti_free_memory(rt->runtime(), static_cast<TiMemory>(memory));
   if (!memory_call_ok(ctx, operation))
     return false;
+  ctx->memory_ledger.release(record->capacity);
   ctx->buffers.erase(static_cast<TiMemory>(memory));
   return true;
 }
 
 static void *allocate_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
-                                   uint64_t size, bool host_write, bool host_read) {
+                                   uint64_t size, bool host_write, bool host_read,
+                                   bool private_staging = false) {
   if (!size || size > (std::numeric_limits<size_t>::max)()) {
     memory_error(ctx, "allocate_gpu_buffer", "size must be positive and fit size_t");
     return nullptr;
   }
+  if (!ctx->memory_ledger.reserve(size, ctx->memory_limits.budget_bytes)) {
+    memory_error(ctx, "allocate_gpu_buffer", "native logical byte budget exceeded or accounting overflow");
+    return nullptr;
+  }
+  pixel_refine::MemoryReservation reservation{ctx->memory_ledger, size};
   // Prepare node and buckets before native allocation; reinsertion after
   // extract restores the same map size and cannot need another rehash/node.
-  ctx->buffers.emplace(nullptr, BufferRecord{size, false, false, host_read});
+  BufferRecord record{size, false, false, host_read};
+  record.private_staging = private_staging;
+  ctx->buffers.emplace(nullptr, record);
   auto node = ctx->buffers.extract(nullptr);
   TiMemoryAllocateInfo info = {};
   info.size = size;
@@ -1409,14 +1437,18 @@ static void *allocate_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
   info.host_write = host_write;
   info.host_read = host_read;
   ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  reservation.entered_native = true;
   TiMemory memory = ti_allocate_memory(rt->runtime(), &info);
   if (memory) {
     node.key() = memory;
     ctx->buffers.insert(std::move(node));
+    reservation.commit();
   }
   if (!memory_call_ok(ctx, "allocate_gpu_buffer")) {
-    if (memory)
+    if (memory) {
+      ctx->memory_ledger.accumulate(ctx->memory_ledger.failures, 1);
       free_owned_buffer(ctx, rt, memory, "allocate_gpu_buffer cleanup");
+    }
     return nullptr;
   }
   if (!memory)
@@ -1426,8 +1458,8 @@ static void *allocate_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
 
 static bool copy_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
                                void *src, void *dst, uint64_t size) {
-  BufferRecord *source = checked_buffer(ctx, src, size, "copy_gpu_buffer source");
-  BufferRecord *destination = checked_buffer(ctx, dst, size, "copy_gpu_buffer destination");
+  BufferRecord *source = checked_buffer(ctx, src, size, "copy_gpu_buffer source", true);
+  BufferRecord *destination = checked_buffer(ctx, dst, size, "copy_gpu_buffer destination", true);
   if (!source || !destination)
     return false;
   if (source->mapped || destination->mapped) {
@@ -1448,6 +1480,56 @@ static bool copy_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
     return false;
   rt->wait(); // Completion is required before host mapping or temporary free.
   return memory_call_ok(ctx, "copy_gpu_buffer wait");
+}
+
+static bool idle_cached_staging(const BufferRecord &record) noexcept {
+  return pixel_refine::idle_cache_eligible(record);
+}
+
+static void cached_staging_totals(EngineContext *ctx, uint64_t &bytes,
+                                   uint64_t &entries) noexcept {
+  bytes = entries = 0;
+  for (const auto &entry : ctx->buffers) {
+    if (idle_cached_staging(entry.second)) {
+      bytes += entry.second.capacity; // Subset of overflow-checked retained.
+      ++entries;
+    }
+  }
+}
+
+static void *acquire_readback_staging(EngineContext *ctx, ti::Runtime *rt,
+                                      uint64_t size) {
+  for (auto &entry : ctx->buffers) {
+    if (idle_cached_staging(entry.second) && entry.second.capacity == size) {
+      entry.second.cached = false;
+      entry.second.leased = true;
+      entry.second.complete = false;
+      ctx->memory_ledger.accumulate(ctx->memory_cache_hits, 1);
+      return entry.first;
+    }
+  }
+  ctx->memory_ledger.accumulate(ctx->memory_cache_misses, 1);
+  void *memory = allocate_owned_buffer(ctx, rt, size, false, true, true);
+  if (memory)
+    ctx->buffers.find(static_cast<TiMemory>(memory))->second.leased = true;
+  return memory;
+}
+
+static bool release_readback_staging(EngineContext *ctx, ti::Runtime *rt,
+                                      void *memory, bool successful_read) {
+  BufferRecord *record = checked_buffer(ctx, memory, 0, "readback release", true);
+  if (!record)
+    return false;
+  uint64_t bytes = 0, entries = 0;
+  cached_staging_totals(ctx, bytes, entries);
+  if (successful_read && record->private_staging && !record->leased &&
+      record->complete && !record->mapped && !record->release_failed &&
+      pixel_refine::cache_fits(bytes, entries, record->capacity,
+          ctx->memory_limits.cache_max_bytes, ctx->memory_limits.cache_max_entries)) {
+    record->cached = true;
+    return true;
+  }
+  return free_owned_buffer(ctx, rt, memory, "readback staging cleanup");
 }
 
 // The upload-only public allocation policy stays unchanged. Host readback uses
@@ -1472,7 +1554,7 @@ class ReadbackMapping {
     if (record->host_read) {
       memory_ = source;
     } else {
-      memory_ = allocate_owned_buffer(ctx_, rt_, size, false, true);
+      memory_ = acquire_readback_staging(ctx_, rt_, size);
       if (!memory_)
         return nullptr;
       temporary_ = true;
@@ -1483,16 +1565,28 @@ class ReadbackMapping {
     rt_->wait(); // Preserve completion before direct or staged host reads.
     if (!memory_call_ok(ctx_, "readback wait"))
       return nullptr;
-    return map_owned_buffer(ctx_, rt_, memory_, "readback map");
+    auto it = ctx_->buffers.find(static_cast<TiMemory>(memory_));
+    if (it != ctx_->buffers.end())
+      it->second.complete = true;
+    void *result = map_owned_buffer(ctx_, rt_, memory_, "readback map");
+    successful_read_ = result != nullptr;
+    return result;
   }
 
   bool close() noexcept {
     void *memory = memory_;
     const bool temporary = temporary_;
+    const bool successful_read = successful_read_;
     memory_ = nullptr;
     temporary_ = false;
+    successful_read_ = false;
     if (!memory)
       return true;
+    // The scope no longer owns a host lease, even if later cleanup bookkeeping
+    // throws. Mapped/incomplete/quarantined records remain ineligible for trim.
+    auto entry = ctx_->buffers.find(static_cast<TiMemory>(memory));
+    if (temporary && entry != ctx_->buffers.end())
+      entry->second.leased = false;
     std::string original;
     try {
       {
@@ -1504,7 +1598,7 @@ class ReadbackMapping {
       if (it != ctx_->buffers.end() && it->second.mapped)
         okay = unmap_owned_buffer(ctx_, rt_, memory, "readback unmap");
       if (temporary && okay)
-        okay = free_owned_buffer(ctx_, rt_, memory, "readback staging cleanup");
+        okay = release_readback_staging(ctx_, rt_, memory, successful_read);
       if (!okay && !original.empty()) {
         std::lock_guard<std::mutex> lock(ctx_->mutex);
         ctx_->last_error = original + "; cleanup: " + ctx_->last_error;
@@ -1529,6 +1623,7 @@ class ReadbackMapping {
   ti::Runtime *rt_;
   void *memory_ = nullptr;
   bool temporary_ = false;
+  bool successful_read_ = false;
 };
 
 // -----------------------------------------------------------------------
@@ -1897,6 +1992,11 @@ EXPORT void destroy_aot_engine(void *runtime) {
     ScopedOpenGLContext gl_scope(ctx);
     if (!gl_scope.ready())
       return;
+    if (ctx->memory_ledger.unresolved || ctx->memory_ledger.invariant_error) {
+      memory_error(ctx, "destroy_aot_engine",
+                   "unresolved native allocation outcome; retaining runtime and accounting");
+      return;
+    }
     try {
       ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
       ctx->runtime->wait();
@@ -1937,6 +2037,141 @@ EXPORT void destroy_aot_engine(void *runtime) {
 // -----------------------------------------------------------------------
 // Memory Management
 // -----------------------------------------------------------------------
+static bool memory_control_header(EngineContext *ctx, const void *object,
+                                   uint32_t size, const char *operation) {
+  if (!object) {
+    memory_error(ctx, operation, "null control structure");
+    return false;
+  }
+  const auto *header = static_cast<const uint32_t *>(object);
+  if (header[0] < size || header[1] != 1) {
+    memory_error(ctx, operation, "unsupported memory control version or structure size");
+    return false;
+  }
+  return true;
+}
+
+EXPORT int ti_aot_get_memory_snapshot(void *runtime, TiAotMemorySnapshotV1 *output) {
+  return memory_boundary<int>(runtime, "ti_aot_get_memory_snapshot", 0,
+      [=](EngineContext *ctx, ti::Runtime *) -> int {
+    if (!memory_control_header(ctx, output, sizeof(*output), "memory snapshot"))
+      return 0;
+    TiAotMemorySnapshotV1 snapshot{};
+    snapshot.struct_size = sizeof(snapshot);
+    snapshot.abi_version = 1;
+    snapshot.flags = TI_AOT_MEMORY_PHYSICAL_UNKNOWN | TI_AOT_MEMORY_IN_FLIGHT_UNKNOWN;
+    const auto &ledger = ctx->memory_ledger;
+    if (ledger.saturated) snapshot.flags |= TI_AOT_MEMORY_COUNTER_SATURATED;
+    if (ledger.invariant_error) snapshot.flags |= TI_AOT_MEMORY_ACCOUNTING_ERROR;
+    if (ledger.unresolved) snapshot.flags |= TI_AOT_MEMORY_UNRESOLVED_ALLOCATION;
+    snapshot.budget_bytes = ctx->memory_limits.budget_bytes;
+    snapshot.cache_max_bytes = ctx->memory_limits.cache_max_bytes;
+    snapshot.cache_max_entries = ctx->memory_limits.cache_max_entries;
+    snapshot.budget_charge_bytes = ledger.charge;
+    snapshot.retained_bytes = ledger.retained;
+    snapshot.pending_bytes = ledger.pending;
+    snapshot.unresolved_bytes = ledger.unresolved;
+    snapshot.retained_count = ledger.retained_count;
+    snapshot.unresolved_count = ledger.unresolved_count;
+    snapshot.allocation_requests = ledger.requests;
+    snapshot.allocation_requested_bytes_total = ledger.requested_total;
+    snapshot.allocation_failures = ledger.failures;
+    snapshot.high_water_retained_bytes = ledger.high_retained;
+    snapshot.high_water_budget_charge_bytes = ledger.high_charge;
+    snapshot.cache_hits = ctx->memory_cache_hits;
+    snapshot.cache_misses = ctx->memory_cache_misses;
+    snapshot.physical_bytes = snapshot.driver_budget_bytes = snapshot.in_flight_bytes =
+        (std::numeric_limits<uint64_t>::max)();
+    for (const auto &entry : ctx->buffers) {
+      const auto &record = entry.second;
+      const uint64_t bytes = record.capacity;
+      if (!record.release_failed && !record.cached) snapshot.live_bytes += bytes;
+      if (record.private_staging) {
+        snapshot.private_staging_bytes += bytes;
+        ++snapshot.private_staging_count;
+      } else {
+        snapshot.caller_bytes += bytes;
+        ++snapshot.caller_count;
+      }
+      if (idle_cached_staging(record)) {
+        snapshot.idle_cache_bytes += bytes;
+        ++snapshot.idle_cache_count;
+      }
+      if (record.mapped) { snapshot.mapped_bytes += bytes; ++snapshot.mapped_count; }
+      if (record.release_failed) { snapshot.quarantined_bytes += bytes; ++snapshot.quarantined_count; }
+      if (record.private_staging && record.leased) {
+        snapshot.leased_private_bytes += bytes;
+        ++snapshot.leased_private_count;
+      }
+    }
+    memcpy(output, &snapshot, sizeof(snapshot));
+    return 1;
+  });
+}
+
+EXPORT int ti_aot_set_memory_limits(void *runtime, const TiAotMemoryLimitsV1 *limits) {
+  return memory_boundary<int>(runtime, "ti_aot_set_memory_limits", 0,
+      [=](EngineContext *ctx, ti::Runtime *) -> int {
+    if (!memory_control_header(ctx, limits, sizeof(*limits), "memory limits"))
+      return 0;
+    if (limits->reserved[0] || limits->reserved[1] ||
+        static_cast<bool>(limits->cache_max_bytes) != static_cast<bool>(limits->cache_max_entries)) {
+      memory_error(ctx, "memory limits", "reserved fields must be zero and cache requires byte plus entry caps");
+      return 0;
+    }
+    uint64_t bytes = 0, entries = 0;
+    cached_staging_totals(ctx, bytes, entries);
+    if ((limits->budget_bytes && ctx->memory_ledger.charge > limits->budget_bytes) ||
+        bytes > limits->cache_max_bytes || entries > limits->cache_max_entries) {
+      memory_error(ctx, "memory limits", "limits below retained charge/cache; trim idle cache explicitly first");
+      return 0; // Atomic configuration: never evict caller resources to fit.
+    }
+    ctx->memory_limits = *limits;
+    ctx->memory_limits.struct_size = sizeof(*limits);
+    return 1;
+  });
+}
+
+EXPORT int ti_aot_trim_memory_cache(void *runtime, uint64_t target_bytes,
+                                    uint64_t target_entries, TiAotMemoryTrimV1 *output) {
+  return memory_boundary<int>(runtime, "ti_aot_trim_memory_cache", 0,
+      [=](EngineContext *ctx, ti::Runtime *rt) -> int {
+    if (!memory_control_header(ctx, output, sizeof(*output), "memory trim"))
+      return 0;
+    TiAotMemoryTrimV1 result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = 1;
+    result.valid = 1;
+    cached_staging_totals(ctx, result.remaining_cache_bytes, result.remaining_cache_entries);
+    while (result.remaining_cache_bytes > target_bytes || result.remaining_cache_entries > target_entries) {
+      TiMemory memory = nullptr;
+      uint64_t capacity = 0;
+      for (const auto &entry : ctx->buffers) {
+        if (idle_cached_staging(entry.second)) { memory = entry.first; capacity = entry.second.capacity; break; }
+      }
+      if (!memory) break;
+      bool freed = false;
+      try {
+        freed = free_owned_buffer(ctx, rt, memory, "memory cache trim");
+      } catch (const std::exception &error) {
+        memory_error(ctx, "memory cache trim", error.what());
+      } catch (...) {
+        memory_error(ctx, "memory cache trim", "unknown exception");
+      }
+      if (!freed) {
+        cached_staging_totals(ctx, result.remaining_cache_bytes, result.remaining_cache_entries);
+        memcpy(output, &result, sizeof(result));
+        return 0; // Partial successes are reported; failed releases stay charged.
+      }
+      result.freed_bytes += capacity;
+      ++result.freed_entries;
+      cached_staging_totals(ctx, result.remaining_cache_bytes, result.remaining_cache_entries);
+    }
+    memcpy(output, &result, sizeof(result));
+    return 1;
+  });
+}
+
 EXPORT void *allocate_gpu_buffer(void *runtime, uint64_t size,
                                  int host_accessible) {
   return memory_boundary<void *>(runtime, "allocate_gpu_buffer", nullptr,
@@ -1951,7 +2186,8 @@ EXPORT void *allocate_gpu_buffer(void *runtime, uint64_t size,
 EXPORT void free_gpu_buffer(void *runtime, void *memory) {
   memory_boundary<bool>(runtime, "free_gpu_buffer", false,
       [=](EngineContext *engine, ti::Runtime *rt) {
-        return free_owned_buffer(engine, rt, memory, "free_gpu_buffer");
+        return checked_buffer(engine, memory, 0, "free_gpu_buffer") &&
+               free_owned_buffer(engine, rt, memory, "free_gpu_buffer");
       });
 }
 
@@ -2005,14 +2241,16 @@ EXPORT void *map_gpu_buffer(void *runtime, void *memory) {
     rt->wait();
     if (!memory_call_ok(engine, "map_gpu_buffer wait"))
       return nullptr;
-    return map_owned_buffer(engine, rt, memory, "map_gpu_buffer");
+    return checked_buffer(engine, memory, 0, "map_gpu_buffer")
+        ? map_owned_buffer(engine, rt, memory, "map_gpu_buffer") : nullptr;
   });
 }
 
 EXPORT void unmap_gpu_buffer(void *runtime, void *memory) {
   memory_boundary<bool>(runtime, "unmap_gpu_buffer", false,
       [=](EngineContext *engine, ti::Runtime *rt) {
-    return unmap_owned_buffer(engine, rt, memory, "unmap_gpu_buffer");
+    return checked_buffer(engine, memory, 0, "unmap_gpu_buffer") &&
+           unmap_owned_buffer(engine, rt, memory, "unmap_gpu_buffer");
   });
 }
 
@@ -2020,7 +2258,9 @@ EXPORT void copy_gpu_buffer(void *runtime, void *src, void *dst,
                             uint64_t size) {
   memory_boundary<bool>(runtime, "copy_gpu_buffer", false,
       [=](EngineContext *engine, ti::Runtime *rt) {
-    return copy_owned_buffer(engine, rt, src, dst, size);
+    return checked_buffer(engine, src, size, "copy_gpu_buffer source") &&
+           checked_buffer(engine, dst, size, "copy_gpu_buffer destination") &&
+           copy_owned_buffer(engine, rt, src, dst, size);
   });
 }
 

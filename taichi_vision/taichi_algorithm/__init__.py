@@ -573,6 +573,7 @@ if AOT_MODE == "1":
         buffer_provider="pool",
         return_gpu=False,
         reference_pyramid=None,
+        scratch=None,
     ):
         return _aot_farneback_flow(
             ref_gray,
@@ -587,6 +588,7 @@ if AOT_MODE == "1":
             flow_init=flow_init,
             return_gpu=return_gpu,
             reference_pyramid=reference_pyramid,
+            scratch=scratch,
         )
     zncc = _aot_zncc
 
@@ -1414,6 +1416,7 @@ def calcOpticalFlowFarneback(
     preset="opencv",
     return_diagnostics=False,
     reference_pyramid=None,
+    scratch=None,
     return_gpu=False,
     dst=None,
 ):
@@ -1434,6 +1437,7 @@ def calcOpticalFlowFarneback(
         flags=flags,
         flow_init=flow,
         reference_pyramid=reference_pyramid,
+        scratch=scratch,
         return_gpu=return_gpu,
         dst=dst,
     )
@@ -1461,6 +1465,7 @@ def calcOpticalFlowPyrLK(
     dst=None,
     return_diagnostics=False,
     reference_pyramid=None,
+    scratch=None,
 ):
     """OpenCV-style Lucas-Kanade entrypoint with internal grid dense flow."""
     return aot_wrapper.calcOpticalFlowPyrLK(
@@ -1485,6 +1490,7 @@ def calcOpticalFlowPyrLK(
         dst=dst,
         return_diagnostics=return_diagnostics,
         reference_pyramid=reference_pyramid,
+        scratch=scratch,
     )
 
 

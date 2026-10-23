@@ -13,7 +13,9 @@ The tests cannot safely be used against an old binary without boundary guards.
 """
 
 import ctypes as c
+import importlib.util
 import os
+from pathlib import Path
 import threading
 import unittest
 
@@ -156,6 +158,56 @@ class NativeMemoryBoundary(unittest.TestCase):
         # Both public buffers must remain usable after temporary staging cleanup.
         self.lib.copy_gpu_buffer(self.ctx, device_buffer, upload, 257)
         self.assertEqual(self.error(), "")
+
+    def test_native_limits_cache_reuse_and_trim_preserve_mapped_caller(self):
+        # Load only the pure ABI structures, never the package/engine initializer.
+        path = Path(__file__).resolve().parents[3] / "taichi_aot" / "native_memory_control.py"
+        spec = importlib.util.spec_from_file_location("memory_control_deferred", path)
+        controls = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(controls)
+        for name, args in {
+            "ti_aot_get_memory_snapshot": [c.c_void_p, c.POINTER(controls.SnapshotV1)],
+            "ti_aot_set_memory_limits": [c.c_void_p, c.POINTER(controls.LimitsV1)],
+            "ti_aot_trim_memory_cache": [c.c_void_p, c.c_uint64, c.c_uint64, c.POINTER(controls.TrimV1)],
+        }.items():
+            function = getattr(self.lib, name)
+            function.argtypes, function.restype = args, c.c_int
+
+        def snapshot():
+            value = controls._new(controls.SnapshotV1)
+            self.assertEqual(self.lib.ti_aot_get_memory_snapshot(self.ctx, c.byref(value)), 1, self.error())
+            return value
+
+        memory = self.alloc(16)
+        payload = c.create_string_buffer(bytes(range(16)), 16)
+        self.lib.write_to_gpu_buffer(self.ctx, memory, payload, 16)
+        initial = snapshot()
+        self.assertEqual((initial.retained_bytes, initial.cache_max_bytes, initial.idle_cache_count), (16, 0, 0))
+        limits = controls._new(controls.LimitsV1)
+        limits.budget_bytes, limits.cache_max_bytes, limits.cache_max_entries = 64, 32, 2
+        self.assertEqual(self.lib.ti_aot_set_memory_limits(self.ctx, c.byref(limits)), 1)
+        for _ in range(2):
+            output = c.create_string_buffer(16)
+            self.lib.read_from_gpu_buffer(self.ctx, memory, output, 16)
+            self.assertEqual(self.error(), "")
+            self.assertEqual(output.raw, payload.raw)
+        cached = snapshot()
+        self.assertEqual((cached.retained_bytes, cached.caller_bytes, cached.idle_cache_bytes), (32, 16, 16))
+        self.assertEqual((cached.private_staging_count, cached.idle_cache_count, cached.cache_hits), (1, 1, 1))
+        self.assertFalse(self.lib.allocate_gpu_buffer(self.ctx, 33, 1))
+        self.assertIn("budget", self.error())
+        rejected = snapshot()
+        self.assertEqual((rejected.budget_charge_bytes, rejected.unresolved_bytes), (32, 0))
+        self.assertTrue(self.lib.map_gpu_buffer(self.ctx, memory))
+        trim = controls._new(controls.TrimV1)
+        self.assertEqual(self.lib.ti_aot_trim_memory_cache(self.ctx, 0, 0, c.byref(trim)), 1)
+        self.assertEqual((trim.valid, trim.freed_bytes, trim.freed_entries), (1, 16, 1))
+        mapped = snapshot()
+        self.assertEqual((mapped.retained_bytes, mapped.caller_bytes, mapped.mapped_bytes), (16, 16, 16))
+        self.lib.unmap_gpu_buffer(self.ctx, memory)
+        limits.budget_bytes = 8
+        self.assertEqual(self.lib.ti_aot_set_memory_limits(self.ctx, c.byref(limits)), 0)
+        self.assertEqual(snapshot().budget_bytes, 64) # Rejected configuration is atomic.
 
 
 if __name__ == "__main__":
