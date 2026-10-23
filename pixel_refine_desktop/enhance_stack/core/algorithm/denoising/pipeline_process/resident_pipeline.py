@@ -765,6 +765,7 @@ def prepare_analysis_proxy_gpu(
     analysis_params: Optional[dict] = None,
     in_place: bool = False,
     source_is_disposable: bool = False,
+    dst: Optional[TaichiGPUBuffer] = None,
 ) -> TaichiGPUBuffer:
     """Create the canonical work-resolution RGB analysis proxy.
 
@@ -773,11 +774,10 @@ def prepare_analysis_proxy_gpu(
     source carrier and release the returned temporary when finished.
 
     ``in_place`` opts into writing the tone-mapped result back into
-    ``source_gpu``.  The enhance kernel is per-pixel with an explicit
+    ``source_gpu`` or ``dst``. The enhance kernel is per-pixel with an explicit
     destination, so when the caller already owns a throwaway carrier (RAW
-    Native analysis proxies) the second full-resolution buffer is pure waste:
-    at 12.6 MP one proxy is 144 MiB, and both the reference and every support
-    frame allocate one.
+    Native analysis proxies) or supplies a persistent ``dst`` scratch buffer,
+    the second full-resolution buffer is pure waste.
     """
 
     from taichi_vision import taichi_aot
@@ -791,25 +791,31 @@ def prepare_analysis_proxy_gpu(
             (work_w, work_h),
             interpolation=taichi_aot.INTER_AREA,
             return_gpu=True,
+            dst=dst,
         )
     else:
-        proxy = source_gpu
-        if (
-            in_place
-            and analysis_params is not None
-            and not source_is_disposable
-        ):
-            # Keep the full-resolution linear carrier untouched when the
-            # requested analysis geometry happens to match its dimensions.
-            # A same-size resize does extra filtering work; an exact device
-            # copy is sufficient to create the disposable in-place proxy.
-            proxy = taichi_aot.copy(source_gpu, return_gpu=True)
+        if dst is not None and dst is not source_gpu:
+            from taichi_vision.taichi_algorithm.common import copy_field
+            copy_field(source_gpu, dst)
+            proxy = dst
+        else:
+            proxy = source_gpu
+            if (
+                in_place
+                and analysis_params is not None
+                and not source_is_disposable
+            ):
+                # Keep the full-resolution linear carrier untouched when the
+                # requested analysis geometry happens to match its dimensions.
+                # A same-size resize does extra filtering work; an exact device
+                # copy is sufficient to create the disposable in-place proxy.
+                proxy = taichi_aot.copy(source_gpu, return_gpu=True)
     if analysis_params is None:
         return proxy
     enhanced = apply_auto_enhance_on_gpu(
         proxy, analysis_params, dst=proxy if in_place else None
     )
-    if enhanced is not proxy and proxy is not source_gpu:
+    if enhanced is not proxy and proxy is not source_gpu and proxy is not dst:
         _destroy_work_item(proxy)
     return enhanced
 
@@ -1414,7 +1420,26 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                 raise RuntimeError("Block Matching alignment cancelled.")
 
         source = analysis_frame_gpu if analysis_frame_gpu is not None else supp_linear_gpu
-        supp_gray_gpu = taichi_aot.cvtColor(source, taichi_aot.COLOR_RGB2GRAY)
+        supp_gray_scratch = getattr(self, "_supp_gray_scratch", None)
+        if (
+            supp_gray_scratch is None
+            or getattr(supp_gray_scratch, "handle", None) is None
+            or tuple(int(v) for v in getattr(supp_gray_scratch, "shape", ())) != (self.work_h, self.work_w)
+        ):
+            if supp_gray_scratch is not None:
+                _destroy_work_item(supp_gray_scratch)
+            engine = get_engine()
+            self._supp_gray_scratch = _own_component(
+                engine.allocate((self.work_h, self.work_w), dtype=np.float32, host_accessible=False)
+            )
+            supp_gray_scratch = self._supp_gray_scratch
+
+        supp_gray_gpu = taichi_aot.cvtColor(
+            source,
+            taichi_aot.COLOR_RGB2GRAY,
+            dst=supp_gray_scratch if tuple(source.shape[:2]) == (self.work_h, self.work_w) else None,
+            return_gpu=True,
+        )
         flow_gpu = None
         try:
             if tuple(supp_gray_gpu.shape[:2]) != (self.work_h, self.work_w):
@@ -1423,8 +1448,10 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                     (self.work_w, self.work_h),
                     interpolation=taichi_aot.INTER_AREA,
                     return_gpu=True,
+                    dst=supp_gray_scratch,
                 )
-                _destroy_work_item(supp_gray_gpu)
+                if supp_gray_gpu is not supp_gray_scratch:
+                    _destroy_work_item(supp_gray_gpu)
                 supp_gray_gpu = resized
             flow_destination = self._ensure_resident_flow_buffer(
                 (self.work_h, self.work_w, 2)
@@ -1471,7 +1498,7 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                 and hasattr(flow_gpu, "destroy")
             ):
                 _destroy_work_item(flow_gpu)
-            if supp_gray_gpu is not None and hasattr(supp_gray_gpu, "destroy"):
+            if supp_gray_gpu is not None and supp_gray_gpu is not getattr(self, "_supp_gray_scratch", None) and hasattr(supp_gray_gpu, "destroy"):
                 _destroy_work_item(supp_gray_gpu)
 
     def close(self):
@@ -1485,6 +1512,9 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                 pass
         self.reference_pyramid = ()
         self.ref_gray_gpu = None
+        if hasattr(self, "_supp_gray_scratch") and self._supp_gray_scratch is not None:
+            _destroy_work_item(self._supp_gray_scratch)
+            self._supp_gray_scratch = None
         if hasattr(self, "_flow_scratch") and self._flow_scratch is not None:
             self._flow_scratch.clear()
             self._flow_scratch = None
@@ -1609,7 +1639,26 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                 raise RuntimeError("Lucas Kanade alignment cancelled.")
 
         source = analysis_frame_gpu if analysis_frame_gpu is not None else supp_linear_gpu
-        supp_gray_gpu = taichi_aot.cvtColor(source, taichi_aot.COLOR_RGB2GRAY)
+        supp_gray_scratch = getattr(self, "_supp_gray_scratch", None)
+        if (
+            supp_gray_scratch is None
+            or getattr(supp_gray_scratch, "handle", None) is None
+            or tuple(int(v) for v in getattr(supp_gray_scratch, "shape", ())) != (self.work_h, self.work_w)
+        ):
+            if supp_gray_scratch is not None:
+                _destroy_work_item(supp_gray_scratch)
+            engine = get_engine()
+            self._supp_gray_scratch = _own_component(
+                engine.allocate((self.work_h, self.work_w), dtype=np.float32, host_accessible=False)
+            )
+            supp_gray_scratch = self._supp_gray_scratch
+
+        supp_gray_gpu = taichi_aot.cvtColor(
+            source,
+            taichi_aot.COLOR_RGB2GRAY,
+            dst=supp_gray_scratch if tuple(source.shape[:2]) == (self.work_h, self.work_w) else None,
+            return_gpu=True,
+        )
         flow_gpu = None
         try:
             if tuple(supp_gray_gpu.shape[:2]) != (self.work_h, self.work_w):
@@ -1618,8 +1667,10 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                     (self.work_w, self.work_h),
                     interpolation=taichi_aot.INTER_AREA,
                     return_gpu=True,
+                    dst=supp_gray_scratch,
                 )
-                _destroy_work_item(supp_gray_gpu)
+                if supp_gray_gpu is not supp_gray_scratch:
+                    _destroy_work_item(supp_gray_gpu)
                 supp_gray_gpu = resized
             flow_destination = self._ensure_resident_flow_buffer(
                 (self.work_h, self.work_w, 2)
@@ -1668,7 +1719,7 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                 and hasattr(flow_gpu, "destroy")
             ):
                 _destroy_work_item(flow_gpu)
-            if supp_gray_gpu is not None and hasattr(supp_gray_gpu, "destroy"):
+            if supp_gray_gpu is not None and supp_gray_gpu is not getattr(self, "_supp_gray_scratch", None) and hasattr(supp_gray_gpu, "destroy"):
                 _destroy_work_item(supp_gray_gpu)
 
     def close(self):
@@ -1680,6 +1731,9 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                 pass
         self.reference_pyramid = ()
         self.ref_gray_gpu = None
+        if hasattr(self, "_supp_gray_scratch") and self._supp_gray_scratch is not None:
+            _destroy_work_item(self._supp_gray_scratch)
+            self._supp_gray_scratch = None
         if hasattr(self, "_flow_scratch") and self._flow_scratch is not None:
             self._flow_scratch.clear()
             self._flow_scratch = None
@@ -2508,7 +2562,7 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
                 and hasattr(flow_gpu, "destroy")
             ):
                 _destroy_work_item(flow_gpu)
-            if supp_gray_gpu is not None and hasattr(supp_gray_gpu, "destroy"):
+            if supp_gray_gpu is not None and supp_gray_gpu is not getattr(self, "_supp_gray_scratch", None) and hasattr(supp_gray_gpu, "destroy"):
                 _destroy_work_item(supp_gray_gpu)
             if supp_gray_unit_gpu is not None and hasattr(supp_gray_unit_gpu, "destroy"):
                 _destroy_work_item(supp_gray_unit_gpu)
@@ -3196,14 +3250,28 @@ def _run_shared_raw_provider_pipeline(
 
         # Persistent scratch destination for support demosaic to prevent VRAM churn
         _demosaic_scratch = None
+        _work_scratch = None
         if needs_analysis:
             try:
-                half_h, half_w = geometry.full_shape[0] // 2, geometry.full_shape[1] // 2
+                target_scratch_h = geometry.full_shape[0] // 2 if use_half_res else geometry.full_shape[0]
+                target_scratch_w = geometry.full_shape[1] // 2 if use_half_res else geometry.full_shape[1]
                 _demosaic_scratch = buffer_session.own(
-                    engine.allocate((half_h, half_w, 3), dtype=np.float32, host_accessible=False)
+                    engine.allocate((target_scratch_h, target_scratch_w, 3), dtype=np.float32, host_accessible=False)
                 )
             except Exception:
                 _demosaic_scratch = None
+
+            # Persistent work scratch for analysis proxy resize & in-place tone-mapping
+            try:
+                align_h, align_w = geometry.align_shape
+                if (align_h, align_w) == (target_scratch_h, target_scratch_w):
+                    _work_scratch = _demosaic_scratch
+                else:
+                    _work_scratch = buffer_session.own(
+                        engine.allocate((align_h, align_w, 3), dtype=np.float32, host_accessible=False)
+                    )
+            except Exception:
+                _work_scratch = None
 
         def _load_support_dng_payload(index):
             return provider.load_support_dng_payload_host(index)
@@ -3276,8 +3344,13 @@ def _run_shared_raw_provider_pipeline(
                         analysis_params=analysis_params,
                         in_place=True,
                         source_is_disposable=True,
+                        dst=_work_scratch,
                     )
-                    if support_linear_full is not support_analysis and support_linear_full is not _demosaic_scratch:
+                    if (
+                        support_linear_full is not support_analysis
+                        and support_linear_full is not _demosaic_scratch
+                        and support_linear_full is not _work_scratch
+                    ):
                         _destroy_work_item(support_linear_full)
                     support_linear_full = None
                     if share_support_weight_proxy:
@@ -3312,7 +3385,7 @@ def _run_shared_raw_provider_pipeline(
                             alignment_preview = None
 
                 if normalized_engine not in ("fusionet", "spatial_fusion"):
-                    if support_analysis is not _demosaic_scratch:
+                    if support_analysis is not _demosaic_scratch and support_analysis is not _work_scratch:
                         _destroy_work_item(support_analysis)
                     support_analysis = None
 
@@ -3348,7 +3421,7 @@ def _run_shared_raw_provider_pipeline(
                     else:
                         aligned_analysis_weight = aligned_weight_proxy
                     if aligned_weight_proxy is not support_analysis:
-                        if support_analysis is not _demosaic_scratch:
+                        if support_analysis is not _demosaic_scratch and support_analysis is not _work_scratch:
                             _destroy_work_item(support_analysis)
                         support_analysis = None
                     support_weight_analysis = None
@@ -3389,7 +3462,7 @@ def _run_shared_raw_provider_pipeline(
                         _destroy_work_item(aligned_weight_rgb)
                     aligned_weight_rgb = None
                     if support_analysis is not None:
-                        if support_analysis is not _demosaic_scratch:
+                        if support_analysis is not _demosaic_scratch and support_analysis is not _work_scratch:
                             _destroy_work_item(support_analysis)
                         support_analysis = None
                 elif normalized_engine == "fusionet":
@@ -3720,7 +3793,7 @@ def _run_shared_raw_provider_pipeline(
 
                 # Release all analysis RGB proxies before CFA accumulation,
                 # which is the largest transient allocation of this frame.
-                released_ids = set()
+                released_ids = {id(_demosaic_scratch), id(_work_scratch)}
                 for buffer in (
                     aligned_weight_rgb,
                     support_weight_analysis,
@@ -3738,7 +3811,7 @@ def _run_shared_raw_provider_pipeline(
                 # only needs the mosaic frame, the transform and the weight map,
                 # so both full-resolution RGB proxies can go before it runs.
                 if support_analysis is not None:
-                    if support_analysis is not _demosaic_scratch:
+                    if support_analysis is not _demosaic_scratch and support_analysis is not _work_scratch:
                         _destroy_work_item(support_analysis)
                     support_analysis = None
                 if aligned_analysis_weight is not None:
@@ -3759,7 +3832,7 @@ def _run_shared_raw_provider_pipeline(
                 )
                 pipeline_telemetry.emit(f"blend_{ordinal}")
             finally:
-                released_ids = set()
+                released_ids = {id(_demosaic_scratch), id(_work_scratch)}
                 for buffer in (
                     aligned_weight_rgb,
                     support_weight_analysis,

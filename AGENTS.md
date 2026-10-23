@@ -11,11 +11,21 @@
 
 ## Saat bekerja pada Pixel Refine
 
-Ikuti aturan proyek di bawah dan `ai_governance/`. Aktifkan skill
+Ikuti aturan proyek di bawah dan governance bersama di
+`E:\APP Developer\Eel-Dance\ai_governance`. Aktifkan skill
 `pixel-refine-governance` untuk perubahan kode, pekerjaan Taichi AOT/TCM, atau
 klaim backend, akurasi, performa, maupun kesiapan produksi. Aturan proyek lebih
 spesifik daripada preferensi umum ini, tetapi tetap tunduk pada instruksi
 platform dan pengguna.
+
+> **Lokasi governance (wajib).** Gunakan `ai_governance` di path
+> `E:\APP Developer\Eel-Dance\ai_governance` untuk seluruh aturan, memori,
+> handoff, dan evidence. Semua chat dan agent langsung diarahkan ke path
+> tersebut, dan setiap rujukan relatif `ai_governance/...` di dokumen mana pun
+> dibaca sebagai path absolut itu. `Pixel-Refine\ai_governance\` hanya berisi
+> `TICKETS\` dan bukan lokasi governance aktif; jangan menambah dokumen
+> governance, memori, atau handoff di sana. Detail:
+> `../ai_governance/GOVERNANCE_PATH_ROUTING_MEMORY_20261023.md`.
 
 ---
 
@@ -23,9 +33,9 @@ platform dan pengguna.
 
 Dokumen ini adalah aturan global dan entry point terikat untuk setiap AI agent yang bekerja di Pixel Refine (termasuk Gemini, Antigravity, Codex, dan DeepSeek). Aturan ini otomatis dimuat pada setiap sesi percakapan.
 
-Kontrak proyek lengkap tertera pada [`agen.md`](agen.md), dan tata kelola normatif berada di [`ai_governance/`](ai_governance/).
+Kontrak proyek lengkap tertera pada [`agen.md`](agen.md), dan tata kelola normatif berada di [`../ai_governance/`](../ai_governance/) (`E:\APP Developer\Eel-Dance\ai_governance`).
 
-Peta harness, klasifikasi arsip, dan alur memilih dokumen governance yang relevan ada di [`ai_governance/AGENT_HARNESS_MAP.md`](ai_governance/AGENT_HARNESS_MAP.md). Baca peta itu saat memulai task; muat histori dan evidence sesuai cakupan, lalu verifikasi fakta historis terhadap source dan bukti terkini.
+Peta harness, klasifikasi arsip, dan alur memilih dokumen governance yang relevan ada di [`../ai_governance/AGENT_HARNESS_MAP.md`](../ai_governance/AGENT_HARNESS_MAP.md). Baca peta itu saat memulai task; muat histori dan evidence sesuai cakupan, lalu verifikasi fakta historis terhadap source dan bukti terkini.
 
 ---
 
@@ -33,7 +43,7 @@ Peta harness, klasifikasi arsip, dan alur memilih dokumen governance yang releva
 
 1. Instruksi langsung platform dan pengguna.
 2. `AGENTS.md` (Aturan ini).
-3. Dokumen normatif dalam `ai_governance/` (`GLOBAL_RULES.md`, `OPERATING_PROTOCOL.md`, `MULTI_AGENT_PROTOCOL.md`, dll.).
+3. Dokumen normatif dalam `E:\APP Developer\Eel-Dance\ai_governance\` (`GLOBAL_RULES.md`, `OPERATING_PROTOCOL.md`, `MULTI_AGENT_PROTOCOL.md`, dll.).
 4. Dokumen arsitektur/kontrak proyek (`agen.md`, `skill.md`, `blueprint_project.md`).
 5. Source code, konfigurasi aktif, dan bukti pengujian terkini.
 
@@ -55,7 +65,7 @@ Peta harness, klasifikasi arsip, dan alur memilih dokumen governance yang releva
 - **Diferensiasi Backend**: Bedakan secara tegas hasil CPU, CUDA, Vulkan, dan OpenGL; hasil pada satu backend tidak membuktikan backend lain.
 - **Tingkatan Bukti**: Bedakan 5 level bukti yang tidak setara: (1) artefak tersedia, (2) validasi statis, (3) eksekusi perangkat, (4) parity numerik, dan (5) validasi aplikasi.
 - **Asumsi Komputasi**: Jangan menganggap preload batching sebagai komputasi GPU paralel, dan jangan memutuskan suatu graph aman ditile tanpa memeriksa halo, konteks global, reduksi, dan batas memori.
-- **Taichi AOT & ABI**: Patuhi panduan di `ai_governance/skills/taichi-aot-dev/SKILL.md`. Jangan mencampur ABI LLVM/Taichi/bridge/TCM yang berbeda.
+- **Taichi AOT & ABI**: Patuhi panduan di `E:\APP Developer\Eel-Dance\ai_governance\skills\taichi-aot-dev\SKILL.md`. Jangan mencampur ABI LLVM/Taichi/bridge/TCM yang berbeda.
 - **Lingkungan Pengujian**: Gunakan venv proyek (`venv`) untuk semua eksekusi dan pengujian Python.
 - **Uji aplikasi headless wajib**: setiap perubahan aplikasi desktop diuji tanpa membuka UI melalui venv proyek. Jalankan import headless `main_desktop.py` dan smoke integrasi headless yang mengeksekusi alur/fitur yang diubah. Import/lint saja tidak membuktikan fitur atau algoritma bekerja. Catat command, backend/device, shape, dtype, hasil, dan batas validasi; bila eksekusi integrasi tidak tersedia, tandai belum terverifikasi.
 
@@ -66,8 +76,8 @@ Peta harness, klasifikasi arsip, dan alur memilih dokumen governance yang releva
 - **Hormati Pekerjaan Pengguna**: Worktree dapat berisi uncommitted work milik pengguna. Dilarang mengubah, men-stage, me-revert, atau meng-commit file di luar lingkup tugas yang diminta.
 - **DILARANG `git add -A` / `git add .`**: Selalu stage hanya file spesifik yang telah ditinjau dan relevan dengan tugas.
 - **Validasi Pre-Commit**: Sebelum commit, jalankan validasi terkecil yang relevan dan periksa `git diff --check`.
-- **Pencatatan Keputusan**: Jika ada keputusan desain yang mengubah kontrak proyek, dokumentasikan pada file aktif di `ai_governance/`.
-- **Status Arsip**: Direktori `.qoder` dan `agen-docs` telah dipensiunkan; semua aturan dan knowledge baru wajib berada di `ai_governance/`.
+- **Pencatatan Keputusan**: Jika ada keputusan desain yang mengubah kontrak proyek, dokumentasikan pada file aktif di `E:\APP Developer\Eel-Dance\ai_governance\`.
+- **Status Arsip**: Direktori `.qoder` dan `agen-docs` telah dipensiunkan; semua aturan dan knowledge baru wajib berada di `E:\APP Developer\Eel-Dance\ai_governance\`.
 
 ---
 
@@ -79,9 +89,9 @@ Peta harness, klasifikasi arsip, dan alur memilih dokumen governance yang releva
   2. Pengguna memberikan batas jumlah agent (`user_agent_limit`).
   3. Coordinator merumuskan cakupan kerja (coverage) tanpa tumpang tindih (dua agent tidak boleh mengedit file yang sama).
   4. Seluruh temuan dan penggabungan hasil diverifikasi oleh single coordinator.
-  5. Sebelum peluncuran, coordinator membuat atau menunjuk memori task persisten di `ai_governance/` yang berisi baseline, coverage tiap agent, handoff path, status, risiko, dan kriteria selesai. Semua agent membaca serta berbagi perubahan konteks melalui coordinator. Simpan temuan pada file terpisah dan daftarkan memori lintas sesi di `KNOWLEDGE_INDEX.md` serta `README.md`.
+  5. Sebelum peluncuran, coordinator membuat atau menunjuk memori task persisten di `E:\APP Developer\Eel-Dance\ai_governance\` yang berisi baseline, coverage tiap agent, handoff path, status, risiko, dan kriteria selesai. Semua agent membaca serta berbagi perubahan konteks melalui coordinator. Simpan temuan pada file terpisah dan daftarkan memori lintas sesi di `KNOWLEDGE_INDEX.md` serta `README.md` (keduanya di `E:\APP Developer\Eel-Dance\ai_governance\`).
 
-Detail format memori bersama, update lintas agent, dan batas penyimpanan ada di [`ai_governance/MULTI_AGENT_PROTOCOL.md`](ai_governance/MULTI_AGENT_PROTOCOL.md).
+Detail format memori bersama, update lintas agent, dan batas penyimpanan ada di [`../ai_governance/MULTI_AGENT_PROTOCOL.md`](../ai_governance/MULTI_AGENT_PROTOCOL.md).
 
 ---
 
@@ -102,8 +112,8 @@ Detail format memori bersama, update lintas agent, dan batas penyimpanan ada di 
 Agent Command Code **wajib mengaktifkan skill `pixel-refine-governance`** sebelum
 mengubah kode, mengompilasi TCM, menyentuh `taichi_vision/taichi_aot`, atau membuat
 klaim backend/akurasi/performa. Skill tersebut berisi ringkasan aturan, kontrak
-arsitektur, format bukti, dan indeks routing ke seluruh dokumen `ai_governance/`
-serta `taichi_vision/documentation/`.
+arsitektur, format bukti, dan indeks routing ke seluruh dokumen
+`E:\APP Developer\Eel-Dance\ai_governance\` serta `taichi_vision/documentation/`.
 
 Ringkasan barrier yang selalu berlaku:
 
@@ -129,9 +139,9 @@ Ringkasan barrier yang selalu berlaku:
 ## 8. Kontinuitas Lintas Sesi
 
 - **Handoff wajib**: ketika sesi panjang berakhir atau pekerjaan meninggalkan working
-  tree yang belum di-commit, tulis dokumen handoff di `ai_governance/` lalu daftarkan
-  di `KNOWLEDGE_INDEX.md` dan `ai_governance/README.md`.
-- **Peta handoff aktif**: `ai_governance/PIPELINE_MIGRATION_AND_SR_HANDOFF.md`
+  tree yang belum di-commit, tulis dokumen handoff di `E:\APP Developer\Eel-Dance\ai_governance\`
+  lalu daftarkan di `KNOWLEDGE_INDEX.md` dan `README.md` pada folder yang sama.
+- **Peta handoff aktif**: `E:\APP Developer\Eel-Dance\ai_governance\PIPELINE_MIGRATION_AND_SR_HANDOFF.md`
   (migrasi resident pipeline, splat SR reliability, routing parameter FusionNet).
 - **Baca dulu, jangan ukur ulang**: angka yang sudah tercatat di dokumen handoff atau
   evidence bersifat otoritatif untuk sesi berikutnya. Mengulang probe mahal tanpa
