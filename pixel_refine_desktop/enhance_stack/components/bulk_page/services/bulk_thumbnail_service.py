@@ -116,6 +116,7 @@ class ThumbnailScheduler(QObject):
         self.max_workers = max_workers
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(max_workers)
+        self.pool.setThreadPriority(QThread.Priority.LowPriority)
         self.pending = OrderedDict()
         self.active = {}
         self.ready.connect(self._on_ready, Qt.QueuedConnection)
@@ -137,6 +138,18 @@ class ThumbnailScheduler(QObject):
                 if not requests[path] and requests is self.pending:
                     del requests[path]
 
+    def cancel_except(self, owner, keep_paths):
+        """Drop this owner's obsolete viewport listeners but retain visible work."""
+        keep_paths = set(keep_paths)
+        owner_id = id(owner)
+        for requests in (self.pending, self.active):
+            for path in list(requests):
+                if path in keep_paths:
+                    continue
+                requests[path].pop(owner_id, None)
+                if not requests[path] and requests is self.pending:
+                    del requests[path]
+
     def cancel_all(self):
         self.pending.clear()
         for listeners in self.active.values():
@@ -148,6 +161,8 @@ class ThumbnailScheduler(QObject):
         while self.pending and len(self.active) < self.max_workers:
             path, listeners = self.pending.popitem(last=False)
             self.active[path] = listeners
+            # The pool itself carries the low-priority setting. Passing Qt's
+            # Priority enum as the overload's int argument fails in PySide6.
             self.pool.start(_ThumbnailTask(path, self.ready))
 
     @Slot(str, QImage)

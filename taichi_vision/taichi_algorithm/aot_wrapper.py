@@ -50,17 +50,11 @@ def _register_opengl_flow_output(buffer):
 def _opengl_native_flow_output_supported():
     """Return whether the active OpenGL renderer has a qualified GPU flow path.
 
-    The native dense-flow graphs are already qualified on the NVIDIA desktop
-    ICD. Intel/OpenGL keeps the established host-compatible route because its
-    transient SSBO exposure is driver-sensitive. Unknown renderers must remain
-    on the conservative path until a fresh backend-specific probe qualifies
-    them.
+    Keep OpenGL on the conservative host-compatible route across desktop ICDs,
+    as transient SSBO exposure across dispatches is sensitive to driver/context
+    inconsistencies (avoiding Access Violation 0xC0000005).
     """
-    engine = _get_engine()
-    if str(getattr(engine, "arch", "")).lower() not in {"opengl", "gles"}:
-        return False
-    renderer = str(getattr(engine, "gpu_name", "") or "").lower()
-    return "nvidia" in renderer
+    return False
 
 
 def _prepare_opengl_flow_family(family):
@@ -226,6 +220,15 @@ def _dense_flow_spec(
     )
 
 
+def _is_clamped_dense_mode(dense_mode):
+    return str(dense_mode or "smooth").lower() in {
+        "blocky_clamped",
+        "clamped",
+        "cpu_like_clamped",
+        "cpu-like-clamped",
+    }
+
+
 def _run_fused_flow_level(
     mod,
     track_args,
@@ -234,6 +237,7 @@ def _run_fused_flow_level(
     *,
     zero_init=None,
     use_fused=True,
+    force_direct=False,
 ):
     """Run track+dense as one AOT graph, with an explicit direct fallback."""
     suffix, dense_name, _ = _dense_flow_spec(
@@ -248,7 +252,10 @@ def _run_fused_flow_level(
     fused_name = (
         "flow_lk_zero_track_dense" if zero_init is not None else "flow_lk_track_dense"
     ) + suffix
-    if use_fused:
+    # Some target-qualified fused clamped graphs reject a correctly shaped
+    # resident flow destination. Callers can bypass that fused graph while
+    # retaining the same backend and exact dense mode.
+    if use_fused and not force_direct:
         fused_args = dict(track_args)
         fused_args.update(dense_args)
         if zero_init is not None:
@@ -267,7 +274,20 @@ def _run_fused_flow_level(
     if zero_init is not None:
         mod.run("flow_lk_zero", init_flow=zero_init)
     mod.run("flow_lk_grid_track", **track_args)
-    mod.run(dense_name, **dense_args)
+    try:
+        mod.run(dense_name, **dense_args)
+    except Exception as exc:
+        if (
+            dense_name != "flow_lk_dense_interpolate"
+            and not _is_clamped_dense_mode(dense_mode)
+        ):
+            # Direct fallback to flow_lk_dense_interpolate on the same backend
+            interp_args = dict(dense_args)
+            interp_args.pop("max_flow_px", None)
+            interp_args["overlap"] = 0.50
+            mod.run("flow_lk_dense_interpolate", **interp_args)
+        else:
+            raise
     return False
 
 
@@ -2030,13 +2050,17 @@ def calcOpticalFlowPyrLK(
                     "iterations": max(1, int(iterations)),
                     "epsilon": float(epsilon),
                 }
+                # Coarse pyramid levels (level > 0) require continuous interpolation for pyramid seed upsampling.
+                # Mode selection (smooth vs blocky_clamped) applies strictly to the final level 0 output.
+                level_dense_mode = dense_mode_value if level == 0 else "smooth"
+                level_overlap = overlap if level == 0 else 0.50
                 _dense_suffix, dense_name, dense_args = _dense_flow_spec(
-                    dense_mode_value,
+                    level_dense_mode,
                     grid_flow=grid_flow,
                     flow_out=flow_out,
                     grid_step=level_grid_step,
                     border_margin=level_margin,
-                    overlap=overlap,
+                    overlap=level_overlap,
                     max_flow_px=max_flow_px,
                 )
                 adaptive_level = adaptive and level == 0
@@ -2062,9 +2086,10 @@ def calcOpticalFlowPyrLK(
                     _run_fused_flow_level(
                         mod,
                         track_args,
-                        dense_mode_value,
+                        level_dense_mode,
                         dense_args,
                         zero_init=init_flow if current_flow is None else None,
+                        force_direct=_is_clamped_dense_mode(level_dense_mode),
                     )
                 if mode == "auto" and level == 0:
                     stats = _own(_OutputArray((8,), np.float32))

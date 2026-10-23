@@ -20,6 +20,8 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
 
 from .card_content import (
     CARD_NAME,
+    HDR_MASK_NAME,
+    LEGACY_HDR_MASK_NAME,
     LEGACY_CARD_NAME,
     LEGACY_SPDE_MR_NAME,
     SPDE_MR_NAME,
@@ -314,7 +316,17 @@ def run_hdr_pipeline(
         "SPDE-MR",
         "SPDE MR",
     }
-    if algorithm_key not in {CARD_NAME, LEGACY_CARD_NAME, "Weighted HDR (Streaming)"} and not is_spde_mr:
+    is_hdr_mask = algorithm_key in {
+        HDR_MASK_NAME,
+        LEGACY_HDR_MASK_NAME,
+        "HDR Mask",
+        "HDR Mask Pipeline",
+    }
+    if (
+        algorithm_key not in {CARD_NAME, LEGACY_CARD_NAME, "Weighted HDR (Streaming)"}
+        and not is_spde_mr
+        and not is_hdr_mask
+    ):
         raise ValueError(f"Unknown HDR algorithm: {algorithm_name}")
 
     from .runtime_recipe import HDRFusionRecipe, HDRPathSource
@@ -342,6 +354,7 @@ def run_hdr_pipeline(
         effective_exposures=effective_exposures,
         radiance_enabled=radiance_enabled,
         is_spde_mr=is_spde_mr,
+        is_hdr_mask=is_hdr_mask,
         progress_callback=progress,
     )
     runtime = PipelineRuntime(
@@ -360,7 +373,9 @@ def run_hdr_pipeline(
     safe_name = "".join(
         char if char.isalnum() or char in "-_" else "_" for char in output_name
     ).strip("._") or "hdr_reference"
-    algorithm_suffix = "spde_mr" if is_spde_mr else "weighted_hdr"
+    algorithm_suffix = (
+        "hdr_mask" if is_hdr_mask else "spde_mr" if is_spde_mr else "weighted_hdr"
+    )
     ldr_path = output_directory / f"{safe_name}_{algorithm_suffix}_ldr.tif"
     if progress is not None:
         progress(94, "Menyimpan hasil HDR LDR")
@@ -374,7 +389,9 @@ def run_hdr_pipeline(
         progress(100, f"HDR selesai: {ldr_path.name}")
 
     return {
-        "algorithm": SPDE_MR_NAME if is_spde_mr else CARD_NAME,
+        "algorithm": (
+            HDR_MASK_NAME if is_hdr_mask else SPDE_MR_NAME if is_spde_mr else CARD_NAME
+        ),
         "frame_count": len(analyses),
         "reference_path": selected.path,
         "reference_fallback": reference_fallback,

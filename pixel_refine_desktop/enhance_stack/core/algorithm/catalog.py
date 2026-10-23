@@ -173,6 +173,11 @@ _SPECS = (
                   aliases=("SPDE-MR (Patch-Based)",), owns_alignment=True,
                   factory=_BASE + "HDR.spde_mr:SPDEMRAlgorithm",
                   entrypoint=_BASE + "HDR:running_hdr_fusion", entrypoint_kwargs=(("algorithm_name", "SPDE-MR HDR Fusion"),)),
+    AlgorithmSpec("hdr", "mask", "HDR Mask",
+                  "Hard per-pixel exposure source selection with a saturation mask.",
+                  aliases=("HDR Mask Pipeline",), owns_alignment=True,
+                  factory=_BASE + "HDR.HDR:HDRMaskAlgorithm",
+                  entrypoint=_BASE + "HDR:running_hdr_fusion", entrypoint_kwargs=(("algorithm_name", "HDR Mask"),)),
 )
 
 

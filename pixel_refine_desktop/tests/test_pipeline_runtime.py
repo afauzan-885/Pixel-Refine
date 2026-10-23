@@ -732,4 +732,103 @@ def test_recipe_error_is_not_masked_by_session_cleanup_error():
     runtime = PipelineRuntime(session_factory=lambda _: Session())
     with pytest.raises(ValueError, match="source failed"):
         runtime.execute(Source(), object(), [])
-    normalize_in_processing_depth,
+
+
+def test_pipeline_execution_context_borrowed_and_buffer_delegation():
+    class MockSession:
+        def __init__(self):
+            self._owned_resources = {}
+            self._borrowed_resources = {}
+            self.acquired = []
+
+        def own(self, resource, releaser=None):
+            self._owned_resources[id(resource)] = resource
+            return resource
+
+        def borrow(self, resource, from_session=None):
+            self._borrowed_resources[id(resource)] = (resource, self._borrowed_resources.get(id(resource), (resource, 0))[1] + 1)
+            return resource
+
+        def release_borrow(self, resource):
+            if id(resource) in self._borrowed_resources:
+                del self._borrowed_resources[id(resource)]
+
+        from contextlib import contextmanager
+        @contextmanager
+        def borrowed(self, resource, from_session=None):
+            self.borrow(resource, from_session=from_session)
+            try:
+                yield resource
+            finally:
+                self.release_borrow(resource)
+
+        def acquire_buffer(self, shape, **kwargs):
+            buf = ("buf", shape)
+            self.acquired.append(buf)
+            return buf
+
+        def upload_if_needed(self, array, **kwargs):
+            return array, True
+
+    session = MockSession()
+    runtime = PipelineRuntime(session_factory=lambda _: session)
+    ctx = runtime.ensure_session()
+
+    from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
+        PipelineExecutionContext,
+        PipelineOptions,
+    )
+    context = PipelineExecutionContext(session=session, options=PipelineOptions())
+
+    item = [1, 2, 3]
+    context.own(item)
+    assert id(item) in session._owned_resources
+
+    with context.borrowed(item) as val:
+        assert val is item
+        assert id(item) in session._borrowed_resources
+    assert id(item) not in session._borrowed_resources
+
+    buf = context.acquire_buffer((10, 10))
+    assert buf == ("buf", (10, 10))
+    assert session.acquired == [("buf", (10, 10))]
+
+    arr, uploaded = context.upload_if_needed("fake_array")
+    assert arr == "fake_array" and uploaded is True
+
+
+def test_pipeline_support_lease_borrowed_delegation():
+    class MockSession:
+        def __init__(self):
+            self._owned_resources = {}
+            self._borrowed = set()
+
+        def own(self, res, releaser=None):
+            self._owned_resources[id(res)] = res
+            return res
+
+        from contextlib import contextmanager
+        @contextmanager
+        def borrowed(self, res, from_session=None):
+            self._borrowed.add(id(res))
+            try:
+                yield res
+            finally:
+                self._borrowed.discard(id(res))
+
+    session = MockSession()
+    from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime.runtime import (
+        PipelineSupportLease,
+    )
+    runtime = PipelineRuntime(session_factory=lambda _: session)
+    slot = runtime.acquire_in_processing_slot()
+    payload = {"data": 42}
+    session.own(payload)
+
+    lease = PipelineSupportLease(0, payload, None, slot, session=session)
+    with lease.borrowed() as val:
+        assert val is payload
+        assert id(payload) in session._borrowed
+    assert id(payload) not in session._borrowed
+    lease.release()
+

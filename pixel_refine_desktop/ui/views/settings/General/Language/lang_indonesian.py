@@ -696,6 +696,7 @@ LBL_ALGORITHM_PLACEHOLDER = (
 BTN_START = "Mulai Proses"
 BTN_NEW_BATCH = "Buat Batch Baru"
 BTN_DELETE_BATCH = "Hapus Batch"
+BTN_DELETE_ALL_BATCH = "Hapus Semua"
 LBL_ALGORITHM_SETTINGS = "Pengaturan Metode Stacking & Penyelarasan"
 BTN_PROCESS_ALL_BATCH = "Proses Semua Batch"
 LBL_FROM_PROJECT = "Dari Project No:"

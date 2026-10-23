@@ -249,17 +249,22 @@ if TAICHI_AVAILABLE:
                     (win_radius * 2 + 1) * (win_radius * 2 + 1), ti.f32
                 )
 
-                # Bouguet Minimum Eigenvalue Criterion (check aperture problem)
+                # Bouguet Minimum Eigenvalue Criterion & Aperture Gating
                 tr = gxx + gyy
                 diff = gxx - gyy
                 disc = ti.sqrt(ti.max(0.0, diff * diff + 4.0 * gxy * gxy))
                 lambda_min = (tr - disc) * 0.5
+                lambda_max = (tr + disc) * 0.5
 
-                if lambda_min < 1e-4 or ti.abs(det) < 1e-4:
+                if lambda_min < 0.05 or lambda_min < 0.02 * lambda_max or ti.abs(det) < 0.01:
                     valid = 0
                     active = 0
                 else:
-                    inv_det = 1.0 / det
+                    lambda_damp = 0.5
+                    gxx_d = gxx + lambda_damp
+                    gyy_d = gyy + lambda_damp
+                    det_d = gxx_d * gyy_d - gxy * gxy
+                    inv_det = 1.0 / det_d
 
                     # Fast Iterative Sub-Pixel Taylor Expansion (Bouguet algorithm)
                     for _it in range(iterations):
@@ -293,8 +298,8 @@ if TAICHI_AVAILABLE:
                                 err_abs += ti.abs(err)
 
                             residual = err_abs / patch_area
-                            step_x = (-gyy * bx + gxy * by) * inv_det
-                            step_y = (gxy * bx - gxx * by) * inv_det
+                            step_x = (-gyy_d * bx + gxy * by) * inv_det
+                            step_y = (gxy * bx - gxx_d * by) * inv_det
                             step_x = ti.max(-max_step, ti.min(max_step, step_x))
                             step_y = ti.max(-max_step, ti.min(max_step, step_y))
                             dx += step_x
@@ -303,6 +308,9 @@ if TAICHI_AVAILABLE:
                             dy = ti.max(-max_flow, ti.min(max_flow, dy))
                             if step_x * step_x + step_y * step_y < epsilon * epsilon:
                                 active = 0
+
+                if valid == 1 and residual > 25.0:
+                    valid = 0
 
                 if valid == 1:
                     grid_flow[gy, gx, 0] = dx
@@ -378,17 +386,22 @@ if TAICHI_AVAILABLE:
                     (win_radius * 2 + 1) * (win_radius * 2 + 1), ti.f32
                 )
 
-                # Bouguet Minimum Eigenvalue Criterion
+                # Bouguet Minimum Eigenvalue Criterion & Aperture Gating
                 tr = gxx + gyy
                 diff = gxx - gyy
                 disc = ti.sqrt(ti.max(0.0, diff * diff + 4.0 * gxy * gxy))
                 lambda_min = (tr - disc) * 0.5
+                lambda_max = (tr + disc) * 0.5
 
-                if lambda_min < 1e-4 or ti.abs(det) < 1e-4:
+                if lambda_min < 0.05 or lambda_min < 0.02 * lambda_max or ti.abs(det) < 0.01:
                     valid = 0
                     active = 0
                 else:
-                    inv_det = 1.0 / det
+                    lambda_damp = 0.5
+                    gxx_d = gxx + lambda_damp
+                    gyy_d = gyy + lambda_damp
+                    det_d = gxx_d * gyy_d - gxy * gxy
+                    inv_det = 1.0 / det_d
 
                     for _it in range(iterations):
                         if active == 1:
@@ -421,8 +434,8 @@ if TAICHI_AVAILABLE:
                                 err_abs += ti.abs(err)
 
                             residual = err_abs / patch_area
-                            step_x = (-gyy * bx + gxy * by) * inv_det
-                            step_y = (gxy * bx - gxx * by) * inv_det
+                            step_x = (-gyy_d * bx + gxy * by) * inv_det
+                            step_y = (gxy * bx - gxx_d * by) * inv_det
                             step_x = ti.max(-max_step, ti.min(max_step, step_x))
                             step_y = ti.max(-max_step, ti.min(max_step, step_y))
                             dx += step_x
@@ -431,6 +444,9 @@ if TAICHI_AVAILABLE:
                             dy = ti.max(-max_flow, ti.min(max_flow, dy))
                             if step_x * step_x + step_y * step_y < epsilon * epsilon:
                                 active = 0
+
+                if valid == 1 and residual > 25.0:
+                    valid = 0
 
                 if valid == 1:
                     grid_flow[gy, gx, 0] = dx

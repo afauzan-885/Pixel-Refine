@@ -606,6 +606,7 @@ LBL_ALGORITHM_PLACEHOLDER = "Tetapan terperinci akan dipaparkan selepas anda mem
 BTN_START = "Mula Proses"
 BTN_NEW_BATCH = "Buat Batch Baharu"
 BTN_DELETE_BATCH = "Padam Batch"
+BTN_DELETE_ALL_BATCH = "Padam Semua"
 LBL_ALGORITHM_SETTINGS = "Tetapan Kaedah Penindanan & Penjajaran"
 BTN_PROCESS_ALL_BATCH = "Proses Semua Batch"
 LBL_FROM_PROJECT = "Dari Projek No:"

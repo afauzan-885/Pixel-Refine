@@ -1,3 +1,19 @@
+def _parse_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("false", "0", "no", "off", "none", ""):
+            return False
+        if v in ("true", "1", "yes", "on"):
+            return True
+    return bool(value)
+
+
 """
 Farneback Optical Flow Algorithm - 100% Taichi Vision GPU-Native Optical Flow.
 ==============================================================================
@@ -227,6 +243,25 @@ class FarnebackFlow:
             reference_pyramid=reference_pyramid,
             return_gpu=bool(return_gpu),
         )
+        smooth = _parse_bool((config or {}).get("smooth", True), default=True)
+        if not smooth:
+            step = max(2, int(preset.get("grid_step", 16)))
+            if return_gpu:
+                flow_cpu = flow.to_numpy()
+                flow_quant = self._quantize_to_blocks(flow_cpu, step)
+                from taichi_vision import taichi_aot
+                try:
+                    flow.destroy()
+                except Exception:
+                    try:
+                        flow.release()
+                    except Exception:
+                        pass
+                return taichi_aot.upload(flow_quant, is_vector=True, vector_dim=2)
+            else:
+                flow_arr = np.asarray(flow[0] if isinstance(flow, tuple) else flow, dtype=np.float32)
+                return self._quantize_to_blocks(flow_arr, step)
+
         if return_gpu:
             return flow
         if isinstance(flow, tuple):
@@ -236,6 +271,20 @@ class FarnebackFlow:
         if flow.shape != expected or not np.isfinite(flow).all():
             raise RuntimeError(f"Taichi Farneback returned invalid flow: {flow.shape}, expected {expected}")
         return np.ascontiguousarray(flow)
+
+    @staticmethod
+    def _quantize_to_blocks(flow_arr, step):
+        h, w = flow_arr.shape[:2]
+        pad_h = (step - (h % step)) % step
+        pad_w = (step - (w % step)) % step
+        if pad_h > 0 or pad_w > 0:
+            padded = np.pad(flow_arr, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
+        else:
+            padded = flow_arr
+        half = step // 2
+        sampled = padded[half::step, half::step, :]
+        upsampled = np.repeat(np.repeat(sampled, step, axis=0), step, axis=1)
+        return np.ascontiguousarray(upsampled[:h, :w, :], dtype=np.float32)
 
     def align_frame(
         self,

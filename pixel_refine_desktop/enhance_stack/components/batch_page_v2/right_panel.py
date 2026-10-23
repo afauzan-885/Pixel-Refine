@@ -737,6 +737,14 @@ class RightPanel(QWidget, SyncMixin):
         finally:
             self.list_group.blockSignals(False)
 
+        active_batch_id = self.current_batch_id
+        if active_batch_id is not None and not any(
+            int(batch.id) == int(active_batch_id) for batch in batches
+        ):
+            # A reload after deletion must clear the stale workspace/header state
+            # when its previously active batch no longer exists.
+            self.selection_handler.handle_selection([])
+
         # The header shortcut is only useful for an empty project.  Keep this
         # synchronized here as well as in page_layout so project restores (and
         # other refreshes that do not emit batch_created/batch_deleted) cannot
@@ -978,21 +986,34 @@ class RightPanel(QWidget, SyncMixin):
         if not selected_ids:
             return
 
+        self._delete_batches(selected_ids)
+
+    def _delete_batches(self, batch_ids):
+        """Confirm and delete the supplied batch IDs through the shared controller path."""
+        batch_ids = list(dict.fromkeys(batch_ids))
+        if not batch_ids:
+            return
+
         from UILibrary import modal_confirm
         confirmed = modal_confirm.question(
             self,
-            language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(len(selected_ids))
+            language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(len(batch_ids))
         )
 
         if confirmed:
-            for bid in selected_ids:
-                if self.controller.delete_batch(bid):
-                    pass  # Handled by list reload or manual remove
+            failed_ids = [
+                bid for bid in batch_ids if not self.controller.delete_batch(bid)
+            ]
 
             # Reload to sync
             self._load_batches()
 
-            # Emit signal clearing selection if needed (handled by list group clearing usually)
+            if failed_ids:
+                QMessageBox.warning(
+                    self,
+                    "Delete Batches",
+                    f"Could not delete {len(failed_ids)} of {len(batch_ids)} batches.",
+                )
 
     def _calculate_algo_target_h(self):
         """Return the natural algorithm content height, capped by list space."""

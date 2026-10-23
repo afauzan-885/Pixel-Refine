@@ -222,6 +222,31 @@ def compile_block_matching_flow(arch=ti.vulkan, out_dir=None):
     }.get(arch, str(arch))
     tcm_path = _package_tcm(module, out_dir, f"block_matching_{arch_name}.tcm")
 
+    try:
+        from taichi_vision.taichi_aot.artifact_targets import detect_target
+        target = detect_target(backend=arch_name, device="0")
+        target_candidates = {
+            os.path.join(out_dir, target.target_id),
+            os.path.join(out_dir, f"{arch_name}_x86_64_windows"),
+        }
+        for sub in target_candidates:
+            if os.path.isdir(sub):
+                import shutil
+                target_tcm = os.path.join(sub, target.artifact_name("block_matching"))
+                shutil.copy2(tcm_path, target_tcm)
+                print(f"  -> {target_tcm}")
+
+        bundle_sub = os.path.abspath(
+            os.path.join(file_dir, "../../..", "test_algorithm", "aot_targets", "bundles", target.target_id, "tcm")
+        )
+        if os.path.isdir(bundle_sub):
+            import shutil
+            bundle_tcm = os.path.join(bundle_sub, target.artifact_name("block_matching"))
+            shutil.copy2(tcm_path, bundle_tcm)
+            print(f"  -> {bundle_tcm}")
+    except Exception as e:
+        print(f"  Warning copying target artifact: {e}")
+
     ti.reset()
     print(f"Block Matching flow compiled: {tcm_path}")
     return tcm_path

@@ -226,6 +226,30 @@ def compile_farneback_flow(arch=ti.vulkan, out_dir=None):
     }.get(arch, str(arch))
     tcm_name = f"farneback_flow_{arch_name}.tcm"
     tcm_path = _package_tcm(module, out_dir, tcm_name)
+    try:
+        from taichi_vision.taichi_aot.artifact_targets import detect_target
+        target = detect_target(backend=arch_name, device="0")
+        target_candidates = {
+            os.path.join(out_dir, target.target_id),
+            os.path.join(out_dir, f"{arch_name}_x86_64_windows"),
+        }
+        for sub in target_candidates:
+            if os.path.isdir(sub):
+                import shutil
+                target_tcm = os.path.join(sub, target.artifact_name("farneback_flow"))
+                shutil.copy2(tcm_path, target_tcm)
+                print(f"  -> {target_tcm}")
+
+        bundle_sub = os.path.abspath(
+            os.path.join(file_dir, "../../..", "test_algorithm", "aot_targets", "bundles", target.target_id, "tcm")
+        )
+        if os.path.isdir(bundle_sub):
+            import shutil
+            bundle_tcm = os.path.join(bundle_sub, target.artifact_name("farneback_flow"))
+            shutil.copy2(tcm_path, bundle_tcm)
+            print(f"  -> {bundle_tcm}")
+    except Exception as e:
+        print(f"  Warning copying target artifact: {e}")
 
     ti.reset()
     print(f"Farneback flow compiled: {tcm_path}")
@@ -253,6 +277,7 @@ if __name__ == "__main__":
             (ti.vulkan, "vulkan"),
             (ti.cuda, "cuda"),
             (ti.cpu, "cpu"),
+            (ti.opengl, "opengl"),
         ]
     for arch, suffix in archs:
         try:

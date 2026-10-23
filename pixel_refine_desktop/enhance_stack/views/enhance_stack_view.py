@@ -526,6 +526,14 @@ class EnhanceStackView(WorkspaceView):
         if batch_panel is None:
             return
         batches = batch_panel._load_batches() or []
+        # Bulk Mode writes directly to the shared database, so its changes do
+        # not necessarily emit the Batch V2 controller's batch_deleted signal.
+        # Reconcile panel visibility from the database after every mode switch.
+        from pixel_refine_desktop.enhance_stack.components.batch_page_v2.page_layout import (
+            _update_right_panel_visibility,
+        )
+
+        _update_right_panel_visibility(self.single_page_view)
         current_id = batch_panel.current_batch_id
         selected_id = next(
             (batch.id for batch in batches if batch.id == current_id),

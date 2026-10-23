@@ -23,6 +23,37 @@ def extract(reference: ti.types.ndarray(ti.f32, 1), support: ti.types.ndarray(ti
 
 
 @ti.kernel
+def cache_reference_tiles(reference: ti.types.ndarray(ti.f32, 1),
+                          cache: ti.types.ndarray(ti.f32, 1),
+                          coords: ti.types.ndarray(ti.i32, 2),
+                          height: ti.i32, width: ti.i32, size: ti.i32, num_tiles: ti.i32):
+    for t, i in ti.ndrange(num_tiles, size * size):
+        y0, x0 = coords[t, 0], coords[t, 1]
+        y, x = i // size + y0, i % size + x0
+        r = 0.0
+        if y < height and x < width:
+            r = reference[y * width + x]
+        cache[t * size * size + i] = r
+
+
+@ti.kernel
+def extract_with_ref_cache(ref_cache: ti.types.ndarray(ti.f32, 1),
+                           support: ti.types.ndarray(ti.f32, 1),
+                           ref_tile: ti.types.ndarray(ti.f32, 1),
+                           support_tile: ti.types.ndarray(ti.f32, 1),
+                           height: ti.i32, width: ti.i32, size: ti.i32,
+                           tile_idx: ti.i32, y0: ti.i32, x0: ti.i32):
+    offset = tile_idx * size * size
+    for i in ref_tile:
+        ref_tile[i] = ref_cache[offset + i]
+        y, x = i // size + y0, i % size + x0
+        s = 0.0
+        if y < height and x < width:
+            s = support[y * width + x]
+        support_tile[i] = s
+
+
+@ti.kernel
 def clear(numerator: ti.types.ndarray(ti.f32, 2), denominator: ti.types.ndarray(ti.f32, 2),
           alpha: ti.types.ndarray(ti.f32, 1)):
     for y, x in numerator:
@@ -137,7 +168,7 @@ def flow(indices: ti.types.ndarray(ti.i32, 3), offsets: ti.types.ndarray(ti.i32,
 
 def register_graphs(module):
     from taichi.types.ndarray_type import NdarrayType
-    for kernel in (proxy, extract, clear, stitch, confidence, scalar, scale,
+    for kernel in (proxy, extract, cache_reference_tiles, extract_with_ref_cache, clear, stitch, confidence, scalar, scale,
                    coherent, coherent_cells, gather, flow, multi_patch_topk_kernel):
         args = []
         for arg in kernel._primal.arguments:

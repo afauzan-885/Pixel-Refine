@@ -812,7 +812,13 @@ class AlignmentParameterPage(QWidget):
             self._save_current_config()
 
     def _coerce_value(self, field, value):
-        value_type = field.get("value_type", "str")
+        field_type = field.get("type")
+        value_type = field.get("value_type", "")
+        if field_type in ("toggle", "checkbox") or value_type == "bool":
+            if isinstance(value, str):
+                return value.strip().lower() in ("true", "1", "yes", "on")
+            return bool(value)
+        value_type = value_type or "str"
         try:
             if value_type == "int":
                 coerced = int(float(value))

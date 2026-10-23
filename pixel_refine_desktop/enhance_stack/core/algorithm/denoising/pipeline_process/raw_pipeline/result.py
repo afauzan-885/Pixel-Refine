@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import math
+import os
 from typing import Sequence
 
 import numpy as np
@@ -84,6 +86,31 @@ class RawPipelineResult:
             compression="none",
             bits_per_sample=bits,
         )
+        return str(target)
+
+    def save_preview(self, path: str | Path, max_dimension: int = 2048) -> str:
+        """Persist the already-demosaiced display preview without decoding the DNG."""
+        from PIL import Image
+
+        preview = np.asarray(self.preview_rgb)
+        if preview.ndim != 3 or preview.shape[2] < 3 or not preview.size:
+            raise ValueError("RAW preview must be a non-empty HxWxRGB array")
+        max_dimension = max(1, int(max_dimension))
+        step = max(1, math.ceil(max(preview.shape[:2]) / max_dimension))
+        preview = np.nan_to_num(preview[::step, ::step, :3], nan=0.0, posinf=1.0, neginf=0.0)
+        preview_u8 = np.clip(preview, 0.0, 1.0).__mul__(255.0).round().astype(np.uint8)
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f"{target.stem}.tmp{target.suffix or '.jpg'}")
+        try:
+            Image.fromarray(preview_u8, mode="RGB").save(temporary, format="JPEG", quality=92)
+            os.replace(temporary, target)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
         return str(target)
 
 

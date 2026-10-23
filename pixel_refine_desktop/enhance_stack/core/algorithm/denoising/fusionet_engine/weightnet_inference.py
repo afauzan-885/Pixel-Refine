@@ -241,7 +241,7 @@ def load_burst_images(paths: Sequence[str | Path]) -> list[np.ndarray]:
     target_h, target_w = ref_linear.shape[:2]
 
     # 2. Analyze Reference Frame ONCE
-    params = taichi_aot.analyze_auto_enhance_params(ref_linear, mode="natural")
+    params = taichi_aot.analyze_auto_enhance_params(ref_linear, mode="analysis")
     print(
         f"[AutoEnhance Burst] Analyzed ref={Path(paths[0]).name} -> "
         f"gain={params['gain']:.4f}, white={params['white_level']:.4f}, "
@@ -358,10 +358,73 @@ def load_weightnet_onnx(
     runtime: str = "auto",
     patch_size: int = 512,
     input_channels: int | None = 1,
+    max_safety: float = 0.30,
 ):
-    # Explicit experimental selection: use the same GPU graph and weights as
-    # DirectML, with native Taichi compute. Keep automatic runtime policy intact.
-    if str(runtime).strip().lower() in ("taichi_cuda", "taichi_aot"):
+    source = Path(model_path)
+    # Direct TCM file path loading
+    if source.is_file() and source.suffix.lower() == ".tcm":
+        from taichi_vision.taichi_algorithm.denoising.resident_weightnet import ResidentWeightNet
+        session = ResidentWeightNet(source)
+        session.max_safety = float(max_safety)
+        return session
+
+    # Normalize runtime: Default and "auto" are 100% full native Taichi AOT (TCM)
+    norm_runtime = str(runtime).strip().lower()
+    if norm_runtime in ("auto", "default", "", "taichi_aot", "taichi_cuda"):
+        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_algorithm.denoising.resident_weightnet import ResidentWeightNet
+        from taichi_vision.taichi_aot import neural
+
+        backend = taichi_aot.get_backend_name()
+        # 1. First priority: direct prebaked TCM from aot_assets/neural
+        custom_artifact = os.environ.get("PIXEL_REFINE_WEIGHTNET_AOT_ARTIFACT", "")
+        if custom_artifact and Path(custom_artifact).is_file():
+            artifact = Path(custom_artifact)
+        else:
+            tcm_candidate = neural.DEFAULT_AOT_NEURAL_DIR / f"weightnet_{patch_size}_{backend}.tcm"
+            if tcm_candidate.is_file():
+                artifact = tcm_candidate
+            else:
+                artifact = neural.find_prebaked_tcm(f"weightnet_{patch_size}", backend)
+
+        if artifact is not None and Path(artifact).is_file():
+            session = ResidentWeightNet(Path(artifact))
+            print(f"[WeightNet AOT] backend={session.engine.arch} patch={patch_size} model={Path(artifact).name} host_patch_readback=0")
+            session.max_safety = float(max_safety)
+            return session
+
+        # 2. If TCM not pre-baked, resolve or compile from bundle
+        search_dirs = [
+            source.parent if source.is_file() else source,
+            Path("database/Learning_Model/nanoFlow"),
+            Path("database/Learning_Model/weightNet"),
+            Path("pixel_refine_desktop/ui/data/models"),
+        ]
+        if source.is_file() and source.suffix.lower() == ".bundle":
+            bundle = source
+        else:
+            bundle = next((d / name for d in search_dirs
+                           for name in ("weightnet_master.bundle", "weightnet_v3_master.bundle")
+                           if (d / name).is_file()), None)
+        if bundle is not None and bundle.is_file():
+            import zipfile
+            member = f"weightnet_{patch_size}_gpu_1c_fp32.onnx"
+            with zipfile.ZipFile(bundle) as archive:
+                if member in archive.namelist():
+                    model_bytes = archive.read(member)
+                    artifact = neural.resolve_or_compile_tcm(
+                        model_bytes,
+                        backend=backend,
+                        model_name=f"weightnet_{patch_size}",
+                        patch_tools=True,
+                    )
+                    session = ResidentWeightNet(artifact)
+                    session.max_safety = float(max_safety)
+                    return session
+
+        raise FileNotFoundError(f"WeightNet TCM artifact not found for backend={backend} patch={patch_size}")
+
+    if norm_runtime in ("taichi_cuda",):
         from taichi_vision.taichi_aot import onnx as load_native
 
         if input_channels not in (None, 1) or patch_size not in (512, 1024):
@@ -407,6 +470,7 @@ def load_weightnet_onnx(
                     raise FileNotFoundError(f"Pre-baked WeightNet artifact is missing for {backend}: {artifact}")
                 session = ResidentWeightNet(artifact, model_sha256=hashlib.sha256(model_bytes).hexdigest())
                 print(f"[WeightNet AOT] backend={session.engine.arch} patch={patch_size} model={artifact.name} host_patch_readback=0")
+                session.max_safety = float(max_safety)
                 return session
             session = load_native(model_bytes, backend="cuda", channels=1)
         session.runtime = "taichi_cuda"
@@ -649,6 +713,7 @@ def infer_single_support_weight_map(
     stop_event: Optional[threading.Event] = None,
     progress: Optional[Callable[[int, str], None]] = None,
     return_scalar: bool = False,
+    max_safety: Optional[float] = None,
 ) -> tuple[np.ndarray, float]:
     """
     Computes a 3-channel fusion weight map for one reference/support pair.
@@ -657,8 +722,9 @@ def infer_single_support_weight_map(
     scalar map [1, work_h, work_w] when ``return_scalar`` is requested.
     """
     if getattr(session, "runtime", None) == "taichi_aot":
+        ms_val = max_safety if max_safety is not None else getattr(session, "max_safety", 0.30)
         return session.infer(ref_work, supp_work, overlap=overlap, ghost_penalty=ghost_penalty,
-                             ghost_cutoff=ghost_cutoff, stop_event=stop_event)
+                             ghost_cutoff=ghost_cutoff, stop_event=stop_event, max_safety=ms_val)
     channels, work_h, work_w = ref_work.shape
     if channels not in (1, 3) or tuple(supp_work.shape) != tuple(ref_work.shape):
         raise ValueError(

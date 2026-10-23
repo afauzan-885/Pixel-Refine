@@ -375,12 +375,14 @@ def _preview_from_mosaic(
     )
 
 
-def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None):
+def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None, half_res=False):
     """Demosaic an already-decoded carrier without a second file decode.
 
-    Analysis uses full-resolution bilinear; the final CFA preview remains
-    Hamilton. Sensor normalization, WB and camera matrix still come from the
-    decoded carrier. No file re-open or CPU demosaic is introduced. ``method``
+    Analysis uses bilinear demosaicing (half_res=True directly produces the
+    half-resolution analysis proxy, eliminating redundant full-resolution buffer
+    allocation and downscaling); the final CFA preview remains Hamilton.
+    Sensor normalization, WB and camera matrix still come from the decoded
+    carrier. No file re-open or CPU demosaic is introduced. ``method``
     permits an explicit Hamilton quality oracle, not a silent backend fallback.
     """
     from taichi_vision import taichi_aot
@@ -390,12 +392,14 @@ def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None):
     from .metadata import carrier_demosaic_parameters
 
     params = carrier_demosaic_parameters(carrier)
+    extra_kwargs = {"half_res": True} if half_res else {}
     return taichi_aot.demosaic(
         np.ascontiguousarray(carrier.samples),
         **params,
         method=method,
         return_gpu=True,
         dst=dst,
+        **extra_kwargs,
     )
 
 
@@ -1169,7 +1173,13 @@ class RawPipelineProvider:
 
         from ..resident_pipeline import prepare_analysis_proxy_gpu
 
-        proxy = _demosaic_carrier_gpu(frame.carrier)
+        carrier_h, carrier_w = frame.carrier.samples.shape[:2]
+        use_half_res = (
+            work_shape is not None
+            and work_shape[0] <= carrier_h // 2
+            and work_shape[1] <= carrier_w // 2
+        )
+        proxy = _demosaic_carrier_gpu(frame.carrier, half_res=use_half_res)
         try:
             analysis = prepare_analysis_proxy_gpu(
                 proxy,

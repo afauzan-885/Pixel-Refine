@@ -23,6 +23,7 @@ PARAMETER_SCHEMA = [
         "key": "smooth",
         "label": "Smooth Blending",
         "type": "checkbox",
+        "value_type": "bool",
         "default": False,
     },
 ]

@@ -928,6 +928,10 @@ class CombinedPanel(QWidget):
         from UILibrary import AlertModal
 
         latest_image_path = get_last_image("database/stack")
+        if latest_image_path and latest_image_path.lower().endswith(".dng"):
+            raw_preview_path = os.path.splitext(latest_image_path)[0] + "_preview.jpg"
+            if os.path.isfile(raw_preview_path):
+                latest_image_path = raw_preview_path
         if latest_image_path:
             dialog = ImageViewer(latest_image_path, self)
             dialog.exec()

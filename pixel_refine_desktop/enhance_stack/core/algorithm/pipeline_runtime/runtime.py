@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import contextvars
 import inspect
 import json
+import os
 import queue
 import sys
 import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any, Callable, Iterable, Iterator, Mapping
@@ -176,15 +179,28 @@ class InProcessingLease:
 class PipelineSupportLease:
     """Prepared payload whose admission and buffer ownership transfer together."""
 
-    __slots__ = ("index", "value", "_release_value", "_lease", "_lock", "_released")
+    __slots__ = ("index", "value", "_release_value", "_lease", "_session", "_lock", "_released")
 
-    def __init__(self, index, value, release_value, lease, *, retain_value=True):
+    def __init__(self, index, value, release_value, lease, *, retain_value=True, session=None):
         self.index = int(index)
         self.value = value if retain_value else None
         self._release_value = release_value
         self._lease = lease
+        self._session = session
         self._lock = threading.Lock()
         self._released = False
+
+    @contextmanager
+    def borrowed(self):
+        """Borrow the leased support value in the active session for safe zero-copy execution."""
+        session = self._session
+        if session is not None and hasattr(session, "borrowed") and self.value is not None:
+            owned = getattr(session, "_owned_resources", None)
+            if owned is not None and id(self.value) in owned:
+                with session.borrowed(self.value) as val:
+                    yield val
+                return
+        yield self.value
 
     def release(self) -> None:
         with self._lock:
@@ -409,7 +425,10 @@ class PipelineRuntime:
             return self._in_processing_live
 
     def acquire_in_processing_slot(
-        self, *, stop_when: Callable[[], bool] | None = None
+        self,
+        *,
+        stop_when: Callable[[], bool] | None = None,
+        timeout: float | None = None,
     ) -> InProcessingLease | None:
         """Reserve one shared in-processing slot, observing cancellation."""
 
@@ -425,7 +444,10 @@ class PipelineRuntime:
                         return None
                 except Exception:
                     return None
-            if not self._in_processing_slots.acquire(timeout=0.05):
+            step_timeout = 0.05 if timeout is None else max(0.0, float(timeout))
+            if not self._in_processing_slots.acquire(timeout=step_timeout):
+                if timeout is not None:
+                    return None
                 continue
             with self._lock:
                 if self._closed:
@@ -498,6 +520,100 @@ class PipelineRuntime:
                         engine = get_engine()
                     self._session = BufferSession(engine=engine, sync_on_exit=False)
             return self._session
+
+    @contextmanager
+    def borrowed(self, resource: Any, *, from_session: Any = None):
+        """Scope a borrow lease on a GPU buffer/resource while passing it to the caller."""
+        session = self.ensure_session()
+        if session is not None and hasattr(session, "borrowed") and resource is not None:
+            owned = getattr(session, "_owned_resources", None)
+            if owned is not None and id(resource) in owned:
+                with session.borrowed(resource, from_session=from_session) as val:
+                    yield val
+                return
+        yield resource
+
+    def borrow(self, resource: Any, *, from_session: Any = None) -> Any:
+        """Pin a buffer/resource in the underlying BufferSession."""
+        session = self.ensure_session()
+        if session is not None and hasattr(session, "borrow") and resource is not None:
+            owned = getattr(session, "_owned_resources", None)
+            if owned is not None and id(resource) in owned:
+                return session.borrow(resource, from_session=from_session)
+        return resource
+
+    def release_borrow(self, resource: Any) -> None:
+        """Release a previously pinned borrow on the underlying BufferSession."""
+        session = self.ensure_session()
+        if session is not None and hasattr(session, "release_borrow") and resource is not None:
+            borrowed_res = getattr(session, "_borrowed_resources", None)
+            if borrowed_res is not None and id(resource) in borrowed_res:
+                session.release_borrow(resource)
+
+    def own(self, resource: Any, releaser: Any = None) -> Any:
+        """Register ownership of a buffer/resource with the underlying BufferSession."""
+        session = self.ensure_session()
+        if session is not None and hasattr(session, "own") and resource is not None:
+            return session.own(resource, releaser=releaser)
+        return resource
+
+    def acquire_buffer(
+        self,
+        shape: tuple[int, ...],
+        dtype: Any = None,
+        is_vector: bool = False,
+        vector_dim: int = 1,
+    ) -> Any:
+        """Acquire a reusable scratch buffer from the underlying BufferSession cache."""
+        session = self.ensure_session()
+        if session is not None and hasattr(session, "acquire_buffer"):
+            kwargs = {"dtype": dtype} if dtype is not None else {}
+            return session.acquire_buffer(
+                shape, is_vector=is_vector, vector_dim=vector_dim, **kwargs
+            )
+        raise RuntimeError("Current PipelineRuntime session does not provide a buffer allocator")
+
+    def acquire_ring_buffer(
+        self,
+        name: str,
+        shape: tuple[int, ...],
+        depth: int = 4,
+        dtype: Any = None,
+        is_vector: bool = False,
+        vector_dim: int = 1,
+    ) -> Any:
+        """Acquire or advance a ring buffer slot from the underlying BufferSession."""
+        session = self.ensure_session()
+        if session is not None and hasattr(session, "acquire_ring_buffer"):
+            kwargs = {"dtype": dtype} if dtype is not None else {}
+            return session.acquire_ring_buffer(
+                name, shape, depth=depth, is_vector=is_vector, vector_dim=vector_dim, **kwargs
+            )
+        raise RuntimeError("Current PipelineRuntime session does not provide a ring buffer allocator")
+
+    def upload_if_needed(
+        self, array: Any, is_vector: bool = False, vector_dim: int = 1
+    ) -> tuple[Any, bool]:
+        """Upload a host array or view existing GPU buffer via BufferSession."""
+        session = self.ensure_session()
+        if session is not None and hasattr(session, "upload_if_needed"):
+            return session.upload_if_needed(array, is_vector=is_vector, vector_dim=vector_dim)
+        return array, False
+
+    def get_or_create_grayscale(self, frame: Any, is_vector: bool = False) -> Any:
+        """Get or compute cached grayscale representation in BufferSession."""
+        session = self.ensure_session()
+        if session is not None and hasattr(session, "get_or_create_grayscale"):
+            return session.get_or_create_grayscale(frame, is_vector=is_vector)
+        return frame
+
+    @property
+    def managed_api(self) -> Any:
+        """Access BufferSession's managed AOT API facade if available."""
+        session = self.ensure_session()
+        if session is not None and hasattr(session, "managed_api"):
+            return session.managed_api
+        return None
 
     def iter_supports(
         self,
@@ -636,6 +752,7 @@ class PipelineRuntime:
                                 release or prepared_disposer,
                                 lease,
                                 retain_value=(release or prepared_disposer) is not None,
+                                session=self._session,
                             )
                             yielded_item = (index, prepared, support_lease)
                             prepared = None
@@ -690,43 +807,144 @@ class PipelineRuntime:
                 raise_on_cancel=raise_on_cancel,
                 disposer=source_disposer,
             )
+            concurrency = max(1, min(self.in_processing_depth, os.cpu_count() or 4))
+            executor = (
+                ThreadPoolExecutor(
+                    max_workers=concurrency,
+                    thread_name_prefix="PipelineDecodeWorker",
+                )
+                if concurrency > 1
+                else None
+            )
+            pending_futures: deque[tuple[int, Any, Any]] = deque()
+            source_exhausted = False
             try:
-                while not stopped():
-                    lease = self.acquire_in_processing_slot(stop_when=stopped)
-                    if lease is None:
-                        break
-                    try:
-                        index, source = next(source_stream)
-                    except StopIteration:
-                        lease.release()
-                        break
-                    except BaseException:
-                        lease.release()
-                        raise
-
-                    prepared = None
-                    release = None
-                    try:
-                        prepared = prepare(index, source)
-                        prepared, release = own_prepared(prepared)
-                        if not put(_Loaded(index, (prepared, release, lease))):
-                            _dispose(prepared, release or prepared_disposer)
+                if executor is None:
+                    while not stopped():
+                        lease = self.acquire_in_processing_slot(stop_when=stopped)
+                        if lease is None:
+                            break
+                        try:
+                            index, source = next(source_stream)
+                        except StopIteration:
                             lease.release()
                             break
-                        prepared = None  # Ownership moves to the consumer queue.
-                        lease = None
-                    except BaseException as exc:
-                        if prepared is not None:
-                            _dispose(prepared, release or prepared_disposer)
-                        if lease is not None:
+                        except BaseException:
                             lease.release()
-                        if not stopped():
-                            put(_Failed(exc))
-                        break
+                            raise
+
+                        prepared = None
+                        release = None
+                        try:
+                            prepared = prepare(index, source)
+                            prepared, release = own_prepared(prepared)
+                            if not put(_Loaded(index, (prepared, release, lease))):
+                                _dispose(prepared, release or prepared_disposer)
+                                lease.release()
+                                break
+                            prepared = None  # Ownership moves to the consumer queue.
+                            lease = None
+                        except BaseException as exc:
+                            if prepared is not None:
+                                _dispose(prepared, release or prepared_disposer)
+                            if lease is not None:
+                                lease.release()
+                            if not stopped():
+                                put(_Failed(exc))
+                            break
+                else:
+                    def _decode_task(idx, src, lse):
+                        prep = None
+                        rel = None
+                        try:
+                            prep = prepare(idx, src)
+                            prep, rel = own_prepared(prep)
+                            return idx, prep, rel, lse
+                        except BaseException:
+                            if prep is not None:
+                                _dispose(prep, rel or prepared_disposer)
+                            lse.release()
+                            raise
+                        finally:
+                            self.release_borrow(src)
+
+                    while not stopped():
+                        # Fill pending futures up to in_processing_depth
+                        while (
+                            not stopped()
+                            and not source_exhausted
+                            and len(pending_futures) < self.in_processing_depth
+                        ):
+                            slot_timeout = None if not pending_futures else 0.0
+                            lease = self.acquire_in_processing_slot(
+                                stop_when=stopped, timeout=slot_timeout
+                            )
+                            if lease is None:
+                                break
+                            try:
+                                index, source = next(source_stream)
+                            except StopIteration:
+                                source_exhausted = True
+                                lease.release()
+                                break
+                            except BaseException:
+                                lease.release()
+                                raise
+
+                            self.borrow(source)
+                            fut = executor.submit(_decode_task, index, source, lease)
+                            pending_futures.append((index, fut, lease, source))
+
+                        if not pending_futures:
+                            if source_exhausted:
+                                break
+                            continue
+
+                        # Await and yield the next future in strict ordinal order
+                        item_index, fut, lse, item_source = pending_futures[0]
+                        res = None
+                        while not stopped():
+                            try:
+                                res = fut.result(timeout=0.05)
+                                break
+                            except FutureTimeoutError:
+                                continue
+                            except BaseException as exc:
+                                if not stopped():
+                                    put(_Failed(exc))
+                                res = None
+                                break
+
+                        if stopped() or res is None:
+                            break
+
+                        pending_futures.popleft()
+                        idx, prep, rel, item_lease = res
+                        if not put(_Loaded(idx, (prep, rel, item_lease))):
+                            _dispose(prep, rel or prepared_disposer)
+                            item_lease.release()
+                            break
             except BaseException as exc:
                 if not stopped():
                     put(_Failed(exc))
             finally:
+                if executor is not None:
+                    for _, fut, lse, src_item in pending_futures:
+                        if fut.cancel():
+                            lse.release()
+                            self.release_borrow(src_item)
+                    executor.shutdown(wait=True)
+                    for _, fut, lse, src_item in pending_futures:
+                        if fut.done() and not fut.cancelled():
+                            try:
+                                exc = fut.exception()
+                                if exc is None:
+                                    _, prep, rel, item_lease = fut.result()
+                                    _dispose(prep, rel or prepared_disposer)
+                                    item_lease.release()
+                            except Exception:
+                                pass
+                    pending_futures.clear()
                 try:
                     source_stream.close()
                 except Exception:
@@ -761,6 +979,7 @@ class PipelineRuntime:
                         release or prepared_disposer,
                         lease,
                         retain_value=(release or prepared_disposer) is not None,
+                        session=self._session,
                     )
                     yielded_item = (item.index, prepared, support_lease)
                     prepared = None
@@ -840,6 +1059,7 @@ class PipelineRuntime:
                         prepared_disposer,
                         lease,
                         retain_value=prepared_disposer is not None,
+                        session=self._session,
                     )
                     yielded_item = (index, prepared, support_lease)
                     prepared = None
@@ -990,35 +1210,37 @@ class PipelineRuntime:
             reference = source.load_reference()
             if own_reference and reference is not None and hasattr(session, "own"):
                 session.own(reference)
-            reference_state = recipe.prepare_reference(reference, context)
-            prepare_support = getattr(recipe, "prepare_support", None)
-            release_support = getattr(recipe, "release_support", None)
-            if callable(prepare_support) != callable(release_support):
-                raise TypeError(
-                    "PreparedPipelineRecipe must implement both "
-                    "prepare_support() and release_support()"
-                )
+            with self.borrowed(reference):
+                reference_state = recipe.prepare_reference(reference, context)
+                with self.borrowed(reference_state):
+                    prepare_support = getattr(recipe, "prepare_support", None)
+                    release_support = getattr(recipe, "release_support", None)
+                    if callable(prepare_support) != callable(release_support):
+                        raise TypeError(
+                            "PreparedPipelineRecipe must implement both "
+                            "prepare_support() and release_support()"
+                        )
 
-            if callable(prepare_support):
-                self._execute_prepared_supports(
-                    source,
-                    recipe,
-                    support_indices,
-                    reference_state,
-                    context,
-                    prepare_support,
-                    release_support,
-                )
-            else:
-                self._execute_legacy_supports(
-                    source,
-                    recipe,
-                    support_indices,
-                    reference_state,
-                    context,
-                )
-            context.check_cancelled()
-            return recipe.finalize(reference_state, context)
+                    if callable(prepare_support):
+                        self._execute_prepared_supports(
+                            source,
+                            recipe,
+                            support_indices,
+                            reference_state,
+                            context,
+                            prepare_support,
+                            release_support,
+                        )
+                    else:
+                        self._execute_legacy_supports(
+                            source,
+                            recipe,
+                            support_indices,
+                            reference_state,
+                            context,
+                        )
+                    context.check_cancelled()
+                    return recipe.finalize(reference_state, context)
         finally:
             # execute() represents one complete job. Always stop prefetch and
             # release the owned session, including when a recipe or source

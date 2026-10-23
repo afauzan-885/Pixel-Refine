@@ -1381,6 +1381,479 @@ def remap_accumulate_cfa_weighted_plane_kernel(
 
 
 @ti.kernel
+def remap_accumulate_cfa_raw_mosaic_kernel(
+    raw_mosaic: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+    b0: ti.f32, b1: ti.f32, b2: ti.f32, b3: ti.f32,
+    inv0: ti.f32, inv1: ti.f32, inv2: ti.f32, inv3: ti.f32,
+):
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+
+                    r0 = sy0 * 2 + origin_y
+                    r1 = sy1 * 2 + origin_y
+                    c0 = sx0 * 2 + origin_x
+                    c1 = sx1 * 2 + origin_x
+
+                    s00 = float(raw_mosaic[r0, c0])
+                    s01 = float(raw_mosaic[r0, c1])
+                    s10 = float(raw_mosaic[r1, c0])
+                    s11 = float(raw_mosaic[r1, c1])
+
+                    b = 0.0
+                    inv = 1.0
+                    if ti.static(idx == 0):
+                        b = b0; inv = inv0
+                    elif ti.static(idx == 1):
+                        b = b1; inv = inv1
+                    elif ti.static(idx == 2):
+                        b = b2; inv = inv2
+                    else:
+                        b = b3; inv = inv3
+
+                    n00 = ti.max(0.0, ti.min(1.0, (s00 - b) * inv))
+                    n01 = ti.max(0.0, ti.min(1.0, (s01 - b) * inv))
+                    n10 = ti.max(0.0, ti.min(1.0, (s10 - b) * inv))
+                    n11 = ti.max(0.0, ti.min(1.0, (s11 - b) * inv))
+
+                    value = (
+                        (1.0 - ty) * (1.0 - tx) * n00
+                        + (1.0 - ty) * tx * n01
+                        + ty * (1.0 - tx) * n10
+                        + ty * tx * n11
+                    )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0]
+                        + tyw * txw * weight_map_work[wy1, wx1]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
+def remap_accumulate_cfa_raw_mosaic_weighted_kernel(
+    raw_mosaic: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+    b0: ti.f32, b1: ti.f32, b2: ti.f32, b3: ti.f32,
+    inv0: ti.f32, inv1: ti.f32, inv2: ti.f32, inv3: ti.f32,
+    cfa_c0: ti.i32, cfa_c1: ti.i32, cfa_c2: ti.i32, cfa_c3: ti.i32,
+):
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            cfa_channel = 0
+            if ti.static(idx == 0):
+                cfa_channel = cfa_c0
+            elif ti.static(idx == 1):
+                cfa_channel = cfa_c1
+            elif ti.static(idx == 2):
+                cfa_channel = cfa_c2
+            else:
+                cfa_channel = cfa_c3
+
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+
+                    r0 = sy0 * 2 + origin_y
+                    r1 = sy1 * 2 + origin_y
+                    c0 = sx0 * 2 + origin_x
+                    c1 = sx1 * 2 + origin_x
+
+                    s00 = float(raw_mosaic[r0, c0])
+                    s01 = float(raw_mosaic[r0, c1])
+                    s10 = float(raw_mosaic[r1, c0])
+                    s11 = float(raw_mosaic[r1, c1])
+
+                    b = 0.0
+                    inv = 1.0
+                    if ti.static(idx == 0):
+                        b = b0; inv = inv0
+                    elif ti.static(idx == 1):
+                        b = b1; inv = inv1
+                    elif ti.static(idx == 2):
+                        b = b2; inv = inv2
+                    else:
+                        b = b3; inv = inv3
+
+                    n00 = ti.max(0.0, ti.min(1.0, (s00 - b) * inv))
+                    n01 = ti.max(0.0, ti.min(1.0, (s01 - b) * inv))
+                    n10 = ti.max(0.0, ti.min(1.0, (s10 - b) * inv))
+                    n11 = ti.max(0.0, ti.min(1.0, (s11 - b) * inv))
+
+                    value = (
+                        (1.0 - ty) * (1.0 - tx) * n00
+                        + (1.0 - ty) * tx * n01
+                        + ty * (1.0 - tx) * n10
+                        + ty * tx * n11
+                    )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0, cfa_channel]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1, cfa_channel]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0, cfa_channel]
+                        + tyw * txw * weight_map_work[wy1, wx1, cfa_channel]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
+def remap_accumulate_cfa_scalar_weighted_4planes_kernel(
+    p0: ti.types.ndarray(),
+    p1: ti.types.ndarray(),
+    p2: ti.types.ndarray(),
+    p3: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+):
+    """Fused single-pass CFA remap & accumulate for 4 Bayer planes with 2D scalar weight."""
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+                    value = 0.0
+                    if ti.static(idx == 0):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p0[sy0, sx0]
+                            + (1.0 - ty) * tx * p0[sy0, sx1]
+                            + ty * (1.0 - tx) * p0[sy1, sx0]
+                            + ty * tx * p0[sy1, sx1]
+                        )
+                    elif ti.static(idx == 1):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p1[sy0, sx0]
+                            + (1.0 - ty) * tx * p1[sy0, sx1]
+                            + ty * (1.0 - tx) * p1[sy1, sx0]
+                            + ty * tx * p1[sy1, sx1]
+                        )
+                    elif ti.static(idx == 2):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p2[sy0, sx0]
+                            + (1.0 - ty) * tx * p2[sy0, sx1]
+                            + ty * (1.0 - tx) * p2[sy1, sx0]
+                            + ty * tx * p2[sy1, sx1]
+                        )
+                    else:
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p3[sy0, sx0]
+                            + (1.0 - ty) * tx * p3[sy0, sx1]
+                            + ty * (1.0 - tx) * p3[sy1, sx0]
+                            + ty * tx * p3[sy1, sx1]
+                        )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0]
+                        + tyw * txw * weight_map_work[wy1, wx1]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
+def remap_accumulate_cfa_weighted_4planes_kernel(
+    p0: ti.types.ndarray(),
+    p1: ti.types.ndarray(),
+    p2: ti.types.ndarray(),
+    p3: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+    cfa_c0: ti.i32,
+    cfa_c1: ti.i32,
+    cfa_c2: ti.i32,
+    cfa_c3: ti.i32,
+):
+    """Fused single-pass CFA remap & accumulate for 4 Bayer planes with 3D multi-channel weight."""
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            cfa_channel = 0
+            if ti.static(idx == 0):
+                cfa_channel = cfa_c0
+            elif ti.static(idx == 1):
+                cfa_channel = cfa_c1
+            elif ti.static(idx == 2):
+                cfa_channel = cfa_c2
+            else:
+                cfa_channel = cfa_c3
+
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+                    value = 0.0
+                    if ti.static(idx == 0):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p0[sy0, sx0]
+                            + (1.0 - ty) * tx * p0[sy0, sx1]
+                            + ty * (1.0 - tx) * p0[sy1, sx0]
+                            + ty * tx * p0[sy1, sx1]
+                        )
+                    elif ti.static(idx == 1):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p1[sy0, sx0]
+                            + (1.0 - ty) * tx * p1[sy0, sx1]
+                            + ty * (1.0 - tx) * p1[sy1, sx0]
+                            + ty * tx * p1[sy1, sx1]
+                        )
+                    elif ti.static(idx == 2):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p2[sy0, sx0]
+                            + (1.0 - ty) * tx * p2[sy0, sx1]
+                            + ty * (1.0 - tx) * p2[sy1, sx0]
+                            + ty * tx * p2[sy1, sx1]
+                        )
+                    else:
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p3[sy0, sx0]
+                            + (1.0 - ty) * tx * p3[sy0, sx1]
+                            + ty * (1.0 - tx) * p3[sy1, sx0]
+                            + ty * tx * p3[sy1, sx1]
+                        )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0, cfa_channel]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1, cfa_channel]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0, cfa_channel]
+                        + tyw * txw * weight_map_work[wy1, wx1, cfa_channel]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
 def remap_accumulate_cfa_scalar_weighted_plane_kernel(
     source_plane: ti.types.ndarray(),
     flow_work: ti.types.ndarray(),
@@ -1465,6 +1938,476 @@ def remap_accumulate_cfa_scalar_weighted_plane_kernel(
 
 
 @ti.kernel
+def remap_accumulate_cfa_scalar_weighted_4planes_kernel(
+    p0: ti.types.ndarray(),
+    p1: ti.types.ndarray(),
+    p2: ti.types.ndarray(),
+    p3: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+):
+    """Fused single-pass CFA remap & accumulate for 4 Bayer planes with 2D scalar weight."""
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+                    value = 0.0
+                    if ti.static(idx == 0):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p0[sy0, sx0]
+                            + (1.0 - ty) * tx * p0[sy0, sx1]
+                            + ty * (1.0 - tx) * p0[sy1, sx0]
+                            + ty * tx * p0[sy1, sx1]
+                        )
+                    elif ti.static(idx == 1):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p1[sy0, sx0]
+                            + (1.0 - ty) * tx * p1[sy0, sx1]
+                            + ty * (1.0 - tx) * p1[sy1, sx0]
+                            + ty * tx * p1[sy1, sx1]
+                        )
+                    elif ti.static(idx == 2):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p2[sy0, sx0]
+                            + (1.0 - ty) * tx * p2[sy0, sx1]
+                            + ty * (1.0 - tx) * p2[sy1, sx0]
+                            + ty * tx * p2[sy1, sx1]
+                        )
+                    else:
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p3[sy0, sx0]
+                            + (1.0 - ty) * tx * p3[sy0, sx1]
+                            + ty * (1.0 - tx) * p3[sy1, sx0]
+                            + ty * tx * p3[sy1, sx1]
+                        )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0]
+                        + tyw * txw * weight_map_work[wy1, wx1]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
+def remap_accumulate_cfa_weighted_4planes_kernel(
+    p0: ti.types.ndarray(),
+    p1: ti.types.ndarray(),
+    p2: ti.types.ndarray(),
+    p3: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+    cfa_c0: ti.i32,
+    cfa_c1: ti.i32,
+    cfa_c2: ti.i32,
+    cfa_c3: ti.i32,
+):
+    """Fused single-pass CFA remap & accumulate for 4 Bayer planes with 3D multi-channel weight."""
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            cfa_channel = 0
+            if ti.static(idx == 0):
+                cfa_channel = cfa_c0
+            elif ti.static(idx == 1):
+                cfa_channel = cfa_c1
+            elif ti.static(idx == 2):
+                cfa_channel = cfa_c2
+            else:
+                cfa_channel = cfa_c3
+
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+                    value = 0.0
+                    if ti.static(idx == 0):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p0[sy0, sx0]
+                            + (1.0 - ty) * tx * p0[sy0, sx1]
+                            + ty * (1.0 - tx) * p0[sy1, sx0]
+                            + ty * tx * p0[sy1, sx1]
+                        )
+                    elif ti.static(idx == 1):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p1[sy0, sx0]
+                            + (1.0 - ty) * tx * p1[sy0, sx1]
+                            + ty * (1.0 - tx) * p1[sy1, sx0]
+                            + ty * tx * p1[sy1, sx1]
+                        )
+                    elif ti.static(idx == 2):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p2[sy0, sx0]
+                            + (1.0 - ty) * tx * p2[sy0, sx1]
+                            + ty * (1.0 - tx) * p2[sy1, sx0]
+                            + ty * tx * p2[sy1, sx1]
+                        )
+                    else:
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p3[sy0, sx0]
+                            + (1.0 - ty) * tx * p3[sy0, sx1]
+                            + ty * (1.0 - tx) * p3[sy1, sx0]
+                            + ty * tx * p3[sy1, sx1]
+                        )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0, cfa_channel]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1, cfa_channel]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0, cfa_channel]
+                        + tyw * txw * weight_map_work[wy1, wx1, cfa_channel]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
+def remap_accumulate_cfa_scalar_weighted_4planes_kernel(
+    p0: ti.types.ndarray(),
+    p1: ti.types.ndarray(),
+    p2: ti.types.ndarray(),
+    p3: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+):
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+                    value = 0.0
+                    if ti.static(idx == 0):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p0[sy0, sx0]
+                            + (1.0 - ty) * tx * p0[sy0, sx1]
+                            + ty * (1.0 - tx) * p0[sy1, sx0]
+                            + ty * tx * p0[sy1, sx1]
+                        )
+                    elif ti.static(idx == 1):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p1[sy0, sx0]
+                            + (1.0 - ty) * tx * p1[sy0, sx1]
+                            + ty * (1.0 - tx) * p1[sy1, sx0]
+                            + ty * tx * p1[sy1, sx1]
+                        )
+                    elif ti.static(idx == 2):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p2[sy0, sx0]
+                            + (1.0 - ty) * tx * p2[sy0, sx1]
+                            + ty * (1.0 - tx) * p2[sy1, sx0]
+                            + ty * tx * p2[sy1, sx1]
+                        )
+                    else:
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p3[sy0, sx0]
+                            + (1.0 - ty) * tx * p3[sy0, sx1]
+                            + ty * (1.0 - tx) * p3[sy1, sx0]
+                            + ty * tx * p3[sy1, sx1]
+                        )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0]
+                        + tyw * txw * weight_map_work[wy1, wx1]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
+def remap_accumulate_cfa_weighted_4planes_kernel(
+    p0: ti.types.ndarray(),
+    p1: ti.types.ndarray(),
+    p2: ti.types.ndarray(),
+    p3: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+    cfa_c0: ti.i32,
+    cfa_c1: ti.i32,
+    cfa_c2: ti.i32,
+    cfa_c3: ti.i32,
+):
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            cfa_channel = 0
+            if ti.static(idx == 0):
+                cfa_channel = cfa_c0
+            elif ti.static(idx == 1):
+                cfa_channel = cfa_c1
+            elif ti.static(idx == 2):
+                cfa_channel = cfa_c2
+            else:
+                cfa_channel = cfa_c3
+
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+                    value = 0.0
+                    if ti.static(idx == 0):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p0[sy0, sx0]
+                            + (1.0 - ty) * tx * p0[sy0, sx1]
+                            + ty * (1.0 - tx) * p0[sy1, sx0]
+                            + ty * tx * p0[sy1, sx1]
+                        )
+                    elif ti.static(idx == 1):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p1[sy0, sx0]
+                            + (1.0 - ty) * tx * p1[sy0, sx1]
+                            + ty * (1.0 - tx) * p1[sy1, sx0]
+                            + ty * tx * p1[sy1, sx1]
+                        )
+                    elif ti.static(idx == 2):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p2[sy0, sx0]
+                            + (1.0 - ty) * tx * p2[sy0, sx1]
+                            + ty * (1.0 - tx) * p2[sy1, sx0]
+                            + ty * tx * p2[sy1, sx1]
+                        )
+                    else:
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p3[sy0, sx0]
+                            + (1.0 - ty) * tx * p3[sy0, sx1]
+                            + ty * (1.0 - tx) * p3[sy1, sx0]
+                            + ty * tx * p3[sy1, sx1]
+                        )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0, cfa_channel]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1, cfa_channel]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0, cfa_channel]
+                        + tyw * txw * weight_map_work[wy1, wx1, cfa_channel]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
 def accumulate_cfa_homography_weighted_plane_kernel(
     source_plane: ti.types.ndarray(),
     m_inv: ti.types.ndarray(),
@@ -1541,6 +2484,242 @@ def accumulate_cfa_homography_weighted_plane_kernel(
 
 
 @ti.kernel
+def remap_accumulate_cfa_scalar_weighted_4planes_kernel(
+    p0: ti.types.ndarray(),
+    p1: ti.types.ndarray(),
+    p2: ti.types.ndarray(),
+    p3: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+):
+    """Fused single-pass CFA remap & accumulate for 4 Bayer planes with 2D scalar weight."""
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+                    value = 0.0
+                    if ti.static(idx == 0):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p0[sy0, sx0]
+                            + (1.0 - ty) * tx * p0[sy0, sx1]
+                            + ty * (1.0 - tx) * p0[sy1, sx0]
+                            + ty * tx * p0[sy1, sx1]
+                        )
+                    elif ti.static(idx == 1):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p1[sy0, sx0]
+                            + (1.0 - ty) * tx * p1[sy0, sx1]
+                            + ty * (1.0 - tx) * p1[sy1, sx0]
+                            + ty * tx * p1[sy1, sx1]
+                        )
+                    elif ti.static(idx == 2):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p2[sy0, sx0]
+                            + (1.0 - ty) * tx * p2[sy0, sx1]
+                            + ty * (1.0 - tx) * p2[sy1, sx0]
+                            + ty * tx * p2[sy1, sx1]
+                        )
+                    else:
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p3[sy0, sx0]
+                            + (1.0 - ty) * tx * p3[sy0, sx1]
+                            + ty * (1.0 - tx) * p3[sy1, sx0]
+                            + ty * tx * p3[sy1, sx1]
+                        )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0]
+                        + tyw * txw * weight_map_work[wy1, wx1]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
+def remap_accumulate_cfa_weighted_4planes_kernel(
+    p0: ti.types.ndarray(),
+    p1: ti.types.ndarray(),
+    p2: ti.types.ndarray(),
+    p3: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+    cfa_c0: ti.i32,
+    cfa_c1: ti.i32,
+    cfa_c2: ti.i32,
+    cfa_c3: ti.i32,
+):
+    """Fused single-pass CFA remap & accumulate for 4 Bayer planes with 3D multi-channel weight."""
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            cfa_channel = 0
+            if ti.static(idx == 0):
+                cfa_channel = cfa_c0
+            elif ti.static(idx == 1):
+                cfa_channel = cfa_c1
+            elif ti.static(idx == 2):
+                cfa_channel = cfa_c2
+            else:
+                cfa_channel = cfa_c3
+
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+                    value = 0.0
+                    if ti.static(idx == 0):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p0[sy0, sx0]
+                            + (1.0 - ty) * tx * p0[sy0, sx1]
+                            + ty * (1.0 - tx) * p0[sy1, sx0]
+                            + ty * tx * p0[sy1, sx1]
+                        )
+                    elif ti.static(idx == 1):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p1[sy0, sx0]
+                            + (1.0 - ty) * tx * p1[sy0, sx1]
+                            + ty * (1.0 - tx) * p1[sy1, sx0]
+                            + ty * tx * p1[sy1, sx1]
+                        )
+                    elif ti.static(idx == 2):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p2[sy0, sx0]
+                            + (1.0 - ty) * tx * p2[sy0, sx1]
+                            + ty * (1.0 - tx) * p2[sy1, sx0]
+                            + ty * tx * p2[sy1, sx1]
+                        )
+                    else:
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p3[sy0, sx0]
+                            + (1.0 - ty) * tx * p3[sy0, sx1]
+                            + ty * (1.0 - tx) * p3[sy1, sx0]
+                            + ty * tx * p3[sy1, sx1]
+                        )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0, cfa_channel]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1, cfa_channel]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0, cfa_channel]
+                        + tyw * txw * weight_map_work[wy1, wx1, cfa_channel]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
 def accumulate_cfa_homography_scalar_weighted_plane_kernel(
     source_plane: ti.types.ndarray(),
     m_inv: ti.types.ndarray(),
@@ -1598,6 +2777,242 @@ def accumulate_cfa_homography_scalar_weighted_plane_kernel(
                         + (1.0 - tyw) * txw * weight_map_work[wy0, wx1]
                         + tyw * (1.0 - txw) * weight_map_work[wy1, wx0]
                         + tyw * txw * weight_map_work[wy1, wx1]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
+def remap_accumulate_cfa_scalar_weighted_4planes_kernel(
+    p0: ti.types.ndarray(),
+    p1: ti.types.ndarray(),
+    p2: ti.types.ndarray(),
+    p3: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+):
+    """Fused single-pass CFA remap & accumulate for 4 Bayer planes with 2D scalar weight."""
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+                    value = 0.0
+                    if ti.static(idx == 0):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p0[sy0, sx0]
+                            + (1.0 - ty) * tx * p0[sy0, sx1]
+                            + ty * (1.0 - tx) * p0[sy1, sx0]
+                            + ty * tx * p0[sy1, sx1]
+                        )
+                    elif ti.static(idx == 1):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p1[sy0, sx0]
+                            + (1.0 - ty) * tx * p1[sy0, sx1]
+                            + ty * (1.0 - tx) * p1[sy1, sx0]
+                            + ty * tx * p1[sy1, sx1]
+                        )
+                    elif ti.static(idx == 2):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p2[sy0, sx0]
+                            + (1.0 - ty) * tx * p2[sy0, sx1]
+                            + ty * (1.0 - tx) * p2[sy1, sx0]
+                            + ty * tx * p2[sy1, sx1]
+                        )
+                    else:
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p3[sy0, sx0]
+                            + (1.0 - ty) * tx * p3[sy0, sx1]
+                            + ty * (1.0 - tx) * p3[sy1, sx0]
+                            + ty * tx * p3[sy1, sx1]
+                        )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0]
+                        + tyw * txw * weight_map_work[wy1, wx1]
+                    )
+                    weight = ti.max(0.0, ti.min(1.0, weight))
+                    final_cfa_sum[gr, gc] += value * weight
+                    final_cfa_weight[gr, gc] += weight
+
+
+@ti.kernel
+def remap_accumulate_cfa_weighted_4planes_kernel(
+    p0: ti.types.ndarray(),
+    p1: ti.types.ndarray(),
+    p2: ti.types.ndarray(),
+    p3: ti.types.ndarray(),
+    flow_work: ti.types.ndarray(),
+    weight_map_work: ti.types.ndarray(),
+    final_cfa_sum: ti.types.ndarray(),
+    final_cfa_weight: ti.types.ndarray(),
+    h_dst: ti.i32,
+    w_dst: ti.i32,
+    h_flow: ti.i32,
+    w_flow: ti.i32,
+    h_work: ti.i32,
+    w_work: ti.i32,
+    h_plane: ti.i32,
+    w_plane: ti.i32,
+    scale_x: ti.f32,
+    scale_y: ti.f32,
+    phase_y: ti.i32,
+    phase_x: ti.i32,
+    cfa_c0: ti.i32,
+    cfa_c1: ti.i32,
+    cfa_c2: ti.i32,
+    cfa_c3: ti.i32,
+):
+    """Fused single-pass CFA remap & accumulate for 4 Bayer planes with 3D multi-channel weight."""
+    flow_x_scale = float(w_flow) / float(w_dst)
+    flow_y_scale = float(h_flow) / float(h_dst)
+    weight_x_scale = float(w_work) / float(w_dst)
+    weight_y_scale = float(h_work) / float(h_dst)
+    for r, c in ti.ndrange(h_plane, w_plane):
+        for idx in ti.static(range(4)):
+            plane_row = idx // 2
+            plane_col = idx % 2
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            gr = r * 2 + origin_y
+            gc = c * 2 + origin_x
+            cfa_channel = 0
+            if ti.static(idx == 0):
+                cfa_channel = cfa_c0
+            elif ti.static(idx == 1):
+                cfa_channel = cfa_c1
+            elif ti.static(idx == 2):
+                cfa_channel = cfa_c2
+            else:
+                cfa_channel = cfa_c3
+
+            if gr < h_dst and gc < w_dst:
+                fx = ti.max(
+                    0.0,
+                    ti.min(float(w_flow - 1), (float(gc) + 0.5) * flow_x_scale - 0.5),
+                )
+                fy = ti.max(
+                    0.0,
+                    ti.min(float(h_flow - 1), (float(gr) + 0.5) * flow_y_scale - 0.5),
+                )
+                dx = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 0)
+                dy = bilinear_at_3ch(flow_work, fx, fy, h_flow, w_flow, 1)
+                src_x = float(c) + dx * scale_x * 0.5
+                src_y = float(r) + dy * scale_y * 0.5
+                if 0.0 <= src_x <= float(w_plane - 1) and 0.0 <= src_y <= float(h_plane - 1):
+                    sx0 = ti.cast(ti.floor(src_x), ti.i32)
+                    sy0 = ti.cast(ti.floor(src_y), ti.i32)
+                    sx1 = ti.min(sx0 + 1, w_plane - 1)
+                    sy1 = ti.min(sy0 + 1, h_plane - 1)
+                    tx = src_x - float(sx0)
+                    ty = src_y - float(sy0)
+                    value = 0.0
+                    if ti.static(idx == 0):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p0[sy0, sx0]
+                            + (1.0 - ty) * tx * p0[sy0, sx1]
+                            + ty * (1.0 - tx) * p0[sy1, sx0]
+                            + ty * tx * p0[sy1, sx1]
+                        )
+                    elif ti.static(idx == 1):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p1[sy0, sx0]
+                            + (1.0 - ty) * tx * p1[sy0, sx1]
+                            + ty * (1.0 - tx) * p1[sy1, sx0]
+                            + ty * tx * p1[sy1, sx1]
+                        )
+                    elif ti.static(idx == 2):
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p2[sy0, sx0]
+                            + (1.0 - ty) * tx * p2[sy0, sx1]
+                            + ty * (1.0 - tx) * p2[sy1, sx0]
+                            + ty * tx * p2[sy1, sx1]
+                        )
+                    else:
+                        value = (
+                            (1.0 - ty) * (1.0 - tx) * p3[sy0, sx0]
+                            + (1.0 - ty) * tx * p3[sy0, sx1]
+                            + ty * (1.0 - tx) * p3[sy1, sx0]
+                            + ty * tx * p3[sy1, sx1]
+                        )
+
+                    wx = ti.max(
+                        0.0,
+                        ti.min(float(w_work - 1), (float(gc) + 0.5) * weight_x_scale - 0.5),
+                    )
+                    wy = ti.max(
+                        0.0,
+                        ti.min(float(h_work - 1), (float(gr) + 0.5) * weight_y_scale - 0.5),
+                    )
+                    wx0 = ti.max(0, ti.cast(ti.floor(wx), ti.i32))
+                    wy0 = ti.max(0, ti.cast(ti.floor(wy), ti.i32))
+                    wx1 = ti.min(wx0 + 1, w_work - 1)
+                    wy1 = ti.min(wy0 + 1, h_work - 1)
+                    txw = wx - float(wx0)
+                    tyw = wy - float(wy0)
+                    weight = (
+                        (1.0 - tyw) * (1.0 - txw) * weight_map_work[wy0, wx0, cfa_channel]
+                        + (1.0 - tyw) * txw * weight_map_work[wy0, wx1, cfa_channel]
+                        + tyw * (1.0 - txw) * weight_map_work[wy1, wx0, cfa_channel]
+                        + tyw * txw * weight_map_work[wy1, wx1, cfa_channel]
                     )
                     weight = ti.max(0.0, ti.min(1.0, weight))
                     final_cfa_sum[gr, gc] += value * weight
@@ -2284,6 +3699,147 @@ def _compile_graphs(module):
     module.add_graph(
         "remap_accumulate_cfa_scalar_weighted_plane",
         g_fused_cfa_scalar.compile(),
+    )
+    # Fused single-pass 4-plane CFA graphs
+    sym_cfa_p0 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "p0", dtype=ti.f32, ndim=2)
+    sym_cfa_p1 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "p1", dtype=ti.f32, ndim=2)
+    sym_cfa_p2 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "p2", dtype=ti.f32, ndim=2)
+    sym_cfa_p3 = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "p3", dtype=ti.f32, ndim=2)
+    sym_cfa_phase_y = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "phase_y", dtype=ti.i32)
+    sym_cfa_phase_x = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "phase_x", dtype=ti.i32)
+    sym_cfa_c0 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "cfa_c0", dtype=ti.i32)
+    sym_cfa_c1 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "cfa_c1", dtype=ti.i32)
+    sym_cfa_c2 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "cfa_c2", dtype=ti.i32)
+    sym_cfa_c3 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "cfa_c3", dtype=ti.i32)
+
+    g_fused_cfa_scalar_4p = ti.graph.GraphBuilder()
+    g_fused_cfa_scalar_4p.dispatch(
+        remap_accumulate_cfa_scalar_weighted_4planes_kernel,
+        sym_cfa_p0,
+        sym_cfa_p1,
+        sym_cfa_p2,
+        sym_cfa_p3,
+        sym_fused_flow,
+        sym_fused_weight_2d,
+        sym_cfa_sum,
+        sym_cfa_weight_sum,
+        sym_fused_h_dst,
+        sym_fused_w_dst,
+        sym_fused_h_flow,
+        sym_fused_w_flow,
+        sym_fused_h_work,
+        sym_fused_w_work,
+        sym_cfa_h_plane,
+        sym_cfa_w_plane,
+        sym_fused_scale_x,
+        sym_fused_scale_y,
+        sym_cfa_phase_y,
+        sym_cfa_phase_x,
+    )
+    module.add_graph(
+        "remap_accumulate_cfa_scalar_weighted_4planes",
+        g_fused_cfa_scalar_4p.compile(),
+    )
+
+    g_fused_cfa_4p = ti.graph.GraphBuilder()
+    g_fused_cfa_4p.dispatch(
+        remap_accumulate_cfa_weighted_4planes_kernel,
+        sym_cfa_p0,
+        sym_cfa_p1,
+        sym_cfa_p2,
+        sym_cfa_p3,
+        sym_fused_flow,
+        sym_fused_weight_3d,
+        sym_cfa_sum,
+        sym_cfa_weight_sum,
+        sym_fused_h_dst,
+        sym_fused_w_dst,
+        sym_fused_h_flow,
+        sym_fused_w_flow,
+        sym_fused_h_work,
+        sym_fused_w_work,
+        sym_cfa_h_plane,
+        sym_cfa_w_plane,
+        sym_fused_scale_x,
+        sym_fused_scale_y,
+        sym_cfa_phase_y,
+        sym_cfa_phase_x,
+        sym_cfa_c0,
+        sym_cfa_c1,
+        sym_cfa_c2,
+        sym_cfa_c3,
+    )
+    module.add_graph(
+        "remap_accumulate_cfa_weighted_4planes",
+        g_fused_cfa_4p.compile(),
+    )
+
+    # Direct raw mosaic CFA graphs with GPU-side normalization
+    sym_raw_mosaic = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "raw_mosaic", dtype=ti.u16, ndim=2)
+    sym_raw_b0 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "b0", dtype=ti.f32)
+    sym_raw_b1 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "b1", dtype=ti.f32)
+    sym_raw_b2 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "b2", dtype=ti.f32)
+    sym_raw_b3 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "b3", dtype=ti.f32)
+    sym_raw_inv0 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "inv0", dtype=ti.f32)
+    sym_raw_inv1 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "inv1", dtype=ti.f32)
+    sym_raw_inv2 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "inv2", dtype=ti.f32)
+    sym_raw_inv3 = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "inv3", dtype=ti.f32)
+
+    g_raw_mosaic_scalar = ti.graph.GraphBuilder()
+    g_raw_mosaic_scalar.dispatch(
+        remap_accumulate_cfa_raw_mosaic_kernel,
+        sym_raw_mosaic,
+        sym_fused_flow,
+        sym_fused_weight_2d,
+        sym_cfa_sum,
+        sym_cfa_weight_sum,
+        sym_fused_h_dst,
+        sym_fused_w_dst,
+        sym_fused_h_flow,
+        sym_fused_w_flow,
+        sym_fused_h_work,
+        sym_fused_w_work,
+        sym_cfa_h_plane,
+        sym_cfa_w_plane,
+        sym_fused_scale_x,
+        sym_fused_scale_y,
+        sym_cfa_phase_y,
+        sym_cfa_phase_x,
+        sym_raw_b0, sym_raw_b1, sym_raw_b2, sym_raw_b3,
+        sym_raw_inv0, sym_raw_inv1, sym_raw_inv2, sym_raw_inv3,
+    )
+    module.add_graph(
+        "remap_accumulate_cfa_raw_mosaic_scalar",
+        g_raw_mosaic_scalar.compile(),
+    )
+
+    g_raw_mosaic_weighted = ti.graph.GraphBuilder()
+    g_raw_mosaic_weighted.dispatch(
+        remap_accumulate_cfa_raw_mosaic_weighted_kernel,
+        sym_raw_mosaic,
+        sym_fused_flow,
+        sym_fused_weight_3d,
+        sym_cfa_sum,
+        sym_cfa_weight_sum,
+        sym_fused_h_dst,
+        sym_fused_w_dst,
+        sym_fused_h_flow,
+        sym_fused_w_flow,
+        sym_fused_h_work,
+        sym_fused_w_work,
+        sym_cfa_h_plane,
+        sym_cfa_w_plane,
+        sym_fused_scale_x,
+        sym_fused_scale_y,
+        sym_cfa_phase_y,
+        sym_cfa_phase_x,
+        sym_raw_b0, sym_raw_b1, sym_raw_b2, sym_raw_b3,
+        sym_raw_inv0, sym_raw_inv1, sym_raw_inv2, sym_raw_inv3,
+        sym_cfa_c0, sym_cfa_c1, sym_cfa_c2, sym_cfa_c3,
+    )
+    module.add_graph(
+        "remap_accumulate_cfa_raw_mosaic_weighted",
+        g_raw_mosaic_weighted.compile(),
     )
 
     # Experimental direct homography gather.  This keeps the legacy
@@ -4360,6 +5916,64 @@ def remap_accumulate_cfa_weighted_taichi(
 
     phase_y, phase_x = (int(phase_origin[0]) & 1, int(phase_origin[1]) & 1)
     mod = engine.load(tcm_path)
+
+    fused_4p_graph = (
+        "remap_accumulate_cfa_scalar_weighted_4planes"
+        if scalar_weight
+        else "remap_accumulate_cfa_weighted_4planes"
+    )
+    if _tcm_graph_available(tcm_path, fused_4p_graph):
+        h_plane0 = int(source_planes[0].shape[0])
+        w_plane0 = int(source_planes[0].shape[1])
+        # Validate shapes for all 4 planes
+        for index, source_plane in enumerate(source_planes):
+            plane_row, plane_col = divmod(index, 2)
+            origin_y = (plane_row - phase_y) & 1
+            origin_x = (plane_col - phase_x) & 1
+            channel = int(cfa_pattern[index])
+            if channel < 0 or channel > 2:
+                raise ValueError(
+                    f"CFA FusionNet requires RGB CFA codes in [0, 2], got {channel} at plane {index}"
+                )
+            expected_shape = (
+                len(range(origin_y, h_dst, 2)),
+                len(range(origin_x, w_dst, 2)),
+            )
+            if tuple(int(v) for v in source_plane.shape) != expected_shape:
+                raise ValueError(
+                    f"CFA plane {index} shape {tuple(source_plane.shape)} does not match "
+                    f"phase-correct expected shape {expected_shape}"
+                )
+        args_4p = dict(
+            p0=source_planes[0],
+            p1=source_planes[1],
+            p2=source_planes[2],
+            p3=source_planes[3],
+            flow_work=_scalar_3d(flow_work),
+            weight_map_work=(weight_map_work if scalar_weight else _scalar_3d(weight_map_work)),
+            final_cfa_sum=final_cfa_sum,
+            final_cfa_weight=final_cfa_weight,
+            h_dst=h_dst,
+            w_dst=w_dst,
+            h_flow=int(flow_work.shape[0]),
+            w_flow=int(flow_work.shape[1]),
+            h_work=int(weight_map_work.shape[0]),
+            w_work=int(weight_map_work.shape[1]),
+            h_plane=h_plane0,
+            w_plane=w_plane0,
+            scale_x=float(w_dst) / float(flow_work.shape[1]),
+            scale_y=float(h_dst) / float(flow_work.shape[0]),
+            phase_y=phase_y,
+            phase_x=phase_x,
+        )
+        if not scalar_weight:
+            args_4p["cfa_c0"] = int(cfa_pattern[0])
+            args_4p["cfa_c1"] = int(cfa_pattern[1])
+            args_4p["cfa_c2"] = int(cfa_pattern[2])
+            args_4p["cfa_c3"] = int(cfa_pattern[3])
+        mod.run(fused_4p_graph, **args_4p)
+        return
+
     for index, source_plane in enumerate(source_planes):
         plane_row, plane_col = divmod(index, 2)
         origin_y = (plane_row - phase_y) & 1

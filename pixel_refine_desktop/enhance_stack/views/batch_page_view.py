@@ -3,7 +3,14 @@ Batch Page View (MVC Hybrid).
 Wraps legacy BatchPageLayout with a Bulk Mode header.
 """
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGraphicsOpacityEffect
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QGraphicsOpacityEffect,
+    QSizePolicy,
+)
 from PySide6.QtCore import Signal
 
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
@@ -40,7 +47,7 @@ class BatchPageView(QWidget):
         self.legacy_title = QLabel(language_config.LBL_BULK_MODE)
         self.legacy_title.setObjectName("DisplayHeaderTitle")
         legacy_header_layout.addWidget(self.legacy_title)
-        
+
         legacy_header_layout.addStretch()
         
         # Bulk Mode Button (replacing switch)
@@ -75,16 +82,41 @@ class BatchPageView(QWidget):
         # Uses QGraphicsOpacityEffect to visually hide without removing physical space
         # so that the toggle position remains stable.
         self.process_all_btn = Button(language_config.BTN_PROCESS_ALL_BATCH, variant="primary")
-        self.process_all_btn.setFixedWidth(150)
-        self.process_all_btn.setFixedHeight(22)
-        self.process_all_btn.setStyleSheet(self.process_all_btn.styleSheet() + " QPushButton { padding: 2px 4px; font-size: 8pt; }")
+        self.process_all_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.process_all_btn.setStyleSheet(
+            self.process_all_btn.styleSheet()
+            + " QPushButton { padding: 3px; font-size: 8pt; }"
+        )
         self.process_all_btn.clicked.connect(self._on_process_all_clicked)
         legacy_header_layout.addWidget(self.process_all_btn)
+
+        self.delete_all_batches_btn = Button(
+            language_config.BTN_DELETE_ALL_BATCH, variant="danger"
+        )
+        self.delete_all_batches_btn.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.delete_all_batches_btn.setStyleSheet(
+            self.delete_all_batches_btn.styleSheet()
+            + " QPushButton { padding: 3px; font-size: 8pt; }"
+        )
+        self.delete_all_batches_btn.clicked.connect(self._on_delete_all_batches_clicked)
+        legacy_header_layout.insertWidget(
+            legacy_header_layout.indexOf(self.process_all_btn),
+            self.delete_all_batches_btn,
+        )
 
         # Apply opacity effect - starts invisible if no batches (updated after batch_layout init)
         self._process_all_opacity = QGraphicsOpacityEffect(self.process_all_btn)
         self._process_all_opacity.setOpacity(0.0)
         self.process_all_btn.setGraphicsEffect(self._process_all_opacity)
+        self._delete_all_batches_opacity = QGraphicsOpacityEffect(
+            self.delete_all_batches_btn
+        )
+        self._delete_all_batches_opacity.setOpacity(0.0)
+        self.delete_all_batches_btn.setGraphicsEffect(self._delete_all_batches_opacity)
 
         layout.addWidget(self.legacy_header)
 
@@ -110,13 +142,22 @@ class BatchPageView(QWidget):
         except Exception:
             has_batches = False
 
-        self._process_all_opacity.setOpacity(1.0 if has_batches else 0.0)
+        opacity = 1.0 if has_batches else 0.0
+        self._process_all_opacity.setOpacity(opacity)
+        self._delete_all_batches_opacity.setOpacity(opacity)
         # Also disable click when invisible to prevent accidental triggering
         self.process_all_btn.setEnabled(has_batches)
+        self.delete_all_batches_btn.setEnabled(has_batches)
 
     def _on_process_all_clicked(self):
         if hasattr(self, "batch_layout") and hasattr(self.batch_layout, "process_all_batches"):
             self.batch_layout.process_all_batches()
+
+    def _on_delete_all_batches_clicked(self):
+        if hasattr(self, "batch_layout") and hasattr(
+            self.batch_layout, "handle_delete_all_batches"
+        ):
+            self.batch_layout.handle_delete_all_batches()
 
     def _on_bulk_btn_clicked(self):
         # When clicked in Bulk View, transition back to Batch (Tunggal) Mode
@@ -130,6 +171,10 @@ class BatchPageView(QWidget):
             self.bulk_mode_btn.setText(language_config.LBL_BATCH_MODE)
         if hasattr(self, "process_all_btn"):
             self.process_all_btn.setText(language_config.BTN_PROCESS_ALL_BATCH)
+            self.process_all_btn.adjustSize()
+        if hasattr(self, "delete_all_batches_btn"):
+            self.delete_all_batches_btn.setText(language_config.BTN_DELETE_ALL_BATCH)
+            self.delete_all_batches_btn.adjustSize()
         # Refresh inner layout translations if it has retranslate_ui
         if hasattr(self, "batch_layout") and hasattr(self.batch_layout, "retranslate_ui"):
             try:
@@ -146,15 +191,22 @@ class BatchPageView(QWidget):
         window_width = self.window().width() if self.window() else 1000
         f = max(0.0, min(1.0, (window_width - 1000) / 920.0))
 
-        # Update process_all_btn
-        if hasattr(self, "process_all_btn") and self.process_all_btn:
-            btn_h = 22 + int(f * 10)
-            self.process_all_btn.setFixedHeight(btn_h)
+        if getattr(self, "process_all_btn", None):
             font_size = 8.0 + f * 3.0
-            
             from UILibrary.theme import get_theme, create_button_style, apply_style
+
             theme = get_theme()
-            apply_style(self.process_all_btn, create_button_style("primary", theme).with_overrides(padding="4px 8px", font_size=f"{font_size:.1f}pt"))
+            for button, variant in (
+                (self.delete_all_batches_btn, "danger"),
+                (self.process_all_btn, "primary"),
+            ):
+                apply_style(
+                    button,
+                    create_button_style(variant, theme).with_overrides(
+                        padding="3px", font_size=f"{font_size:.1f}pt"
+                    ),
+                )
+                button.adjustSize()
 
         # Update bulk_mode_btn
         if hasattr(self, "bulk_mode_btn") and self.bulk_mode_btn:

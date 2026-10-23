@@ -501,6 +501,12 @@ class MFDenoiserAlgorithm:
             output_path = os.path.join(output_folder, f"{safe_name}_{output_suffix}.dng")
             print(f"[MFDenoiser][Save] RAW DNG output_path={output_path}")
             saved_path = raw_pipeline_result.save_dng(output_path)
+            preview_path = os.path.splitext(output_path)[0] + "_preview.jpg"
+            try:
+                raw_pipeline_result.save_preview(preview_path)
+                print(f"[MFDenoiser][Preview] saved preview_path={preview_path}")
+            except Exception as error:
+                print(f"[MFDenoiser][Preview] could not save display preview: {error}")
             ctx.raw_pipeline_result = None
             del raw_pipeline_result
             return saved_path

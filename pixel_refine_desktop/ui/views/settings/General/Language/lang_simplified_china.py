@@ -607,6 +607,7 @@ LBL_ALGORITHM_PLACEHOLDER = "详细设置将在您选择上述处理方法后显
 BTN_START = "开始处理"
 BTN_NEW_BATCH = "创建新批次"
 BTN_DELETE_BATCH = "删除批次"
+BTN_DELETE_ALL_BATCH = "删除全部"
 LBL_ALGORITHM_SETTINGS = "叠加与对齐方法设置"
 BTN_PROCESS_ALL_BATCH = "处理所有批次"
 LBL_FROM_PROJECT = "从项目编号:"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Protocol, TypeVar
 
@@ -62,6 +63,94 @@ class PipelineExecutionContext:
     def report(self, *args: Any, **kwargs: Any) -> None:
         if self.progress_callback is not None:
             self.progress_callback(*args, **kwargs)
+
+    @contextmanager
+    def borrowed(self, resource: Any, *, from_session: Any = None):
+        """Scope a borrow lease on a GPU buffer/resource while passing it to the caller."""
+        session = self.session
+        if session is not None and hasattr(session, "borrowed") and resource is not None:
+            with session.borrowed(resource, from_session=from_session) as val:
+                yield val
+        else:
+            yield resource
+
+    def borrow(self, resource: Any, *, from_session: Any = None) -> Any:
+        """Pin a buffer/resource in the underlying BufferSession."""
+        session = self.session
+        if session is not None and hasattr(session, "borrow") and resource is not None:
+            return session.borrow(resource, from_session=from_session)
+        return resource
+
+    def release_borrow(self, resource: Any) -> None:
+        """Release a previously pinned borrow on the underlying BufferSession."""
+        session = self.session
+        if session is not None and hasattr(session, "release_borrow") and resource is not None:
+            session.release_borrow(resource)
+
+    def own(self, resource: Any, releaser: Any = None) -> Any:
+        """Register ownership of a buffer/resource with the underlying BufferSession."""
+        session = self.session
+        if session is not None and hasattr(session, "own") and resource is not None:
+            return session.own(resource, releaser=releaser)
+        return resource
+
+    def acquire_buffer(
+        self,
+        shape: tuple[int, ...],
+        dtype: Any = None,
+        is_vector: bool = False,
+        vector_dim: int = 1,
+    ) -> Any:
+        """Acquire a reusable scratch buffer from the underlying BufferSession cache."""
+        session = self.session
+        if session is not None and hasattr(session, "acquire_buffer"):
+            kwargs = {"dtype": dtype} if dtype is not None else {}
+            return session.acquire_buffer(
+                shape, is_vector=is_vector, vector_dim=vector_dim, **kwargs
+            )
+        raise RuntimeError("Current execution context does not provide a buffer allocator")
+
+    def acquire_ring_buffer(
+        self,
+        name: str,
+        shape: tuple[int, ...],
+        depth: int = 4,
+        dtype: Any = None,
+        is_vector: bool = False,
+        vector_dim: int = 1,
+    ) -> Any:
+        """Acquire or advance a ring buffer slot from the underlying BufferSession."""
+        session = self.session
+        if session is not None and hasattr(session, "acquire_ring_buffer"):
+            kwargs = {"dtype": dtype} if dtype is not None else {}
+            return session.acquire_ring_buffer(
+                name, shape, depth=depth, is_vector=is_vector, vector_dim=vector_dim, **kwargs
+            )
+        raise RuntimeError("Current execution context does not provide a ring buffer allocator")
+
+    def upload_if_needed(
+        self, array: Any, is_vector: bool = False, vector_dim: int = 1
+    ) -> tuple[Any, bool]:
+        """Upload a host array or view existing GPU buffer via BufferSession."""
+        session = self.session
+        if session is not None and hasattr(session, "upload_if_needed"):
+            return session.upload_if_needed(array, is_vector=is_vector, vector_dim=vector_dim)
+        return array, False
+
+    def get_or_create_grayscale(self, frame: Any, is_vector: bool = False) -> Any:
+        """Get or compute cached grayscale representation in BufferSession."""
+        session = self.session
+        if session is not None and hasattr(session, "get_or_create_grayscale"):
+            return session.get_or_create_grayscale(frame, is_vector=is_vector)
+        return frame
+
+    @property
+    def managed_api(self) -> Any:
+        """Access BufferSession's managed AOT API facade if available."""
+        session = self.session
+        if session is not None and hasattr(session, "managed_api"):
+            return session.managed_api
+        return None
 
 
 class PipelineSource(Protocol[TReference, TFrame]):

@@ -1,3 +1,19 @@
+def _parse_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("false", "0", "no", "off", "none", ""):
+            return False
+        if v in ("true", "1", "yes", "on"):
+            return True
+    return bool(value)
+
+
 import concurrent.futures
 from functools import lru_cache
 import os
@@ -274,7 +290,9 @@ def make_weight_mask(height, width):
     return _cached_weight_mask(int(height), int(width))
 
 
-def _compute_and_warp_tile(reference_gray, target_gray, target_original, tile, flow_func):
+def _compute_and_warp_tile(
+    reference_gray, target_gray, target_original, tile, flow_func, smooth=True
+):
     vx0, vy0, vx1, vy1 = tile["valid"]
     rx0, ry0, rx1, ry1 = tile["roi"]
     ref_roi = reference_gray[ry0:ry1, rx0:rx1]
@@ -291,7 +309,13 @@ def _compute_and_warp_tile(reference_gray, target_gray, target_original, tile, f
     flow_valid = flow_roi[oy0:oy1, ox0:ox1]
     target_valid = target_roi_original[oy0:oy1, ox0:ox1]
     warped = warp_tile_with_flow(target_valid, flow_valid)
-    return vx0, vy0, warped, make_weight_mask(warped.shape[0], warped.shape[1])
+    is_smooth = _parse_bool(smooth, default=True)
+    mask = (
+        make_weight_mask(warped.shape[0], warped.shape[1])
+        if is_smooth
+        else np.ones((warped.shape[0], warped.shape[1]), dtype=np.float32)
+    )
+    return vx0, vy0, warped, mask
 
 
 def align_with_tiled_flow(
@@ -305,17 +329,21 @@ def align_with_tiled_flow(
     stop_requested=None,
     executor=None,
     target_for_warping=None,
+    smooth=True,
 ):
     reference_gray = to_flow_gray_u8(reference)
     target_gray = to_flow_gray_u8(target)
     if reference_gray is None or target_gray is None:
         return None
 
+    is_smooth = _parse_bool(smooth, default=True)
+    actual_overlap = 0.50 if (is_smooth and overlap == 0.20) else (overlap if is_smooth else 0.0)
+
     height, width = reference_gray.shape[:2]
     # Keep the tile iterator lazy.  The normal tiled-flow path has only a few
     # regions, but callers can request a dense grid and should not pay for a
     # list of dictionaries before the first worker starts.
-    tiles = iter_flow_tiles(width, height, cols=cols, rows=rows, overlap=overlap)
+    tiles = iter_flow_tiles(width, height, cols=cols, rows=rows, overlap=actual_overlap)
     tile_count = max(1, int(cols)) * max(1, int(rows))
     output_shape = target.shape
     accumulator = np.zeros(output_shape, dtype=np.float32)
@@ -325,7 +353,9 @@ def align_with_tiled_flow(
         if stop_requested and stop_requested():
             return None
         tgt_warp = target_for_warping if target_for_warping is not None else target
-        return _compute_and_warp_tile(reference_gray, target_gray, tgt_warp, tile, flow_func)
+        return _compute_and_warp_tile(
+            reference_gray, target_gray, tgt_warp, tile, flow_func, smooth=smooth
+        )
 
     pool = None
     parallel_tiles = _should_parallelize(
@@ -389,6 +419,7 @@ def align_with_block_flow(
     stop_requested=None,
     executor=None,
     target_for_warping=None,
+    smooth=True,
 ):
     """Run the legacy CPU flow compositor on runtime-owned BlockGrid regions."""
     reference_gray = to_flow_gray_u8(reference)
@@ -443,7 +474,7 @@ def align_with_block_flow(
             return None
         source = target_for_warping if target_for_warping is not None else target
         return _compute_and_warp_tile(
-            reference_gray, target_gray, source, block, flow_func
+            reference_gray, target_gray, source, block, flow_func, smooth=smooth
         )
 
     max_workers = _flow_worker_limit(block_count)

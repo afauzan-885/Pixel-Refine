@@ -6,6 +6,8 @@ CARD_NAME = get_spec("hdr", "weighted").name
 LEGACY_CARD_NAME = get_spec("hdr", "weighted").aliases[0]
 SPDE_MR_NAME = get_spec("hdr", "spde_mr").name
 LEGACY_SPDE_MR_NAME = get_spec("hdr", "spde_mr").aliases[0]
+HDR_MASK_NAME = get_spec("hdr", "mask").name
+LEGACY_HDR_MASK_NAME = get_spec("hdr", "mask").aliases[0]
 FEATURE_CARD_NAME = "HDR Fusion"
 CARD_CONTENT = {
     "name": CARD_NAME,

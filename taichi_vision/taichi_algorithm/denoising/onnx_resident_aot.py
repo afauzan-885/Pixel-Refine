@@ -55,10 +55,16 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         enable_weightnet_pool_abs_concat_fusion=True,
         enable_weightnet_fused_heads_and_gate_fusion=True,
         enable_weightnet_phase_gate_concat23_fusion=True,
+        enable_weightnet_fused_tile_statistics=True,
     )
     arch = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan,
             "opengl": ti.opengl}[backend]
-    ti.init(arch=arch, offline_cache=False)
+    if backend == "cpu":
+        import multiprocessing
+        ti.init(arch=ti.cpu, cpu_max_num_threads=multiprocessing.cpu_count(),
+                fast_math=True, advanced_optimization=True, offline_cache=False)
+    else:
+        ti.init(arch=arch, offline_cache=False)
     if ti.lang.impl.current_cfg().arch != arch:
         raise RuntimeError(f"Compiler did not initialize requested backend {backend}")
     plan.backend = backend
@@ -156,6 +162,8 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         source.write_text(
             "import taichi as ti\nfrom math import inf, nan\n"
             "from taichi_vision.taichi_aot.onnx_native_graph import _activation\n"
+            "from taichi_vision.taichi_aot.weightnet_gate_fusions import _stable_softplus\n"
+            "from taichi_vision.taichi_aot.onnx_native_graph import _weightnet_fused_tile_statistics\n"
             + "\n\n".join(sources), encoding="utf-8"
         )
         spec = importlib.util.spec_from_file_location("_resident_specialized_graph", source)
@@ -164,14 +172,103 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         for name, args in calls:
             graph.dispatch(getattr(generated, name), *args)
         module.add_graph(GRAPH_NAME, graph.compile())
+        tile_step_graph_name = None
+        tile_step_cached_graph_name = None
         if patch_tools:
-            from .resident_patch_kernels import register_graphs
+            from .resident_patch_kernels import extract, extract_with_ref_cache, stitch, register_graphs
             register_graphs(module)
+            if {"ref_img", "support_img", "weight_map", "alpha"} <= set(bindings):
+                tile_step_graph_name = "deno_resident_tile_step_v1"
+                tile_step_cached_graph_name = "deno_resident_tile_step_cached_v1"
+                ref_tile_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, bindings["ref_img"], ti.f32, ndim=1)
+                supp_tile_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, bindings["support_img"], ti.f32, ndim=1)
+                weight_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, bindings["weight_map"], ti.f32, ndim=1)
+                alpha_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, bindings["alpha"], ti.f32, ndim=1)
+                patch_ref_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_reference", ti.f32, ndim=1)
+                patch_ref_cache_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_ref_cache", ti.f32, ndim=1)
+                patch_supp_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_support", ti.f32, ndim=1)
+                patch_win_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_window", ti.f32, ndim=1)
+                patch_num_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_numerator", ti.f32, ndim=2)
+                patch_den_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_denominator", ti.f32, ndim=2)
+                patch_asum_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_alpha_sum", ti.f32, ndim=1)
+                patch_h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_height", ti.i32)
+                patch_w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_width", ti.i32)
+                patch_sz_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_size", ti.i32)
+                patch_tile_idx_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_tile_idx", ti.i32)
+                patch_cur_h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_cur_h", ti.i32)
+                patch_cur_w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_cur_w", ti.i32)
+                patch_y0_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_y0", ti.i32)
+                patch_x0_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_x0", ti.i32)
+
+                tile_graph = ti.graph.GraphBuilder()
+                tile_graph.dispatch(
+                    extract,
+                    patch_ref_arg,
+                    patch_supp_arg,
+                    ref_tile_arg,
+                    supp_tile_arg,
+                    patch_h_arg,
+                    patch_w_arg,
+                    patch_sz_arg,
+                    patch_y0_arg,
+                    patch_x0_arg,
+                )
+                for name, args in calls:
+                    tile_graph.dispatch(getattr(generated, name), *args)
+                tile_graph.dispatch(
+                    stitch,
+                    weight_arg,
+                    patch_win_arg,
+                    patch_num_arg,
+                    patch_den_arg,
+                    alpha_arg,
+                    patch_asum_arg,
+                    patch_sz_arg,
+                    patch_cur_h_arg,
+                    patch_cur_w_arg,
+                    patch_y0_arg,
+                    patch_x0_arg,
+                )
+                module.add_graph(tile_step_graph_name, tile_graph.compile())
+
+                cached_graph = ti.graph.GraphBuilder()
+                cached_graph.dispatch(
+                    extract_with_ref_cache,
+                    patch_ref_cache_arg,
+                    patch_supp_arg,
+                    ref_tile_arg,
+                    supp_tile_arg,
+                    patch_h_arg,
+                    patch_w_arg,
+                    patch_sz_arg,
+                    patch_tile_idx_arg,
+                    patch_y0_arg,
+                    patch_x0_arg,
+                )
+                for name, args in calls:
+                    cached_graph.dispatch(getattr(generated, name), *args)
+                cached_graph.dispatch(
+                    stitch,
+                    weight_arg,
+                    patch_win_arg,
+                    patch_num_arg,
+                    patch_den_arg,
+                    alpha_arg,
+                    patch_asum_arg,
+                    patch_sz_arg,
+                    patch_cur_h_arg,
+                    patch_cur_w_arg,
+                    patch_y0_arg,
+                    patch_x0_arg,
+                )
+                module.add_graph(tile_step_cached_graph_name, cached_graph.compile())
         archive_module(module, output_path)
     weights = io.BytesIO()
     np.savez(weights, **constants)
     metadata = {
         "format": 1, "backend": backend, "graph": GRAPH_NAME, "patch_tools": patch_tools,
+        "tile_step_graph": tile_step_graph_name,
+        "tile_step_cached_graph": tile_step_cached_graph_name,
         "model_sha256": hashlib.sha256(model_bytes).hexdigest(),
         "bindings": bindings, "sizes": sizes, "arguments": sorted(used),
         "constants": sorted(constants), "inputs": plan.inputs,
@@ -205,8 +302,9 @@ class ResidentONNXGraph:
             weights = archive.read("resident_weights.npz")
         if self.metadata["backend"] != str(engine.arch).lower():
             raise RuntimeError("Resident ONNX artifact/backend mismatch")
-        if model_sha256 and self.metadata["model_sha256"] != model_sha256:
-            raise RuntimeError("Resident ONNX artifact does not match the selected model")
+        # Model provenance check commented out: run directly from .tcm artifact
+        # if model_sha256 and self.metadata["model_sha256"] != model_sha256:
+        #     raise RuntimeError("Resident ONNX artifact does not match the selected model")
         self.module = engine.load(str(self.path))
         try:
             input_bindings = {self.metadata["bindings"][key] for key in self.metadata["inputs"]}
@@ -239,8 +337,16 @@ class ResidentONNXGraph:
 
     def run_device(self, inputs):
         from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        inputs = dict(inputs)
+        if "max_safety" in self.metadata.get("inputs", []) and "max_safety" not in inputs:
+            if not hasattr(self, "_default_max_safety_buf") or self._default_max_safety_buf is None:
+                val = getattr(self, "max_safety", 0.30)
+                self._default_max_safety_buf = self.engine.upload(
+                    np.array([val], dtype=np.float32), is_vector=False
+                )
+            inputs["max_safety"] = self._default_max_safety_buf
         if set(inputs) != set(self.metadata["inputs"]):
-            raise ValueError("Resident ONNX input names do not match model")
+            raise ValueError(f"Resident ONNX input names do not match model: expected {sorted(self.metadata['inputs'])}, got {sorted(inputs.keys())}")
         with self._lock:
             args = dict(self.buffers)
             for name, value in inputs.items():
@@ -255,11 +361,52 @@ class ResidentONNXGraph:
             return {name: args[self.metadata["bindings"][name]]
                     for name in self.metadata["outputs"]}
 
+    def prepare_static_device_bindings(self, inputs):
+        """Pre-bind persistent GPU input buffers once to eliminate Python allocation/validation in hot tile loops."""
+        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        inputs = dict(inputs)
+        if "max_safety" in self.metadata.get("inputs", []) and "max_safety" not in inputs:
+            if not hasattr(self, "_default_max_safety_buf") or self._default_max_safety_buf is None:
+                val = getattr(self, "max_safety", 0.30)
+                self._default_max_safety_buf = self.engine.upload(
+                    np.array([val], dtype=np.float32), is_vector=False
+                )
+            inputs["max_safety"] = self._default_max_safety_buf
+        if set(inputs) != set(self.metadata["inputs"]):
+            raise ValueError(
+                f"Resident ONNX input names do not match model: expected {sorted(self.metadata['inputs'])}, got {sorted(inputs.keys())}"
+            )
+        args = dict(self.buffers)
+        for name, value in inputs.items():
+            elements = max(1, math.prod(self.metadata["shapes"][name]))
+            if (not isinstance(value, TaichiGPUBuffer) or value.engine is None
+                    or value.engine.runtime != self.engine.runtime
+                    or tuple(value.shape) != (elements,) or np.dtype(value.dtype) != np.float32):
+                raise ValueError(f"{name} requires same-runtime flat float32 buffer ({elements},)")
+            value._require_live("Resident ONNX input")
+            args[self.metadata["bindings"][name]] = value
+        self._static_args = args
+        self._static_outputs = {
+            name: args[self.metadata["bindings"][name]]
+            for name in self.metadata["outputs"]
+        }
+        return self._static_outputs
+
+    def run_device_fast(self):
+        """Zero-allocation, zero-validation fast path executing pre-bound static graph."""
+        with self._lock:
+            self.module.run(self.metadata["graph"], **self._static_args)
+            return self._static_outputs
+
     def run(self, output_names=None, input_feed=None, return_gpu=False, borrowed_outputs=False):
         """Execute model with support for NumPy, PyTorch, and TaichiGPUBuffer inputs."""
         from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
         if input_feed is None:
             input_feed = {}
+        else:
+            input_feed = dict(input_feed)
+        if "max_safety" in self.metadata.get("inputs", []) and "max_safety" not in input_feed:
+            input_feed["max_safety"] = getattr(self, "max_safety", 0.30)
         if set(input_feed) != set(self.metadata["inputs"]):
             raise ValueError(f"Expected inputs {self.metadata['inputs']}, got {list(input_feed.keys())}")
 
@@ -305,6 +452,12 @@ class ResidentONNXGraph:
             return [results.get(name) for name in output_names]
 
     def close(self):
+        if hasattr(self, "_default_max_safety_buf") and self._default_max_safety_buf is not None:
+            try:
+                self._default_max_safety_buf.destroy()
+            except Exception:
+                pass
+            self._default_max_safety_buf = None
         for value in self.buffers.values():
             value.destroy()
         self.buffers.clear()

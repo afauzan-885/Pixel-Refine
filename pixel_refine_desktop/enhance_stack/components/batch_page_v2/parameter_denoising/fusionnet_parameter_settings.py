@@ -17,6 +17,7 @@ FUSIONNET_DEFAULTS = {
     "fusionnet_work_pixel_fraction": 0.50,
     "fusionnet_max_neighbor_candidates": 4,
     "fusionnet_patch_search_radius": 5,
+    "fusionnet_max_safety": 0.30,
 }
 
 FUSIONNET_DENOISING_MODES = ("standard", "deep_analysis")
@@ -93,6 +94,11 @@ def _normalize_fusionnet_config(config):
         normalized["fusionnet_work_pixel_fraction"] = FUSIONNET_DEFAULTS[
             "fusionnet_work_pixel_fraction"
         ]
+    try:
+        raw_safety = source.get("fusionnet_max_safety", source.get("max_safety", normalized.get("fusionnet_max_safety", 0.30)))
+        normalized["fusionnet_max_safety"] = max(0.01, min(2.0, float(raw_safety)))
+    except (TypeError, ValueError):
+        normalized["fusionnet_max_safety"] = FUSIONNET_DEFAULTS["fusionnet_max_safety"]
     return normalized
 
 
@@ -162,6 +168,17 @@ PARAMETER_SCHEMA = [
             "Percentage of total working pixels. For example, 25% uses about "
             "half the width and half the height; output remains full resolution."
         ),
+    },
+    {
+        "key": "fusionnet_max_safety",
+        "label": "Max Safety",
+        "type": "slider",
+        "default": 0.30,
+        "min": 1,
+        "max": 200,
+        "scale": 0.01,
+        "value_type": "float",
+        "tooltip": "Maximum additive WeightNet safety-head bias (0.01 to 2.00, default 0.30).",
     },
 ]
 

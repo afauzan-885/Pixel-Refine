@@ -1,3 +1,19 @@
+def _parse_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("false", "0", "no", "off", "none", ""):
+            return False
+        if v in ("true", "1", "yes", "on"):
+            return True
+    return bool(value)
+
+
 """
 Block Flow Optical Flow Alignment Module
 ========================================
@@ -153,6 +169,11 @@ class BlockFlow(LucasKanade):
     ):
         """Align a frame using memory-bounded Block Flow."""
         active_config = self.load_config() if config is None else dict(config)
+        smooth = _parse_bool(active_config.get("smooth", True), default=True)
+        active_config["smooth"] = smooth
+        active_config["overlap"] = 0.50 if smooth else 0.0
+        active_config["tile_overlap"] = 0.50 if smooth else 0.0
+        active_config["dense_mode"] = "smooth" if smooth else "blocky_clamped"
 
         # 1. GPU Resident Native Alignment (Zero CPU RAM)
         if not bool(active_config.get("use_multi_core", False)):
@@ -191,6 +212,7 @@ class BlockFlow(LucasKanade):
             stop_requested=stop_requested,
             executor=tile_executor,
             target_for_warping=target_for_warping,
+            smooth=smooth,
         )
 
     def close(self):

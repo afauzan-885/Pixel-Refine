@@ -667,6 +667,7 @@ LBL_ALGORITHM_PLACEHOLDER = "Parameters will appear here\nbased on selected algo
 BTN_START = "Start"
 BTN_NEW_BATCH = "New Batch"
 BTN_DELETE_BATCH = "Delete Batch"
+BTN_DELETE_ALL_BATCH = "Delete All"
 LBL_ALGORITHM_SETTINGS = "Algorithm Settings"
 BTN_PROCESS_ALL_BATCH = "Process All Batch"
 LBL_FROM_PROJECT = "From Project #:"

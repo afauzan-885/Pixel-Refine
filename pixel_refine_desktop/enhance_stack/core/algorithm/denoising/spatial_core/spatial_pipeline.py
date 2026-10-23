@@ -25,7 +25,6 @@ _SPATIAL_CACHE = {
 def clear_spatial_cache():
     """Safely destroy all cached GPU buffers for spatial merging."""
     global _SPATIAL_CACHE
-    print("[GPU Merging] Clearing persistent spatial merging cache...")
     if _SPATIAL_CACHE["static_bufs"] is not None:
         for buf in _SPATIAL_CACHE["static_bufs"]:
             try:

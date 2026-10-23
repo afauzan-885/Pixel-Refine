@@ -25,14 +25,95 @@ def view(buffer, shape, *, vector=False):
     return result
 
 
-@dataclass
 class ResidentImage:
-    owner: object
-    buffer: object
-    shape: tuple
+    def __init__(self, owner, buffer, shape):
+        self.owner = owner
+        self.buffer = buffer
+        self.shape = shape
+        self._tile_cache = None
+        self._tile_coords_gpu = None
+        self._tile_grid_key = None
+        self._tile_coords = None
+
+    def ensure_tile_cache(self, patch_size: int, overlap: float):
+        """Pre-extract all reference tiles into a contiguous resident VRAM cache once per burst."""
+        grid_key = (int(patch_size), float(overlap))
+        if self._tile_cache is not None and self._tile_grid_key == grid_key:
+            return self._tile_cache, self._tile_coords
+
+        if self._tile_cache is not None:
+            try:
+                self._tile_cache.destroy()
+            except Exception:
+                pass
+            self._tile_cache = None
+
+        if self._tile_coords_gpu is not None:
+            try:
+                self._tile_coords_gpu.destroy()
+            except Exception:
+                pass
+            self._tile_coords_gpu = None
+
+        _, height, width = self.shape
+        stride = max(1, patch_size - int(patch_size * float(overlap)))
+        coords = []
+        for y in range(0, height, stride):
+            for x in range(0, width, stride):
+                y1 = height if y + patch_size > height else y + patch_size
+                x1 = width if x + patch_size > width else x + patch_size
+                y0 = 0 if y1 - patch_size < 0 else y1 - patch_size
+                x0 = 0 if x1 - patch_size < 0 else x1 - patch_size
+                cur_h = y1 - y0
+                cur_w = x1 - x0
+                coords.append((y0, x0, cur_h, cur_w))
+
+        num_tiles = len(coords)
+        if num_tiles == 0:
+            return None, []
+
+        coords_arr = np.array([(c[0], c[1]) for c in coords], dtype=np.int32)
+        engine = self.owner.engine
+        self._tile_coords_gpu = engine.upload(coords_arr, is_vector=False)
+        self._tile_cache = self.owner.allocate((num_tiles * patch_size * patch_size,))
+        self._tile_grid_key = grid_key
+        self._tile_coords = coords
+
+        # Populate cache on GPU once
+        self.owner.dispatch(
+            "cache_reference_tiles",
+            reference=self.buffer,
+            cache=self._tile_cache,
+            coords=self._tile_coords_gpu,
+            height=height,
+            width=width,
+            size=patch_size,
+            num_tiles=num_tiles,
+        )
+        return self._tile_cache, self._tile_coords
+
+    def close(self):
+        if self._tile_cache is not None:
+            try:
+                self._tile_cache.destroy()
+            except Exception:
+                pass
+            self._tile_cache = None
+        if self._tile_coords_gpu is not None:
+            try:
+                self._tile_coords_gpu.destroy()
+            except Exception:
+                pass
+            self._tile_coords_gpu = None
+        if self.buffer is not None:
+            try:
+                self.buffer.destroy()
+            except Exception:
+                pass
+            self.buffer = None
 
     def __del__(self):
-        self.buffer.destroy()
+        self.close()
 
 
 @dataclass
@@ -119,6 +200,45 @@ class ResidentWeightNet(ResidentONNXGraph):
         self._persistent.append(self.dummy_flow)
         self.identity = self.engine.upload(np.eye(3, dtype=np.float32).reshape(-1), is_vector=False)
         self._persistent.append(self.identity)
+        self._max_safety_val = 0.30
+        self.max_safety_buf = None
+        if "max_safety" in self.metadata.get("inputs", []):
+            self.max_safety_buf = self.engine.upload(
+                np.array([self._max_safety_val], dtype=np.float32), is_vector=False
+            )
+            self._persistent.append(self.max_safety_buf)
+        static_inputs = {"ref_img": self.ref_tile, "support_img": self.support_tile}
+        if self.max_safety_buf is not None:
+            static_inputs["max_safety"] = self.max_safety_buf
+        self._static_device_outputs = self.prepare_static_device_bindings(static_inputs)
+    @property
+    def max_safety(self):
+        return getattr(self, "_max_safety_val", 0.30)
+
+    @max_safety.setter
+    def max_safety(self, val):
+        self._max_safety_val = float(val)
+        if "max_safety" in self.metadata.get("inputs", []):
+            old_buf = getattr(self, "max_safety_buf", None)
+            new_buf = self.engine.upload(
+                np.array([self._max_safety_val], dtype=np.float32), is_vector=False
+            )
+            self.max_safety_buf = new_buf
+            if old_buf in self._persistent:
+                self._persistent.remove(old_buf)
+            self._persistent.append(new_buf)
+            if old_buf is not None:
+                try:
+                    old_buf.destroy()
+                except Exception:
+                    pass
+            static_inputs = {
+                "ref_img": self.ref_tile,
+                "support_img": self.support_tile,
+                "max_safety": self.max_safety_buf,
+            }
+            self._static_device_outputs = self.prepare_static_device_bindings(static_inputs)
+
 
     def allocate(self, shape, dtype=np.float32):
         return self.engine.allocate(tuple(shape), dtype=dtype, is_vector=False, host_accessible=False)
@@ -131,22 +251,39 @@ class ResidentWeightNet(ResidentONNXGraph):
     def dispatch(self, name, **args):
         self.module.run(f"deno_resident_{name}_v1", **args)
 
-    def prepare_reference(self, source):
-        return self.prepare(source), self
+    def prepare_reference(self, source, session=None):
+        return self.prepare(source, session=session), self
 
-    def prepare(self, source):
+    def prepare(self, source, session=None):
         from taichi_vision import taichi_aot as aot
-        gray = source if len(source.shape) == 2 else aot.cvtColor(source, aot.COLOR_RGB2GRAY, return_gpu=True)
+        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        if isinstance(source, TaichiGPUBuffer):
+            gray = source if len(source.shape) == 2 else aot.cvtColor(source, aot.COLOR_RGB2GRAY, return_gpu=True, session=session)
+        elif len(source.shape) == 2:
+            gray = self.engine.upload(np.ascontiguousarray(source, dtype=np.float32), is_vector=False)
+        else:
+            gray = aot.cvtColor(source, aot.COLOR_RGB2GRAY, return_gpu=True, session=session)
         height, width = gray.shape
+        if (
+            gray is not source
+            and np.dtype(getattr(gray, "dtype", np.float32)) == np.dtype(np.float32)
+            and not getattr(gray, "is_vector", False)
+        ):
+            gray.shape = (height * width,)
+            if session is not None and hasattr(session, "borrow"):
+                session.borrow(gray)
+            return ResidentImage(self, gray, (1, height, width))
         output = self.allocate((height * width,))
         try:
             self.dispatch("proxy", gray=gray, output=output, width=width)
+            if session is not None and hasattr(session, "borrow"):
+                session.borrow(output)
             return ResidentImage(self, output, (1, height, width))
         except Exception:
             output.destroy()
             raise
         finally:
-            if gray is not source:
+            if gray is not source and session is None:
                 gray.destroy()
 
     @_serialized
@@ -164,25 +301,146 @@ class ResidentWeightNet(ResidentONNXGraph):
         alpha_sum, output = self.allocate((1,)), self.allocate((height, width))
         try:
             self.dispatch("clear", numerator=numerator, denominator=denominator, alpha=alpha_sum)
-            stride = max(1, self.patch_size - int(self.patch_size * float(overlap)))
+            static_outs = getattr(self, "_static_device_outputs", None)
+            if static_outs is None:
+                static_inputs = {"ref_img": self.ref_tile, "support_img": self.support_tile}
+                if getattr(self, "max_safety_buf", None) is not None:
+                    static_inputs["max_safety"] = self.max_safety_buf
+                static_outs = self.prepare_static_device_bindings(static_inputs)
+                self._static_device_outputs = static_outs
+
+            weight_val = static_outs["weight_map"]
+            alpha_val = static_outs["alpha"]
+
+            run_module = self.module.run
+            patch_sz = self.patch_size
+            tile_step_graph = self.metadata.get("tile_step_graph")
+            tile_step_cached_graph = self.metadata.get("tile_step_cached_graph")
+
+            ref_cache_buf, tile_coords = None, None
+            if hasattr(reference, "ensure_tile_cache"):
+                try:
+                    ref_cache_buf, tile_coords = reference.ensure_tile_cache(patch_sz, overlap)
+                except Exception:
+                    ref_cache_buf, tile_coords = None, None
+
+            stride = max(1, patch_sz - int(patch_sz * float(overlap)))
             count = 0
-            for y in range(0, height, stride):
-                for x in range(0, width, stride):
-                    cancelled = stop_event is not None and (
-                        stop_event() if callable(stop_event) else stop_event.is_set())
-                    if cancelled:
+            if tile_step_cached_graph and ref_cache_buf is not None and tile_coords:
+                cached_args = dict(self._static_args)
+                cached_args.update({
+                    "patch_ref_cache": ref_cache_buf,
+                    "patch_support": support.buffer,
+                    "patch_window": self.window,
+                    "patch_numerator": numerator,
+                    "patch_denominator": denominator,
+                    "patch_alpha_sum": alpha_sum,
+                    "patch_height": height,
+                    "patch_width": width,
+                    "patch_size": patch_sz,
+                    "patch_tile_idx": 0,
+                    "patch_cur_h": patch_sz,
+                    "patch_cur_w": patch_sz,
+                    "patch_y0": 0,
+                    "patch_x0": 0,
+                })
+                for t, (y0, x0, cur_h, cur_w) in enumerate(tile_coords):
+                    if stop_event is not None and (
+                        stop_event() if callable(stop_event) else stop_event.is_set()
+                    ):
                         raise RuntimeError("Resident WeightNet cancelled")
-                    y1, x1 = min(height, y + self.patch_size), min(width, x + self.patch_size)
-                    y0, x0 = max(0, y1 - self.patch_size), max(0, x1 - self.patch_size)
-                    self.dispatch("extract", reference=reference.buffer, support=support.buffer,
-                                  ref_tile=self.ref_tile, support_tile=self.support_tile,
-                                  height=height, width=width, size=self.patch_size, y0=y0, x0=x0)
-                    values = self.run_device({"ref_img": self.ref_tile, "support_img": self.support_tile})
-                    self.dispatch("stitch", weight=values["weight_map"], window=self.window,
-                                  numerator=numerator, denominator=denominator, alpha=values["alpha"],
-                                  alpha_sum=alpha_sum, size=self.patch_size, cur_h=y1-y0, cur_w=x1-x0,
-                                  y0=y0, x0=x0)
+                    cached_args["patch_tile_idx"] = t
+                    cached_args["patch_cur_h"] = cur_h
+                    cached_args["patch_cur_w"] = cur_w
+                    cached_args["patch_y0"] = y0
+                    cached_args["patch_x0"] = x0
+                    run_module(tile_step_cached_graph, **cached_args)
                     count += 1
+            elif tile_step_graph:
+                tile_step_args = dict(self._static_args)
+                tile_step_args.update({
+                    "patch_reference": reference.buffer,
+                    "patch_support": support.buffer,
+                    "patch_window": self.window,
+                    "patch_numerator": numerator,
+                    "patch_denominator": denominator,
+                    "patch_alpha_sum": alpha_sum,
+                    "patch_height": height,
+                    "patch_width": width,
+                    "patch_size": patch_sz,
+                    "patch_cur_h": patch_sz,
+                    "patch_cur_w": patch_sz,
+                    "patch_y0": 0,
+                    "patch_x0": 0,
+                })
+                for y in range(0, height, stride):
+                    for x in range(0, width, stride):
+                        if stop_event is not None and (
+                            stop_event() if callable(stop_event) else stop_event.is_set()
+                        ):
+                            raise RuntimeError("Resident WeightNet cancelled")
+                        y1 = height if y + patch_sz > height else y + patch_sz
+                        x1 = width if x + patch_sz > width else x + patch_sz
+                        y0 = 0 if y1 - patch_sz < 0 else y1 - patch_sz
+                        x0 = 0 if x1 - patch_sz < 0 else x1 - patch_sz
+                        tile_step_args["patch_cur_h"] = y1 - y0
+                        tile_step_args["patch_cur_w"] = x1 - x0
+                        tile_step_args["patch_y0"] = y0
+                        tile_step_args["patch_x0"] = x0
+                        run_module(tile_step_graph, **tile_step_args)
+                        count += 1
+            else:
+                extract_kernel = "deno_resident_extract_v1"
+                stitch_kernel = "deno_resident_stitch_v1"
+                run_fast = self.run_device_fast
+                extract_args = {
+                    "reference": reference.buffer,
+                    "support": support.buffer,
+                    "ref_tile": self.ref_tile,
+                    "support_tile": self.support_tile,
+                    "height": height,
+                    "width": width,
+                    "size": patch_sz,
+                    "y0": 0,
+                    "x0": 0,
+                }
+                stitch_args = {
+                    "weight": weight_val,
+                    "window": self.window,
+                    "numerator": numerator,
+                    "denominator": denominator,
+                    "alpha": alpha_val,
+                    "alpha_sum": alpha_sum,
+                    "size": patch_sz,
+                    "cur_h": 0,
+                    "cur_w": 0,
+                    "y0": 0,
+                    "x0": 0,
+                }
+                for y in range(0, height, stride):
+                    for x in range(0, width, stride):
+                        if stop_event is not None and (
+                            stop_event() if callable(stop_event) else stop_event.is_set()
+                        ):
+                            raise RuntimeError("Resident WeightNet cancelled")
+                        y1 = height if y + patch_sz > height else y + patch_sz
+                        x1 = width if x + patch_sz > width else x + patch_sz
+                        y0 = 0 if y1 - patch_sz < 0 else y1 - patch_sz
+                        x0 = 0 if x1 - patch_sz < 0 else x1 - patch_sz
+
+                        extract_args["y0"] = y0
+                        extract_args["x0"] = x0
+                        run_module(extract_kernel, **extract_args)
+
+                        run_fast()
+
+                        stitch_args["cur_h"] = y1 - y0
+                        stitch_args["cur_w"] = x1 - x0
+                        stitch_args["y0"] = y0
+                        stitch_args["x0"] = x0
+                        run_module(stitch_kernel, **stitch_args)
+
+                        count += 1
             self.dispatch("confidence", numerator=numerator, denominator=denominator, output=output,
                           indices=rank.indices if rank else self.dummy_indices,
                           rank=rank.rank if rank else -1, penalty=float(ghost_penalty), cutoff=float(ghost_cutoff))

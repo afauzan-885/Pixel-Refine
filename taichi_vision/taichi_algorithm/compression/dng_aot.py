@@ -733,6 +733,42 @@ def _unpack_samples(raw: bytes, width: int, height: int, bits: int, endian: str 
     if bits == 16:
         dtype = ">u2" if endian == "MM" else "<u2"
         return np.frombuffer(raw, dtype=dtype).reshape(height, width).copy()
+    samples_per_group = {10: 4, 12: 2, 14: 4}.get(bits)
+    if samples_per_group is not None and (width % samples_per_group) == 0:
+        encoded = np.frombuffer(raw, dtype=np.uint8)
+        output = np.empty((height, width), dtype=np.uint16)
+        flat = output.ravel()
+        if bits == 10:
+            b0 = encoded[0::5].astype(np.uint16)
+            b1 = encoded[1::5].astype(np.uint16)
+            b2 = encoded[2::5].astype(np.uint16)
+            b3 = encoded[3::5].astype(np.uint16)
+            b4 = encoded[4::5].astype(np.uint16)
+            flat[0::4] = (b0 << 2) | (b1 >> 6)
+            flat[1::4] = ((b1 & 0x3F) << 4) | (b2 >> 4)
+            flat[2::4] = ((b2 & 0x0F) << 6) | (b3 >> 2)
+            flat[3::4] = ((b3 & 0x03) << 8) | b4
+            return output
+        elif bits == 12:
+            b0 = encoded[0::3].astype(np.uint16)
+            b1 = encoded[1::3].astype(np.uint16)
+            b2 = encoded[2::3].astype(np.uint16)
+            flat[0::2] = (b0 << 4) | (b1 >> 4)
+            flat[1::2] = ((b1 & 0x0F) << 8) | b2
+            return output
+        elif bits == 14:
+            b0 = encoded[0::7].astype(np.uint16)
+            b1 = encoded[1::7].astype(np.uint16)
+            b2 = encoded[2::7].astype(np.uint16)
+            b3 = encoded[3::7].astype(np.uint16)
+            b4 = encoded[4::7].astype(np.uint16)
+            b5 = encoded[5::7].astype(np.uint16)
+            b6 = encoded[6::7].astype(np.uint16)
+            flat[0::4] = (b0 << 6) | (b1 >> 2)
+            flat[1::4] = ((b1 & 0x03) << 12) | (b2 << 4) | (b3 >> 4)
+            flat[2::4] = ((b3 & 0x0F) << 10) | (b4 << 2) | (b5 >> 6)
+            flat[3::4] = ((b5 & 0x3F) << 8) | b6
+            return output
     row_size = (width * bits + 7) // 8
     output = np.empty((height, width), dtype=np.uint16)
     for y in range(height):

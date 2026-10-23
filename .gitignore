@@ -12,6 +12,7 @@ main.dist/
 auto_pyd/
 
 # Ignore agent and local governance
+.backups
 agen-docs/
 scratch/
 .qoder/

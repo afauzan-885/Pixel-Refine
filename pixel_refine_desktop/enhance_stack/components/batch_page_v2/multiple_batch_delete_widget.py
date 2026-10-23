@@ -1,8 +1,14 @@
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox
-from PySide6.QtCore import Signal, Qt, Property, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QColor
-from UILibrary import Button
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QFrame,
+)
+from PySide6.QtCore import Signal, Qt
+from UILibrary import Button, ModalDialog
 
 
 class MultipleBatchDeleteWidget(QWidget):
@@ -17,26 +23,18 @@ class MultipleBatchDeleteWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.all_batch_names = []
-        self._bg_color = QColor("#FFFFFF")
         
         # Enable stylesheet background styling on custom QWidget
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         
         self._setup_ui()
-        self._setup_animation()
-
-    @Property(QColor)
-    def backgroundColor(self):
-        return self._bg_color
-
-    @backgroundColor.setter
-    def backgroundColor(self, color):
-        self._bg_color = color
-        self.setStyleSheet(f"QWidget#MultipleBatchDeleteWidget {{ background-color: {color.name()}; }}")
 
     def _setup_ui(self):
         """Set up the UI components."""
         self.setObjectName("MultipleBatchDeleteWidget")
+        self.setStyleSheet(
+            "QWidget#MultipleBatchDeleteWidget { background-color: #FFF3CD; }"
+        )
         main_layout = QVBoxLayout(self)
         main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.setSpacing(25)
@@ -67,16 +65,6 @@ class MultipleBatchDeleteWidget(QWidget):
 
         button_layout.addStretch()
         main_layout.addLayout(button_layout)
-
-    def _setup_animation(self):
-        """Configure soft flashing background animation using the soft orange alert color."""
-        self.anim = QPropertyAnimation(self, b"backgroundColor")
-        self.anim.setDuration(1200)
-        self.anim.setStartValue(QColor("#FFFFFF"))
-        self.anim.setKeyValueAt(0.5, QColor("#FFF3CD"))  # Soft warning/orange alert color
-        self.anim.setEndValue(QColor("#FFFFFF"))
-        self.anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
-        self.anim.setLoopCount(-1)  # Loop continuously when active
 
     def set_batch_info(self, batch_names: list):
         """
@@ -123,17 +111,49 @@ class MultipleBatchDeleteWidget(QWidget):
 
     def _show_all_batches_popup(self, link):
         if link == "show_all" and self.all_batch_names:
-            QMessageBox.information(
-                self,
-                language_config.MSG_CONFIRM_TITLE,
-                "\n".join(f"- {name}" for name in self.all_batch_names),
-                QMessageBox.StandardButton.Ok
+            modal = ModalDialog(
+                message="",
+                parent=self,
+                title=language_config.MSG_CONFIRM_TITLE,
+                close_on_click_outside=False,
+                width=520,
+                height=400,
             )
+            container_layout = modal.container.layout()
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        self.anim.start()
+            scroll_area = QScrollArea(modal.container)
+            scroll_area.setObjectName("BatchNamesScrollArea")
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll_area.setStyleSheet(
+                "QScrollArea#BatchNamesScrollArea { background: #F1F5F9; "
+                "border: 1px solid #E2E8F0; border-radius: 4px; }"
+            )
+            scroll_area.viewport().setStyleSheet("background-color: #F1F5F9;")
 
-    def hideEvent(self, event):
-        super().hideEvent(event)
-        self.anim.stop()
+            names_content = QWidget()
+            names_content.setObjectName("BatchNamesContent")
+            names_content.setStyleSheet(
+                "QWidget#BatchNamesContent { background-color: #F1F5F9; }"
+            )
+            names_layout = QVBoxLayout(names_content)
+            names_layout.setContentsMargins(12, 8, 12, 8)
+            names_layout.setSpacing(4)
+            for name in self.all_batch_names:
+                name_label = QLabel(f"- {name}", names_content)
+                name_label.setWordWrap(True)
+                name_label.setStyleSheet("color: #334155; background: transparent;")
+                names_layout.addWidget(name_label)
+            names_layout.addStretch(1)
+            scroll_area.setWidget(names_content)
+
+            container_layout.addWidget(scroll_area, 1)
+            footer = QFrame(modal.container)
+            footer_layout = QHBoxLayout(footer)
+            footer_layout.setContentsMargins(14, 8, 14, 0)
+            footer_layout.addStretch(1)
+            close_button = Button("OK", variant="primary")
+            close_button.clicked.connect(modal.accept)
+            footer_layout.addWidget(close_button)
+            container_layout.addWidget(footer)
+            modal.exec()

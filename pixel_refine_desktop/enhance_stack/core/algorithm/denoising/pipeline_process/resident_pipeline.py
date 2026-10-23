@@ -1195,6 +1195,7 @@ class _ResidentFlowBufferMixin:
 
     def _init_resident_flow_buffer(self):
         self._resident_flow_buffer = None
+        self._resident_quantized_flow_buffer = None
 
     def _ensure_resident_flow_buffer(self, shape):
         expected = tuple(int(value) for value in shape)
@@ -1231,8 +1232,9 @@ class _ResidentFlowBufferMixin:
                 _destroy_work_item(result)
         return destination
 
-    def _resident_flow_view(self):
-        owner = getattr(self, "_resident_flow_buffer", None)
+    def _resident_flow_view(self, owner=None):
+        if owner is None:
+            owner = getattr(self, "_resident_flow_buffer", None)
         if owner is None or getattr(owner, "handle", None) is None:
             return None
         view = TaichiGPUBuffer(
@@ -1250,10 +1252,42 @@ class _ResidentFlowBufferMixin:
         return view
 
     def _close_resident_flow_buffer(self):
-        owner = getattr(self, "_resident_flow_buffer", None)
+        owners = (
+            getattr(self, "_resident_flow_buffer", None),
+            getattr(self, "_resident_quantized_flow_buffer", None),
+        )
         self._resident_flow_buffer = None
-        if owner is not None and hasattr(owner, "destroy"):
-            _destroy_work_item(owner)
+        self._resident_quantized_flow_buffer = None
+        for owner in owners:
+            if owner is not None and hasattr(owner, "destroy"):
+                _destroy_work_item(owner)
+
+    def _store_quantized_flow(self, taichi_aot, flow_quant):
+        """Keep quantized remap flow separate from the AOT ndarray destination."""
+        quantized = taichi_aot.upload(flow_quant, is_vector=True)
+        previous = getattr(self, "_resident_quantized_flow_buffer", None)
+        if previous is not None and previous is not quantized:
+            # The previous flow may still be consumed by resident accumulation.
+            taichi_aot.engine.sync()
+            _destroy_work_item(previous)
+        self._resident_quantized_flow_buffer = quantized
+        return quantized
+
+
+def _parse_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("false", "0", "no", "off", "none", ""):
+            return False
+        if v in ("true", "1", "yes", "on"):
+            return True
+    return bool(value)
 
 
 class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
@@ -1327,10 +1361,11 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
         win_size = max(5, int(self.config.get("win_size", 13)))
         if win_size % 2 == 0:
             win_size += 1
-        smooth = self.config.get("smooth", None)
-        if smooth is not None:
-            dense_mode = "smooth" if bool(smooth) else "blocky_clamped"
-            overlap = 0.50 if bool(smooth) else 0.0
+        smooth_val = self.config.get("smooth", None)
+        if smooth_val is not None:
+            smooth = _parse_bool(smooth_val, default=False)
+            dense_mode = "smooth" if smooth else "blocky_clamped"
+            overlap = 0.50 if smooth else 0.0
         else:
             dense_mode = str(self.config.get("dense_mode", "blocky_clamped"))
             if "overlap" in self.config:
@@ -1401,13 +1436,16 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                 dst=flow_destination,
             )
             flow_gpu = self._normalize_resident_flow(flow_gpu, flow_destination)
-            warped_primary = taichi_aot.remap_with_flow(
-                supp_linear_gpu,
-                flow_gpu,
-                self.full_h,
-                self.full_w,
-                return_gpu=True,
-            )
+            warped_primary = None
+            if supp_linear_gpu is not None:
+                prim_h, prim_w = (int(v) for v in supp_linear_gpu.shape[:2])
+                warped_primary = taichi_aot.remap_with_flow(
+                    supp_linear_gpu,
+                    flow_gpu,
+                    prim_h,
+                    prim_w,
+                    return_gpu=True,
+                )
             warped_secondary = None
             if secondary_frame_to_warp is not None:
                 sec_h, sec_w = (int(v) for v in secondary_frame_to_warp.shape[:2])
@@ -1514,10 +1552,11 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
         win_size = max(5, int(self.config.get("win_size", 17)))
         if win_size % 2 == 0:
             win_size += 1
-        smooth = self.config.get("smooth", None)
-        if smooth is not None:
-            dense_mode = "smooth" if bool(smooth) else "blocky_clamped"
-            overlap = 0.50 if bool(smooth) else 0.0
+        smooth_val = self.config.get("smooth", None)
+        if smooth_val is not None:
+            smooth = _parse_bool(smooth_val, default=True)
+            dense_mode = "smooth" if smooth else "blocky_clamped"
+            overlap = 0.50 if smooth else 0.0
         else:
             dense_mode = str(self.config.get("dense_mode", "smooth"))
             overlap = float(
@@ -1586,13 +1625,16 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                 dst=flow_destination,
             )
             flow_gpu = self._normalize_resident_flow(flow_gpu, flow_destination)
-            warped_primary = taichi_aot.remap_with_flow(
-                supp_linear_gpu,
-                flow_gpu,
-                self.full_h,
-                self.full_w,
-                return_gpu=True,
-            )
+            warped_primary = None
+            if supp_linear_gpu is not None:
+                prim_h, prim_w = (int(v) for v in supp_linear_gpu.shape[:2])
+                warped_primary = taichi_aot.remap_with_flow(
+                    supp_linear_gpu,
+                    flow_gpu,
+                    prim_h,
+                    prim_w,
+                    return_gpu=True,
+                )
             warped_secondary = None
             if secondary_frame_to_warp is not None:
                 sec_h, sec_w = (int(v) for v in secondary_frame_to_warp.shape[:2])
@@ -1604,7 +1646,7 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                     return_gpu=True,
                 )
             if return_transform:
-                retained_flow = self._resident_flow_view()
+                retained_flow = self._resident_flow_view(flow_gpu)
                 flow_gpu = None
                 return warped_primary, warped_secondary, retained_flow
             return warped_primary, warped_secondary
@@ -1612,6 +1654,8 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
             if (
                 flow_gpu is not None
                 and flow_gpu is not getattr(self, "_resident_flow_buffer", None)
+                and flow_gpu
+                is not getattr(self, "_resident_quantized_flow_buffer", None)
                 and hasattr(flow_gpu, "destroy")
             ):
                 _destroy_work_item(flow_gpu)
@@ -1897,7 +1941,7 @@ class FeatureMatchingGPUAligner:
             analysis_frame_gpu if analysis_frame_gpu is not None else supp_linear_gpu
         )
         supp_gray_gpu = taichi_aot.cvtColor(src_for_analysis, taichi_aot.COLOR_RGB2GRAY)
-        if (self.work_h, self.work_w) != (self.target_h, self.target_w):
+        if tuple(int(v) for v in supp_gray_gpu.shape[:2]) != (self.work_h, self.work_w):
             supp_gray_work = taichi_aot.resize(
                 supp_gray_gpu,
                 (self.work_w, self.work_h),
@@ -2133,11 +2177,12 @@ class FeatureMatchingGPUAligner:
                     warped_primary = None
                     warped_secondary = None
                     try:
-                        warped_primary = taichi_aot.remap_with_flow(
-                            supp_linear_gpu, flow_gpu,
-                            int(supp_linear_gpu.shape[0]), int(supp_linear_gpu.shape[1]),
-                            return_gpu=True,
-                        )
+                        if supp_linear_gpu is not None:
+                            warped_primary = taichi_aot.remap_with_flow(
+                                supp_linear_gpu, flow_gpu,
+                                int(supp_linear_gpu.shape[0]), int(supp_linear_gpu.shape[1]),
+                                return_gpu=True,
+                            )
                         if secondary_frame_to_warp is not None:
                             warped_secondary = taichi_aot.remap_with_flow(
                                 secondary_frame_to_warp, flow_gpu,
@@ -2162,32 +2207,56 @@ class FeatureMatchingGPUAligner:
                     warp_apap,
                 )
 
-                warped_primary = _track_gpu_result(
-                    warp_apap(
-                        supp_linear_gpu,
-                        apap_ref_points,
-                        apap_support_points,
-                        dsize=(self.target_w, self.target_h),
-                        global_homography=apap_global_h,
-                        fit_grid_shape=(self.apap_fit_grid_size,) * 2,
-                        return_gpu=True,
+                warped_primary = None
+                if supp_linear_gpu is not None:
+                    warped_primary = _track_gpu_result(
+                        warp_apap(
+                            supp_linear_gpu,
+                            apap_ref_points,
+                            apap_support_points,
+                            dsize=(self.target_w, self.target_h),
+                            global_homography=apap_global_h,
+                            fit_grid_shape=(self.apap_fit_grid_size,) * 2,
+                            return_gpu=True,
+                        )
                     )
-                )
+            elif supp_linear_gpu is None:
+                warped_primary = None
             elif self.feature_type == "ofb":
                 from ...alignment.feature_matching.OFB import OFBAlgorithm
 
+                prim_h, prim_w = (int(v) for v in supp_linear_gpu.shape[:2])
+                H_prim = (
+                    scale_homography(
+                        H_matrix,
+                        source_shape=(self.target_h, self.target_w),
+                        destination_shape=(prim_h, prim_w),
+                    )
+                    if (prim_h, prim_w) != (self.target_h, self.target_w)
+                    else H_matrix
+                )
                 primary_np = np.ascontiguousarray(supp_linear_gpu.to_numpy())
                 warped_primary_np = OFBAlgorithm._warp_perspective(
-                    primary_np, H_matrix, (self.target_w, self.target_h)
+                    primary_np, H_prim, (prim_w, prim_h)
                 )
                 warped_primary = taichi_aot.upload(
                     np.ascontiguousarray(warped_primary_np), is_vector=False
                 )
             else:
+                prim_h, prim_w = (int(v) for v in supp_linear_gpu.shape[:2])
+                H_prim = (
+                    scale_homography(
+                        H_matrix,
+                        source_shape=(self.target_h, self.target_w),
+                        destination_shape=(prim_h, prim_w),
+                    )
+                    if (prim_h, prim_w) != (self.target_h, self.target_w)
+                    else H_matrix
+                )
                 warped_primary = taichi_aot.warp_perspective(
                     supp_linear_gpu,
-                    H_matrix,
-                    (self.target_w, self.target_h),
+                    H_prim,
+                    (prim_w, prim_h),
                     return_gpu=True,
                 )
             warped_secondary = None
@@ -2384,13 +2453,25 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
                 dst=flow_destination,
             )
             flow_gpu = self._normalize_resident_flow(flow_gpu, flow_destination)
-            warped_primary = taichi_aot.remap_with_flow(
-                supp_linear_gpu,
-                flow_gpu,
-                self.full_h,
-                self.full_w,
-                return_gpu=True,
-            )
+            smooth = _parse_bool(self.config.get("smooth", True), default=True)
+            if not smooth:
+                from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow import (
+                    FarnebackFlow as FarnebackFlowCPU,
+                )
+                step = max(2, int(self.config.get("grid_step", 16)))
+                flow_np = flow_gpu.to_numpy()
+                flow_quant = FarnebackFlowCPU._quantize_to_blocks(flow_np, step)
+                flow_gpu = self._store_quantized_flow(taichi_aot, flow_quant)
+            warped_primary = None
+            if supp_linear_gpu is not None:
+                prim_h, prim_w = (int(v) for v in supp_linear_gpu.shape[:2])
+                warped_primary = taichi_aot.remap_with_flow(
+                    supp_linear_gpu,
+                    flow_gpu,
+                    prim_h,
+                    prim_w,
+                    return_gpu=True,
+                )
             warped_secondary = None
             if secondary_frame_to_warp is not None:
                 sec_h, sec_w = (int(v) for v in secondary_frame_to_warp.shape[:2])
@@ -2402,7 +2483,7 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
                     return_gpu=True,
                 )
             if return_transform:
-                retained_flow = self._resident_flow_view()
+                retained_flow = self._resident_flow_view(flow_gpu)
                 flow_gpu = None
                 return warped_primary, warped_secondary, retained_flow
             return warped_primary, warped_secondary
@@ -2410,6 +2491,8 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
             if (
                 flow_gpu is not None
                 and flow_gpu is not getattr(self, "_resident_flow_buffer", None)
+                and flow_gpu
+                is not getattr(self, "_resident_quantized_flow_buffer", None)
                 and hasattr(flow_gpu, "destroy")
             ):
                 _destroy_work_item(flow_gpu)
@@ -2491,10 +2574,7 @@ def create_resident_aligner(
         print(f"[GPU Pipeline] Aligner: Dense Optical Flow Adaptive Multi-Tile ({spec.name})")
         from ..fusionet_engine.flownet_inference import AOTOpticalFlowAligner
 
-        smooth = True
-        if alignment_config:
-            if "smooth" in alignment_config:
-                smooth = bool(alignment_config["smooth"])
+        smooth = _parse_bool((alignment_config or {}).get("smooth", True), default=True)
 
         return AOTOpticalFlowAligner(
             ref_analysis_gpu,
@@ -2836,11 +2916,25 @@ def _run_shared_raw_provider_pipeline(
                 geometry.weight_shape, channels=weightnet_channels
             )
         ref_noise_score = None
+        use_half_res = False
         if needs_analysis:
             from .raw_pipeline.provider import _demosaic_carrier_gpu
 
-            ref_proxy_full_gpu = _demosaic_carrier_gpu(ref_frame.carrier)
-            print("[RAW Native] Analysis demosaic: bilinear, full-resolution; final preview: Hamilton")
+            carrier_h, carrier_w = ref_frame.carrier.samples.shape[:2]
+            use_half_res = (
+                geometry.align_shape[0] <= carrier_h // 2
+                and geometry.align_shape[1] <= carrier_w // 2
+                and geometry.weight_shape[0] <= carrier_h // 2
+                and geometry.weight_shape[1] <= carrier_w // 2
+            )
+            ref_proxy_full_gpu = _demosaic_carrier_gpu(
+                ref_frame.carrier, half_res=use_half_res
+            )
+            print(
+                f"[RAW Native] Analysis demosaic: bilinear, "
+                f"{'half-resolution' if use_half_res else 'full-resolution'}; "
+                "final preview: Hamilton"
+            )
             alignment_mode = (
                 "analysis"
                 if normalized_engine in ("fusionet", "spatial_fusion")
@@ -2854,17 +2948,15 @@ def _run_shared_raw_provider_pipeline(
                 mode=alignment_mode,
             )
             if normalized_engine == "fusionet":
-                weight_analysis_params = _resolve_reference_analysis_params(
-                    ref_proxy_full_gpu,
-                    enabled=analysis_enhance,
-                    supplied=auto_params,
-                    needs_analysis=needs_analysis,
-                    mode="natural",
-                )
+                weight_analysis_params = analysis_params
             noise_analysis_params = (
                 analysis_params if normalized_engine == "fusionet" else None
             )
-            if normalized_engine in ("fusionet", "spatial_fusion"):
+            share_ref_weight_proxy = (
+                normalized_engine == "fusionet"
+                and geometry.weight_shape == geometry.align_shape
+            )
+            if normalized_engine in ("fusionet", "spatial_fusion") and not share_ref_weight_proxy:
                 ref_weight_analysis_gpu = prepare_analysis_proxy_gpu(
                     ref_proxy_full_gpu,
                     work_shape=geometry.weight_shape,
@@ -2893,7 +2985,7 @@ def _run_shared_raw_provider_pipeline(
                 )
             if weight_analysis_params is not None:
                 print(
-                    "[RAW Native] FusionNet WeightNet AutoEnhance (natural): "
+                    "[RAW Native] FusionNet WeightNet AutoEnhance (analysis): "
                     f"Gain={float(weight_analysis_params.get('gain', 1.0)):.2f}x"
                 )
 
@@ -2904,8 +2996,8 @@ def _run_shared_raw_provider_pipeline(
                     analysis_params=analysis_params,
                     ghost_penalty=ghost_penalty,
                     ghost_penalty_min=ghost_penalty_min,
-                    in_place=False,
-                    source_is_disposable=False,
+                    in_place=share_ref_weight_proxy,
+                    source_is_disposable=share_ref_weight_proxy,
                     noise_source_gpu=(
                         ref_proxy_full_gpu
                         if normalized_engine in ("fusionet", "spatial_fusion")
@@ -2914,6 +3006,8 @@ def _run_shared_raw_provider_pipeline(
                     noise_analysis_params=noise_analysis_params,
                 )
             )
+            if share_ref_weight_proxy:
+                ref_weight_analysis_gpu = ref_analysis_gpu
             if ref_proxy_full_gpu is not ref_analysis_gpu:
                 _destroy_work_item(ref_proxy_full_gpu)
             ref_proxy_full_gpu = None
@@ -2967,7 +3061,7 @@ def _run_shared_raw_provider_pipeline(
                     "CFA carrier unchanged"
                 )
             if normalized_engine == "fusionet":
-                if weightnet_channels == 1:
+                if weightnet_channels == 1 and getattr(session, "runtime", None) != "taichi_aot":
                     taichi_aot.cvtColor(
                         ref_weight_analysis_gpu,
                         taichi_aot.COLOR_RGB2GRAY,
@@ -3125,11 +3219,17 @@ def _run_shared_raw_provider_pipeline(
                 if needs_analysis:
                     from .raw_pipeline.provider import _demosaic_carrier_gpu
 
-                    support_linear_full = _demosaic_carrier_gpu(support_frame.carrier)
+                    support_linear_full = _demosaic_carrier_gpu(
+                        support_frame.carrier, half_res=use_half_res
+                    )
 
-                    # Build the independent WeightNet/SpatialFusion proxy before
-                    # alignment enhancement can reuse the disposable RGB buffer.
-                    if normalized_engine in ("fusionet", "spatial_fusion"):
+                    share_support_weight_proxy = (
+                        normalized_engine == "fusionet"
+                        and geometry.weight_shape == geometry.align_shape
+                    )
+                    # Build the independent WeightNet/SpatialFusion proxy only when
+                    # it differs from the alignment analysis proxy.
+                    if normalized_engine in ("fusionet", "spatial_fusion") and not share_support_weight_proxy:
                         support_weight_analysis = prepare_analysis_proxy_gpu(
                             support_linear_full,
                             work_shape=geometry.weight_shape,
@@ -3144,34 +3244,27 @@ def _run_shared_raw_provider_pipeline(
                                 support_weight_analysis, return_gpu=True
                             )
 
-                    # Alignment always uses the reference-derived full analysis
-                    # AutoEnhance proxy for both selected weight engines.
-                    if normalized_engine in ("fusionet", "spatial_fusion"):
-                        support_analysis = prepare_analysis_proxy_gpu(
-                            support_linear_full,
-                            work_shape=geometry.align_shape,
-                            analysis_params=analysis_params,
-                            in_place=True,
-                            source_is_disposable=True,
-                        )
-                        if support_linear_full is not support_analysis:
-                            _destroy_work_item(support_linear_full)
-                        support_linear_full = None
-                    else:
-                        support_analysis = prepare_analysis_proxy_gpu(
-                            support_linear_full,
-                            work_shape=geometry.align_shape,
-                            analysis_params=analysis_params,
-                            in_place=True,
-                        )
-                        if support_linear_full is not support_analysis:
-                            _destroy_work_item(support_linear_full)
-                        support_linear_full = None
+                    # Alignment uses the reference-derived analysis AutoEnhance proxy.
+                    support_analysis = prepare_analysis_proxy_gpu(
+                        support_linear_full,
+                        work_shape=geometry.align_shape,
+                        analysis_params=analysis_params,
+                        in_place=True,
+                        source_is_disposable=True,
+                    )
+                    if support_linear_full is not support_analysis:
+                        _destroy_work_item(support_linear_full)
+                    support_linear_full = None
+                    if share_support_weight_proxy:
+                        support_weight_analysis = support_analysis
 
                     if aligner is not None:
+                        primary_for_preview = (
+                            support_analysis if share_support_weight_proxy else None
+                        )
                         if hasattr(aligner, "take_last_flow"):
                             alignment_preview = aligner.align_frame(
-                                support_analysis,
+                                primary_for_preview,
                                 analysis_frame_gpu=support_analysis,
                                 stop_event=stop_event,
                                 return_gpu=True,
@@ -3180,7 +3273,7 @@ def _run_shared_raw_provider_pipeline(
                             transform = aligner.take_last_flow()
                         else:
                             alignment_preview, _ignored, transform = aligner.align_frame(
-                                support_analysis,
+                                primary_for_preview,
                                 analysis_frame_gpu=support_analysis,
                                 stop_event=stop_event,
                                 return_gpu=True,
@@ -3197,15 +3290,16 @@ def _run_shared_raw_provider_pipeline(
                     _destroy_work_item(support_analysis)
                     support_analysis = None
 
-                # Alignment and weight scoring use separate proxies; FusionNet
-                # scores natural-mode input while SpatialFusion stays linear.
                 if normalized_engine in ("spatial_fusion", "fusionet"):
-                    # The aligner preview belongs to the analysis-mode proxy,
-                    # so it cannot stand in for the independent natural/linear
-                    # weight proxy even when both grids have the same shape.
-                    if alignment_preview is not None and alignment_preview is not support_analysis:
-                        _destroy_work_item(alignment_preview)
-                    alignment_preview = None
+                    # SpatialFusion scores linear proxies while alignment uses
+                    # analysis-mode AutoEnhance; FusionNet shares analysis mode.
+                    if not (
+                        normalized_engine == "fusionet"
+                        and geometry.weight_shape == geometry.align_shape
+                    ):
+                        if alignment_preview is not None and alignment_preview is not support_analysis:
+                            _destroy_work_item(alignment_preview)
+                        alignment_preview = None
                     aligned_weight_proxy, unused_preview = _prepare_raw_aligned_analysis(
                         support_weight_analysis, alignment_preview, transform,
                         align_shape=geometry.weight_shape, warp_analysis=_warp_analysis
@@ -3842,7 +3936,7 @@ def run_gpu_resident_pipeline(
 
             session = load_weightnet_onnx(
                 DEFAULT_WEIGHTNET_ONNX,
-                runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "dml"),
+                runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "taichi_aot"),
                 patch_size=int(tile_size),
                 input_channels=1,
             )
@@ -3929,7 +4023,7 @@ def run_gpu_resident_pipeline(
     if session is None and weight_engine == "fusionet" and not alignment_only:
         session = load_weightnet_onnx(
             DEFAULT_WEIGHTNET_ONNX,
-            runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "dml"),
+            runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "taichi_aot"),
             patch_size=tile_size,
             input_channels=1,
         )
@@ -3991,15 +4085,7 @@ def run_gpu_resident_pipeline(
         needs_analysis=needs_analysis,
         mode=alignment_mode,
     )
-    weight_analysis_params = None
-    if weight_engine == "fusionet":
-        weight_analysis_params = _resolve_reference_analysis_params(
-            ref_gpu,
-            enabled=analysis_enhance,
-            supplied=auto_params,
-            needs_analysis=needs_analysis,
-            mode="natural",
-        )
+    weight_analysis_params = analysis_params if weight_engine == "fusionet" else None
     if analysis_params is not None:
         print(
             f"[GPU Pipeline] Alignment AutoEnhance "
@@ -4009,7 +4095,7 @@ def run_gpu_resident_pipeline(
         )
     if weight_analysis_params is not None:
         print(
-            "[GPU Pipeline] FusionNet WeightNet AutoEnhance (natural): "
+            "[GPU Pipeline] FusionNet WeightNet AutoEnhance (analysis): "
             f"Gain={weight_analysis_params['gain']:.2f}x "
             "(reference-derived parameters reused for weight inference)"
         )
@@ -4021,7 +4107,7 @@ def run_gpu_resident_pipeline(
         )
         print(f"[GPU Pipeline] Alignment AutoEnhance skipped ({reason})")
     if weight_engine == "fusionet" and weight_analysis_params is None:
-        print("[GPU Pipeline] FusionNet natural WeightNet AutoEnhance skipped")
+        print("[GPU Pipeline] FusionNet analysis WeightNet AutoEnhance skipped")
 
     # ------------------------------------------------------------------
     # PHASE 3: Create Analysis Reference & Work-Resolution Copy
@@ -4207,14 +4293,18 @@ def run_gpu_resident_pipeline(
         spatial_weight_slots.put_nowait(spatial_weight_post_b_gpu)
         spatial_scratch = _own_component(SpatialScratchCache(), releaser=lambda cache: cache.clear())
     elif weight_engine == "fusionet":
-        # WeightNet keeps its natural-mode reference; alignment uses the
-        # separate analysis-mode proxy.
-        reference_analysis_gpu = prepare_analysis_proxy_gpu(
-            ref_gpu,
-            work_shape=geometry.weight_shape,
-            analysis_params=weight_analysis_params,
-        )
-        if weightnet_channels == 1:
+        if (
+            ref_analysis_gpu is not None
+            and geometry.weight_shape == geometry.align_shape
+        ):
+            reference_analysis_gpu = ref_analysis_gpu
+        else:
+            reference_analysis_gpu = prepare_analysis_proxy_gpu(
+                ref_gpu,
+                work_shape=geometry.weight_shape,
+                analysis_params=weight_analysis_params,
+            )
+        if weightnet_channels == 1 and getattr(session, "runtime", None) != "taichi_aot":
             reference_gray_source_gpu = reference_analysis_gpu
             taichi_aot.cvtColor(
                 reference_gray_source_gpu,
@@ -4234,7 +4324,10 @@ def run_gpu_resident_pipeline(
         )
         analysis_context.weight_reference = ref_work_rgb_np
         analysis_context.clahe_transfer_map = None
-        if reference_analysis_gpu is not ref_gpu:
+        if (
+            reference_analysis_gpu is not ref_gpu
+            and reference_analysis_gpu is not ref_analysis_gpu
+        ):
             _destroy_work_item(reference_analysis_gpu)
 
     def _is_persistent_weight(buf):
@@ -4602,11 +4695,14 @@ def run_gpu_resident_pipeline(
                         )
 
                         if weight_engine == "fusionet":
-                            supp_analysis_sec_gpu = prepare_analysis_proxy_gpu(
-                                supp_linear_gpu,
-                                work_shape=geometry.weight_shape,
-                                analysis_params=weight_analysis_params,
-                            )
+                            if geometry.weight_shape == geometry.align_shape:
+                                supp_analysis_sec_gpu = supp_analysis_flow_gpu
+                            else:
+                                supp_analysis_sec_gpu = prepare_analysis_proxy_gpu(
+                                    supp_linear_gpu,
+                                    work_shape=geometry.weight_shape,
+                                    analysis_params=weight_analysis_params,
+                                )
                         elif weight_engine == "spatial_fusion":
                             supp_analysis_sec_gpu = prepare_analysis_proxy_gpu(
                                 supp_linear_gpu,
@@ -5155,35 +5251,22 @@ def run_gpu_resident_pipeline(
                     supp_analysis_flow_gpu = supp_linear_gpu
                     supp_analysis_sec_gpu = supp_linear_gpu
                 else:
-                    # Downscale linear frame to resident alignment work-res directly FIRST across all backends
-                    if (flow_work_h, flow_work_w) != (target_h, target_w):
-                        supp_linear_flow_gpu = taichi_aot.resize(
-                            supp_linear_gpu,
-                            (flow_work_w, flow_work_h),
-                            interpolation=taichi_aot.INTER_AREA,
-                            return_gpu=True,
-                        )
-                    else:
-                        supp_linear_flow_gpu = supp_linear_gpu
-
                     supp_analysis_flow_gpu = prepare_analysis_proxy_gpu(
-                        supp_linear_flow_gpu,
+                        supp_linear_gpu,
                         work_shape=geometry.align_shape,
                         analysis_params=analysis_params,
                         in_place=True,
                     )
-                    if (
-                        supp_linear_flow_gpu is not supp_linear_gpu
-                        and supp_analysis_flow_gpu is not supp_linear_flow_gpu
-                    ):
-                        _destroy_work_item(supp_linear_flow_gpu)
 
                     if weight_engine == "fusionet":
-                        supp_analysis_sec_gpu = prepare_analysis_proxy_gpu(
-                            supp_linear_gpu,
-                            work_shape=geometry.weight_shape,
-                            analysis_params=weight_analysis_params,
-                        )
+                        if geometry.weight_shape == geometry.align_shape:
+                            supp_analysis_sec_gpu = supp_analysis_flow_gpu
+                        else:
+                            supp_analysis_sec_gpu = prepare_analysis_proxy_gpu(
+                                supp_linear_gpu,
+                                work_shape=geometry.weight_shape,
+                                analysis_params=weight_analysis_params,
+                            )
                     elif weight_engine == "spatial_fusion":
                         supp_analysis_sec_gpu = prepare_analysis_proxy_gpu(
                             supp_linear_gpu,
@@ -5391,7 +5474,7 @@ def run_gpu_resident_pipeline(
                     alpha_mean = 1.0
                 else:
                     weightnet_input_gpu = supp_aligned_sec_gpu
-                    if weightnet_channels == 1:
+                    if weightnet_channels == 1 and getattr(session, "runtime", None) != "taichi_aot":
                         taichi_aot.cvtColor(
                             supp_aligned_sec_gpu,
                             taichi_aot.COLOR_RGB2GRAY,

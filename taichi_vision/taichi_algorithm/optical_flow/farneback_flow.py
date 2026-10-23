@@ -338,11 +338,13 @@ if TAICHI_AVAILABLE:
         weights: ti.types.ndarray(dtype=ti.f32, ndim=1),
         radius: ti.i32,
     ):
-        """Horizontal Gaussian blur on 5-channel tensor."""
+        """Horizontal Edge-Aware Bilateral blur on 5-channel tensor."""
         for y, x in ti.ndrange(h, w):
-            a0 = src[y, x, 0] * weights[0]
+            c0 = src[y, x, 0]
+            c2 = src[y, x, 2]
+            a0 = c0 * weights[0]
             a1 = src[y, x, 1] * weights[0]
-            a2 = src[y, x, 2] * weights[0]
+            a2 = c2 * weights[0]
             a3 = src[y, x, 3] * weights[0]
             a4 = src[y, x, 4] * weights[0]
             tw = weights[0]
@@ -351,12 +353,22 @@ if TAICHI_AVAILABLE:
                     wk = weights[k]
                     lx = common.reflect_idx(x - k, w)
                     rx = common.reflect_idx(x + k, w)
-                    a0 += (src[y, lx, 0] + src[y, rx, 0]) * wk
-                    a1 += (src[y, lx, 1] + src[y, rx, 1]) * wk
-                    a2 += (src[y, lx, 2] + src[y, rx, 2]) * wk
-                    a3 += (src[y, lx, 3] + src[y, rx, 3]) * wk
-                    a4 += (src[y, lx, 4] + src[y, rx, 4]) * wk
-                    tw += 2.0 * wk
+                    dl0 = src[y, lx, 0] - c0
+                    dl2 = src[y, lx, 2] - c2
+                    diff_l = dl0 * dl0 + dl2 * dl2
+                    wl = wk / (1.0 + 0.001 * diff_l)
+
+                    dr0 = src[y, rx, 0] - c0
+                    dr2 = src[y, rx, 2] - c2
+                    diff_r = dr0 * dr0 + dr2 * dr2
+                    wr = wk / (1.0 + 0.001 * diff_r)
+
+                    a0 += src[y, lx, 0] * wl + src[y, rx, 0] * wr
+                    a1 += src[y, lx, 1] * wl + src[y, rx, 1] * wr
+                    a2 += src[y, lx, 2] * wl + src[y, rx, 2] * wr
+                    a3 += src[y, lx, 3] * wl + src[y, rx, 3] * wr
+                    a4 += src[y, lx, 4] * wl + src[y, rx, 4] * wr
+                    tw += wl + wr
             inv = 1.0 / tw
             dst[y, x, 0] = a0 * inv
             dst[y, x, 1] = a1 * inv
@@ -373,11 +385,13 @@ if TAICHI_AVAILABLE:
         weights: ti.types.ndarray(dtype=ti.f32, ndim=1),
         radius: ti.i32,
     ):
-        """Vertical Gaussian blur on 5-channel tensor."""
+        """Vertical Edge-Aware Bilateral blur on 5-channel tensor."""
         for y, x in ti.ndrange(h, w):
-            a0 = src[y, x, 0] * weights[0]
+            c0 = src[y, x, 0]
+            c2 = src[y, x, 2]
+            a0 = c0 * weights[0]
             a1 = src[y, x, 1] * weights[0]
-            a2 = src[y, x, 2] * weights[0]
+            a2 = c2 * weights[0]
             a3 = src[y, x, 3] * weights[0]
             a4 = src[y, x, 4] * weights[0]
             tw = weights[0]
@@ -386,12 +400,22 @@ if TAICHI_AVAILABLE:
                     wk = weights[k]
                     ty = common.reflect_idx(y - k, h)
                     by = common.reflect_idx(y + k, h)
-                    a0 += (src[ty, x, 0] + src[by, x, 0]) * wk
-                    a1 += (src[ty, x, 1] + src[by, x, 1]) * wk
-                    a2 += (src[ty, x, 2] + src[by, x, 2]) * wk
-                    a3 += (src[ty, x, 3] + src[by, x, 3]) * wk
-                    a4 += (src[ty, x, 4] + src[by, x, 4]) * wk
-                    tw += 2.0 * wk
+                    dt0 = src[ty, x, 0] - c0
+                    dt2 = src[ty, x, 2] - c2
+                    diff_t = dt0 * dt0 + dt2 * dt2
+                    wt = wk / (1.0 + 0.001 * diff_t)
+
+                    db0 = src[by, x, 0] - c0
+                    db2 = src[by, x, 2] - c2
+                    diff_b = db0 * db0 + db2 * db2
+                    wb = wk / (1.0 + 0.001 * diff_b)
+
+                    a0 += src[ty, x, 0] * wt + src[by, x, 0] * wb
+                    a1 += src[ty, x, 1] * wt + src[by, x, 1] * wb
+                    a2 += src[ty, x, 2] * wt + src[by, x, 2] * wb
+                    a3 += src[ty, x, 3] * wt + src[by, x, 3] * wb
+                    a4 += src[ty, x, 4] * wt + src[by, x, 4] * wb
+                    tw += wt + wb
             inv = 1.0 / tw
             dst[y, x, 0] = a0 * inv
             dst[y, x, 1] = a1 * inv
@@ -410,9 +434,7 @@ if TAICHI_AVAILABLE:
         h: ti.i32,
         w: ti.i32,
     ):
-        """Solve G*d = h at each pixel using Cramer's rule.
-        Regularization epsilon = 1e-3 (OpenCV line 564).
-        """
+        """Solve G*d = h at each pixel using regularized Cramer's rule."""
         for y, x in ti.ndrange(h, w):
             g11 = M[y, x, 0]
             g12 = M[y, x, 1]
@@ -420,11 +442,15 @@ if TAICHI_AVAILABLE:
             hh1 = M[y, x, 3]
             hh2 = M[y, x, 4]
 
-            det = g11 * g22 - g12 * g12
-            idet = 1.0 / (det + 1e-3)
+            tr = g11 + g22
+            lam = 0.005 * tr + 1e-3
+            g11_r = g11 + lam
+            g22_r = g22 + lam
+            det_r = g11_r * g22_r - g12 * g12
+            idet = 1.0 / det_r
 
-            flow[y, x, 0] = (g11 * hh2 - g12 * hh1) * idet
-            flow[y, x, 1] = (g22 * hh1 - g12 * hh2) * idet
+            flow[y, x, 0] = (g11_r * hh2 - g12 * hh1) * idet
+            flow[y, x, 1] = (g22_r * hh1 - g12 * hh2) * idet
 
     # -----------------------------------------------------------------
     # 5. Utility Kernels

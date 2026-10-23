@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGraphicsOpacityEffect,
     QFrame,
+    QMenu,
 )
 from PySide6.QtCore import (
     Signal,
@@ -34,6 +35,9 @@ from pixel_refine_desktop.enhance_stack.components.bulk_page.controllers.bulk_pr
 from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_combined_panel import (
     CombinedPanel,
     SkeletonCombinedPanel,
+)
+from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_batch_list_view import (
+    BulkBatchListModel, BulkBatchDelegate, BulkBatchListView,
 )
 from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_import_service import (
     BulkDeleteProcess,
@@ -103,6 +107,36 @@ class BatchPreloaderThread(QThread):
                 self.batch_prepared.emit(self.batch_id, {}, [])
 
 
+class BulkSnapshotThread(QThread):
+    """Read all batch metadata off the GUI thread; no QWidget work is done here."""
+    prepared = Signal(int, object)
+
+    def __init__(self, database_manager, json_path, generation, parent=None):
+        super().__init__(parent)
+        self.database_manager = database_manager
+        self.json_path = json_path
+        self.generation = generation
+
+    def run(self):
+        records = []
+        try:
+            states = load_json_state(self.json_path)
+            for batch_id in self.database_manager.get_all_batch_ids():
+                if self.isInterruptionRequested():
+                    return
+                paths = self.database_manager.get_images_by_batch(batch_id)
+                records.append({
+                    "id": batch_id,
+                    "paths": [path for path in paths if os.path.exists(path)],
+                    "state": dict(states.get(str(batch_id), {}) or {}),
+                    "thumbnails": {},
+                })
+        except Exception as error:
+            print(f"[BulkSnapshotThread] Snapshot failed: {error}")
+        if not self.isInterruptionRequested():
+            self.prepared.emit(self.generation, records)
+
+
 class BulkBatchScrollContainer(ScrollContainer):
     """
     Scrollable container extending ScrollContainer from GenericUILibrary.
@@ -116,6 +150,8 @@ class BulkBatchScrollContainer(ScrollContainer):
     def update_inner_dimensions(self):
         inner = self.container
         if inner and inner.layout():
+            inner.layout().invalidate()
+            inner.layout().activate()
             vh = self.viewport().height()
             content_h = inner.layout().sizeHint().height()
             inner.setMinimumHeight(max(vh, content_h))
@@ -129,7 +165,7 @@ def setup_main_panel(layout_instance, scroll_area_style):
     main_panel = scroll_area.container
     main_panel.setObjectName("BulkMainPanel")
 
-    layout_instance.setContentsMargins(16, 16, 16, 16)
+    layout_instance.setContentsMargins(5, 5, 8, 16)
     layout_instance.setSpacing(25)
     layout_instance.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -244,6 +280,16 @@ class BulkPageLayout(QWidget):
         self.main_scroll_area.installEventFilter(self)
         self._original_scroll_stylesheet = self.main_scroll_area.styleSheet()
 
+        self.batch_model = BulkBatchListModel(self)
+        self.batch_delegate = BulkBatchDelegate(self)
+        self.batch_list_view = BulkBatchListView(self.main_scroll_area.container)
+        self.batch_list_view.setModel(self.batch_model)
+        self.batch_list_view.setItemDelegate(self.batch_delegate)
+        self.batch_delegate.action.connect(self._handle_virtual_row_action)
+        self.batch_list_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.main_panel_container.addWidget(self.batch_list_view)
+        self._snapshot_thread = None
+
         self.data_changed.connect(self.update_batch_view)
 
         # Hook scroll listener for lazy loading (Task 4)
@@ -255,19 +301,27 @@ class BulkPageLayout(QWidget):
         self._batch_positions = {}
         self._view_generation = 0
         self._view_active = True
+        self._is_scroll_idle = True
         self._wanted_batch_ids = set()
         self._prepared_batch_data = {}
         self._manifest_dirty = set()
         self._active_preloaders = []
+        self._panel_materialization_queue = {}
         self._materialize_timer = QTimer(self)
         self._materialize_timer.setSingleShot(True)
         self._materialize_timer.timeout.connect(self._load_next_batch_incrementally)
+        self._panel_build_timer = QTimer(self)
+        self._panel_build_timer.setSingleShot(True)
+        self._panel_build_timer.timeout.connect(self._materialize_next_batch_panel)
         self._viewport_timer = QTimer(self)
         self._viewport_timer.setSingleShot(True)
         self._viewport_timer.timeout.connect(self._refresh_visible_thumbnails)
         self._scroll_timer = QTimer(self)
         self._scroll_timer.setSingleShot(True)
         self._scroll_timer.timeout.connect(self._extend_batch_view)
+        self._scroll_idle_timer = QTimer(self)
+        self._scroll_idle_timer.setSingleShot(True)
+        self._scroll_idle_timer.timeout.connect(self._on_scroll_idle)
         self._thumbnail_batch_queue = []
         self._active_thumbnail_batches = []
         self.main_scroll_area.verticalScrollBar().valueChanged.connect(
@@ -275,12 +329,20 @@ class BulkPageLayout(QWidget):
         )
 
         self.layout.addWidget(self.main_scroll_area)
+        QTimer.singleShot(0, self.update_batch_view)
 
     def _on_scroll_changed(self, value):
         if not self._scroll_timer.isActive():
             self._scroll_timer.start(16)
-        if not self._viewport_timer.isActive():
-            self._viewport_timer.start(16)
+        self._is_scroll_idle = False
+        self._scroll_idle_timer.start(120)
+        self._panel_build_timer.stop()
+        # Hindari membuat QWidget ketika scrollbar masih bergerak. Pembuatan
+        # panel cukup berat dan dijadwalkan setelah scroll berhenti sejenak.
+
+    def _on_scroll_idle(self):
+        self._is_scroll_idle = True
+        self._viewport_timer.start(0)
 
     def _extend_batch_view(self):
         bar = self.main_scroll_area.verticalScrollBar()
@@ -291,11 +353,17 @@ class BulkPageLayout(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._view_active = True
+        self._is_scroll_idle = True
         self._viewport_timer.start(0)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, "_viewport_timer"):
+            self._is_scroll_idle = True
+            if hasattr(self, "batch_list_view"):
+                self.batch_list_view.update_content_height(
+                    len(self.batch_model.records), self.main_scroll_area.viewport().height()
+                )
             self._viewport_timer.start(0)
 
     def _load_next_batch_incrementally(self):
@@ -318,7 +386,7 @@ class BulkPageLayout(QWidget):
                 self._manifest_dirty.discard(batch_id)
                 self._viewport_timer.start(0)
             else:
-                self._materialize_batch(batch_id, *prepared)
+                self._queue_panel_materialization(batch_id, *prepared)
             self._materialize_timer.start(8)
             return
         preloader = BatchPreloaderThread(self.database_manager, batch_id, parent=self)
@@ -327,7 +395,7 @@ class BulkPageLayout(QWidget):
         preloader.batch_prepared.connect(self._on_batch_prepared)
         preloader.finished.connect(self._on_preloader_finished)
         self._active_preloaders.append(preloader)
-        preloader.start()
+        preloader.start(QThread.Priority.LowPriority)
         self._materialize_timer.start(8)
 
     @Slot(object, dict, list)
@@ -343,7 +411,38 @@ class BulkPageLayout(QWidget):
                 self._manifest_dirty.discard(batch_id)
                 self._viewport_timer.start(0)
             else:
-                self._materialize_batch(batch_id, state, paths)
+                self._queue_panel_materialization(batch_id, state, paths)
+
+    def _queue_panel_materialization(self, batch_id, state, paths):
+        if batch_id not in self.active_skeletons:
+            return
+        self._panel_materialization_queue[batch_id] = (state, paths)
+        if self._is_scroll_idle and not self._panel_build_timer.isActive():
+            self._panel_build_timer.start(0)
+
+    @Slot()
+    def _materialize_next_batch_panel(self):
+        if (
+            not self._view_active
+            or not self._is_scroll_idle
+            or not self._panel_materialization_queue
+        ):
+            return
+
+        for batch_id in list(self._panel_materialization_queue):
+            if batch_id not in self.active_skeletons:
+                self._panel_materialization_queue.pop(batch_id, None)
+                continue
+            if batch_id not in self._wanted_batch_ids:
+                continue
+
+            state, paths = self._panel_materialization_queue.pop(batch_id)
+            self._materialize_batch(batch_id, state, paths)
+            # Yield to paint/input/scroll events between comparatively expensive
+            # panel constructors while keeping visible rows moving forward.
+            if self._panel_materialization_queue:
+                self._panel_build_timer.start(24)
+            return
 
     @Slot()
     def _on_preloader_finished(self):
@@ -368,6 +467,9 @@ class BulkPageLayout(QWidget):
         skeleton.deleteLater()
         self.main_panel_container.insertWidget(max(0, index), panel)
         panel.update_sequential_number(self._batch_positions.get(batch_id, 0) + 1)
+        self.main_panel_container.invalidate()
+        self.main_panel_container.activate()
+        self.main_scroll_area.update_inner_dimensions()
         self._viewport_timer.start(0)
 
     def refresh_after_project_load(self):
@@ -389,6 +491,7 @@ class BulkPageLayout(QWidget):
         self.active_skeletons.clear()
         self._panel_cache.clear()
         self._prepared_batch_data.clear()
+        self._panel_materialization_queue.clear()
         self._manifest_dirty.clear()
         self.batch_states.clear()
         self.loading_queue.clear()
@@ -396,101 +499,54 @@ class BulkPageLayout(QWidget):
         self.update_batch_view()
 
     def update_batch_view(self):
-        """Refresh the index on data changes; scrolling reuses this snapshot."""
+        """Prepare all batch rows in a worker, then publish one model snapshot."""
         self._view_active = True
-        self._batch_ids = self.database_manager.get_all_batch_ids()
-        self._batch_positions = {batch_id: index for index, batch_id in enumerate(self._batch_ids)}
         self._view_generation += 1
-        for preloader in self._active_preloaders:
-            preloader.requestInterruption()
-        self._prepared_batch_data.clear()
-        self._manifest_dirty = set(self._panel_cache)
-        self._render_batch_view()
+        generation = self._view_generation
+        if self._snapshot_thread is not None and self._snapshot_thread.isRunning():
+            self._snapshot_thread.requestInterruption()
+        worker = BulkSnapshotThread(self.database_manager, self.json_path, generation, self)
+        worker.prepared.connect(self._on_bulk_snapshot_ready)
+        worker.finished.connect(lambda w=worker: self._on_bulk_snapshot_finished(w))
+        self._snapshot_thread = worker
+        worker.start(QThread.Priority.LowPriority)
+
+    @Slot(int, object)
+    def _on_bulk_snapshot_ready(self, generation, records):
+        if generation != self._view_generation:
+            return
+        self._batch_ids = [record["id"] for record in records]
+        self._batch_positions = {batch_id: index for index, batch_id in enumerate(self._batch_ids)}
+        self.batch_model.replace_records(records)
+        for record in records:
+            self.batch_states[record["id"]] = record["state"]
+        self.batch_list_view.update_content_height(len(records), self.main_scroll_area.viewport().height())
+        self.batch_list_view.setVisible(bool(records))
+        if not records:
+            if self._placeholder_wrapper is None:
+                self._placeholder_wrapper, self._placeholder_widget = self._create_viewport_centered_placeholder()
+                self.main_panel_container.addWidget(self._placeholder_wrapper)
+        elif self._placeholder_wrapper is not None:
+            self.main_panel_container.removeWidget(self._placeholder_wrapper)
+            self._placeholder_wrapper.deleteLater()
+            self._placeholder_wrapper = self._placeholder_widget = None
+        self.main_panel_container.invalidate()
+        self.main_panel_container.activate()
+        self.main_scroll_area.update_inner_dimensions()
+        self._viewport_timer.start(0)
+
+    def _on_bulk_snapshot_finished(self, worker):
+        if self._snapshot_thread is worker:
+            self._snapshot_thread = None
+        worker.deleteLater()
 
     def _render_batch_view(self):
-        db_ids = self._batch_ids
-        if not hasattr(self, "limit"):
-            self.limit = 10
-        visible_db_ids = db_ids[: self.limit]
-        ui_ids = set(self.active_batch_panels.keys())
-
-        # 2. Identifikasi batch yang perlu dihapus dari UI
-        # Termasuk batch yang sudah tidak ada di DB (cache stale eviction)
-        db_ids_set = set(db_ids)
-        ids_to_remove = ui_ids - set(visible_db_ids)
-        for batch_id in ids_to_remove:
-            panel_to_remove = self.active_batch_panels.pop(batch_id, None)
-            if panel_to_remove:
-                self.batch_states.pop(batch_id, None)
-                panel_to_remove.pause_thumbnail_loading()
-                self._panel_cache.pop(batch_id, None)
-
-                # Hapus widget dari layout SECARA LANGSUNG
-                self.main_panel_container.removeWidget(panel_to_remove)
-                # Sembunyikan widget agar tidak terlihat sesaat sebelum benar-benar dihapus
-                panel_to_remove.hide()
-                # Jadwalkan penghapusan memori widget
-                panel_to_remove.deleteLater()
-
-            # Jika batch sudah tidak ada di DB sama sekali, hapus dari cache juga
-            if batch_id not in db_ids_set:
-                stale = self._panel_cache.pop(batch_id, None)
-                if stale and stale is not panel_to_remove:
-                    try:
-                        stale.deleteLater()
-                    except RuntimeError:
-                        pass
-
-        # Remove skeletons that are no longer in visible list
-        for bid in list(self.active_skeletons.keys()):
-            if bid not in visible_db_ids:
-                skel = self.active_skeletons.pop(bid, None)
-                if skel:
-                    self.main_panel_container.removeWidget(skel)
-                    skel.hide()
-                    skel.deleteLater()
-
-        # 3. Identifikasi batch yang perlu ditambahkan ke UI
-        ids_to_add = [
-            bid
-            for bid in visible_db_ids
-            if bid not in ui_ids and bid not in self.active_skeletons
-        ]
-        for batch_id in ids_to_add:
-            # --- CACHE HIT: Reuse panel yang sudah pernah dibuat ---
-            cached_panel = self._panel_cache.get(batch_id)
-            if cached_panel is not None:
-                try:
-                    _ = cached_panel.isVisible()  # cek masih hidup
-                    # Panel valid: re-insert ke layout dan tampilkan langsung
-                    if self._spacer_item:
-                        insert_idx = self.main_panel_container.count() - 1
-                        self.main_panel_container.insertWidget(insert_idx, cached_panel)
-                    else:
-                        self.main_panel_container.addWidget(cached_panel)
-                    cached_panel.show()
-                    self.active_batch_panels[batch_id] = cached_panel
-                    self._enqueue_thumbnail_loading(cached_panel)
-                    continue  # langsung ke batch_id berikutnya
-                except RuntimeError:
-                    # Panel sudah dihancurkan, hapus dari cache
-                    self._panel_cache.pop(batch_id, None)
-
-            skeleton = SkeletonCombinedPanel(self)
-            skeleton.batch_label.setText(f"Batch {self._batch_positions[batch_id] + 1}")
-            self.active_skeletons[batch_id] = skeleton
-            index = self.main_panel_container.count() - (1 if self._spacer_item else 0)
-            self.main_panel_container.insertWidget(index, skeleton)
-
-        # 4. Atur ulang nomor urut visual untuk semua panel yang ada
-        self._schedule_reorder()
-
-        # 5. Kelola tampilan placeholder atau spacer
-        self._manage_placeholder_and_spacer()
-
-        if hasattr(self.main_scroll_area, "update_inner_dimensions"):
-            self.main_scroll_area.update_inner_dimensions()
-        self._viewport_timer.start(0)
+        # The model owns all rows; QListView paints only the visible viewport.
+        self.batch_list_view.update_content_height(len(self.batch_model.records), self.main_scroll_area.viewport().height())
+        self.batch_list_view.viewport().update()
+        self.main_panel_container.invalidate()
+        self.main_panel_container.activate()
+        self.main_scroll_area.update_inner_dimensions()
 
     def _reorder_visual_batch_numbers(self):
         for batch_id, panel in self.active_batch_panels.items():
@@ -628,6 +684,15 @@ class BulkPageLayout(QWidget):
             for batch_id in self._batch_ids:
                 if str(batch_id) in all_new_states:
                     self.batch_states[batch_id] = all_new_states[str(batch_id)]
+                    record = self.batch_model.record_for_id(batch_id)
+                    if record is not None:
+                        record["state"] = dict(all_new_states[str(batch_id)] or {})
+            if self.batch_model.rowCount():
+                self.batch_model.dataChanged.emit(
+                    self.batch_model.index(0, 0),
+                    self.batch_model.index(self.batch_model.rowCount() - 1, 0),
+                    [BulkBatchListModel.RecordRole],
+                )
             for batch_id, (_, paths) in list(self._prepared_batch_data.items()):
                 self._prepared_batch_data[batch_id] = (all_new_states.get(str(batch_id), {}), paths)
             self.parameters_changed.emit(all_new_states)
@@ -669,64 +734,99 @@ class BulkPageLayout(QWidget):
         if not self._view_active:
             return
         bar = self.main_scroll_area.verticalScrollBar()
-        top = bar.value()
-        bottom = top + self.main_scroll_area.viewport().height()
-        near = []
-        widgets = {**self.active_skeletons, **dict(self.active_batch_panels)}
-        for batch_id, widget in widgets.items():
-            y = widget.geometry().top()
-            end = y + widget.height()
-            if end >= top - 140 and y <= bottom + 140:
-                distance = max(top - end, y - bottom, 0)
-                near.append((distance, y, batch_id))
-        near.sort()
-        self._wanted_batch_ids = {entry[2] for entry in near}
-        for panel in list(self._active_thumbnail_batches):
-            if panel.batch_id not in self._wanted_batch_ids:
-                self._active_thumbnail_batches.remove(panel)
-                panel.pause_thumbnail_loading()
-        inflight = {thread.batch_id for thread in self._active_preloaders}
-        self.loading_queue = [batch_id for _, _, batch_id in near
-                              if (batch_id in self.active_skeletons or batch_id in self._manifest_dirty)
-                              and batch_id not in inflight]
-        if self.loading_queue and not self._materialize_timer.isActive():
-            self._materialize_timer.start(8)
-        self._thumbnail_batch_queue = []
-        if thumbnail_creation_enabled(self.thumbnail_policy):
-            for _, _, batch_id in near:
-                panel = self.active_batch_panels.get(batch_id)
-                if panel is not None and panel not in self._active_thumbnail_batches and any(
-                    panel.needs_thumbnail(path) for path in panel.image_paths_in_batch
-                ):
-                    self._thumbnail_batch_queue.append(panel)
-            self._process_thumbnail_queue()
-        self._trim_panel_cache(top, bottom)
+        if not thumbnail_creation_enabled(self.thumbnail_policy):
+            return
+        row_pitch = BulkBatchDelegate.HEIGHT + BulkBatchDelegate.ROW_GAP
+        row_offset = 0
+        first = max(0, (bar.value() - row_offset) // row_pitch - 1)
+        last = min(
+            len(self.batch_model.records),
+            (bar.value() + self.main_scroll_area.viewport().height() - row_offset) // row_pitch + 2,
+        )
+        visible_records = self.batch_model.records[first:last]
+        needed_paths = {
+            path for record in visible_records
+            for path in record["paths"]
+            if path not in record["thumbnails"]
+        }
+        self.thumbnail_scheduler.cancel_except(self, needed_paths)
+        for record in visible_records:
+            record.setdefault("thumbnail_loading", set())
+            requested = False
+            for path in record["paths"]:
+                if path not in record["thumbnails"]:
+                    record["thumbnail_loading"].add(path)
+                    requested = True
+                    self.thumbnail_scheduler.request(
+                        self, path,
+                        lambda image, image_path, row=record: self._on_virtual_thumbnail_ready(row, image_path, image),
+                    )
+            if requested:
+                self.batch_list_view.refresh_thumbnail_record(record)
+
+    def _on_virtual_thumbnail_ready(self, record, path, image):
+        record.setdefault("thumbnail_loading", set()).discard(path)
+        if image is not None and not image.isNull() and record in self.batch_model.records:
+            record["thumbnails"][path] = image
+            self.batch_list_view.refresh_thumbnail_record(record)
+            self.batch_list_view.viewport().update()
+        elif record in self.batch_model.records:
+            self.batch_list_view.refresh_thumbnail_record(record)
+            self.batch_list_view.viewport().update()
 
     def _trim_panel_cache(self, top, bottom):
-        if len(self._panel_cache) <= 24:
+        return
+
+    def _handle_virtual_row_action(self, action, batch_id, value):
+        record = self.batch_model.record_for_id(batch_id)
+        if record is None:
             return
-        candidates = sorted(
-            ((abs(panel.geometry().top() - (top + bottom) / 2), batch_id, panel)
-             for batch_id, panel in self._panel_cache.items()
-             if batch_id not in self._wanted_batch_ids
-             and not (getattr(panel, "_preview_thread", None) and panel._preview_thread.isRunning())), reverse=True,
-        )
-        for _, batch_id, panel in candidates:
-            if len(self._panel_cache) <= 24:
-                break
-            self.batch_states[batch_id] = panel.get_current_state()
-            panel.pause_thumbnail_loading()
-            index = self.main_panel_container.indexOf(panel)
-            if index >= 0:
-                skeleton = SkeletonCombinedPanel(self)
-                skeleton.batch_label.setText(f"Batch {self._batch_positions.get(batch_id, 0) + 1}")
-                self.main_panel_container.removeWidget(panel)
-                self.main_panel_container.insertWidget(index, skeleton)
-                self.active_skeletons[batch_id] = skeleton
-            self.active_batch_panels.pop(batch_id, None)
-            self._panel_cache.pop(batch_id, None)
-            panel.hide()
-            panel.deleteLater()
+        if action == "add":
+            from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_import_service import handle_add_image_to_batch
+            handle_add_image_to_batch(self, self.database_manager, self.thumbnail_threads, batch_id, None)
+        elif action == "delete":
+            self.handle_delete_individual_batch(batch_id)
+        elif action == "toggle":
+            keys = ("checkbox_align_images", "checkbox_denoising", "checkbox_super_resolution")
+            key = keys[int(value)]
+            state = record["state"]
+            state[key] = not bool(state.get(key, False))
+            if state[key] and key == "checkbox_denoising":
+                state["checkbox_super_resolution"] = False
+            elif state[key] and key == "checkbox_super_resolution":
+                state["checkbox_denoising"] = False
+            self._save_virtual_batch_state(batch_id, state)
+            self.batch_list_view.viewport().update()
+        elif action == "choose":
+            category = str(value)
+            from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.MFDenoiser import get_algorithm_options
+            menu = QMenu(self)
+            for name, _ in get_algorithm_options(category):
+                menu.addAction(str(name))
+            selected = menu.exec(self.batch_list_view.mapToGlobal(self.batch_list_view.viewport().mapFromGlobal(self.cursor().pos())))
+            if selected is not None:
+                key = {"alignment": "alignment_algo", "denoising": "denoising_algo",
+                       "super_resolution": "super_resolution_algo"}[category]
+                record["state"][key] = selected.text()
+                self._save_virtual_batch_state(batch_id, record["state"])
+                self.batch_list_view.viewport().update()
+        elif action == "preview":
+            panel = self.setup_combined_panel(batch_id, record["state"], record["paths"])
+            panel.update_sequential_number(self._batch_positions.get(batch_id, 0) + 1)
+            panel.process_and_preview()
+
+    def _save_virtual_batch_state(self, batch_id, state):
+        try:
+            all_states = load_json_state(self.json_path)
+            all_states[str(batch_id)] = dict(state)
+            with open(self.json_path, "w", encoding="utf-8") as stream:
+                json.dump(all_states, stream, indent=4)
+            self.batch_states[batch_id] = dict(state)
+        except Exception as error:
+            print(f"[BulkPageLayout] Could not save settings for batch {batch_id}: {error}")
+
+    def _trim_panel_cache(self, top, bottom):
+        return
 
     def _process_thumbnail_queue(self):
         """Schedule nearby batches through the shared bounded thumbnail queue."""
@@ -1062,10 +1162,7 @@ class BulkPageLayout(QWidget):
             return False
 
     def handle_delete_individual_batch(self, batch_id):
-        panel_to_delete = self.active_batch_panels.get(batch_id)
-        panel_ref = weakref.ref(panel_to_delete) if panel_to_delete else None
-
-        if not panel_to_delete:
+        if self.batch_model.record_for_id(batch_id) is None and batch_id not in self._batch_ids:
             return
 
         title, message = language_config.BATCH_DELETE_LABEL
@@ -1075,17 +1172,8 @@ class BulkPageLayout(QWidget):
         reply = modal_confirm.question(self, message)
 
         if reply:
-            if batch_id in self.batch_states:
-                del self.batch_states[batch_id]
-
-            fade_out(
-                animator=self.animator,
-                widget=panel_to_delete,
-                duration=300,
-                on_finished_callback=lambda bid=batch_id, pref=panel_ref: self._individual_delete_post_animation(
-                    bid, pref
-                ),
-            )
+            self.batch_states.pop(batch_id, None)
+            self._start_background_delete_process(batch_id)
 
     def handle_delete_all_batches(self):
         title = language_config.TITLE_BATCH_ALL_DELETE_BUTTON
@@ -1125,21 +1213,7 @@ class BulkPageLayout(QWidget):
 
         if reply:
             self.batch_states.clear()
-            panels_to_animate = list(self.active_batch_panels.values())
-            panel_refs = [weakref.ref(p) for p in panels_to_animate]
-
-            if not panels_to_animate:
-                self._start_bulk_background_delete_process()
-                return
-
-            self._bulk_delete_animation_counter = len(panels_to_animate)
-            delay_ms = 10
-
-            for index, panel_ref in enumerate(panel_refs):
-                QTimer.singleShot(
-                    index * delay_ms,
-                    lambda pref=panel_ref: self._trigger_single_bulk_fade_out(pref),
-                )
+            self._start_bulk_background_delete_process()
 
     def _start_bulk_background_delete_process(self):
         """Memulai proses penghapusan semua batch di background."""
@@ -1267,9 +1341,13 @@ class BulkPageLayout(QWidget):
         self._view_active = False
         self._view_generation += 1
         self._materialize_timer.stop()
+        self._panel_build_timer.stop()
         self._viewport_timer.stop()
         self._scroll_timer.stop()
+        self._scroll_idle_timer.stop()
         self.thumbnail_scheduler.cancel_all()
+        if self._snapshot_thread is not None and self._snapshot_thread.isRunning():
+            self._snapshot_thread.requestInterruption()
         for preloader in self._active_preloaders:
             preloader.requestInterruption()
         for panel in list(self.active_batch_panels.values()):
@@ -1281,6 +1359,7 @@ class BulkPageLayout(QWidget):
         self.load_timer_running = False
         if hasattr(self, "_thumbnail_batch_queue"):
             self._thumbnail_batch_queue.clear()
+        self._panel_materialization_queue.clear()
         if hasattr(self, "_active_thumbnail_batches"):
             self._active_thumbnail_batches.clear()
 
@@ -1405,6 +1484,8 @@ class BulkPageLayout(QWidget):
                     panel.retranslate_ui()
                 except Exception as e:
                     print(f"Error retranslating panel: {e}")
+        if hasattr(self, "batch_list_view"):
+            self.batch_list_view.viewport().update()
         self.update_theme()
 
     def update_theme(self):
@@ -1415,3 +1496,6 @@ class BulkPageLayout(QWidget):
                     child.update_theme()
                 except Exception as e:
                     pass
+        if hasattr(self, "batch_list_view"):
+            self.batch_delegate.refresh_button_styles()
+            self.batch_list_view.viewport().update()

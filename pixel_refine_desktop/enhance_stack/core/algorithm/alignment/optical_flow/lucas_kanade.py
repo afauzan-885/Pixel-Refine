@@ -1,3 +1,19 @@
+def _parse_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("false", "0", "no", "off", "none", ""):
+            return False
+        if v in ("true", "1", "yes", "on"):
+            return True
+    return bool(value)
+
+
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import json
 import os
@@ -302,10 +318,15 @@ class LucasKanade:
             (roi_h, roi_w), dtype=np.float32, is_vector=False,
             host_accessible=True,
         )
-        hanning_gpu = taichi_aot.upload(
-            taichi_aot.generate_hanning_window_2d(
+        smooth = _parse_bool((config or {}).get("smooth", True), default=True)
+        if smooth:
+            hanning_cpu = taichi_aot.generate_hanning_window_2d(
                 (roi_h, roi_w), exclude_boundary=True
-            ),
+            )
+        else:
+            hanning_cpu = np.ones((roi_h, roi_w), dtype=np.float32)
+        hanning_gpu = taichi_aot.upload(
+            hanning_cpu,
             is_vector=False,
         )
         vx0, vy0, vx1, vy1 = tile["valid"]
@@ -375,13 +396,9 @@ class LucasKanade:
         if win_size % 2 == 0:
             win_size += 1
 
-        smooth = config.get("smooth", None)
-        if smooth is not None:
-            dense_mode = "smooth" if bool(smooth) else "blocky_clamped"
-            overlap = 0.50 if bool(smooth) else 0.0
-        else:
-            dense_mode = str(config.get("dense_mode", "smooth"))
-            overlap = float(config.get("overlap", 0.50))
+        smooth = _parse_bool((config or {}).get("smooth", True), default=True)
+        dense_mode = "smooth" if smooth else "blocky_clamped"
+        overlap = 0.50 if smooth else 0.0
 
         return {
             "winSize": (win_size, win_size),
@@ -818,7 +835,9 @@ class LucasKanade:
         block_size = runtime_config.normalized_size()
         win_radius = max(2, int(config.get("win_size", 15)) // 2)
         motion_halo = int(np.ceil(float(config.get("max_flow_px", 64.0))))
-        overlap_halo = int(max(block_size) * float(config.get("tile_overlap", 0.20)))
+        smooth = _parse_bool((config or {}).get("smooth", True), default=True)
+        tile_overlap = float(config.get("tile_overlap", 0.50 if smooth else 0.0))
+        overlap_halo = int(max(block_size) * tile_overlap) if smooth else 0
         halo = max(win_radius + motion_halo, overlap_halo)
         grid = BlockGrid((height, width), size=block_size, halo=halo)
         blocks = [

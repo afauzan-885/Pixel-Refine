@@ -835,6 +835,64 @@ def _download_device(x: ti.types.ndarray(ti.f32, 1), y: ti.types.ndarray(dtype=t
         y[index] = x[offset]
 
 
+
+@ti.kernel
+def _weightnet_fused_tile_statistics(
+    ref_4ch: ti.types.ndarray(ti.f32, 1),
+    concat_1: ti.types.ndarray(ti.f32, 1),
+    tanh_out: ti.types.ndarray(ti.f32, 1),
+    h: ti.i32,
+    w: ti.i32,
+    oh: ti.i32,
+    ow: ti.i32,
+):
+    """Fuse 9-step tile statistics (mean, variance, texture context) into a single kernel."""
+    ti.loop_config(block_dim=128)
+    plane_in = h * w
+    plane_out = oh * ow
+    for idx in range(plane_out):
+        ox = idx % ow
+        oy = idx // ow
+        iy = oy * 2
+        ix = ox * 2
+
+        sum_m = 0.0
+        sum_sq = 0.0
+        sum_std = 0.0
+
+        for ky in ti.static(range(4)):
+            y = iy + ky
+            for kx in ti.static(range(4)):
+                x = ix + kx
+                p = y * w + x
+                c0 = ref_4ch[p]
+                c1 = ref_4ch[plane_in + p]
+                c2 = ref_4ch[2 * plane_in + p]
+                c3 = ref_4ch[3 * plane_in + p]
+
+                m = (c0 + c1 + c2 + c3) * 0.25
+                sum_m += m
+                sum_sq += (c0 * c0 + c1 * c1 + c2 * c2 + c3 * c3) * 0.25
+
+                d0 = c0 - m
+                d1 = c1 - m
+                d2 = c2 - m
+                d3 = c3 - m
+                variance = (d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3) * 0.25
+                sum_std += ti.sqrt(ti.max(variance, 1e-12))
+
+        mean_tile = sum_m * (1.0 / 16.0)
+        sq_tile = sum_sq * (1.0 / 16.0)
+        std_tile = sum_std * (1.0 / 16.0)
+
+        var_tile = ti.max(sq_tile - mean_tile * mean_tile, 1e-5)
+        std_out = ti.sqrt(var_tile)
+
+        concat_1[idx] = mean_tile
+        concat_1[plane_out + idx] = std_out
+        tanh_out[idx] = ti.tanh(std_tile * 8.0)
+
+
 class NativeGraph:
     """Validated static graph; host output copies are owned by the caller.
 
@@ -916,7 +974,8 @@ class NativeGraph:
                  enable_weightnet_abs_conv_fusion=False,
                  enable_weightnet_pool_abs_concat_fusion=False,
                  enable_weightnet_fused_heads_and_gate_fusion=False,
-                 enable_weightnet_phase_gate_concat23_fusion=False):
+                 enable_weightnet_phase_gate_concat23_fusion=False,
+                 enable_weightnet_fused_tile_statistics=False):
         from onnx import defs, helper, numpy_helper
 
         self.opsets = {}
@@ -1361,6 +1420,11 @@ class NativeGraph:
         if enable_weightnet_phase_gate_concat23_fusion:
             self.fusion_stats["weightnet_phase_gate_concat23"] = (
                 self._fuse_weightnet_phase_gate_concat23()
+            )
+        self.fusion_stats["weightnet_fused_tile_statistics"] = 0
+        if enable_weightnet_fused_tile_statistics:
+            self.fusion_stats["weightnet_fused_tile_statistics"] = (
+                self._fuse_weightnet_tile_statistics()
             )
         self.concat_stats = {"gather_nodes": 0, "legacy_fallback_nodes": 0}
         if enable_concat_gather:
@@ -3244,6 +3308,72 @@ class NativeGraph:
             finally:
                 self.buffers.update(saved_buffers)
 
+
+    def _fuse_weightnet_tile_statistics(self):
+        """Fuse the 9-step WeightNet tile statistics sub-graph into a single kernel."""
+        concat_idx = None
+        tanh_idx = None
+        for i, step in enumerate(self.steps):
+            out = step.get("output")
+            if out == "/Concat_1_output_0" or (step.get("op") == "Concat" and len(step.get("inputs", [])) == 2 and any("Sqrt" in x for x in step.get("inputs", []))):
+                concat_idx = i
+            elif out == "/Tanh_output_0" or (step.get("op") == "WeightNetStatsTanh"):
+                tanh_idx = i
+        if concat_idx is None or tanh_idx is None:
+            return 0
+
+        concat_step = self.steps[concat_idx]
+        tanh_step = self.steps[tanh_idx]
+
+        concat_shape = self.shapes.get(concat_step["output"])
+        if concat_shape is None or len(concat_shape) != 4 or concat_shape[1] != 2:
+            return 0
+        oh, ow = concat_shape[2], concat_shape[3]
+
+        ref_4ch_name = "/SpaceToDepth_output_0"
+        if ref_4ch_name not in self.shapes:
+            for s in self.steps:
+                if s.get("op") == "SpaceToDepth" and s.get("output") in self.shapes:
+                    sh = self.shapes[s["output"]]
+                    if len(sh) == 4 and sh[1] == 4 and (sh[2] - 4) // 2 + 1 == oh:
+                        ref_4ch_name = s["output"]
+                        break
+        ref_shape = self.shapes.get(ref_4ch_name)
+        if ref_shape is None:
+            return 0
+        h, w = ref_shape[2], ref_shape[3]
+
+        subgraph_outputs = {
+            "/ReduceMean_2_output_0", "/Sub_3_output_0", "/AveragePool_2_output_0",
+            "/Pow_1_output_0", "/ReduceMean_1_output_0", "/AveragePool_3_output_0",
+            "/Sqrt_1_output_0", concat_step["output"], tanh_step["output"]
+        }
+
+        new_step = {
+            "op": "WeightNetFusedTileStatistics",
+            "inputs": [ref_4ch_name],
+            "output": concat_step["output"],
+            "outputs": [concat_step["output"], tanh_step["output"]],
+            "tanh_output": tanh_step["output"],
+            "h": h, "w": w, "oh": oh, "ow": ow,
+            "attrs": {},
+        }
+
+        new_steps = []
+        replaced = False
+        for s in self.steps:
+            out = s.get("output")
+            if out in subgraph_outputs:
+                if not replaced:
+                    new_steps.append(new_step)
+                    replaced = True
+                continue
+            new_steps.append(s)
+
+        self.steps = new_steps
+        return 1
+
+
     def _dispatch(self, step, emit=None):
         # The AOT exporter records these same dispatches with fixed model
         # dimensions. Keep operator selection and arithmetic in one place.
@@ -3332,6 +3462,17 @@ class NativeGraph:
                 out,
                 step["h"],
                 step["w"],
+            )
+        elif op == "WeightNetFusedTileStatistics":
+            emit(
+                _weightnet_fused_tile_statistics,
+                self.buffers[ins[0]],
+                self.buffers[step["output"]],
+                self.buffers[step["tanh_output"]],
+                step["h"],
+                step["w"],
+                step["oh"],
+                step["ow"],
             )
         elif op == "FusedMulClip":
             emit(

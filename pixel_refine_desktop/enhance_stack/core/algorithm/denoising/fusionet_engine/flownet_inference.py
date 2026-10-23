@@ -510,29 +510,35 @@ class AOTOpticalFlowAligner:
                 # Flow is already smoothly stitched via fused WOLA in the AOT graph;
                 # no external Gaussian blur is required.
                 active_flow_gpu = self.flow_l0
-                if return_gpu:
-                    warped = self._remap_resident(
-                        supp_rgb_f32,
-                        active_flow_gpu,
-                        self.full_h,
-                        self.full_w,
+                warped = None
+                if supp_rgb_f32 is not None:
+                    prim_shape = getattr(
+                        supp_rgb_f32, "shape", (self.full_h, self.full_w)
                     )
-                    if warped is None:
+                    prim_h, prim_w = int(prim_shape[0]), int(prim_shape[1])
+                    if return_gpu:
+                        warped = self._remap_resident(
+                            supp_rgb_f32,
+                            active_flow_gpu,
+                            prim_h,
+                            prim_w,
+                        )
+                        if warped is None:
+                            warped = taichi_aot.remap_with_flow(
+                                supp_rgb_f32,
+                                active_flow_gpu,
+                                prim_h,
+                                prim_w,
+                                return_gpu=True,
+                            )
+                    else:
                         warped = taichi_aot.remap_with_flow(
                             supp_rgb_f32,
                             active_flow_gpu,
-                            self.full_h,
-                            self.full_w,
-                            return_gpu=True,
+                            prim_h,
+                            prim_w,
+                            return_gpu=False,
                         )
-                else:
-                    warped = taichi_aot.remap_with_flow(
-                        supp_rgb_f32,
-                        active_flow_gpu,
-                        self.full_h,
-                        self.full_w,
-                        return_gpu=False,
-                    )
 
                 if secondary_frame_to_warp is not None:
                     sec_shape = getattr(
@@ -580,13 +586,19 @@ class AOTOpticalFlowAligner:
                 )
                 active_flow_gpu = smooth_flow_gpu
                 transient_flow_gpu = smooth_flow_gpu
-                warped = taichi_aot.remap_with_flow(
-                    supp_rgb_f32,
-                    active_flow_gpu,
-                    self.full_h,
-                    self.full_w,
-                    return_gpu=return_gpu,
-                )
+                warped = None
+                if supp_rgb_f32 is not None:
+                    prim_shape = getattr(
+                        supp_rgb_f32, "shape", (self.full_h, self.full_w)
+                    )
+                    prim_h, prim_w = int(prim_shape[0]), int(prim_shape[1])
+                    warped = taichi_aot.remap_with_flow(
+                        supp_rgb_f32,
+                        active_flow_gpu,
+                        prim_h,
+                        prim_w,
+                        return_gpu=return_gpu,
+                    )
 
                 if secondary_frame_to_warp is not None:
                     sec_shape = getattr(

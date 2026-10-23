@@ -5,6 +5,7 @@ from __future__ import annotations
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 
 from .card_content import CARD_CONTENT, CARD_NAME, LEGACY_CARD_NAME
+from .hdr_mask_pipeline import HDRMaskFusion
 from .hdr_fusion import WeightedHDRFusion
 from .spde_mr import SPDEMRAlgorithm, SPDEMRFusion
 
@@ -31,6 +32,26 @@ class WeightedHDRAlgorithm:
         return _run_array_frames(self, ctx, frames)
 
 
+class HDRMaskAlgorithm:
+    """Select one exposure source per output pixel using a hard mask."""
+
+    SPEC = get_spec("hdr", "mask")
+    NAME = SPEC.implementation_name
+    KIND = SPEC.category
+    DESCRIPTION = SPEC.description
+    CARD_CATEGORIES = ("hdr",)
+
+    def create_fusion(self, reference_rgb, *, radiance_enabled: bool):
+        return HDRMaskFusion(
+            reference_rgb.shape,
+            radiance_enabled=radiance_enabled,
+        )
+
+    def run(self, ctx, frames, batch_plan=None):
+        """Fuse an iterable of already-aligned, demosaiced RGB frames."""
+        return _run_array_frames(self, ctx, frames)
+
+
 def _run_array_frames(algorithm, ctx, frames):
     from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
         PipelineRuntime,
@@ -50,6 +71,7 @@ def _run_array_frames(algorithm, ctx, frames):
         support_paths=None,
         effective_exposures=None,
         is_spde_mr=isinstance(algorithm, SPDEMRAlgorithm),
+        is_hdr_mask=isinstance(algorithm, HDRMaskAlgorithm),
         align_support=False,
         cancel_callback=cancel_callback,
         include_radiance=False,
@@ -93,6 +115,7 @@ def running_hdr_fusion(
 
 
 __all__ = [
+    "HDRMaskAlgorithm",
     "SPDEMRAlgorithm",
     "SPDEMRFusion",
     "WeightedHDRAlgorithm",

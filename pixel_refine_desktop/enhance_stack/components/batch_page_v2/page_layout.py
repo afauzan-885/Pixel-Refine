@@ -74,7 +74,11 @@ def _update_right_panel_visibility(layout_instance: Any):
         has_batches = False
 
     panel = layout_instance.batch_panel
-    currently_visible = panel.isVisible() and panel.maximumWidth() != 0
+    # ``isVisible()`` is false when an ancestor page is hidden, even though
+    # this panel still owns its width in the stacked page's layout. Use the
+    # panel's explicit width state so deletions made from Bulk Mode still
+    # collapse the Batch Mode right panel.
+    currently_visible = panel.maximumWidth() != 0
 
     if has_batches and not currently_visible:
         _animate_panel_visibility(panel, True)

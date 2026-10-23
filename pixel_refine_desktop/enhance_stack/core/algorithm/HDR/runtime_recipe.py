@@ -14,6 +14,7 @@ from .hdr_fusion import (
     rgb_to_gray,
     srgb_to_linear,
 )
+from .HDR import HDRMaskAlgorithm
 from .spde_mr import SPDEMRAlgorithm
 
 
@@ -82,6 +83,7 @@ class HDRFusionRecipe:
         support_paths: list[str] | None,
         effective_exposures: list[float] | None,
         is_spde_mr: bool,
+        is_hdr_mask: bool = False,
         radiance_enabled: bool = False,
         progress_callback: Callable | None = None,
         align_support: bool = True,
@@ -93,6 +95,7 @@ class HDRFusionRecipe:
         self.effective_exposures = list(effective_exposures or ())
         self.radiance_enabled = bool(radiance_enabled)
         self.is_spde_mr = bool(is_spde_mr)
+        self.is_hdr_mask = bool(is_hdr_mask)
         self.progress_callback = progress_callback
         self.align_support = bool(align_support)
         self.cancel_callback = cancel_callback
@@ -115,7 +118,11 @@ class HDRFusionRecipe:
 
     def prepare_reference(self, reference_rgb, context) -> HDRFusionState:
         self._check_cancelled(context)
-        if self.is_spde_mr:
+        if self.is_hdr_mask:
+            fusion = HDRMaskAlgorithm().create_fusion(
+                reference_rgb, radiance_enabled=self.radiance_enabled
+            )
+        elif self.is_spde_mr:
             fusion = SPDEMRAlgorithm().create_fusion(
                 reference_rgb, radiance_enabled=self.radiance_enabled
             )
@@ -148,6 +155,19 @@ class HDRFusionRecipe:
         is_reference: bool = False,
         valid_mask=None,
     ) -> None:
+        if self.is_hdr_mask:
+            exposure_scale = 1.0
+            if self.radiance_enabled:
+                exposure_scale = (
+                    self.effective_exposures[index] / self.selected_exposure
+                )
+            fusion.add_frame(
+                rgb,
+                exposure_scale=exposure_scale,
+                valid_mask=valid_mask,
+            )
+            return
+
         gray = rgb_to_gray(rgb)
         noise_sigma = estimate_noise_taichi(gray, context.session)
         radiance_rgb = None

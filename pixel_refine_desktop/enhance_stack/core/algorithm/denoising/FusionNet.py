@@ -42,8 +42,9 @@ class FusionNetDenoisingAlgorithm:
         "input_channels": 1,
         "tile_overlap": 0.20,  # Tile overlap ratio (20% optimal for speed & seamless blend)
         "analysis_auto_enhance_mode": "natural",
-        "ghost_penalty": 3.5,  # Maximum ghost penalty for clean/low-noise regions
-        "ghost_penalty_min": 0.5,  # Minimum ghost penalty for high-noise regions
+        "ghost_penalty": 1.5,  # Maximum ghost penalty for clean/low-noise regions
+        "ghost_penalty_min": 1.0,  # Minimum ghost penalty for high-noise regions
+        "max_safety": 0.30,  # Maximum additive WeightNet safety-head bias
     }
 
     def _load_inputs(self, ctx, frames):
@@ -208,6 +209,9 @@ class FusionNetDenoisingAlgorithm:
                     "ghost_penalty_min", self.DEFAULT_CONFIG["ghost_penalty_min"]
                 )
             ),
+            "max_safety": float(
+                params.get("fusionnet_max_safety", params.get("max_safety", self.DEFAULT_CONFIG.get("max_safety", 0.30)))
+            ),
             "chroma_sensitivity": float(params.get("chroma_sensitivity", 1.0)),
             "alignment_plan": getattr(ctx, "alignment_selection_name", None)
             or params.get("alignment_plan", "No Alignment"),
@@ -237,6 +241,7 @@ class FusionNetDenoisingAlgorithm:
             runtime=weightnet_runtime,
             patch_size=config["tile_size"],
             input_channels=config["input_channels"],
+            max_safety=config.get("max_safety", 0.30),
         )
         config["alignment_config"].setdefault("work_scale", config["work_scale"])
         result, mean_alpha = run_resident_pipeline(
@@ -436,6 +441,7 @@ class FusionNetDenoisingAlgorithm:
                 runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "dml"),
                 patch_size=tile_size,
                 input_channels=config["input_channels"],
+                max_safety=config.get("max_safety", 0.30),
             )
 
             with AOTOpticalFlowAligner(
@@ -518,6 +524,7 @@ class FusionNetDenoisingAlgorithm:
                         ghost_cutoff=0.0,
                         chroma_sensitivity=1.0,
                         stop_event=stop_ev,
+                        max_safety=config.get("max_safety", 0.30),
                     )
                     alpha_total += alpha_mean
                     del supp_work

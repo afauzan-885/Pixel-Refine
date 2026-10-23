@@ -1,12 +1,24 @@
 # HDR Fusion
 
-This package adds two selectable batch algorithms:
+This package adds three selectable batch algorithms:
 
 - **Weighted HDR**: per-pixel exposure, detail, saturation, and Taichi noise
   weighted fusion.
 - **SPDE-MR HDR Fusion**: the same AOT weights plus Taichi AOT-scored 8×8
   patches at stride 4, local `E×C×S` quality, a structure correlation
   threshold of 0.8, and single-frame priority for regions rejected as moving.
+- **HDR Mask**: hard per-pixel source selection for aligned, demosaiced RGB
+  brackets. It selects the strongest unsaturated sample and uses a least-clipped
+  fallback where every available frame is saturated. Deghosting is not part of
+  this initial algorithm; `valid_mask` is the extension point for a later
+  source-eligibility provider.
+
+The HDR Mask core is in `hdr_mask_pipeline/core.py`. It expects RGB float32
+frames normalized to `[0, 1]` and aligned to the same pixel grid. Its source map
+records the selected input frame per pixel. When reliable exposure metadata is
+available, the selected sample is also scaled to the chosen reference exposure
+for the relative-radiance output. The initial mask is hard and does not feather
+transitions between source frames.
 
 `running_hdr_fusion()` reads the marked reference image from the batch database.
 It scans histogram summaries one image at a time; if the selected reference is
