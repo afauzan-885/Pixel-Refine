@@ -36,6 +36,7 @@ class ResidentManifestTests(unittest.TestCase):
             "runtime_abi": 1,
             "taichi_version": "test-taichi",
             "weights_sha256": hashlib.sha256(self.weights).hexdigest(),
+            "opsets": {"ai.onnx": 17},
             "io_schema": {"input": {"shape": [1], "dtype": "float32", "layout": "flat-contiguous"}},
             "artifact_members_sha256": dict(self.members),
         }
