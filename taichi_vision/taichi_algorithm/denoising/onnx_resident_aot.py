@@ -70,6 +70,10 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         ti.init(arch=arch, offline_cache=False)
     if ti.lang.impl.current_cfg().arch != arch:
         raise RuntimeError(f"Compiler did not initialize requested backend {backend}")
+    from taichi_vision.taichi_aot.artifact_targets import detect_target
+    from taichi_vision.taichi_aot.tcm_contract import RUNTIME_ABI_VERSION
+
+    target_identity = detect_target(backend=backend).as_dict()
     plan.backend = backend
     bindings, sizes, symbols = {}, {}, {}
 
@@ -268,11 +272,33 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         archive_module(module, output_path)
     weights = io.BytesIO()
     np.savez(weights, **constants)
+    with zipfile.ZipFile(output_path) as archive:
+        artifact_members_sha256 = {
+            name: hashlib.sha256(archive.read(name)).hexdigest()
+            for name in archive.namelist()
+            if name not in {"resident_onnx.json", "resident_weights.npz"}
+        }
+    io_schema = {
+        name: {
+            "shape": list(plan.shapes[name]),
+            "dtype": "float32",
+            "layout": "flat-contiguous",
+        }
+        for name in (*plan.inputs, *plan.outputs)
+    }
     metadata = {
-        "format": 1, "backend": backend, "graph": GRAPH_NAME, "patch_tools": patch_tools,
+        "format": 2, "backend": backend, "graph": GRAPH_NAME, "patch_tools": patch_tools,
         "tile_step_graph": tile_step_graph_name,
         "tile_step_cached_graph": tile_step_cached_graph_name,
         "model_sha256": hashlib.sha256(model_bytes).hexdigest(),
+        "target_identity": target_identity,
+        "device_capabilities": "not-recorded-at-compile-time",
+        "runtime_abi": RUNTIME_ABI_VERSION,
+        "compiler_version": str(ti.__version__),
+        "runtime_version": str(ti.__version__),
+        "opsets": {item.domain or "ai.onnx": int(item.version) for item in model.opset_import},
+        "io_schema": io_schema,
+        "artifact_members_sha256": artifact_members_sha256,
         "bindings": bindings, "sizes": sizes, "arguments": sorted(used),
         "constants": sorted(constants), "inputs": plan.inputs,
         "outputs": plan.outputs, "shapes": {k: list(v) for k, v in plan.shapes.items()},
@@ -292,7 +318,7 @@ class ResidentONNXGraph:
 
     runtime = "taichi_aot"
 
-    def __init__(self, path, *, engine=None, model_sha256=None):
+    def __init__(self, path, *, engine=None, model_sha256=None, artifact_only=False):
         if engine is None:
             from taichi_vision import taichi_aot
             engine = taichi_aot.get_engine()
@@ -307,11 +333,31 @@ class ResidentONNXGraph:
         with zipfile.ZipFile(self.path) as archive:
             self.metadata = json.loads(archive.read("resident_onnx.json"))
             weights = archive.read("resident_weights.npz")
-        if self.metadata["backend"] != str(engine.arch).lower():
-            raise RuntimeError("Resident ONNX artifact/backend mismatch")
-        # Model provenance check commented out: run directly from .tcm artifact
-        # if model_sha256 and self.metadata["model_sha256"] != model_sha256:
-        #     raise RuntimeError("Resident ONNX artifact does not match the selected model")
+            member_hashes = {
+                name: hashlib.sha256(archive.read(name)).hexdigest()
+                for name in archive.namelist()
+                if name not in {"resident_onnx.json", "resident_weights.npz"}
+            }
+            if len(archive.namelist()) != len(set(archive.namelist())):
+                raise RuntimeError("Resident ONNX artifact contains duplicate ZIP members")
+        from taichi_vision.taichi_aot.artifact_targets import detect_target
+        from taichi_vision.taichi_aot.tcm_contract import RUNTIME_ABI_VERSION
+        from taichi_vision.taichi_algorithm.denoising.resident_manifest import (
+            validate_resident_metadata,
+        )
+
+        target = detect_target(
+            backend=str(engine.arch).lower(), device=getattr(engine, "gpu_name", "")
+        ).as_dict()
+        self.manifest_compatibility = validate_resident_metadata(
+            self.metadata,
+            backend=str(engine.arch).lower(),
+            target_identity=target,
+            model_sha256=model_sha256,
+            artifact_only=artifact_only,
+            runtime_abi=RUNTIME_ABI_VERSION,
+            artifact_members=member_hashes,
+        )
         self.module = engine.load(str(self.path))
         try:
             input_bindings = {self.metadata["bindings"][key] for key in self.metadata["inputs"]}

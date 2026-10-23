@@ -63,7 +63,7 @@ class RealDeviceLeaseTests(unittest.TestCase):
         import numpy as np
         from taichi_vision.taichi_algorithm.denoising.onnx_resident_aot import ResidentONNXGraph
         from taichi_vision.taichi_aot.device_invocation import InvocationBusyError
-        runner = ResidentONNXGraph(path)
+        runner = ResidentONNXGraph(path, artifact_only=True)
         buffers = {}
         try:
             for item in runner.get_inputs():

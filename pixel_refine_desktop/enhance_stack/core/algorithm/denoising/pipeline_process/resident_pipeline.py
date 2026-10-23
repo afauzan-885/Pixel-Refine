@@ -537,9 +537,12 @@ def _resolve_engine_analysis_params(
     mode=ANALYSIS_AUTO_ENHANCE_MODE,
 ):
     """Resolve the reference-driven transform for a requested pipeline stage."""
+    # When mode is explicitly given as "natural" for spatial_weight scoring (not alignment),
+    # SpatialFusion weight input remains linear.
     if (
         str(weight_engine).strip().lower() == "spatial_fusion"
-        and str(mode).strip().lower() != "analysis"
+        and str(mode).strip().lower() == "natural"
+        and ANALYSIS_AUTO_ENHANCE_MODE != "natural"
     ):
         return None
     return _resolve_reference_analysis_params(
@@ -3001,11 +3004,7 @@ def _run_shared_raw_provider_pipeline(
                 f"{'half-resolution' if use_half_res else 'full-resolution'}; "
                 "final preview: Hamilton"
             )
-            alignment_mode = (
-                "analysis"
-                if normalized_engine in ("fusionet", "spatial_fusion")
-                else ANALYSIS_AUTO_ENHANCE_MODE
-            )
+            alignment_mode = ANALYSIS_AUTO_ENHANCE_MODE
             analysis_params = _resolve_engine_analysis_params(
                 ref_proxy_full_gpu,
                 weight_engine=normalized_engine,
@@ -4174,11 +4173,7 @@ def run_gpu_resident_pipeline(
 
     # Alignment uses the full analysis mode for FusionNet and SpatialFusion.
     # FusionNet's WeightNet parameters remain separately resolved in natural mode.
-    alignment_mode = (
-        "analysis"
-        if weight_engine in ("fusionet", "spatial_fusion")
-        else ANALYSIS_AUTO_ENHANCE_MODE
-    )
+    alignment_mode = ANALYSIS_AUTO_ENHANCE_MODE
     analysis_params = _resolve_engine_analysis_params(
         ref_gpu,
         weight_engine=weight_engine,

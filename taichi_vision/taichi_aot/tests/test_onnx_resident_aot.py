@@ -19,11 +19,15 @@ def test_same_runtime_onnx_reuses_device_buffers_without_host_transfer(tmp_path,
         [h.make_tensor_value_info("result", T.FLOAT, shape)],
     )
     model = h.make_model(graph, opset_imports=[h.make_opsetid("", 17)])
-    artifact = compile_resident_onnx(model.SerializeToString(), tmp_path / "tiny.tcm", "cpu")
+    model_bytes = model.SerializeToString()
+    artifact = compile_resident_onnx(model_bytes, tmp_path / "tiny.tcm", "cpu")
     from taichi_vision import taichi_aot as aot
     from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
     assert aot.engine.arch == "cpu"
-    executor = ResidentONNXGraph(artifact)
+    import hashlib
+    executor = ResidentONNXGraph(
+        artifact, model_sha256=hashlib.sha256(model_bytes).hexdigest()
+    )
     x = np.arange(16, dtype=np.float32) - 8
     z = np.full(16, 2, dtype=np.float32)
     x_gpu, z_gpu = aot.engine.upload(x), aot.engine.upload(z)

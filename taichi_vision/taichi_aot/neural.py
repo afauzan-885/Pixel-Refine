@@ -177,7 +177,9 @@ class InferenceSession:
             p = Path(model_path_or_bytes)
             if p.is_file() and p.suffix.lower() == ".tcm":
                 self.tcm_path = p.resolve()
-                self._graph = ResidentONNXGraph(self.tcm_path, engine=self.engine)
+                self._graph = ResidentONNXGraph(
+                    self.tcm_path, engine=self.engine, artifact_only=True
+                )
                 return
 
         # 2. Extract ONNX model bytes
