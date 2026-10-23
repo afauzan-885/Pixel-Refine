@@ -73,4 +73,52 @@ class PipelineTelemetry:
         }
 
 
-__all__ = ["MemorySnapshot", "PipelineTelemetry"]
+def get_memory_telemetry_str(engine: Any = None) -> str:
+    """Format Dedicated VRAM, Shared VRAM, and Process RAM metrics."""
+    parts: list[str] = []
+    try:
+        import psutil
+
+        proc = psutil.Process(os.getpid())
+        ram_mb = proc.memory_info().rss / (1024 * 1024)
+        parts.append(f"RAM={ram_mb:.0f}MB")
+    except Exception:
+        pass
+
+    try:
+        from taichi_vision.device_selection import query_vulkan_memory_budget
+
+        if engine is None:
+            from taichi_vision.taichi_aot import get_engine
+
+            engine = get_engine()
+        dev_id = getattr(engine, "device_id", 0)
+        arch = getattr(engine, "arch", "vulkan").lower()
+        if arch in ("vulkan", "opengl", "cuda"):
+            budget = query_vulkan_memory_budget(dev_id)
+            if budget.get("supported"):
+                heaps = budget.get("heaps", [])
+                vram_used_mb = 0.0
+                shared_used_mb = 0.0
+                for heap in heaps:
+                    used_mb = heap.get("usage", 0) / (1024 * 1024)
+                    if heap.get("device_local"):
+                        vram_used_mb += used_mb
+                    else:
+                        shared_used_mb += used_mb
+                if vram_used_mb > 0 or budget.get("device_local_usage", 0) > 0:
+                    vram_mb = (
+                        vram_used_mb
+                        if vram_used_mb > 0
+                        else (budget.get("device_local_usage", 0) / (1024 * 1024))
+                    )
+                    parts.append(f"VRAM={vram_mb:.0f}MB")
+                if shared_used_mb > 0:
+                    parts.append(f"SharedVRAM={shared_used_mb:.0f}MB")
+    except Exception:
+        pass
+
+    return " | ".join(parts) if parts else "RAM=N/A"
+
+
+__all__ = ["MemorySnapshot", "PipelineTelemetry", "get_memory_telemetry_str"]
