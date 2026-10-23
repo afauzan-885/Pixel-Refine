@@ -177,6 +177,7 @@ struct RawIcdContextTag;
 struct BufferRecord {
   uint64_t capacity;
   bool mapped = false;
+  bool release_failed = false;
 };
 
 struct EngineContext {
@@ -1245,6 +1246,10 @@ static BufferRecord *checked_buffer(EngineContext *ctx, void *memory,
     memory_error(ctx, operation, "buffer is not owned by this runtime or is freed");
     return nullptr;
   }
+  if (it->second.release_failed) {
+    memory_error(ctx, operation, "buffer release outcome is unknown; allocation quarantined");
+    return nullptr;
+  }
   if (size > it->second.capacity || size > (std::numeric_limits<size_t>::max)()) {
     memory_error(ctx, operation, "byte range exceeds allocation capacity or host size_t");
     return nullptr;
@@ -1377,6 +1382,9 @@ static bool free_owned_buffer(EngineContext *ctx, ti::Runtime *rt,
   if (record->mapped && !unmap_owned_buffer(ctx, rt, memory, operation))
     return false;
   ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
+  // The backend has a void release API. Any failure after entering it has an
+  // indeterminate outcome; retain bookkeeping but forbid future access/retry.
+  record->release_failed = true;
   ti_free_memory(rt->runtime(), static_cast<TiMemory>(memory));
   if (!memory_call_ok(ctx, operation))
     return false;
@@ -1532,9 +1540,9 @@ EXPORT void *init_aot_engine(int arch_id, int device_id) {
 #endif
     }
     ctx->destroying = false;
-    ctx->session_id = next_session_id++;
     {
       std::lock_guard<std::recursive_mutex> lock(engine_contexts_mutex);
+      ctx->session_id = next_session_id++;
       engine_contexts.insert(ctx.get());
     }
     return (void *)ctx.release();
@@ -1552,9 +1560,9 @@ EXPORT void *init_aot_engine(int arch_id, int device_id) {
       auto ctx = std::make_unique<EngineContext>();
       ctx->runtime = new ti::Runtime(TI_ARCH_X64, 0);
       ctx->destroying = false;
-      ctx->session_id = next_session_id++;
       {
         std::lock_guard<std::recursive_mutex> lock(engine_contexts_mutex);
+        ctx->session_id = next_session_id++;
         engine_contexts.insert(ctx.get());
       }
       return (void *)ctx.release();
@@ -1570,7 +1578,9 @@ EXPORT const char *get_runtime_device_name(void *runtime) {
   if (!ctx)
     return "";
   std::lock_guard<std::mutex> lock(ctx->mutex);
-  return ctx->device_name.c_str();
+  static thread_local std::string device;
+  device = ctx->device_name;
+  return device.c_str();
 }
 
 EXPORT const char *get_runtime_context_backend(void *runtime) {
@@ -1756,7 +1766,7 @@ EXPORT void destroy_aot_engine(void *runtime) {
       while (!ctx->buffers.empty()) {
         if (!free_owned_buffer(ctx, ctx->runtime, ctx->buffers.begin()->first,
                                "destroy_aot_engine free"))
-          return; // Keep the runtime and failed entries valid for retry.
+          return; // Retain the runtime; quarantined entries fail closed.
       }
       while (!ctx->modules.empty()) {
         ModuleContext *mod = *ctx->modules.begin();
