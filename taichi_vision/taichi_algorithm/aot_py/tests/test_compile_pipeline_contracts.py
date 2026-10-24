@@ -34,6 +34,110 @@ class CompilePipelineContractTests(unittest.TestCase):
             artifact.write_bytes(b"changed payload")
             self.assertEqual(suite._verified_build(artifact, identity), (False, "artifact_size_mismatch"))
 
+    @staticmethod
+    def _alias_identity(output_name: str, source: str = "source-a"):
+        return {
+            "source_sha256": source,
+            "target": "cpu_x64",
+            "job": "block_matching",
+            "aliases": ["lucas_kanade_bm"],
+            "output_artifact": output_name,
+            "output_roster": ["block_matching", "lucas_kanade_bm"],
+            "graph_build_signature": "graph-signature-v1",
+            "with_tcm_manifest": True,
+        }
+
+    def test_job_cache_hit_requires_verified_primary_and_alias(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outputs = []
+            for name in ("block_matching", "lucas_kanade_bm"):
+                artifact = Path(temp) / f"{name}.tcm"
+                artifact.write_bytes(name.encode("ascii"))
+                identity = self._alias_identity(name)
+                suite._write_build_provenance(artifact, identity)
+                outputs.append((name, artifact, identity))
+            self.assertEqual(suite._verified_job_build(outputs), (True, "all_outputs_verified"))
+
+    def test_missing_alias_invalidates_whole_job_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary = Path(temp) / "block_matching.tcm"
+            alias = Path(temp) / "lucas_kanade_bm.tcm"
+            primary.write_bytes(b"primary")
+            primary_identity = self._alias_identity("block_matching")
+            alias_identity = self._alias_identity("lucas_kanade_bm")
+            suite._write_build_provenance(primary, primary_identity)
+            self.assertEqual(
+                suite._verified_job_build([
+                    ("block_matching", primary, primary_identity),
+                    ("lucas_kanade_bm", alias, alias_identity),
+                ]),
+                (False, "lucas_kanade_bm:artifact_missing"),
+            )
+
+    def test_missing_alias_sidecar_invalidates_whole_job_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary = Path(temp) / "block_matching.tcm"
+            alias = Path(temp) / "lucas_kanade_bm.tcm"
+            primary.write_bytes(b"primary")
+            alias.write_bytes(b"alias")
+            primary_identity = self._alias_identity("block_matching")
+            alias_identity = self._alias_identity("lucas_kanade_bm")
+            suite._write_build_provenance(primary, primary_identity)
+            self.assertEqual(
+                suite._verified_job_build([
+                    ("block_matching", primary, primary_identity),
+                    ("lucas_kanade_bm", alias, alias_identity),
+                ]),
+                (False, "lucas_kanade_bm:provenance_missing"),
+            )
+
+    def test_changed_alias_payload_invalidates_whole_job_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outputs = []
+            for name in ("block_matching", "lucas_kanade_bm"):
+                artifact = Path(temp) / f"{name}.tcm"
+                artifact.write_bytes(b"payload")
+                identity = self._alias_identity(name)
+                suite._write_build_provenance(artifact, identity)
+                outputs.append((name, artifact, identity))
+            outputs[1][1].write_bytes(b"changed")  # same size; hash must catch it
+            self.assertEqual(
+                suite._verified_job_build(outputs),
+                (False, "lucas_kanade_bm:artifact_hash_mismatch"),
+            )
+
+    def test_stale_alias_fingerprint_invalidates_whole_job_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outputs = []
+            for name in ("block_matching", "lucas_kanade_bm"):
+                artifact = Path(temp) / f"{name}.tcm"
+                artifact.write_bytes(b"payload")
+                identity = self._alias_identity(name)
+                stamped_identity = self._alias_identity(name, source="old-source") if name.endswith("bm") else identity
+                suite._write_build_provenance(artifact, stamped_identity)
+                outputs.append((name, artifact, identity))
+            self.assertEqual(
+                suite._verified_job_build(outputs),
+                (False, "lucas_kanade_bm:build_inputs_mismatch"),
+            )
+
+    def test_manifest_bytes_cannot_rescue_alias_without_producer_provenance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary = Path(temp) / "block_matching.tcm"
+            alias = Path(temp) / "lucas_kanade_bm.tcm"
+            primary.write_bytes(b"primary")
+            alias.write_bytes(b'{"tcm_manifest":{"compiler_version":"current"}}')
+            primary_identity = self._alias_identity("block_matching")
+            alias_identity = self._alias_identity("lucas_kanade_bm")
+            suite._write_build_provenance(primary, primary_identity)
+            self.assertEqual(
+                suite._verified_job_build([
+                    ("block_matching", primary, primary_identity),
+                    ("lucas_kanade_bm", alias, alias_identity),
+                ]),
+                (False, "lucas_kanade_bm:provenance_missing"),
+            )
+
     def test_arm_profiles_are_selectable_from_active_target_manifest(self):
         self.assertIn("cpu_arm64_android", target_registry.TARGET_BACKENDS)
         self.assertIn("cpu_arm64_linux", target_registry.TARGET_BACKENDS)

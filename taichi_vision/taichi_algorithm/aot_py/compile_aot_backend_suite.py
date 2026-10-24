@@ -470,6 +470,7 @@ def _build_identity(
         "backend": backend,
         "job": name,
         "output_artifact": output_name or name,
+        "output_roster": [name, *aliases],
         "compiler_module": module_name,
         "compiler_callable": function_name,
         "convention": convention,
@@ -525,6 +526,18 @@ def _build_identity(
             "artifact_sha256": _sha256_file(source_artifact) if source_artifact.is_file() else None,
             "build_fingerprint": source_record.get("build_fingerprint") if isinstance(source_record, dict) else None,
         }
+    graph_signature_inputs = {
+        key: identity[key]
+        for key in (
+            "source_sha256", "toolchain_sha256", "target_manifest_sha256",
+            "target", "backend", "job", "compiler_module",
+            "compiler_callable", "compiler_identity", "build_environment",
+            "aot_device", "worker_pythonpath",
+        )
+    }
+    identity["graph_build_signature"] = hashlib.sha256(
+        json.dumps(graph_signature_inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     return identity
 
 
@@ -591,6 +604,33 @@ def _verified_build(artifact: Path, identity: dict[str, object]) -> tuple[bool, 
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False, "provenance_invalid"
     return True, "fingerprint_and_payload_match"
+
+
+def _verified_job_build(
+    outputs: list[tuple[str, Path, dict[str, object]]],
+) -> tuple[bool, str]:
+    """Accept a job cache hit only when every primary/alias output is verified."""
+    if not outputs:
+        return False, "job_has_no_expected_outputs"
+    expected_roster = [output_name for output_name, _, _ in outputs]
+    expected_signature = outputs[0][2].get("graph_build_signature")
+    if not expected_signature:
+        return False, "graph_build_signature_missing"
+    seen_names: set[str] = set()
+    for output_name, artifact, identity in outputs:
+        if output_name in seen_names:
+            return False, f"duplicate_expected_output:{output_name}"
+        seen_names.add(output_name)
+        if identity.get("output_artifact") != output_name:
+            return False, f"identity_output_mismatch:{output_name}"
+        if identity.get("output_roster") != expected_roster:
+            return False, f"identity_roster_mismatch:{output_name}"
+        if identity.get("graph_build_signature") != expected_signature:
+            return False, f"graph_build_signature_mismatch:{output_name}"
+        valid, reason = _verified_build(artifact, identity)
+        if not valid:
+            return False, f"{output_name}:{reason}"
+    return True, "all_outputs_verified"
 
 
 def _artifact_inventory(path: Path) -> dict[str, object]:
@@ -1259,23 +1299,31 @@ def main() -> None:
     if args.target and args.target.startswith("cpu_arm64"):
         target_dir = ARTIFACT_DIR / args.target
         target_dir.mkdir(parents=True, exist_ok=True)
+        job_outputs: dict[str, list[tuple[str, Path, dict[str, object]]]] = {}
+        decisions: dict[str, tuple[bool, str]] = {}
+        for name in requested:
+            outputs = (name, *JOBS[name][3])
+            job_outputs[name] = [
+                (
+                    output_name,
+                    target_dir / f"{output_name}_{args.target}.tcm",
+                    _build_identity(
+                        name, args.backend, args.target, args.tcm_compiler_version,
+                        Path(sys.executable).resolve(), args.with_tcm_manifest,
+                        output_name=output_name,
+                    ),
+                )
+                for output_name in outputs
+            ]
+            decisions[name] = _verified_job_build(job_outputs[name])
         requested_paths = [
-            target_dir / f"{name}_{args.target}.tcm" for name in requested
+            artifact
+            for outputs in job_outputs.values()
+            for _, artifact, _ in outputs
         ]
-        identities = {
-            name: _build_identity(
-                name, args.backend, args.target, args.tcm_compiler_version,
-                Path(sys.executable).resolve(), args.with_tcm_manifest,
-            )
-            for name in requested
-        }
-        decisions = {
-            name: _verified_build(path, identities[name])
-            for name, path in zip(requested, requested_paths)
-        }
         needs_generation = args.force or any(not valid for valid, _ in decisions.values())
         _retarget_cpu_arm64(args.target, force=needs_generation)
-        if needs_generation and _source_fingerprint(refresh=True) != next(iter(identities.values()))["source_sha256"]:
+        if needs_generation and _source_fingerprint(refresh=True) != next(iter(job_outputs.values()))[0][2]["source_sha256"]:
             raise RuntimeError("AOT source inputs changed during ARM64 retarget; refusing provenance stamp")
         missing = [str(path.name) for path in requested_paths if not path.is_file()]
         if missing:
@@ -1287,10 +1335,11 @@ def main() -> None:
             _attach_manifest_to_target_artifacts(
                 requested_paths, args.target, args.tcm_compiler_version
             )
-        for name, artifact in zip(requested, requested_paths):
-            _require_backend_artifact(artifact, "cpu")
-            validate_normalized_tcm(artifact)
-            _write_build_provenance(artifact, identities[name])
+        for outputs in job_outputs.values():
+            for _, artifact, identity in outputs:
+                _require_backend_artifact(artifact, "cpu")
+                validate_normalized_tcm(artifact)
+                _write_build_provenance(artifact, identity)
         for name in requested:
             decision = decisions[name][1]
             outcome = "PASS" if needs_generation else "SKIP verified"
@@ -1374,26 +1423,37 @@ def main() -> None:
     run_started = time.perf_counter()
     worker_python = _selected_worker_python()
     for name in requested:
-        artifact = (
-            _target_artifact_path(name, args.target)
-            if args.target
-            else _artifact_path(name, args.backend)
-        )
         preflight_started = time.perf_counter()
-        identity = _build_identity(
-            name, args.backend, args.target, args.tcm_compiler_version,
-            worker_python, args.with_tcm_manifest,
-        )
+        expected_outputs = (name, *JOBS[name][3])
+        output_records = [
+            (
+                output_name,
+                _target_artifact_path(output_name, args.target)
+                if args.target else _artifact_path(output_name, args.backend),
+                _build_identity(
+                    name, args.backend, args.target, args.tcm_compiler_version,
+                    worker_python, args.with_tcm_manifest,
+                    output_name=output_name,
+                ),
+            )
+            for output_name in expected_outputs
+        ]
         preflight_seconds = time.perf_counter() - preflight_started
-        verified, cache_reason = _verified_build(artifact, identity)
+        verified, cache_reason = _verified_job_build(output_records)
         if verified and not args.force:
             outcomes.append((name, "SKIP verified"))
             report_jobs.append({
                 "job": name, "status": "cache_hit", "cache_reason": cache_reason,
                 "compiler_identity": args.tcm_compiler_version,
-                "build_fingerprint": _build_fingerprint(identity),
+                "build_fingerprints": {
+                    output_name: _build_fingerprint(identity)
+                    for output_name, _, identity in output_records
+                },
                 "preflight_seconds": preflight_seconds,
-                "artifacts": {artifact.name: _artifact_inventory(artifact)},
+                "artifacts": {
+                    artifact.name: _artifact_inventory(artifact)
+                    for _, artifact, _ in output_records
+                },
             })
             continue
         worker_started = time.perf_counter()
@@ -1401,7 +1461,7 @@ def main() -> None:
             args.backend, name, args.target, timeout=args.timeout,
             compiler_version=args.tcm_compiler_version,
             with_manifest=args.with_tcm_manifest,
-            expected_source_sha256=str(identity["source_sha256"]),
+            expected_source_sha256=str(output_records[0][2]["source_sha256"]),
         )
         worker_seconds = time.perf_counter() - worker_started
         outcomes.append((name, "PASS" if ok else f"FAIL\n{output}"))
@@ -1409,7 +1469,10 @@ def main() -> None:
             "job": name, "status": "compiled" if ok else "failed",
             "cache_reason": "forced" if args.force and verified else cache_reason,
             "compiler_identity": args.tcm_compiler_version,
-            "build_fingerprint": _build_fingerprint(identity),
+            "build_fingerprints": {
+                output_name: _build_fingerprint(identity)
+                for output_name, _, identity in output_records
+            },
             "preflight_seconds": preflight_seconds,
             "worker_wall_seconds": worker_seconds,
             "worker_metrics": _worker_metrics(output),
