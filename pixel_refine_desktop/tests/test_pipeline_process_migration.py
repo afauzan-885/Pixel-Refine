@@ -731,94 +731,57 @@ def test_weightnet_scalar_upload_workspace_returns_map_without_rgb_expansion():
     np.testing.assert_array_equal(staged, scalar[0])
 
 
-def test_weightnet_inference_accepts_precomputed_single_channel_inputs():
+def test_weightnet_inference_forwards_to_resident_tcm_session():
     import numpy as np
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
         infer_single_support_weight_map,
     )
 
-    class FakeInput:
-        shape = [1, 1, 4, 4]
+    class FakeTcmSession:
+        runtime = "taichi_aot"
+        max_safety = 0.30
 
-    class FakeOutput:
-        def __init__(self, shape):
-            self.shape = shape
+        def __init__(self):
+            self.calls = []
 
-    class FakeSession:
-        def get_inputs(self):
-            return [FakeInput()]
-
-        def get_outputs(self):
-            return [FakeOutput([1, 1, 4, 4]), FakeOutput([1, 1])]
-
-        def get_providers(self):
-            return ["CPUExecutionProvider"]
-
-        def run(self, names, feed):
-            assert feed["ref_img"].shape == (1, 1, 4, 4)
-            assert feed["support_img"].shape == (1, 1, 4, 4)
-            return [
-                np.full((1, 1, 4, 4), 0.75, dtype=np.float32),
-                np.full((1, 1), 0.8, dtype=np.float32),
-            ]
+        def infer(self, ref_work, supp_work, **options):
+            self.calls.append((ref_work, supp_work, options))
+            weight = np.full((1, 4, 4), 0.75, dtype=np.float32)
+            return weight, np.float32(0.8)
 
     ref = np.full((1, 4, 4), 0.5, dtype=np.float32)
     support = np.full((1, 4, 4), 0.4, dtype=np.float32)
+    session = FakeTcmSession()
     weights, alpha = infer_single_support_weight_map(
-        FakeSession(), ref, support, tile_size=4, overlap=0.0
-    )
-    scalar_weights, scalar_alpha = infer_single_support_weight_map(
-        FakeSession(), ref, support, tile_size=4, overlap=0.0, return_scalar=True
+        session, ref, support, tile_size=4, overlap=0.0,
+        ghost_penalty=1.5, ghost_cutoff=0.05, max_safety=0.42,
     )
 
-    assert weights.shape == (3, 4, 4)
-    assert scalar_weights.shape == (1, 4, 4)
-    assert weights.dtype == np.float32
-    assert scalar_weights.dtype == np.float32
+    assert weights.shape == (1, 4, 4)
     assert alpha == np.float32(0.8)
-    assert scalar_alpha == alpha
-    np.testing.assert_array_equal(scalar_weights, weights[:1])
+    forwarded_ref, forwarded_support, options = session.calls[0]
+    assert forwarded_ref is ref
+    assert forwarded_support is support
+    assert options["overlap"] == 0.0
+    assert options["ghost_penalty"] == 1.5
+    assert options["ghost_cutoff"] == 0.05
+    assert options["max_safety"] == 0.42
 
 
-def test_weightnet_inference_reduces_rgb_callers_to_luminance_input():
+def test_weightnet_inference_rejects_non_tcm_sessions():
     import numpy as np
+    import pytest
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
         infer_single_support_weight_map,
     )
 
-    class FakeInput:
-        shape = [1, 1, 4, 4]
+    class LegacyOrtSession:
+        def run(self, names, feed):  # pragma: no cover - must never be called
+            raise AssertionError("ONNX Runtime route was removed")
 
-    class FakeOutput:
-        def __init__(self, shape):
-            self.shape = shape
-
-    class FakeSession:
-        def get_inputs(self):
-            return [FakeInput()]
-
-        def get_outputs(self):
-            return [FakeOutput([1, 1, 4, 4]), FakeOutput([1, 1])]
-
-        def get_providers(self):
-            return ["CPUExecutionProvider"]
-
-        def run(self, names, feed):
-            assert feed["ref_img"].shape == (1, 1, 4, 4)
-            assert feed["support_img"].shape == (1, 1, 4, 4)
-            return [
-                np.full((1, 1, 4, 4), 0.75, dtype=np.float32),
-                np.full((1, 1), 0.8, dtype=np.float32),
-            ]
-
-    ref = np.full((3, 4, 4), 0.5, dtype=np.float32)
-    support = np.full((3, 4, 4), 0.4, dtype=np.float32)
-    weights, alpha = infer_single_support_weight_map(
-        FakeSession(), ref, support, tile_size=4, overlap=0.0
-    )
-
-    assert weights.shape == (3, 4, 4)
-    assert alpha == np.float32(0.8)
+    ref = np.full((1, 4, 4), 0.5, dtype=np.float32)
+    with pytest.raises(RuntimeError, match="resident TCM session"):
+        infer_single_support_weight_map(LegacyOrtSession(), ref, ref, tile_size=4)
 
 
 def test_fusionnet_keeps_luminance_model_as_default_and_only_route():
