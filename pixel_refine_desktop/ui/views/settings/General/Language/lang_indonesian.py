@@ -865,7 +865,7 @@ LBL_BACKEND_COMPATIBILITY_RESULTS = "Hasil Kompatibilitas Backend"
 LBL_DIAGNOSTIC_LOGS = "Log diagnostik"
 MSG_BACKEND_TEST_FINISHED = "Pengujian backend selesai."
 LBL_AUTO_FALLBACK = "Fallback Otomatis"
-LBL_AUTO_FALLBACK_TIP = "Jika diaktifkan, otomatis beralih melalui CUDA, Vulkan, OpenGL, lalu CPU bila backend yang dipilih tidak tersedia."
+LBL_AUTO_FALLBACK_TIP = "Jika diaktifkan, otomatis beralih melalui CUDA, Vulkan, lalu CPU bila backend yang dipilih tidak tersedia."
 AUTO_SHUTDOWN_LABEL = "Aktifkan Shutdown Otomatis"
 AUTO_SHUTDOWN_DESCRIPTION = (
     "Tutup aplikasi setelah tidak ada aktivitas pengguna selama waktu yang ditentukan."

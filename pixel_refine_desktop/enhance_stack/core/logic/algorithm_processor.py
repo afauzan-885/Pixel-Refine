@@ -33,7 +33,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.SplatSR 
 )
 
 
-_SUPPORTED_BACKENDS = ("cuda", "vulkan", "opengl", "cpu")
+_SUPPORTED_BACKENDS = ("cuda", "vulkan", "cpu")
 
 
 def _is_backend_compatibility_error(result):
@@ -80,14 +80,15 @@ def _fallback_backend_configs(worker_mgr):
         str(item).strip().lower() for item in chain
     }:
         if current_backend == "cuda":
-            chain = ["cuda", "vulkan", "opengl", "cpu"]
+            chain = ["cuda", "vulkan", "cpu"]
         elif current_backend == "vulkan":
-            chain = ["vulkan", "opengl", "cpu"]
-        elif current_backend == "opengl":
-            chain = ["opengl", "cpu"]
+            chain = ["vulkan", "cpu"]
         else:
             chain = [current_backend]
     chain = [str(item).strip().lower() for item in (chain or [])]
+    # OpenGL is excluded from the recovery chain: its native graph dispatch
+    # crashes the worker (0xC0000005) on validated NVIDIA desktop drivers, so
+    # a stored chain containing it must never be retried here.
     chain = [item for item in chain if item in _SUPPORTED_BACKENDS]
 
     try:
@@ -116,7 +117,6 @@ def _fallback_backend_configs(worker_mgr):
         device_id = {
             "cuda": cuda_id,
             "vulkan": vulkan_id,
-            "opengl": 0,
             "cpu": 0,
         }[backend]
         candidate = dict(active)

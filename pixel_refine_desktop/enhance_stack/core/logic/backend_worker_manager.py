@@ -497,7 +497,7 @@ class BackendWorkerManager:
 
         # The runtime resolves canonical variables before the legacy aliases.
         # Override both on every launch/retry so inherited CUDA settings cannot
-        # silently override a newly selected Vulkan/OpenGL/CPU backend.
+        # silently override a newly selected Vulkan/CPU backend.
         backend_config = BackendConfig(backend=arch, device_id=device_id, vendor=vendor)
         arch = backend_config.backend
         device_id = str(backend_config.device_id)
@@ -517,7 +517,7 @@ class BackendWorkerManager:
         if auto_fallback is not None:
             env["PIXEL_REFINE_AOT_AUTO_FALLBACK"] = "1" if auto_fallback else "0"
             # Keep C++ engine initialization from jumping straight to CPU. The
-            # task runner owns the ordered CUDA -> Vulkan -> OpenGL -> CPU retry.
+            # task runner owns the ordered CUDA -> Vulkan -> CPU retry.
             env["PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK"] = "0"
             if not auto_fallback:
                 env["AOT_STRICT_BACKEND"] = "1"

@@ -922,7 +922,7 @@ class GeneralSettingsPage(Container, SyncMixin):
                             "vulkan_device_id": vk_ordinal,
                             "vendor": vendor,
                             "raw_name": dev_name,
-                            "fallback_chain": ["vulkan", "opengl", "cpu"],
+                            "fallback_chain": ["vulkan", "cpu"],
                             "device_record": record,
                             "device_selector": selector,
                         }
@@ -946,12 +946,12 @@ class GeneralSettingsPage(Container, SyncMixin):
                         cuda_id = int(matching_cuda.get("ordinal", 0))
                         primary_backend = "cuda"
                         primary_id = cuda_id
-                        fallback_chain = ["cuda", "vulkan", "opengl", "cpu"]
+                        fallback_chain = ["cuda", "vulkan", "cpu"]
                     else:
                         cuda_id = None
                         primary_backend = "vulkan"
                         primary_id = vk_ordinal
-                        fallback_chain = ["vulkan", "opengl", "cpu"]
+                        fallback_chain = ["vulkan", "cpu"]
 
                     options.append(
                         {
@@ -1076,7 +1076,24 @@ class GeneralSettingsPage(Container, SyncMixin):
 
         backend = normalize_backend(option.get("backend", "cpu"), allow_auto=False)
         device_id = int(option.get("device_id", -1))
-        fallback_chain = option.get("fallback_chain", [backend])
+        # OpenGL is excluded from the recovery chain (native dispatch crashes
+        # the worker on validated NVIDIA desktop drivers).  Sanitize here so a
+        # legacy persisted chain cannot re-select it and repairs the store.
+        fallback_chain = [
+            str(item).strip().lower()
+            for item in option.get("fallback_chain", [backend])
+        ]
+        fallback_chain = [item for item in fallback_chain if item != "opengl"]
+        if backend == "opengl":
+            # A legacy persisted option whose primary backend is OpenGL moves
+            # to the first surviving candidate with its own adapter ordinal.
+            backend = fallback_chain[0] if fallback_chain else "cpu"
+            if backend == "cuda":
+                device_id = int(option.get("cuda_device_id", 0) or 0)
+            elif backend == "vulkan":
+                device_id = int(option.get("vulkan_device_id", 0) or 0)
+            else:
+                device_id = -1
         auto_fallback = bool(self.store.get("auto_fallback", True))
 
         active_backend = backend
@@ -1246,16 +1263,6 @@ class GeneralSettingsPage(Container, SyncMixin):
                         "raw_name": raw_name,
                     }
                 )
-                options.append(
-                    {
-                        "key": f"{fingerprint}|opengl",
-                        "text": f"{raw_name} — OpenGL",
-                        "backend": "opengl",
-                        "device_id": 0,
-                        "vendor": "nvidia",
-                        "raw_name": raw_name,
-                    }
-                )
             elif vendor == "intel":
                 options.append(
                     {
@@ -1263,16 +1270,6 @@ class GeneralSettingsPage(Container, SyncMixin):
                         "text": f"{raw_name} — Vulkan",
                         "backend": "vulkan",
                         "device_id": vk_id,
-                        "vendor": "intel",
-                        "raw_name": raw_name,
-                    }
-                )
-                options.append(
-                    {
-                        "key": f"{fingerprint}|opengl",
-                        "text": f"{raw_name} — OpenGL",
-                        "backend": "opengl",
-                        "device_id": 0,
                         "vendor": "intel",
                         "raw_name": raw_name,
                     }
@@ -1285,16 +1282,6 @@ class GeneralSettingsPage(Container, SyncMixin):
                         "text": f"{raw_name} — Vulkan",
                         "backend": "vulkan",
                         "device_id": vk_id,
-                        "vendor": vendor,
-                        "raw_name": raw_name,
-                    }
-                )
-                options.append(
-                    {
-                        "key": f"{fingerprint}|opengl",
-                        "text": f"{raw_name} — OpenGL",
-                        "backend": "opengl",
-                        "device_id": 0,
                         "vendor": vendor,
                         "raw_name": raw_name,
                     }

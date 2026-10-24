@@ -140,7 +140,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         auto_fb_tip = getattr(
             language_config,
             "LBL_AUTO_FALLBACK_TIP",
-            "When enabled, automatically fall back through CUDA, Vulkan, OpenGL, "
+            "When enabled, automatically fall back through CUDA, Vulkan, "
             "then CPU if the selected backend is unavailable.",
         )
         self.auto_fallback_cb = Checkbox(auto_fb_label, auto_sync=True)
@@ -402,7 +402,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             group_key = hardware.strip().lower()
             grouped.setdefault((group_key, hardware), []).append(option)
         grouped_options = []
-        backend_order = {"vulkan": 0, "opengl": 1, "cuda": 2, "cpu": 3}
+        backend_order = {"vulkan": 0, "cuda": 1, "cpu": 2}
         for (_, hardware), group_options in grouped.items():
             grouped_options.append(("group", hardware, None))
             grouped_options.extend(

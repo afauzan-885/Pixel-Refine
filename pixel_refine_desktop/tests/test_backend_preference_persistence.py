@@ -41,7 +41,7 @@ NVIDIA_OPTION = {
     "cuda_device_id": 0,
     "vendor": "nvidia",
     "raw_name": "NVIDIA GeForce MX150",
-    "fallback_chain": ["cuda", "vulkan", "opengl", "cpu"],
+    "fallback_chain": ["cuda", "vulkan", "cpu"],
     "device_selector": {
         "vendor": "nvidia",
         "name": "nvidia geforce mx150",
@@ -56,7 +56,7 @@ SAVED_NVIDIA_STATE = {
     "device_backend_key": NVIDIA_OPTION["key"],
     "device_backend_arch": "vulkan",
     "device_backend_id": 2,
-    "device_fallback_chain": ["cuda", "vulkan", "opengl", "cpu"],
+    "device_fallback_chain": ["cuda", "vulkan", "cpu"],
     "device_vendor": "nvidia",
     "device_selector": NVIDIA_OPTION["device_selector"],
     "auto_fallback": False,

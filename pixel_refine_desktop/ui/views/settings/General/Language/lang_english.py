@@ -844,7 +844,7 @@ LBL_BACKEND_COMPATIBILITY_RESULTS = "Backend Compatibility Results"
 LBL_DIAGNOSTIC_LOGS = "Diagnostic logs"
 MSG_BACKEND_TEST_FINISHED = "Backend test finished."
 LBL_AUTO_FALLBACK = "Auto Fallback"
-LBL_AUTO_FALLBACK_TIP = "When enabled, automatically fall back through CUDA, Vulkan, OpenGL, then CPU if the selected backend is unavailable."
+LBL_AUTO_FALLBACK_TIP = "When enabled, automatically fall back through CUDA, Vulkan, then CPU if the selected backend is unavailable."
 AUTO_SHUTDOWN_LABEL = "Enable Auto Shutdown"
 AUTO_SHUTDOWN_DESCRIPTION = (
     "Close the application after the configured period without user activity."
