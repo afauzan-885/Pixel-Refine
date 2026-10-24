@@ -218,6 +218,63 @@ class CompilePipelineContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "arch"):
                 target_registry.target_runtime_report(manifest_path)
 
+    def test_registry_and_cli_selectors_normalize_runtime_identity_aliases(self):
+        aliases = tuple(
+            {"backend": backend, "arch": arch, "os": "darwin"}
+            for backend in ("cpu", "vulkan")
+            for arch in ("i386", "i686", "armv7l")
+        )
+        for entry in aliases:
+            with self.subTest(entry=entry), tempfile.TemporaryDirectory() as temp:
+                manifest_path = Path(temp) / "target_manifest.json"
+                manifest_path.write_text(
+                    json.dumps({"schema_version": 1, "target_matrix": [entry]}),
+                    encoding="utf-8",
+                )
+                build_registry = target_registry._load_target_backends(manifest_path)
+                runtime_target = runtime_targets.TargetSpec(**entry)
+                expected_target_id = (
+                    f"{entry['backend']}_{runtime_target.arch}_{runtime_target.os}"
+                )
+                self.assertEqual(runtime_target.target_id, expected_target_id)
+                self.assertEqual(
+                    build_registry, {runtime_target.target_id: entry["backend"]}
+                )
+                with mock.patch.object(suite, "TARGET_BACKENDS", build_registry):
+                    self.assertEqual(
+                        suite._target_cli_choices(), (runtime_target.target_id,)
+                    )
+                with mock.patch.object(
+                    background_compile,
+                    "SUPPORTED_TARGETS",
+                    tuple(build_registry),
+                ):
+                    self.assertEqual(
+                        background_compile._target_cli_choices(),
+                        (runtime_target.target_id,),
+                    )
+                if runtime_target.backend == "vulkan":
+                    artifact_root = Path(temp) / "artifacts"
+                    artifact = (
+                        artifact_root
+                        / runtime_target.target_id
+                        / runtime_target.artifact_name("probe")
+                    )
+                    self._write_target_archive(runtime_target, artifact)
+                    self.assertEqual(
+                        runtime_targets.resolve_artifact(
+                            artifact_root,
+                            "probe",
+                            runtime_target,
+                            allow_legacy=False,
+                        ),
+                        artifact,
+                    )
+                    artifact_report = target_registry.target_artifact_report(
+                        manifest_path, artifact_root
+                    )
+                    self.assertFalse(artifact_report["fail_closed"])
+
     def test_cache_requires_matching_build_and_artifact_provenance(self):
         identity = {"source_sha256": "source-a", "target": "cpu_x64"}
         with tempfile.TemporaryDirectory() as temp:

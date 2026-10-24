@@ -24,14 +24,22 @@ SUPPORTED_BACKENDS = ("cpu", "vulkan", "opengl", "gles", "cuda")
 TEMPORARY_TCM_SUFFIXES = (".staging.tcm", ".next.tcm", ".previous.tcm")
 
 _ARCH_ALIASES = {
+    "i386": "x86",
+    "i686": "x86",
     "amd64": "x86_64",
     "x86_64": "x86_64",
     "x64": "x86_64",
     "aarch64": "arm64",
+    "arm64": "arm64",
     "arm64-v8a": "arm64",
     "armv8": "arm64",
+    "armv7l": "armv7",
+    "armv7": "armv7",
+    "x86": "x86",
 }
 _OS_ALIASES = {
+    "darwin": "macos",
+    "macos": "macos",
     "win32": "windows",
     "windows": "windows",
     "linux": "linux",
@@ -45,7 +53,8 @@ def _canonical(value: object, default: str = "unknown") -> str:
 
 
 def _canonical_arch(value: object) -> str:
-    return _ARCH_ALIASES.get(_canonical(value), _canonical(value))
+    raw = _canonical(value).replace(" ", "")
+    return _ARCH_ALIASES.get(raw, raw)
 
 
 def _canonical_os(value: object) -> str:
@@ -150,10 +159,13 @@ def validate_target_identity(
     }
 
 
-def _load_target_backends() -> dict[str, str]:
-    if not MANIFEST_PATH.is_file():
-        raise FileNotFoundError(f"AOT target manifest does not exist: {MANIFEST_PATH}")
-    payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+def _load_target_backends(
+    manifest_path: str | Path = MANIFEST_PATH,
+) -> dict[str, str]:
+    path = Path(manifest_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"AOT target manifest does not exist: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
     entries = payload.get("target_matrix")
     if not isinstance(entries, list) or not entries:
         raise ValueError("AOT target manifest has no target_matrix entries")
