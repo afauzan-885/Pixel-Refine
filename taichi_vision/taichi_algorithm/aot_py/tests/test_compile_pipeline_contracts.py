@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -16,7 +18,17 @@ sys.path.insert(0, str(AOT_PY))
 
 import aot_artifact  # noqa: E402
 import compile_aot_backend_suite as suite  # noqa: E402
+import background_compile  # noqa: E402
 import target_registry  # noqa: E402
+
+RUNTIME_TARGETS_PATH = ROOT / "taichi_vision" / "taichi_aot" / "artifact_targets.py"
+RUNTIME_TARGETS_SPEC = importlib.util.spec_from_file_location(
+    "pixel_refine_artifact_targets_direct", RUNTIME_TARGETS_PATH
+)
+assert RUNTIME_TARGETS_SPEC is not None and RUNTIME_TARGETS_SPEC.loader is not None
+runtime_targets = importlib.util.module_from_spec(RUNTIME_TARGETS_SPEC)
+sys.modules[RUNTIME_TARGETS_SPEC.name] = runtime_targets
+RUNTIME_TARGETS_SPEC.loader.exec_module(runtime_targets)
 
 
 class CompilePipelineContractTests(unittest.TestCase):
@@ -73,13 +85,138 @@ class CompilePipelineContractTests(unittest.TestCase):
         )
 
     def test_worker_metrics_contract_rejects_unknown_schema_and_units(self):
-        for field, value in (("schema_version", 2), ("phase_unit", "milliseconds")):
+        invalid_contracts = (
+            ("schema_version", suite.WORKER_METRICS_SCHEMA + 1),
+            ("phase_unit", "milliseconds"),
+        )
+        for field, value in invalid_contracts:
             with self.subTest(field=field):
                 payload = self._worker_metrics_payload()
                 payload[field] = value
                 self.assertIsNone(
                     suite._worker_metrics("AOT_METRICS_JSON=" + json.dumps(payload))
                 )
+
+    def test_fake_clock_worker_phases_reach_serialized_compile_report(self):
+        class FakeClock:
+            def __init__(self):
+                self.values = iter((10.0, 10.5, 20.0, 20.25, 30.0, 30.125))
+
+            def __call__(self):
+                return next(self.values)
+
+        phases = {}
+        clock = FakeClock()
+        suite._measure_phase(
+            phases, "native_context_import_seconds", lambda: "context", clock=clock
+        )
+        suite._measure_phase(
+            phases, "taichi_import_seconds", lambda: "taichi", clock=clock
+        )
+        suite._measure_phase(
+            phases, "compiler_module_import_seconds", lambda: "compiler", clock=clock
+        )
+        self.assertEqual(phases["native_context_import_seconds"], 0.5)
+        self.assertEqual(phases["taichi_import_seconds"], 0.25)
+        self.assertEqual(phases["compiler_module_import_seconds"], 0.125)
+
+        payload = self._worker_metrics_payload()
+        payload["phases"].update(phases)
+        output = suite._worker_metrics_line(
+            payload["job"], payload["backend"], payload["target"],
+            payload["phases"], payload["artifacts"],
+        )
+        parsed = suite._worker_metrics(output)
+        self.assertIsNotNone(parsed)
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.object(suite, "BUILD_REPORT_DIR", Path(temp)):
+                report_path = suite._write_compile_report(
+                    {"schema": 1, "jobs": [{"worker_metrics": parsed}]}
+                )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        reported_phases = report["jobs"][0]["worker_metrics"]["phases"]
+        self.assertEqual(reported_phases["native_context_import_seconds"], 0.5)
+        self.assertEqual(reported_phases["taichi_import_seconds"], 0.25)
+        self.assertEqual(reported_phases["compiler_module_import_seconds"], 0.125)
+
+    @staticmethod
+    def _write_target_archive(target, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(path, "w") as archive:
+            if target.backend in {"vulkan", "opengl", "gles"}:
+                archive.writestr("graphs.json", "[]")
+                archive.writestr("graph_0.spv", b"\x03\x02\x23\x07payload")
+                return
+            if target.backend == "cuda":
+                triple = "nvptx64-nvidia-cuda"
+            elif target.arch == "arm64" and target.os == "android":
+                triple = "aarch64-unknown-linux-android"
+            elif target.arch == "arm64":
+                triple = "aarch64-unknown-linux-gnu"
+            else:
+                triple = "x86_64-pc-windows-msvc"
+            archive.writestr("graphs.tcb", b"fixture")
+            archive.writestr("kernel.ll", f'target triple = "{triple}"')
+
+    def test_target_manifest_selectors_resolver_layout_and_unqualified_gate_agree(self):
+        manifest = runtime_targets.load_target_manifest(target_registry.MANIFEST_PATH)
+        entries = manifest["target_matrix"]
+        target_specs = [
+            runtime_targets.TargetSpec(
+                backend=entry["backend"],
+                arch=entry["arch"],
+                os=entry["os"],
+                vendor=entry.get("vendor", "unknown"),
+                variant=entry.get("variant", ""),
+            )
+            for entry in entries
+        ]
+        target_ids = {target.target_id for target in target_specs}
+        self.assertEqual(target_ids, set(target_registry.TARGET_BACKENDS))
+        self.assertEqual(target_ids, set(suite._target_cli_choices()))
+        self.assertEqual(target_ids, set(background_compile._target_cli_choices()))
+        for target in target_specs:
+            self.assertEqual(
+                target_registry.TARGET_BACKENDS[target.target_id], target.backend
+            )
+
+        payload = dict(manifest)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_path = root / "target_manifest.json"
+            manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+            artifact_root = root / "artifacts"
+            for target in target_specs:
+                artifact = artifact_root / target.target_id / target.artifact_name("probe")
+                self._write_target_archive(target, artifact)
+                self.assertEqual(
+                    runtime_targets.resolve_artifact(
+                        artifact_root, "probe", target, allow_legacy=False
+                    ),
+                    artifact,
+                )
+            artifact_report = target_registry.target_artifact_report(
+                manifest_path, artifact_root
+            )
+            self.assertFalse(artifact_report["fail_closed"])
+            self.assertEqual(artifact_report["present_count"], len(target_ids))
+            runtime_report = target_registry.target_runtime_report(manifest_path)
+            self.assertTrue(runtime_report["fail_closed"])
+            self.assertEqual(runtime_report["native_runtime_count"], 0)
+            self.assertEqual(runtime_report["unverified_count"], len(target_ids))
+
+    def test_incomplete_target_identity_is_rejected_by_registry_and_resolver(self):
+        incomplete = {
+            "schema_version": 1,
+            "target_matrix": [{"backend": "cpu", "os": "windows"}],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            manifest_path = Path(temp) / "target_manifest.json"
+            manifest_path.write_text(json.dumps(incomplete), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "arch"):
+                runtime_targets.load_target_manifest(manifest_path)
+            with self.assertRaisesRegex(ValueError, "arch"):
+                target_registry.target_runtime_report(manifest_path)
 
     def test_cache_requires_matching_build_and_artifact_provenance(self):
         identity = {"source_sha256": "source-a", "target": "cpu_x64"}

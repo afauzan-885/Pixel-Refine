@@ -343,11 +343,12 @@ JOBS = {
 
 BUILD_PROVENANCE_SCHEMA = 1
 BUILD_REPORT_DIR = ARTIFACT_DIR.parent / ".aot_compile_reports"
-WORKER_METRICS_SCHEMA = 1
+WORKER_METRICS_SCHEMA = 2
 WORKER_PHASE_BOUNDARIES = {
     "fingerprint_seconds": "build identity calculation start through completion",
-    "taichi_import_seconds": "Taichi import start through completion",
-    "compiler_module_import_seconds": "time after the Taichi import through compiler module import completion, less the separately timed Taichi import (also includes architecture/package selection)",
+    "native_context_import_seconds": "optional AOT facade import before Taichi import; null when native context is disabled",
+    "taichi_import_seconds": "Taichi module import start through completion, excluding native context import",
+    "compiler_module_import_seconds": "compiler module importlib call start through return, excluding context import, Taichi import, and architecture/package selection",
     "compiler_call_seconds": "compiler callable entry through return",
     "payload_validation_seconds": "backend payload validation during promotion",
     "normalization_seconds": "archive normalization during promotion",
@@ -367,6 +368,75 @@ UNKNOWN_WORKER_PHASES = {
 }
 _SOURCE_FINGERPRINT_CACHE: str | None = None
 _TOOLCHAIN_FINGERPRINT_CACHE: dict[str, str] = {}
+
+
+def _measure_phase(
+    phases: dict[str, float | None],
+    phase_name: str,
+    operation,
+    *,
+    clock=None,
+):
+    """Run one observable phase and store its elapsed seconds."""
+
+    timer = clock or time.perf_counter
+    started = timer()
+    result = operation()
+    phases[phase_name] = timer() - started
+    return result
+
+
+def _import_native_context():
+    """Import the AOT facade only for the explicit native-context worker."""
+
+    from taichi_vision import taichi_aot as native_context  # noqa: F401
+
+    return native_context
+
+
+def _import_taichi():
+    """Import Taichi inside the worker after the optional native context."""
+
+    import taichi as ti
+
+    return ti
+
+
+def _worker_metrics_line(
+    job: str,
+    backend: str,
+    target: str | None,
+    phases: dict[str, float | None],
+    artifacts: dict[str, object],
+) -> str:
+    """Serialize one self-describing worker record for the parent report."""
+
+    complete_phases = dict(phases)
+    for phase_name in WORKER_PHASE_BOUNDARIES:
+        complete_phases.setdefault(phase_name, None)
+    for phase_name in UNKNOWN_WORKER_PHASES:
+        complete_phases[phase_name] = None
+    return "AOT_METRICS_JSON=" + json.dumps(
+        {
+            "schema_version": WORKER_METRICS_SCHEMA,
+            "phase_unit": "seconds",
+            "phase_boundaries": WORKER_PHASE_BOUNDARIES,
+            "unknown_phase_reasons": UNKNOWN_WORKER_PHASES,
+            "job": job,
+            "backend": backend,
+            "target": target,
+            "phases": complete_phases,
+            "artifacts": artifacts,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _target_cli_choices() -> tuple[str, ...]:
+    """Return exact target IDs available to this compiler CLI."""
+
+    return tuple(sorted(TARGET_BACKENDS))
 
 
 def _sha256_file(path: Path) -> str:
@@ -820,8 +890,7 @@ def _run_worker(
     compiler_version: str = "taichi-1.7.4-custom", with_manifest: bool = False,
 ) -> None:
     worker_started = time.perf_counter()
-    phases: dict[str, float] = {}
-    phase_started = time.perf_counter()
+    phases: dict[str, float | None] = {}
     module_name, function_name, convention, aliases = JOBS[name]
     python_executable = Path(sys.executable)
     fingerprint_started = time.perf_counter()
@@ -832,15 +901,19 @@ def _run_worker(
     if expected_source and identity["source_sha256"] != expected_source:
         raise RuntimeError("AOT source inputs changed before worker startup; refusing mixed-source build")
     phases["fingerprint_seconds"] = time.perf_counter() - fingerprint_started
-    phase_started = time.perf_counter()
     # OpenGL compilation normally stays context-free so a missing ICD cannot
     # silently turn a graphics archive into CPU LLVM.  A native ICD context is
     # an explicit opt-in for the staged Windows profile; the worker still
     # validates the resulting payload before promotion.
     if backend == "opengl" and os.environ.get("PIXEL_REFINE_AOT_NATIVE_CONTEXT") == "1":
-        from taichi_vision import taichi_aot as _native_context  # noqa: F401
-    import taichi as ti
-    phases["taichi_import_seconds"] = time.perf_counter() - phase_started
+        _measure_phase(
+            phases,
+            "native_context_import_seconds",
+            _import_native_context,
+        )
+    else:
+        phases["native_context_import_seconds"] = None
+    ti = _measure_phase(phases, "taichi_import_seconds", _import_taichi)
 
     # Compile each target with its actual Taichi architecture.  The worker uses
     # the rebuilt wheel, whose GLFW path can create the hidden native context.
@@ -856,9 +929,12 @@ def _run_worker(
         "cuda": ti.cuda,
     }[backend]
     module_package = COLOCATED_COMPILER_PACKAGES.get(module_name, PACKAGE)
-    module = importlib.import_module(f"{module_package}.{module_name}")
+    module = _measure_phase(
+        phases,
+        "compiler_module_import_seconds",
+        lambda: importlib.import_module(f"{module_package}.{module_name}"),
+    )
     compiler = getattr(module, function_name)
-    phases["compiler_module_import_seconds"] = time.perf_counter() - phase_started - phases["taichi_import_seconds"]
     target = (
         _target_artifact_path(name, target_id)
         if target_id
@@ -1023,19 +1099,7 @@ def _run_worker(
     phases["inventory_seconds"] = inventory_seconds
     phases["provenance_seconds"] = provenance_seconds
     phases["worker_total_seconds"] = time.perf_counter() - worker_started
-    for phase_name in WORKER_PHASE_BOUNDARIES:
-        phases.setdefault(phase_name, None)
-    print("AOT_METRICS_JSON=" + json.dumps({
-        "schema_version": WORKER_METRICS_SCHEMA,
-        "phase_unit": "seconds",
-        "phase_boundaries": WORKER_PHASE_BOUNDARIES,
-        "unknown_phase_reasons": UNKNOWN_WORKER_PHASES,
-        "job": name,
-        "backend": backend,
-        "target": target_id,
-        "phases": phases,
-        "artifacts": inventory,
-    }, sort_keys=True, separators=(",", ":")))
+    print(_worker_metrics_line(name, backend, target_id, phases, inventory))
 
 
 def _partial_timeout_output(error: subprocess.TimeoutExpired) -> str:
@@ -1297,7 +1361,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--target",
-        choices=tuple(sorted(TARGET_BACKENDS)),
+        choices=_target_cli_choices(),
         help="exact architecture/OS/vendor artifact profile",
     )
     parser.add_argument("--only", help="comma-separated artifact names")

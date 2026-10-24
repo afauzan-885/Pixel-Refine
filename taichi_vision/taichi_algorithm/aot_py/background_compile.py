@@ -20,6 +20,12 @@ ROOT = Path(__file__).resolve().parents[3]
 SUITE = Path(__file__).with_name("compile_aot_backend_suite.py")
 
 
+def _target_cli_choices():
+    """Return target IDs accepted by the background compiler CLI."""
+
+    return tuple(SUPPORTED_TARGETS)
+
+
 def _host_is_arm64() -> bool:
     """Return whether the current worker can execute an ARM64 host build."""
     values = {
@@ -189,7 +195,7 @@ if __name__ == "__main__":
     selection.add_argument(
         "--targets",
         nargs="+",
-        choices=SUPPORTED_TARGETS,
+        choices=_target_cli_choices(),
         help=(
             "Compile exact architecture/OS/vendor profiles using the same "
             "source compiler. Toolchains for ARM/Android must already be "

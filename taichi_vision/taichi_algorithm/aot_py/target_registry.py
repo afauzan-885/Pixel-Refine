@@ -110,11 +110,23 @@ def validate_target_identity(
 
     if not isinstance(entry, Mapping):
         raise ValueError("AOT target entry must be an object")
+    missing_identity = [
+        field
+        for field in ("backend", "arch", "os")
+        if not str(entry.get(field, "") or "").strip()
+    ]
+    if missing_identity:
+        raise ValueError(
+            "AOT target entry is missing required identity fields: "
+            + ", ".join(missing_identity)
+        )
     os_name = _canonical_os(entry.get("os"))
     backend = _canonical_backend(entry.get("backend"), os_name)
     if backend not in SUPPORTED_BACKENDS:
         raise ValueError(f"unsupported backend in AOT target entry: {backend}")
     arch = _canonical_arch(entry.get("arch"))
+    if os_name == "unknown" or arch == "unknown":
+        raise ValueError("AOT target identity requires a recognized OS and architecture")
     vendor = _canonical(entry.get("vendor"))
     _validate_identity_token("backend", backend)
     _validate_identity_token("architecture", arch)

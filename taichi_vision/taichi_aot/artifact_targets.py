@@ -372,6 +372,41 @@ def load_target_manifest(path: os.PathLike[str] | str) -> Mapping[str, Any]:
         payload = json.load(handle)
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise ValueError("unsupported AOT target manifest schema")
+    entries = payload.get("target_matrix")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("target_matrix must be a non-empty list")
+    seen_target_ids: set[str] = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"target_matrix entry {index} must be an object")
+        missing_identity = [
+            field
+            for field in ("backend", "arch", "os")
+            if not str(entry.get(field, "") or "").strip()
+        ]
+        if missing_identity:
+            raise ValueError(
+                f"target_matrix entry {index} is missing required identity fields: "
+                + ", ".join(missing_identity)
+            )
+        target = TargetSpec(
+            backend=str(entry["backend"]),
+            arch=str(entry["arch"]),
+            os=str(entry["os"]),
+            vendor=str(entry.get("vendor", "unknown")),
+            abi=str(entry.get("abi", "")),
+            driver=str(entry.get("driver", "unknown")),
+            variant=str(entry.get("variant", "")),
+        )
+        if target.arch == "unknown" or target.os == "unknown":
+            raise ValueError(
+                f"target_matrix entry {index} requires a concrete OS and architecture"
+            )
+        if target.backend == "cuda" and target.vendor != "nvidia":
+            raise ValueError("CUDA target identity requires vendor=nvidia")
+        if target.target_id in seen_target_ids:
+            raise ValueError(f"duplicate target_matrix target ID: {target.target_id}")
+        seen_target_ids.add(target.target_id)
     # The top-level schema remains version 1 for compatibility with existing
     # packaging tools.  LLVM20 is an optional nested contract: when present,
     # reject a malformed policy before a bundle can be treated as target-aware.
