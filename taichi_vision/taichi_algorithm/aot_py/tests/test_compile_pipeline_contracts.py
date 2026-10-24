@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -19,6 +20,67 @@ import target_registry  # noqa: E402
 
 
 class CompilePipelineContractTests(unittest.TestCase):
+    @staticmethod
+    def _worker_metrics_payload():
+        phases = {
+            name: 0.25 for name in suite.WORKER_PHASE_BOUNDARIES
+        }
+        phases.update({name: None for name in suite.UNKNOWN_WORKER_PHASES})
+        return {
+            "schema_version": suite.WORKER_METRICS_SCHEMA,
+            "phase_unit": "seconds",
+            "phase_boundaries": suite.WORKER_PHASE_BOUNDARIES,
+            "unknown_phase_reasons": suite.UNKNOWN_WORKER_PHASES,
+            "job": "sample",
+            "backend": "cpu",
+            "target": "cpu_x86_64_windows",
+            "phases": phases,
+            "artifacts": {"sample": {"inventory_status": "unavailable"}},
+        }
+
+    def test_worker_metrics_contract_keeps_unavailable_compiler_phases_null(self):
+        payload = self._worker_metrics_payload()
+        output = "diagnostic\nAOT_METRICS_JSON=" + json.dumps(payload)
+
+        parsed = suite._worker_metrics(output)
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["phase_unit"], "seconds")
+        self.assertEqual(parsed["phases"]["compiler_call_seconds"], 0.25)
+        for name in suite.UNKNOWN_WORKER_PHASES:
+            self.assertIsNone(parsed["phases"][name], name)
+            self.assertIn(name, parsed["unknown_phase_reasons"])
+
+    def test_worker_metrics_contract_rejects_invented_or_malformed_timings(self):
+        invalid_values = (1.0, True, float("nan"), -0.1, "0.1")
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid):
+                payload = self._worker_metrics_payload()
+                payload["phases"]["backend_codegen_seconds"] = invalid
+                output = "AOT_METRICS_JSON=" + json.dumps(payload)
+                self.assertIsNone(suite._worker_metrics(output))
+
+        payload = self._worker_metrics_payload()
+        payload["phases"].pop("worker_total_seconds")
+        self.assertIsNone(
+            suite._worker_metrics("AOT_METRICS_JSON=" + json.dumps(payload))
+        )
+
+        payload = self._worker_metrics_payload()
+        payload["phases"]["unregistered_phase_seconds"] = 0.1
+        self.assertIsNone(
+            suite._worker_metrics("AOT_METRICS_JSON=" + json.dumps(payload))
+        )
+
+    def test_worker_metrics_contract_rejects_unknown_schema_and_units(self):
+        for field, value in (("schema_version", 2), ("phase_unit", "milliseconds")):
+            with self.subTest(field=field):
+                payload = self._worker_metrics_payload()
+                payload[field] = value
+                self.assertIsNone(
+                    suite._worker_metrics("AOT_METRICS_JSON=" + json.dumps(payload))
+                )
+
     def test_cache_requires_matching_build_and_artifact_provenance(self):
         identity = {"source_sha256": "source-a", "target": "cpu_x64"}
         with tempfile.TemporaryDirectory() as temp:

@@ -10,6 +10,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -342,6 +343,28 @@ JOBS = {
 
 BUILD_PROVENANCE_SCHEMA = 1
 BUILD_REPORT_DIR = ARTIFACT_DIR.parent / ".aot_compile_reports"
+WORKER_METRICS_SCHEMA = 1
+WORKER_PHASE_BOUNDARIES = {
+    "fingerprint_seconds": "build identity calculation start through completion",
+    "taichi_import_seconds": "Taichi import start through completion",
+    "compiler_module_import_seconds": "time after the Taichi import through compiler module import completion, less the separately timed Taichi import (also includes architecture/package selection)",
+    "compiler_call_seconds": "compiler callable entry through return",
+    "payload_validation_seconds": "backend payload validation during promotion",
+    "normalization_seconds": "archive normalization during promotion",
+    "promotion_seconds": "atomic artifact replacement during promotion",
+    "manifest_seconds": "TCM manifest attachment and validation, when requested",
+    "post_promotion_integrity_seconds": "post-promotion payload and normalized archive validation",
+    "inventory_seconds": "artifact inventory calculation",
+    "provenance_seconds": "build provenance calculation and sidecar write",
+    "worker_total_seconds": "worker entry through final metric serialization",
+}
+UNKNOWN_WORKER_PHASES = {
+    "backend_init_seconds": "compiler API does not expose an isolated backend-init boundary",
+    "frontend_lowering_seconds": "compiler API does not expose an isolated lowering boundary",
+    "backend_codegen_seconds": "compiler API does not expose an isolated codegen boundary",
+    "archive_seconds": "compiler API does not expose archive-production timing",
+    "per_graph_compile_seconds": "compiler API does not expose per-graph compile timing",
+}
 _SOURCE_FINGERPRINT_CACHE: str | None = None
 _TOOLCHAIN_FINGERPRINT_CACHE: dict[str, str] = {}
 
@@ -1000,7 +1023,13 @@ def _run_worker(
     phases["inventory_seconds"] = inventory_seconds
     phases["provenance_seconds"] = provenance_seconds
     phases["worker_total_seconds"] = time.perf_counter() - worker_started
+    for phase_name in WORKER_PHASE_BOUNDARIES:
+        phases.setdefault(phase_name, None)
     print("AOT_METRICS_JSON=" + json.dumps({
+        "schema_version": WORKER_METRICS_SCHEMA,
+        "phase_unit": "seconds",
+        "phase_boundaries": WORKER_PHASE_BOUNDARIES,
+        "unknown_phase_reasons": UNKNOWN_WORKER_PHASES,
         "job": name,
         "backend": backend,
         "target": target_id,
@@ -1036,7 +1065,52 @@ def _worker_metrics(output: str) -> dict[str, object] | None:
                 decoded = json.loads(line[len(marker):])
             except json.JSONDecodeError:
                 return None
-            return decoded if isinstance(decoded, dict) else None
+            if not isinstance(decoded, dict):
+                return None
+            if decoded.get("schema_version") != WORKER_METRICS_SCHEMA:
+                return None
+            if decoded.get("phase_unit") != "seconds":
+                return None
+            if decoded.get("phase_boundaries") != WORKER_PHASE_BOUNDARIES:
+                return None
+            if decoded.get("unknown_phase_reasons") != UNKNOWN_WORKER_PHASES:
+                return None
+            phases = decoded.get("phases")
+            if not isinstance(phases, dict):
+                return None
+            expected_phase_names = set(WORKER_PHASE_BOUNDARIES) | set(
+                UNKNOWN_WORKER_PHASES
+            )
+            if set(phases) != expected_phase_names:
+                return None
+            # Unknown compiler-internal timings must remain explicitly null;
+            # accepting a numeric value here would turn a caller-supplied
+            # estimate into an observed measurement in the report.
+            if any(name not in phases or phases[name] is not None for name in UNKNOWN_WORKER_PHASES):
+                return None
+            required_phases = (
+                "fingerprint_seconds",
+                "taichi_import_seconds",
+                "compiler_module_import_seconds",
+                "compiler_call_seconds",
+                "post_promotion_integrity_seconds",
+                "inventory_seconds",
+                "provenance_seconds",
+                "worker_total_seconds",
+            )
+            if any(phases.get(name) is None for name in required_phases):
+                return None
+            for name, value in phases.items():
+                if name in UNKNOWN_WORKER_PHASES or value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return None
+                if not math.isfinite(value) or value < 0:
+                    return None
+            artifacts = decoded.get("artifacts")
+            if not isinstance(artifacts, dict):
+                return None
+            return decoded
     return None
 
 
