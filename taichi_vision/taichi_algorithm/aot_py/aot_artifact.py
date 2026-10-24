@@ -82,6 +82,38 @@ def normalize_tcm(path):
     return str(artifact)
 
 
+def validate_normalized_tcm(path):
+    """Validate a canonical TCM without rewriting or recompressing it.
+
+    Call after normalizing a staging archive and promoting it atomically. The
+    post-promotion check reads every member (including ZIP CRC validation) and
+    verifies the canonical metadata without another archive write.
+    """
+    artifact = Path(path).resolve()
+    if artifact.suffix != ".tcm":
+        raise ValueError(f"Expected a .tcm artifact, got {artifact}")
+    with zipfile.ZipFile(artifact, "r") as archive:
+        entries = archive.infolist()
+        names = [entry.filename for entry in entries]
+        if len(names) != len(set(names)):
+            raise ValueError(f"TCM archive contains duplicate entries: {artifact}")
+        if names != sorted(names):
+            raise ValueError(f"TCM archive entries are not normalized: {artifact}")
+        if "__version__" not in names:
+            raise ValueError(f"Invalid Taichi AOT artifact: {artifact}")
+        for entry in entries:
+            if entry.date_time != _FIXED_ZIP_TIME:
+                raise ValueError(f"TCM timestamp is not normalized: {entry.filename}")
+            if entry.compress_type != zipfile.ZIP_DEFLATED:
+                raise ValueError(f"TCM compression is not normalized: {entry.filename}")
+            if entry.external_attr != (0o100644 << 16):
+                raise ValueError(f"TCM permissions are not normalized: {entry.filename}")
+            contents = archive.read(entry)  # validates the ZIP CRC
+            if entry.filename == "graphs.json" and contents != _normalize_graphs(contents):
+                raise ValueError("graphs.json metadata is not normalized")
+    return str(artifact)
+
+
 def archive_module(module, path):
     """Save a Taichi module as a canonical packed artifact.
 

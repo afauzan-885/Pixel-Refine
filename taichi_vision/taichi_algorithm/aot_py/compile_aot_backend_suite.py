@@ -6,19 +6,24 @@ single long-lived compiler process is not reliable across this module suite.
 """
 
 import argparse
+import hashlib
 import importlib
 import importlib.util
+import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import zipfile
 
 try:
-    from .aot_artifact import normalize_tcm
+    from .aot_artifact import normalize_tcm, validate_normalized_tcm
 except ImportError:  # Direct script execution.
-    from aot_artifact import normalize_tcm
+    from aot_artifact import normalize_tcm, validate_normalized_tcm
 
 try:
     from .target_registry import TARGET_BACKENDS, target_entry_for_id
@@ -335,6 +340,308 @@ JOBS = {
     ),
 }
 
+BUILD_PROVENANCE_SCHEMA = 1
+BUILD_REPORT_DIR = ARTIFACT_DIR.parent / ".aot_compile_reports"
+_SOURCE_FINGERPRINT_CACHE: str | None = None
+_TOOLCHAIN_FINGERPRINT_CACHE: dict[str, str] = {}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _source_fingerprint(*, refresh: bool = False) -> str:
+    """Hash Python source inputs that can affect maintained AOT artifacts."""
+    global _SOURCE_FINGERPRINT_CACHE
+    if refresh:
+        _SOURCE_FINGERPRINT_CACHE = None
+    if _SOURCE_FINGERPRINT_CACHE is not None:
+        return _SOURCE_FINGERPRINT_CACHE
+    roots = (
+        PROJECT_ROOT / "taichi_vision" / "taichi_algorithm",
+        PROJECT_ROOT / "taichi_vision" / "taichi_aot",
+    )
+    files = sorted(
+        (path for root in roots for path in root.rglob("*.py")
+         if "__pycache__" not in path.parts),
+        key=lambda path: path.relative_to(PROJECT_ROOT).as_posix(),
+    )
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(PROJECT_ROOT).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        digest.update(bytes.fromhex(_sha256_file(path)))
+    manifest = PROJECT_ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
+    digest.update(b"target_manifest.json\0")
+    digest.update(bytes.fromhex(_sha256_file(manifest)))
+    _SOURCE_FINGERPRINT_CACHE = digest.hexdigest()
+    return _SOURCE_FINGERPRINT_CACHE
+
+
+def _toolchain_fingerprint(python_executable: Path) -> str:
+    """Fingerprint the selected interpreter and installed Taichi compiler files."""
+    key = str(python_executable.resolve())
+    cached = _TOOLCHAIN_FINGERPRINT_CACHE.get(key)
+    if cached:
+        return cached
+    probe = r'''
+import hashlib, importlib.metadata, importlib.util, json, sys
+from pathlib import Path
+try:
+    dist = importlib.metadata.distribution("taichi")
+    version = dist.version
+    spec = importlib.util.find_spec("taichi")
+    origin = str(Path(spec.origin).resolve()) if spec and spec.origin else None
+    origin_sha256 = None
+    if origin and Path(origin).is_file():
+        origin_sha256 = hashlib.sha256(Path(origin).read_bytes()).hexdigest()
+    imported_files = []
+    if spec:
+        for location in spec.submodule_search_locations or ():
+            package_root = Path(location)
+            for path in package_root.rglob("*"):
+                if path.is_file() and path.suffix.lower() in {".py", ".pyd", ".dll", ".so", ".dylib", ".bc"}:
+                    imported_files.append((path.relative_to(package_root).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()))
+    files = []
+    for item in dist.files or ():
+        rel = item.as_posix()
+        suffix = Path(rel).suffix.lower()
+        if not rel.startswith("taichi/") or suffix not in {".py", ".pyd", ".dll", ".so", ".dylib", ".bc"}:
+            continue
+        path = Path(dist.locate_file(item))
+        if path.is_file():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            files.append((rel, digest))
+    payload = {"version": version, "origin": origin, "origin_sha256": origin_sha256, "imported_files": sorted(imported_files), "files": sorted(files)}
+except importlib.metadata.PackageNotFoundError:
+    payload = {"version": None, "origin": None, "origin_sha256": None, "imported_files": [], "files": []}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+'''
+    result = subprocess.run(
+        [key, "-c", probe], cwd=PROJECT_ROOT, text=True,
+        capture_output=True, check=False, timeout=60.0,
+    )
+    if result.returncode:
+        raise RuntimeError("could not identify selected Taichi toolchain: " + result.stderr.strip())
+    try:
+        dist_identity = json.loads(result.stdout.strip())
+    except json.JSONDecodeError as error:
+        raise RuntimeError("selected Taichi toolchain identity was not valid JSON") from error
+    if not dist_identity.get("version") or not (dist_identity.get("files") or dist_identity.get("imported_files")):
+        raise RuntimeError(
+            f"selected interpreter has no fingerprintable Taichi distribution: {key}"
+        )
+    payload = {
+        "python": key,
+        "python_sha256": _sha256_file(Path(key)),
+        "taichi_distribution": dist_identity,
+    }
+    cached = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    _TOOLCHAIN_FINGERPRINT_CACHE[key] = cached
+    return cached
+
+
+def _build_identity(
+    name: str, backend: str, target_id: str | None, compiler_version: str,
+    python_executable: Path, with_manifest: bool, output_name: str | None = None,
+) -> dict[str, object]:
+    if name not in JOBS:
+        raise ValueError(f"unknown AOT job for build identity: {name}")
+    target = target_entry_for_id(target_id) if target_id else {
+        "backend": backend, "arch": platform.machine().lower(),
+        "os": platform.system().lower(), "vendor": "unknown",
+    }
+    module_name, function_name, convention, aliases = JOBS[name]
+    identity: dict[str, object] = {
+        "schema": BUILD_PROVENANCE_SCHEMA,
+        "source_sha256": _source_fingerprint(),
+        "toolchain_sha256": _toolchain_fingerprint(python_executable),
+        "target_manifest_sha256": _sha256_file(
+            PROJECT_ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm" / "target_manifest.json"
+        ),
+        "target": target,
+        "backend": backend,
+        "job": name,
+        "output_artifact": output_name or name,
+        "compiler_module": module_name,
+        "compiler_callable": function_name,
+        "convention": convention,
+        "aliases": list(aliases),
+        "compiler_identity": compiler_version,
+        "with_tcm_manifest": bool(with_manifest),
+        "build_environment": {
+            key: os.environ.get(key, "")
+            for key in (
+                "PIXEL_REFINE_ANDROID_API", "PIXEL_REFINE_AOT_NATIVE_CONTEXT",
+                "TI_OFFLINE_CACHE", "LLVM_CONFIG", "CC", "CXX",
+            )
+            if os.environ.get(key) is not None
+        },
+        "aot_device": os.environ.get("AOT_DEVICE", "1"),
+        "worker_pythonpath": os.pathsep.join(
+            part for part in (
+                str(PROJECT_ROOT), os.environ.get("PYTHONPATH", "")
+            ) if part
+        ),
+    }
+    if target_id and target_id.startswith("cpu_arm64"):
+        ndk_bin = PROJECT_ROOT / "test_algorithm" / "android_ndk_extract" / "android-ndk-r25c" / "toolchains" / "llvm" / "prebuilt" / "windows-x86_64" / "bin"
+        api = os.environ.get("PIXEL_REFINE_ANDROID_API", "26")
+        tool = ndk_bin / (
+            f"aarch64-linux-android{api}-clang.cmd"
+            if target_id == "cpu_arm64_android" else "clang.exe"
+        )
+        runtime_source = PROJECT_ROOT / "test_algorithm" / "taichi_upstream" / "stable-v1.7.4-development" / "taichi" / "runtime" / "llvm" / "runtime_module" / "runtime.cpp"
+        identity["arm64_toolchain"] = {
+            "tool": str(tool),
+            "tool_sha256": _sha256_file(tool) if tool.is_file() else None,
+            "runtime_source": str(runtime_source),
+            "runtime_source_sha256": _sha256_file(runtime_source) if runtime_source.is_file() else None,
+            "api_level": api if target_id == "cpu_arm64_android" else None,
+        }
+    if target_id == "vulkan_arm64_android":
+        spirv_opt = shutil.which("spirv-opt")
+        source_artifact = _target_artifact_path(output_name or name, "vulkan_x86_64_windows")
+        source_provenance = _provenance_path(source_artifact)
+        source_record = None
+        if source_provenance.is_file():
+            try:
+                source_record = json.loads(source_provenance.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                source_record = None
+        identity["spirv_opt"] = {
+            "path": spirv_opt,
+            "sha256": _sha256_file(Path(spirv_opt)) if spirv_opt else None,
+        }
+        identity["promotion_source"] = {
+            "path": str(source_artifact),
+            "artifact_sha256": _sha256_file(source_artifact) if source_artifact.is_file() else None,
+            "build_fingerprint": source_record.get("build_fingerprint") if isinstance(source_record, dict) else None,
+        }
+    return identity
+
+
+def _selected_worker_python() -> Path:
+    configured = os.environ.get("PIXEL_REFINE_AOT_PYTHON", "").strip()
+    return Path(configured).resolve() if configured else Path(sys.executable).resolve()
+
+
+def _build_fingerprint(identity: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _provenance_path(artifact: Path) -> Path:
+    return artifact.with_name(artifact.name + ".build.json")
+
+
+def _write_build_provenance(artifact: Path, identity: dict[str, object]) -> None:
+    """Atomically record exactly which verified inputs produced this artifact."""
+    if not artifact.is_file():
+        raise RuntimeError(f"cannot record build provenance for missing artifact: {artifact}")
+    payload = {
+        "schema": BUILD_PROVENANCE_SCHEMA,
+        "build_fingerprint": _build_fingerprint(identity),
+        "build_identity": identity,
+        "artifact_sha256": _sha256_file(artifact),
+        "artifact_size": artifact.stat().st_size,
+    }
+    encoded = json.dumps(payload, sort_keys=True, indent=2) + "\n"
+    destination = _provenance_path(artifact)
+    staging = destination.with_name(destination.name + ".staging")
+    try:
+        staging.write_text(encoded, encoding="utf-8")
+        os.replace(staging, destination)
+    finally:
+        if staging.exists():
+            staging.unlink()
+
+
+def _verified_build(artifact: Path, identity: dict[str, object]) -> tuple[bool, str]:
+    """Only reuse an artifact with matching build inputs and payload digest."""
+    provenance = _provenance_path(artifact)
+    if not artifact.is_file():
+        return False, "artifact_missing"
+    if not provenance.is_file():
+        return False, "provenance_missing"
+    target = identity.get("target")
+    if isinstance(target, dict) and target.get("backend") == "cpu" and target.get("arch") == "arm64":
+        # The external ARM helper consumes an NDK sysroot/header closure that
+        # is not yet enumerated by its source contract. Never claim a cache hit
+        # while that toolchain input set remains incomplete.
+        return False, "arm64_external_toolchain_closure_unverified"
+    try:
+        payload = json.loads(provenance.read_text(encoding="utf-8"))
+        if payload.get("schema") != BUILD_PROVENANCE_SCHEMA:
+            return False, "provenance_schema_mismatch"
+        if payload.get("build_fingerprint") != _build_fingerprint(identity):
+            return False, "build_inputs_mismatch"
+        if payload.get("artifact_size") != artifact.stat().st_size:
+            return False, "artifact_size_mismatch"
+        if payload.get("artifact_sha256") != _sha256_file(artifact):
+            return False, "artifact_hash_mismatch"
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False, "provenance_invalid"
+    return True, "fingerprint_and_payload_match"
+
+
+def _artifact_inventory(path: Path) -> dict[str, object]:
+    """Collect static archive/graph counts without loading Taichi or a backend."""
+    import zipfile
+
+    result: dict[str, object] = {
+        "artifact_bytes": path.stat().st_size,
+        "archive_entries": None,
+        "uncompressed_bytes": None,
+        "llvm_payload_count": None,
+        "spirv_payload_count": None,
+        "graph_count": None,
+        "dispatch_node_count": None,
+        "kernel_count": None,
+        "inventory_status": "unavailable",
+    }
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            entries = archive.infolist()
+            result["archive_entries"] = len(entries)
+            result["uncompressed_bytes"] = sum(item.file_size for item in entries)
+            result["llvm_payload_count"] = sum(item.filename.lower().endswith((".ll", ".tic")) for item in entries)
+            result["spirv_payload_count"] = sum(item.filename.lower().endswith(".spv") for item in entries)
+            graphs = archive.read("graphs.json")
+            decoded = json.loads(graphs.decode("utf-8"))
+            if not isinstance(decoded, list):
+                raise ValueError("graphs.json root is not a list")
+            dispatches = [
+                dispatch
+                for graph in decoded
+                for dispatch in graph.get("value", {}).get("dispatches", [])
+            ]
+            kernel_names = {
+                str(dispatch[key])
+                for dispatch in dispatches
+                for key in ("kernel_name", "kernel", "func_name")
+                if isinstance(dispatch.get(key), str)
+            }
+            result.update({
+                "graph_count": len(decoded),
+                "dispatch_node_count": len(dispatches),
+                "kernel_count": len(kernel_names) if kernel_names else None,
+                "inventory_status": "graphics_graphs_json",
+            })
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError):
+        # Legacy LLVM/TBC graph metadata is binary; counts remain explicitly
+        # unknown instead of being reported as zero.
+        pass
+    return result
+
 
 def _artifact_path(name: str, backend: str) -> Path:
     return ARTIFACT_DIR / f"{name}_{backend}.tcm"
@@ -426,8 +733,24 @@ def _require_backend_artifact(path: Path, backend: str) -> None:
         raise RuntimeError(f"{path.name} is not a {backend} GFX AOT artifact")
 
 
-def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
+def _run_worker(
+    backend: str, name: str, target_id: str | None = None,
+    compiler_version: str = "taichi-1.7.4-custom", with_manifest: bool = False,
+) -> None:
+    worker_started = time.perf_counter()
+    phases: dict[str, float] = {}
+    phase_started = time.perf_counter()
     module_name, function_name, convention, aliases = JOBS[name]
+    python_executable = Path(sys.executable)
+    fingerprint_started = time.perf_counter()
+    identity = _build_identity(
+        name, backend, target_id, compiler_version, python_executable, with_manifest
+    )
+    expected_source = os.environ.get("PIXEL_REFINE_AOT_EXPECTED_SOURCE_SHA256")
+    if expected_source and identity["source_sha256"] != expected_source:
+        raise RuntimeError("AOT source inputs changed before worker startup; refusing mixed-source build")
+    phases["fingerprint_seconds"] = time.perf_counter() - fingerprint_started
+    phase_started = time.perf_counter()
     # OpenGL compilation normally stays context-free so a missing ICD cannot
     # silently turn a graphics archive into CPU LLVM.  A native ICD context is
     # an explicit opt-in for the staged Windows profile; the worker still
@@ -435,6 +758,7 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
     if backend == "opengl" and os.environ.get("PIXEL_REFINE_AOT_NATIVE_CONTEXT") == "1":
         from taichi_vision import taichi_aot as _native_context  # noqa: F401
     import taichi as ti
+    phases["taichi_import_seconds"] = time.perf_counter() - phase_started
 
     # Compile each target with its actual Taichi architecture.  The worker uses
     # the rebuilt wheel, whose GLFW path can create the hidden native context.
@@ -452,6 +776,7 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
     module_package = COLOCATED_COMPILER_PACKAGES.get(module_name, PACKAGE)
     module = importlib.import_module(f"{module_package}.{module_name}")
     compiler = getattr(module, function_name)
+    phases["compiler_module_import_seconds"] = time.perf_counter() - phase_started - phases["taichi_import_seconds"]
     target = (
         _target_artifact_path(name, target_id)
         if target_id
@@ -467,10 +792,18 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
         if staging.exists():
             staging.unlink()
         try:
+            compile_started = time.perf_counter()
             compiler(arch=arch, save_path=str(staging))
+            phases["compiler_call_seconds"] = time.perf_counter() - compile_started
+            validation_started = time.perf_counter()
             _require_backend_artifact(staging, backend)
+            phases["payload_validation_seconds"] = time.perf_counter() - validation_started
+            normalize_started = time.perf_counter()
             normalize_tcm(staging)
+            phases["normalization_seconds"] = time.perf_counter() - normalize_started
+            promotion_started = time.perf_counter()
             os.replace(staging, target)
+            phases["promotion_seconds"] = time.perf_counter() - promotion_started
         finally:
             # A failed/fallback compiler must not leave a misleading partial
             # archive in the isolated bundle.  Promotion above is atomic, so
@@ -485,7 +818,10 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
             tempfile.mkdtemp(prefix=f".aot-{backend}-{name}-", dir=ARTIFACT_DIR)
         )
         try:
+            compile_started = time.perf_counter()
             compiler(arch=arch, out_dir=str(staging_dir))
+            phases["compiler_call_seconds"] = time.perf_counter() - compile_started
+            validation_seconds = normalization_seconds = promotion_seconds = 0.0
             for candidate in (name, *aliases):
                 target_path = (
                     _target_artifact_path(candidate, target_id)
@@ -508,14 +844,25 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
                         "compiler did not create staging artifact: "
                         + ", ".join(item.name for item in candidates)
                     )
+                phase_mark = time.perf_counter()
                 _require_backend_artifact(staged, backend)
+                validation_seconds += time.perf_counter() - phase_mark
+                phase_mark = time.perf_counter()
                 normalize_tcm(staged)
+                normalization_seconds += time.perf_counter() - phase_mark
+                phase_mark = time.perf_counter()
                 os.replace(staged, target_path)
+                promotion_seconds += time.perf_counter() - phase_mark
+            phases["payload_validation_seconds"] = validation_seconds
+            phases["normalization_seconds"] = normalization_seconds
+            phases["promotion_seconds"] = promotion_seconds
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
     elif convention == "environment":
         os.environ["AOT_ARCH"] = backend
+        compile_started = time.perf_counter()
         compiler()
+        phases["compiler_call_seconds"] = time.perf_counter() - compile_started
         if target_id:
             # Environment-style producers save beside the suite by design.
             # Move the validated legacy name into the exact target directory
@@ -523,9 +870,15 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
             legacy = _artifact_path(name, backend)
             target = _target_artifact_path(name, target_id)
             if legacy.is_file() and legacy.resolve() != target.resolve():
+                validation_started = time.perf_counter()
                 _require_backend_artifact(legacy, backend)
+                phases["payload_validation_seconds"] = time.perf_counter() - validation_started
+                normalize_started = time.perf_counter()
                 normalize_tcm(legacy)
+                phases["normalization_seconds"] = time.perf_counter() - normalize_started
+                promotion_started = time.perf_counter()
                 os.replace(legacy, target)
+                phases["promotion_seconds"] = time.perf_counter() - promotion_started
     else:  # pragma: no cover - registry invariant
         raise RuntimeError(f"unknown convention {convention!r}")
 
@@ -541,14 +894,60 @@ def _run_worker(backend: str, name: str, target_id: str | None = None) -> None:
     ]
     if missing:
         raise RuntimeError(f"compiler did not create: {', '.join(missing)}")
+    if _source_fingerprint(refresh=True) != identity["source_sha256"]:
+        raise RuntimeError("AOT source inputs changed during the worker; refusing provenance stamp")
+    if with_manifest:
+        manifest_started = time.perf_counter()
+        _attach_manifest_to_target_artifacts(
+            [_target_artifact_path(candidate, target_id) for candidate in expected],
+            target_id or "",
+            compiler_version,
+        )
+        phases["manifest_seconds"] = time.perf_counter() - manifest_started
+    post_validation_seconds = 0.0
+    inventory_seconds = 0.0
+    provenance_seconds = 0.0
+    inventory: dict[str, object] = {}
+    phases.update({
+        # These occur inside compiler-family code. They remain null until the
+        # compiler APIs expose them without wrapping or changing lifecycle.
+        "backend_init_seconds": None,
+        "frontend_lowering_seconds": None,
+        "backend_codegen_seconds": None,
+        "archive_seconds": None,
+        "per_graph_compile_seconds": None,
+    })
     for candidate in expected:
         artifact = (
             _target_artifact_path(candidate, target_id)
             if target_id
             else _artifact_path(candidate, backend)
         )
+        phase_mark = time.perf_counter()
         _require_backend_artifact(artifact, backend)
-        normalize_tcm(artifact)
+        validate_normalized_tcm(artifact)
+        post_validation_seconds += time.perf_counter() - phase_mark
+        phase_mark = time.perf_counter()
+        inventory[candidate] = _artifact_inventory(artifact)
+        inventory_seconds += time.perf_counter() - phase_mark
+        phase_mark = time.perf_counter()
+        artifact_identity = _build_identity(
+            name, backend, target_id, compiler_version, python_executable,
+            with_manifest, output_name=candidate,
+        )
+        _write_build_provenance(artifact, artifact_identity)
+        provenance_seconds += time.perf_counter() - phase_mark
+    phases["post_promotion_integrity_seconds"] = post_validation_seconds
+    phases["inventory_seconds"] = inventory_seconds
+    phases["provenance_seconds"] = provenance_seconds
+    phases["worker_total_seconds"] = time.perf_counter() - worker_started
+    print("AOT_METRICS_JSON=" + json.dumps({
+        "job": name,
+        "backend": backend,
+        "target": target_id,
+        "phases": phases,
+        "artifacts": inventory,
+    }, sort_keys=True, separators=(",", ":")))
 
 
 def _partial_timeout_output(error: subprocess.TimeoutExpired) -> str:
@@ -570,8 +969,35 @@ def _partial_timeout_output(error: subprocess.TimeoutExpired) -> str:
     return "\n".join(sections)
 
 
+def _worker_metrics(output: str) -> dict[str, object] | None:
+    marker = "AOT_METRICS_JSON="
+    for line in output.splitlines():
+        if line.startswith(marker):
+            try:
+                decoded = json.loads(line[len(marker):])
+            except json.JSONDecodeError:
+                return None
+            return decoded if isinstance(decoded, dict) else None
+    return None
+
+
+def _write_compile_report(report: dict[str, object]) -> Path:
+    BUILD_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    destination = BUILD_REPORT_DIR / f"compile-{time.time_ns()}.json"
+    staging = destination.with_name(destination.name + ".staging")
+    try:
+        staging.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        os.replace(staging, destination)
+    finally:
+        if staging.exists():
+            staging.unlink()
+    return destination
+
+
 def _run_subprocess(
-    backend: str, name: str, target_id: str | None = None, timeout: float = 900.0
+    backend: str, name: str, target_id: str | None = None, timeout: float = 900.0,
+    compiler_version: str = "taichi-1.7.4-custom", with_manifest: bool = False,
+    expected_source_sha256: str | None = None,
 ) -> tuple[bool, str]:
     env = os.environ.copy()
     native_context = backend == "opengl" and os.environ.get("PIXEL_REFINE_AOT_NATIVE_CONTEXT") == "1"
@@ -593,6 +1019,8 @@ def _run_subprocess(
             "PIXEL_REFINE_AOT_COMPILE_ONLY": "0" if native_context else "1",
         }
     )
+    if expected_source_sha256:
+        env["PIXEL_REFINE_AOT_EXPECTED_SOURCE_SHA256"] = expected_source_sha256
     if target_id:
         env.update(
             {
@@ -625,8 +1053,11 @@ def _run_subprocess(
                 backend,
                 "--worker",
                 name,
+                "--tcm-compiler-version",
+                compiler_version,
             ]
-            + (["--target", target_id] if target_id else []),
+            + (["--target", target_id] if target_id else [])
+            + (["--with-tcm-manifest"] if with_manifest else []),
             cwd=PROJECT_ROOT,
             text=True,
             capture_output=True,
@@ -811,17 +1242,10 @@ def main() -> None:
             )
 
     if args.worker:
-        _run_worker(args.backend, args.worker, args.target)
-        if args.with_tcm_manifest:
-            module_name, function_name, convention, aliases = JOBS[args.worker]
-            expected = (args.worker, *aliases)
-            artifacts = [
-                _target_artifact_path(candidate, args.target)
-                for candidate in expected
-            ]
-            _attach_manifest_to_target_artifacts(
-                artifacts, args.target, args.tcm_compiler_version
-            )
+        _run_worker(
+            args.backend, args.worker, args.target,
+            args.tcm_compiler_version, args.with_tcm_manifest,
+        )
         return
 
     requested = tuple(args.only.split(",")) if args.only else tuple(sorted(JOBS))
@@ -834,13 +1258,25 @@ def main() -> None:
     # loop and is safe to rerun because each archive is atomically promoted.
     if args.target and args.target.startswith("cpu_arm64"):
         target_dir = ARTIFACT_DIR / args.target
+        target_dir.mkdir(parents=True, exist_ok=True)
         requested_paths = [
             target_dir / f"{name}_{args.target}.tcm" for name in requested
         ]
-        needs_generation = args.force or any(
-            not path.is_file() for path in requested_paths
-        )
+        identities = {
+            name: _build_identity(
+                name, args.backend, args.target, args.tcm_compiler_version,
+                Path(sys.executable).resolve(), args.with_tcm_manifest,
+            )
+            for name in requested
+        }
+        decisions = {
+            name: _verified_build(path, identities[name])
+            for name, path in zip(requested, requested_paths)
+        }
+        needs_generation = args.force or any(not valid for valid, _ in decisions.values())
         _retarget_cpu_arm64(args.target, force=needs_generation)
+        if needs_generation and _source_fingerprint(refresh=True) != next(iter(identities.values()))["source_sha256"]:
+            raise RuntimeError("AOT source inputs changed during ARM64 retarget; refusing provenance stamp")
         missing = [str(path.name) for path in requested_paths if not path.is_file()]
         if missing:
             raise RuntimeError(
@@ -851,8 +1287,14 @@ def main() -> None:
             _attach_manifest_to_target_artifacts(
                 requested_paths, args.target, args.tcm_compiler_version
             )
+        for name, artifact in zip(requested, requested_paths):
+            _require_backend_artifact(artifact, "cpu")
+            validate_normalized_tcm(artifact)
+            _write_build_provenance(artifact, identities[name])
         for name in requested:
-            print(f"[PASS] {name} ({args.target} cross-target)")
+            decision = decisions[name][1]
+            outcome = "PASS" if needs_generation else "SKIP verified"
+            print(f"[{outcome}] {name} ({args.target}; {decision})")
         return
 
     # Vulkan graphics archives are SPIR-V and therefore architecture-neutral,
@@ -860,6 +1302,39 @@ def main() -> None:
     # target identity.  Do this automatically so a rebuild cannot leave the
     # ARM profile with a stale partial inventory.
     if args.target == "vulkan_arm64_android":
+        source_target = "vulkan_x86_64_windows"
+        source_dir = ARTIFACT_DIR / source_target
+        producer_for_output = {
+            output: job
+            for job, (_, _, _, aliases) in JOBS.items()
+            for output in (job, *aliases)
+        }
+        source_artifacts = sorted(source_dir.glob("*.tcm")) if source_dir.is_dir() else []
+        if not source_artifacts:
+            raise RuntimeError("cannot promote Vulkan Android artifacts: desktop source set is empty")
+        promotion_producers: dict[str, tuple[str, str]] = {}
+        for source_artifact in source_artifacts:
+            suffix = f"_{source_target}.tcm"
+            if not source_artifact.name.endswith(suffix):
+                raise RuntimeError(f"unexpected desktop Vulkan artifact name: {source_artifact.name}")
+            output_name = source_artifact.name[:-len(suffix)]
+            producer = producer_for_output.get(output_name)
+            if producer is None:
+                raise RuntimeError(
+                    f"desktop Vulkan artifact has no registered compiler job: {source_artifact.name}"
+                )
+            source_identity = _build_identity(
+                producer, "vulkan", source_target, args.tcm_compiler_version,
+                Path(sys.executable).resolve(), args.with_tcm_manifest,
+                output_name=output_name,
+            )
+            valid, reason = _verified_build(source_artifact, source_identity)
+            if not valid:
+                raise RuntimeError(
+                    f"cannot promote {output_name} to Android: desktop source provenance is {reason}; "
+                    "build the exact Vulkan desktop target first"
+                )
+            promotion_producers[output_name] = (producer, output_name)
         _promote_vulkan_arm64_android()
         target_dir = ARTIFACT_DIR / args.target
         missing = [
@@ -874,31 +1349,72 @@ def main() -> None:
             )
         if args.with_tcm_manifest:
             _attach_manifest_to_target_artifacts(
-                [
-                    target_dir / f"{name}_{args.target}.tcm"
-                    for name in requested
-                ],
+                [target_dir / f"{output_name}_{args.target}.tcm" for output_name in promotion_producers],
                 args.target,
                 args.tcm_compiler_version,
+            )
+        for output_name, (producer, _) in promotion_producers.items():
+            artifact = target_dir / f"{output_name}_{args.target}.tcm"
+            _require_backend_artifact(artifact, "vulkan")
+            validate_normalized_tcm(artifact)
+            _write_build_provenance(
+                artifact,
+                _build_identity(
+                    producer, "vulkan", args.target, args.tcm_compiler_version,
+                    Path(sys.executable).resolve(), args.with_tcm_manifest,
+                    output_name=output_name,
+                ),
             )
         for name in requested:
             print(f"[PASS] {name} (vulkan_arm64_android SPIR-V promotion)")
         return
 
     outcomes: list[tuple[str, str]] = []
+    report_jobs: list[dict[str, object]] = []
+    run_started = time.perf_counter()
+    worker_python = _selected_worker_python()
     for name in requested:
         artifact = (
             _target_artifact_path(name, args.target)
             if args.target
             else _artifact_path(name, args.backend)
         )
-        if artifact.is_file() and not args.force:
-            outcomes.append((name, "SKIP existing"))
-            continue
-        ok, output = _run_subprocess(
-            args.backend, name, args.target, timeout=args.timeout
+        preflight_started = time.perf_counter()
+        identity = _build_identity(
+            name, args.backend, args.target, args.tcm_compiler_version,
+            worker_python, args.with_tcm_manifest,
         )
+        preflight_seconds = time.perf_counter() - preflight_started
+        verified, cache_reason = _verified_build(artifact, identity)
+        if verified and not args.force:
+            outcomes.append((name, "SKIP verified"))
+            report_jobs.append({
+                "job": name, "status": "cache_hit", "cache_reason": cache_reason,
+                "compiler_identity": args.tcm_compiler_version,
+                "build_fingerprint": _build_fingerprint(identity),
+                "preflight_seconds": preflight_seconds,
+                "artifacts": {artifact.name: _artifact_inventory(artifact)},
+            })
+            continue
+        worker_started = time.perf_counter()
+        ok, output = _run_subprocess(
+            args.backend, name, args.target, timeout=args.timeout,
+            compiler_version=args.tcm_compiler_version,
+            with_manifest=args.with_tcm_manifest,
+            expected_source_sha256=str(identity["source_sha256"]),
+        )
+        worker_seconds = time.perf_counter() - worker_started
         outcomes.append((name, "PASS" if ok else f"FAIL\n{output}"))
+        report_jobs.append({
+            "job": name, "status": "compiled" if ok else "failed",
+            "cache_reason": "forced" if args.force and verified else cache_reason,
+            "compiler_identity": args.tcm_compiler_version,
+            "build_fingerprint": _build_fingerprint(identity),
+            "preflight_seconds": preflight_seconds,
+            "worker_wall_seconds": worker_seconds,
+            "worker_metrics": _worker_metrics(output),
+            "output_tail": output[-4000:],
+        })
 
     for name, outcome in outcomes:
         print(f"[{outcome.splitlines()[0]}] {name}")
@@ -906,16 +1422,17 @@ def main() -> None:
         f"{name}: {outcome}" for name, outcome in outcomes if outcome.startswith("FAIL")
     ]
     if failures:
+        report_path = _write_compile_report({
+            "schema": 1, "backend": args.backend, "target": args.target,
+            "jobs": report_jobs, "run_total_seconds": time.perf_counter() - run_started,
+        })
+        print(f"[AOT METRICS] {report_path}")
         raise RuntimeError("AOT backend compilation failed:\n" + "\n".join(failures))
-    if args.with_tcm_manifest:
-        artifacts = [
-            _target_artifact_path(candidate, args.target)
-            for name in requested
-            for candidate in (name, *JOBS[name][3])
-        ]
-        _attach_manifest_to_target_artifacts(
-            artifacts, args.target, args.tcm_compiler_version
-        )
+    report_path = _write_compile_report({
+        "schema": 1, "backend": args.backend, "target": args.target,
+        "jobs": report_jobs, "run_total_seconds": time.perf_counter() - run_started,
+    })
+    print(f"[AOT METRICS] {report_path}")
 
 
 if __name__ == "__main__":
