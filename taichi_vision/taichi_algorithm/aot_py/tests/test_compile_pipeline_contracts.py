@@ -138,6 +138,35 @@ class CompilePipelineContractTests(unittest.TestCase):
                 (False, "lucas_kanade_bm:provenance_missing"),
             )
 
+    def test_vulkan_promotion_rejects_incomplete_source_alias_roster(self):
+        with tempfile.TemporaryDirectory() as temp:
+            primary = Path(temp) / "block_matching_vulkan_x86_64_windows.tcm"
+            primary.write_bytes(b"primary")
+            identity = self._alias_identity("block_matching")
+            suite._write_build_provenance(primary, identity)
+            with self.assertRaisesRegex(RuntimeError, "incomplete Vulkan desktop source roster"):
+                suite._require_complete_job_outputs(
+                    "block_matching",
+                    [("block_matching", primary, identity)],
+                    context="Vulkan desktop source",
+                )
+
+    def test_vulkan_promotion_accepts_complete_verified_source_alias_roster(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outputs = []
+            for name in ("block_matching", "lucas_kanade_bm"):
+                artifact = Path(temp) / f"{name}_vulkan_x86_64_windows.tcm"
+                artifact.write_bytes(name.encode("ascii"))
+                identity = self._alias_identity(name)
+                suite._write_build_provenance(artifact, identity)
+                outputs.append((name, artifact, identity))
+            self.assertEqual(
+                suite._require_complete_job_outputs(
+                    "block_matching", outputs, context="Vulkan desktop source"
+                ),
+                outputs,
+            )
+
     def test_arm_profiles_are_selectable_from_active_target_manifest(self):
         self.assertIn("cpu_arm64_android", target_registry.TARGET_BACKENDS)
         self.assertIn("cpu_arm64_linux", target_registry.TARGET_BACKENDS)

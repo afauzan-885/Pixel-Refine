@@ -633,6 +633,25 @@ def _verified_job_build(
     return True, "all_outputs_verified"
 
 
+def _require_complete_job_outputs(
+    job: str, outputs: list[tuple[str, Path, dict[str, object]]],
+    *, context: str,
+) -> list[tuple[str, Path, dict[str, object]]]:
+    """Fail closed unless a producer's complete primary/alias set is verified."""
+    if job not in JOBS:
+        raise RuntimeError(f"{context} has unknown producer job: {job}")
+    expected = (job, *JOBS[job][3])
+    actual = tuple(output_name for output_name, _, _ in outputs)
+    if actual != expected:
+        raise RuntimeError(
+            f"incomplete {context} roster for {job}: expected {expected}, found {actual}"
+        )
+    valid, reason = _verified_job_build(outputs)
+    if not valid:
+        raise RuntimeError(f"invalid {context} roster for {job}: {reason}")
+    return outputs
+
+
 def _artifact_inventory(path: Path) -> dict[str, object]:
     """Collect static archive/graph counts without loading Taichi or a backend."""
     import zipfile
@@ -1361,7 +1380,7 @@ def main() -> None:
         source_artifacts = sorted(source_dir.glob("*.tcm")) if source_dir.is_dir() else []
         if not source_artifacts:
             raise RuntimeError("cannot promote Vulkan Android artifacts: desktop source set is empty")
-        promotion_producers: dict[str, tuple[str, str]] = {}
+        source_records_by_job: dict[str, dict[str, tuple[str, Path, dict[str, object]]]] = {}
         for source_artifact in source_artifacts:
             suffix = f"_{source_target}.tcm"
             if not source_artifact.name.endswith(suffix):
@@ -1372,47 +1391,117 @@ def main() -> None:
                 raise RuntimeError(
                     f"desktop Vulkan artifact has no registered compiler job: {source_artifact.name}"
                 )
+            producer_records = source_records_by_job.setdefault(producer, {})
+            if output_name in producer_records:
+                raise RuntimeError(f"duplicate Vulkan source output for {producer}: {output_name}")
             source_identity = _build_identity(
                 producer, "vulkan", source_target, args.tcm_compiler_version,
                 Path(sys.executable).resolve(), args.with_tcm_manifest,
                 output_name=output_name,
             )
-            valid, reason = _verified_build(source_artifact, source_identity)
-            if not valid:
-                raise RuntimeError(
-                    f"cannot promote {output_name} to Android: desktop source provenance is {reason}; "
-                    "build the exact Vulkan desktop target first"
+            producer_records[output_name] = (output_name, source_artifact, source_identity)
+
+        # Validate the complete producer roster before the promoter can replace
+        # any Android destination. This includes requested jobs that have no
+        # source files at all and unrequested jobs whose partial files would
+        # otherwise be copied by the promoter's directory-wide glob.
+        source_outputs_by_job: dict[str, list[tuple[str, Path, dict[str, object]]]] = {}
+        producer_jobs = tuple(dict.fromkeys((*requested, *sorted(source_records_by_job))))
+        for producer in producer_jobs:
+            records = source_records_by_job.get(producer, {})
+            expected_names = (producer, *JOBS[producer][3])
+            complete_records = [
+                records.get(output_name)
+                or (
+                    output_name,
+                    source_dir / f"{output_name}_{source_target}.tcm",
+                    _build_identity(
+                        producer, "vulkan", source_target, args.tcm_compiler_version,
+                        Path(sys.executable).resolve(), args.with_tcm_manifest,
+                        output_name=output_name,
+                    ),
                 )
-            promotion_producers[output_name] = (producer, output_name)
-        _promote_vulkan_arm64_android()
+                for output_name in expected_names
+            ]
+            try:
+                _require_complete_job_outputs(
+                    producer, complete_records, context="Vulkan desktop source"
+                )
+            except RuntimeError as error:
+                raise RuntimeError(
+                    f"cannot promote Vulkan producer {producer}: {error}"
+                ) from error
+            for output_name, source_artifact, _ in complete_records:
+                _require_backend_artifact(source_artifact, "vulkan")
+                validate_normalized_tcm(source_artifact)
+            source_outputs_by_job[producer] = complete_records
+
+        promotion_outputs = [
+            record
+            for producer in sorted(source_outputs_by_job)
+            for record in source_outputs_by_job[producer]
+        ]
         target_dir = ARTIFACT_DIR / args.target
+        expected_destination_names = {
+            f"{output_name}_{args.target}.tcm"
+            for output_name, _, _ in promotion_outputs
+        }
+        existing_destination_names = {
+            path.name for path in target_dir.glob("*.tcm")
+        } if target_dir.is_dir() else set()
+        unexpected_destination_names = sorted(
+            existing_destination_names - expected_destination_names
+        )
+        if unexpected_destination_names:
+            raise RuntimeError(
+                "Vulkan Android destination contains outputs not present in the "
+                "verified desktop source roster; preserving them and refusing "
+                "promotion: " + ", ".join(unexpected_destination_names)
+            )
+
+        _promote_vulkan_arm64_android()
         missing = [
-            str(target_dir / f"{name}_{args.target}.tcm")
-            for name in requested
-            if not (target_dir / f"{name}_{args.target}.tcm").is_file()
+            f"{output_name}_{args.target}.tcm"
+            for output_name, _, _ in promotion_outputs
+            if not (target_dir / f"{output_name}_{args.target}.tcm").is_file()
         ]
         if missing:
             raise RuntimeError(
-                "Vulkan ARM64 promotion did not produce requested archives: "
+                "Vulkan ARM64 promotion did not produce the complete verified roster: "
                 + ", ".join(missing)
             )
+        for output_name, source_artifact, _ in promotion_outputs:
+            destination = target_dir / f"{output_name}_{args.target}.tcm"
+            _require_backend_artifact(destination, "vulkan")
+            validate_normalized_tcm(destination)
+            if _sha256_file(source_artifact) != _sha256_file(destination):
+                raise RuntimeError(
+                    f"Vulkan promotion payload changed during copy: {destination.name}"
+                )
         if args.with_tcm_manifest:
             _attach_manifest_to_target_artifacts(
-                [target_dir / f"{output_name}_{args.target}.tcm" for output_name in promotion_producers],
+                [target_dir / f"{output_name}_{args.target}.tcm" for output_name, _, _ in promotion_outputs],
                 args.target,
                 args.tcm_compiler_version,
             )
-        for output_name, (producer, _) in promotion_producers.items():
-            artifact = target_dir / f"{output_name}_{args.target}.tcm"
-            _require_backend_artifact(artifact, "vulkan")
-            validate_normalized_tcm(artifact)
-            _write_build_provenance(
-                artifact,
-                _build_identity(
+        target_outputs_by_job: dict[str, list[tuple[str, Path, dict[str, object]]]] = {}
+        for producer, source_outputs in source_outputs_by_job.items():
+            target_outputs = []
+            for output_name, _, _ in source_outputs:
+                target_artifact = target_dir / f"{output_name}_{args.target}.tcm"
+                target_identity = _build_identity(
                     producer, "vulkan", args.target, args.tcm_compiler_version,
                     Path(sys.executable).resolve(), args.with_tcm_manifest,
                     output_name=output_name,
-                ),
+                )
+                _require_backend_artifact(target_artifact, "vulkan")
+                validate_normalized_tcm(target_artifact)
+                _write_build_provenance(target_artifact, target_identity)
+                target_outputs.append((output_name, target_artifact, target_identity))
+            target_outputs_by_job[producer] = target_outputs
+        for producer, outputs in target_outputs_by_job.items():
+            _require_complete_job_outputs(
+                producer, outputs, context="Vulkan Android destination"
             )
         for name in requested:
             print(f"[PASS] {name} (vulkan_arm64_android SPIR-V promotion)")
