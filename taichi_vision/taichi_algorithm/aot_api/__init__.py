@@ -2970,6 +2970,17 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
 
     is_vec = getattr(src_buf, "is_vector", False)
 
+    # A caller-supplied destination may store RGB as scalar HWC3 while the
+    # selected graph expects a vec2/vec3 field (or the reverse).  A view
+    # changes only the ABI metadata, so normalize it here exactly like
+    # box_filter does; the caller's original buffer object stays returned and
+    # keeps ownership.  Without this, the graph rejects the dispatch with
+    # "Mismatched shape information for argument dst" and the sticky C-API
+    # error then poisons every later AOT load in the worker process.
+    dst_arg = dst_buf
+    if dst is not None and is_3d and getattr(dst_buf, "is_vector", False) != is_vec:
+        dst_arg = dst_buf.view_as_vector(is_vec, vector_dim=v_dim)
+
     if interpolation == INTER_CUBIC:
         graph_name = "bicubic_resize_f32_3d" if is_vec else "bicubic_resize_f32_2d"
         if src_buf.dtype != np.float32:
@@ -2977,7 +2988,7 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
         _mod("bicubic").run(
             graph_name,
             src=src_buf,
-            dst=dst_buf,
+            dst=dst_arg,
             h_src=h_src,
             w_src=w_src,
             h_dst=target_h,
@@ -2989,7 +3000,7 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
             _mod("bilinear").run(
                 graph_name,
                 src=src_buf,
-                dst=dst_buf,
+                dst=dst_arg,
                 h_src=h_src,
                 w_src=w_src,
                 h_dst=target_h,
@@ -3032,7 +3043,7 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
         _mod("area").run(
             graph_name,
             src=src_buf,
-            dst=dst_buf,
+            dst=dst_arg,
             sh=h_src,
             sw=w_src,
             dh=target_h,
@@ -3046,7 +3057,7 @@ def resize(src, dsize, interpolation=INTER_CUBIC, return_gpu=False, dst=None):
         _mod("nearest").run(
             "nearest_resize_f32",
             src=src_buf,
-            dst=dst_buf,
+            dst=dst_arg,
             h_src=h_src,
             w_src=w_src,
             h_dst=target_h,
