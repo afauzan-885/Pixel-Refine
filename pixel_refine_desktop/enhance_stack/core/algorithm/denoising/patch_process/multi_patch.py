@@ -36,6 +36,86 @@ class CandidateSelection:
     search_candidate_count: int
 
 
+def _majority_vote_cell_ranks(
+    indices: np.ndarray,
+    valid: np.ndarray,
+    *,
+    cell_size: int = 10,
+) -> np.ndarray:
+    """Aggregate pixelwise top-K rank choices over each ``(cell_size, cell_size)`` block.
+
+    Instead of sampling only a single noisy center pixel per cell, each pixel in
+    the cell casts rank-weighted votes for its valid top-K candidates
+    (weight ``rank_count - r`` for rank ``r``). If the cell center pixel is
+    valid, its preferences are given an edge-preserving boost so sharp object
+    boundaries passing near the cell center remain crisp while flat-field noise
+    averages out across the cell. Selected cell ranks are strictly unique across
+    ``0..rank_count-1``.
+    """
+
+    rank_count, height, width = indices.shape
+    cells_y = (height + cell_size - 1) // cell_size
+    cells_x = (width + cell_size - 1) // cell_size
+    coarse = np.full((rank_count, cells_y, cells_x), -1, dtype=np.int32)
+    rank_weights = np.arange(rank_count, 0, -1, dtype=np.int32)
+
+    for cy in range(cells_y):
+        y0 = cy * cell_size
+        y1 = min(height, y0 + cell_size)
+        center_y = min(height - 1, y0 + cell_size // 2)
+        rel_cy = center_y - y0
+        for cx in range(cells_x):
+            x0 = cx * cell_size
+            x1 = min(width, x0 + cell_size)
+            center_x = min(width - 1, x0 + cell_size // 2)
+            rel_cx = center_x - x0
+
+            cell_idx = indices[:, y0:y1, x0:x1]
+            cell_val = valid[:, y0:y1, x0:x1] & (cell_idx >= 0)
+            if not np.any(cell_val):
+                continue
+
+            scores: dict[int, int] = {}
+            first_seen: dict[int, int] = {}
+            order_counter = 0
+
+            # Edge-preserving center anchor bonus when center is valid
+            center_col = cell_idx[:, rel_cy, rel_cx]
+            center_ok = cell_val[:, rel_cy, rel_cx]
+            for r in range(rank_count):
+                if center_ok[r]:
+                    cand = int(center_col[r])
+                    if cand not in first_seen:
+                        first_seen[cand] = order_counter
+                        order_counter += 1
+                    scores[cand] = scores.get(cand, 0) + int(rank_weights[r]) * 2
+
+            # Aggregate Borda rank votes over all valid pixels in the cell
+            for r in range(rank_count):
+                w = int(rank_weights[r])
+                valid_cands = cell_idx[r][cell_val[r]]
+                if valid_cands.size == 0:
+                    continue
+                unique_cands, counts = np.unique(valid_cands, return_counts=True)
+                for cand_val, count_val in zip(unique_cands, counts):
+                    cand = int(cand_val)
+                    if cand not in first_seen:
+                        first_seen[cand] = order_counter
+                        order_counter += 1
+                    scores[cand] = scores.get(cand, 0) + int(count_val) * w
+
+            # Sort descending by total vote score, tie-breaking by cand index
+            ranked_candidates = sorted(
+                scores.keys(),
+                key=lambda c: (-scores[c], first_seen[c], c),
+            )
+            limit = min(rank_count, len(ranked_candidates))
+            for r in range(limit):
+                coarse[r, cy, cx] = ranked_candidates[r]
+
+    return coarse
+
+
 def cohere_candidate_selection(
     selection: CandidateSelection,
     offsets: tuple[CandidateOffset, ...] | list[CandidateOffset],
@@ -45,11 +125,12 @@ def cohere_candidate_selection(
 ) -> CandidateSelection:
     """Make local candidate choices spatially coherent over patch cells.
 
-    The search still ranks offsets independently at every pixel. Before those
-    rank maps are used to assemble WeightNet inputs or CFA remap fields, sample
-    one top-K decision at each patch-cell center and hold that decision across
-    the cell. This prevents noise in flat areas from switching source offsets
-    at pixel frequency while keeping the existing top-K search and ABI intact.
+    The search ranks offsets at every pixel. Before those rank maps are used to
+    assemble WeightNet inputs or CFA remap fields, aggregate top-K decisions
+    across each patch cell via rank-weighted majority voting (with center-pixel
+    edge preservation) and hold that decision across the cell. This prevents
+    noise in flat areas from switching source offsets at pixel frequency and
+    yields cleaner candidate patches than single-pixel sampling.
     """
 
     indices = np.asarray(selection.indices, dtype=np.int32)
@@ -73,24 +154,18 @@ def cohere_candidate_selection(
         )
 
     radius = patch_size // 2
-    center_y = np.minimum(
-        np.arange(0, height, cell_size, dtype=np.int32) + cell_size // 2,
-        height - 1,
-    )
-    center_x = np.minimum(
-        np.arange(0, width, cell_size, dtype=np.int32) + cell_size // 2,
-        width - 1,
-    )
-    result_indices = np.empty_like(indices, dtype=np.int32)
     max_offset_x = max(abs(int(item.dx_proxy)) for item in offsets)
     max_offset_y = max(abs(int(item.dy_proxy)) for item in offsets)
     border_x = min(width, radius + max_offset_x)
     border_y = min(height, radius + max_offset_y)
 
-    for rank in range(rank_count):
-        sampled = indices[rank][center_y[:, None], center_x[None, :]]
-        expanded = np.repeat(np.repeat(sampled, cell_size, axis=0), cell_size, axis=1)
-        result_indices[rank] = expanded[:height, :width]
+    coarse = _majority_vote_cell_ranks(
+        indices,
+        np.asarray(selection.valid, dtype=bool),
+        cell_size=cell_size,
+    )
+    expanded = np.repeat(np.repeat(coarse, cell_size, axis=1), cell_size, axis=2)
+    result_indices = np.ascontiguousarray(expanded[:, :height, :width], dtype=np.int32)
 
     # A conservative border makes every retained offset patch valid without
     # allocating full-resolution coordinate/validity temporaries per rank.

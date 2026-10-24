@@ -9,6 +9,7 @@ import pytest
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.patch_process.multi_patch import (
     CandidateOffset,
+    CandidateSelection,
     candidate_flow_from_indices,
     cohere_candidate_selection,
     gather_rank_candidate,
@@ -177,6 +178,28 @@ def test_coherent_rank_map_reduces_pixelwise_offset_switching_on_flat_raw_proxy(
                 assert np.unique(cell_values[rank][cell_valid[rank]]).size <= 1
             if np.all(coherent.valid[:, y0 + 2, x0 + 2]):
                 assert len(np.unique(coherent.indices[:, y0 + 2, x0 + 2])) == 4
+
+
+def test_coherent_cell_majority_vote_rejects_noisy_center_outlier_and_preserves_edges():
+    height = width = 10
+    offsets = (_offset(-2, 0), _offset(2, 0), _offset(0, -2), _offset(0, 2))
+    # Every pixel in the 10x10 cell prefers candidate 0 (rank 0) and candidate 1 (rank 1),
+    # except the single noisy center pixel (5, 5) which prefers candidate 2 and 3.
+    indices = np.zeros((2, height, width), dtype=np.int32)
+    indices[0, :, :] = 0
+    indices[1, :, :] = 1
+    indices[0, 5, 5] = 2
+    indices[1, 5, 5] = 3
+    valid = np.ones((2, height, width), dtype=bool)
+    selection = CandidateSelection(
+        indices=indices, valid=valid, search_candidate_count=len(offsets)
+    )
+    coherent = cohere_candidate_selection(
+        selection, offsets, cell_size=10, patch_size=1
+    )
+    # Majority voting over the 10x10 cell must pick (0, 1), not the noisy center (2, 3)!
+    assert coherent.indices[0, 5, 5] == 0
+    assert coherent.indices[1, 5, 5] == 1
 
 
 def test_weightnet_confidence_is_not_scaled_by_patch_distance(monkeypatch):

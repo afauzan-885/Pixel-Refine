@@ -32,8 +32,6 @@ def multi_patch_topk_kernel(
     cells_y = (height + cell_size - 1) // cell_size
     cells_x = (width + cell_size - 1) // cell_size
     for cell_y, cell_x in ti.ndrange(cells_y, cells_x):
-        # Deep Analysis consumes one decision per 10x10 patch cell. Evaluate
-        # exactly the center pixel used by the former full-grid coherence pass.
         y = ti.min(height - 1, cell_y * cell_size + cell_size // 2)
         x = ti.min(width - 1, cell_x * cell_size + cell_size // 2)
         best_distances = ti.Vector.zero(ti.f32, MAX_NEIGHBORS)
@@ -42,47 +40,126 @@ def multi_patch_topk_kernel(
             best_distances[rank] = _F32_MAX
             best_indices[rank] = -1
 
-        target_valid = (
-            y >= PATCH_RADIUS
-            and y + PATCH_RADIUS < height
-            and x >= PATCH_RADIUS
-            and x + PATCH_RADIUS < width
-        )
-        if target_valid:
+        if cell_size <= 1:
+            target_valid = (
+                y >= PATCH_RADIUS
+                and y + PATCH_RADIUS < height
+                and x >= PATCH_RADIUS
+                and x + PATCH_RADIUS < width
+            )
+            if target_valid:
+                for candidate_index in range(candidate_count):
+                    dx = offsets[candidate_index, 0]
+                    dy = offsets[candidate_index, 1]
+                    source_valid = (
+                        y + dy >= PATCH_RADIUS
+                        and y + dy + PATCH_RADIUS < height
+                        and x + dx >= PATCH_RADIUS
+                        and x + dx + PATCH_RADIUS < width
+                    )
+                    if source_valid:
+                        distance = 0.0
+                        for py in ti.static(range(-PATCH_RADIUS, PATCH_RADIUS + 1)):
+                            for px in ti.static(range(-PATCH_RADIUS, PATCH_RADIUS + 1)):
+                                difference = 0.0
+                                if channels == 1:
+                                    difference = (
+                                        reference[0, y + py, x + px]
+                                        - candidate[0, y + dy + py, x + dx + px]
+                                    )
+                                else:
+                                    reference_luma = (
+                                        reference[0, y + py, x + px] * 0.299
+                                        + reference[1, y + py, x + px] * 0.587
+                                        + reference[2, y + py, x + px] * 0.114
+                                    )
+                                    candidate_luma = (
+                                        candidate[0, y + dy + py, x + dx + px] * 0.299
+                                        + candidate[1, y + dy + py, x + dx + px] * 0.587
+                                        + candidate[2, y + dy + py, x + dx + px] * 0.114
+                                    )
+                                    difference = reference_luma - candidate_luma
+                                distance += difference * difference
+                        distance /= ti.cast(PATCH_AREA, ti.f32)
+
+                        carry_distance = distance
+                        carry_index = candidate_index
+                        for rank in ti.static(range(MAX_NEIGHBORS)):
+                            if rank < neighbor_count and carry_distance < best_distances[rank]:
+                                displaced_distance = best_distances[rank]
+                                displaced_index = best_indices[rank]
+                                best_distances[rank] = carry_distance
+                                best_indices[rank] = carry_index
+                                carry_distance = displaced_distance
+                                carry_index = displaced_index
+        else:
+            # Spatial cell aggregation (5-point cross subsample within the cell)
+            # with center-pixel edge-preserving boost (weight 2.0 at center, 1.0
+            # at the 4 quadrant anchors). Suppresses flat-field noise while
+            # keeping sharp object boundaries coherent.
+            step_y = ti.max(1, cell_size // 4)
+            step_x = ti.max(1, cell_size // 4)
             for candidate_index in range(candidate_count):
                 dx = offsets[candidate_index, 0]
                 dy = offsets[candidate_index, 1]
-                source_valid = (
-                    y + dy >= PATCH_RADIUS
-                    and y + dy + PATCH_RADIUS < height
-                    and x + dx >= PATCH_RADIUS
-                    and x + dx + PATCH_RADIUS < width
-                )
-                if source_valid:
-                    distance = 0.0
-                    for py in ti.static(range(-PATCH_RADIUS, PATCH_RADIUS + 1)):
-                        for px in ti.static(range(-PATCH_RADIUS, PATCH_RADIUS + 1)):
-                            difference = 0.0
-                            if channels == 1:
-                                difference = (
-                                    reference[0, y + py, x + px]
-                                    - candidate[0, y + dy + py, x + dx + px]
-                                )
-                            else:
-                                reference_luma = (
-                                    reference[0, y + py, x + px] * 0.299
-                                    + reference[1, y + py, x + px] * 0.587
-                                    + reference[2, y + py, x + px] * 0.114
-                                )
-                                candidate_luma = (
-                                    candidate[0, y + dy + py, x + dx + px] * 0.299
-                                    + candidate[1, y + dy + py, x + dx + px] * 0.587
-                                    + candidate[2, y + dy + py, x + dx + px] * 0.114
-                                )
-                                difference = reference_luma - candidate_luma
-                            distance += difference * difference
-                    distance /= ti.cast(PATCH_AREA, ti.f32)
+                agg_distance = 0.0
+                weight_sum = 0.0
+                for sy, sx, w_sample in ti.static(
+                    (
+                        (0, 0, 2.0),
+                        (-1, -1, 1.0),
+                        (-1, 1, 1.0),
+                        (1, -1, 1.0),
+                        (1, 1, 1.0),
+                    )
+                ):
+                    py_c = ti.min(
+                        height - 1,
+                        ti.max(0, y + sy * step_y),
+                    )
+                    px_c = ti.min(
+                        width - 1,
+                        ti.max(0, x + sx * step_x),
+                    )
+                    sample_valid = (
+                        py_c >= PATCH_RADIUS
+                        and py_c + PATCH_RADIUS < height
+                        and px_c >= PATCH_RADIUS
+                        and px_c + PATCH_RADIUS < width
+                        and py_c + dy >= PATCH_RADIUS
+                        and py_c + dy + PATCH_RADIUS < height
+                        and px_c + dx >= PATCH_RADIUS
+                        and px_c + dx + PATCH_RADIUS < width
+                    )
+                    if sample_valid:
+                        patch_dist = 0.0
+                        for py in ti.static(range(-PATCH_RADIUS, PATCH_RADIUS + 1)):
+                            for px in ti.static(range(-PATCH_RADIUS, PATCH_RADIUS + 1)):
+                                difference = 0.0
+                                if channels == 1:
+                                    difference = (
+                                        reference[0, py_c + py, px_c + px]
+                                        - candidate[0, py_c + dy + py, px_c + dx + px]
+                                    )
+                                else:
+                                    reference_luma = (
+                                        reference[0, py_c + py, px_c + px] * 0.299
+                                        + reference[1, py_c + py, px_c + px] * 0.587
+                                        + reference[2, py_c + py, px_c + px] * 0.114
+                                    )
+                                    candidate_luma = (
+                                        candidate[0, py_c + dy + py, px_c + dx + px] * 0.299
+                                        + candidate[1, py_c + dy + py, px_c + dx + px] * 0.587
+                                        + candidate[2, py_c + dy + py, px_c + dx + px] * 0.114
+                                    )
+                                    difference = reference_luma - candidate_luma
+                                patch_dist += difference * difference
+                        patch_dist /= ti.cast(PATCH_AREA, ti.f32)
+                        agg_distance += patch_dist * w_sample
+                        weight_sum += w_sample
 
+                if weight_sum > 0.0:
+                    distance = agg_distance / weight_sum
                     carry_distance = distance
                     carry_index = candidate_index
                     for rank in ti.static(range(MAX_NEIGHBORS)):
