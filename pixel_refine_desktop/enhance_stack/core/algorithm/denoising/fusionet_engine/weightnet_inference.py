@@ -16,6 +16,12 @@ import numpy as np
 import cv2
 from PIL import Image, ImageOps
 
+from pixel_refine_desktop.enhance_stack.core.algorithm.shared_utils import (
+    RAW_EXTENSIONS,
+    apply_orientation as _apply_orientation,
+    read_orientation as _read_image_orientation,
+)
+
 DEFAULT_WEIGHTNET_ONNX = Path(
     "database/Learning_Model/weightNet/weightnet_master.bundle"
 )
@@ -42,45 +48,6 @@ def _validate_weightnet_input_channels(session, expected_channels: int):
 MAX_DML_REFERENCE_CACHE_TILES = max(
     1, int(os.environ.get("PIXEL_REFINE_DML_CACHE_TILES", "2"))
 )
-RAW_EXTENSIONS = {
-    ".dng",
-    ".cr2",
-    ".cr3",
-    ".nef",
-    ".arw",
-    ".rw2",
-    ".orf",
-    ".raf",
-    ".pef",
-    ".srw",
-}
-
-
-def _read_image_orientation(image_path: Path) -> int:
-    try:
-        with Image.open(image_path) as image:
-            exif = image.getexif()
-            return int(exif.get(0x0112, 1))
-    except Exception:
-        return 1
-
-
-def _apply_orientation(image: np.ndarray, orientation: int) -> np.ndarray:
-    if orientation == 2:
-        return np.fliplr(image)
-    if orientation == 3:
-        return np.rot90(image, 2)
-    if orientation == 4:
-        return np.flipud(image)
-    if orientation == 5:
-        return np.fliplr(np.rot90(image, -1))
-    if orientation == 6:
-        return np.rot90(image, -1)
-    if orientation == 7:
-        return np.fliplr(np.rot90(image, 1))
-    if orientation == 8:
-        return np.rot90(image, 1)
-    return image
 
 
 def load_rgb_linear_image(path: str | Path, is_raw: bool = False) -> np.ndarray:
@@ -1202,171 +1169,3 @@ def fuse_support_frame_inplace(
     else:
         sum_img += supp_full_chw * weight_map_work
         weight_sum += weight_map_work
-
-
-def run_collab_onnx_inference(
-    session,
-    burst_full: np.ndarray,
-    *,
-    tile_size: int = 512,
-    work_scale: float = 0.50,
-    overlap: float = 0.30,
-    ghost_penalty: float = 1.0,
-    ghost_cutoff: float = 0.05,
-    stop_event: Optional[threading.Event] = None,
-    progress: Optional[Callable[[int, str], None]] = None,
-) -> tuple[np.ndarray, float]:
-    """
-    Run core ONNX inference on burst array [1, N, 3, H, W] and return
-    uncompressed fused float32 RGB array [H, W, 3] in range [0.0, 1.0].
-    """
-    from taichi_vision import taichi_aot
-
-    burst_full = np.ascontiguousarray(burst_full, dtype=np.float32)
-    _, frame_count, channels, full_h, full_w = burst_full.shape
-    if channels != 3 or frame_count < 1:
-        raise ValueError("Burst must contain RGB frames and at least one image.")
-
-    work_scale = float(work_scale)
-    work_h = max(1, int(full_h * work_scale))
-    work_w = max(1, int(full_w * work_scale))
-
-    # Reference work frame
-    if (work_h, work_w) != (full_h, full_w):
-        ref_hwc = np.transpose(burst_full[0, 0], (1, 2, 0))
-        ref_work = np.transpose(
-            taichi_aot.resize(
-                ref_hwc, (work_w, work_h), interpolation=taichi_aot.INTER_AREA
-            ),
-            (2, 0, 1),
-        )
-    else:
-        ref_work = burst_full[0, 0]
-
-    sum_img = burst_full[0, 0].copy()
-    weight_sum = np.ones((channels, full_h, full_w), dtype=np.float32)
-    alpha_total = 0.0
-
-    for idx in range(1, frame_count):
-        if stop_event is not None and stop_event.is_set():
-            raise RuntimeError("Inference cancelled.")
-
-        if (work_h, work_w) != (full_h, full_w):
-            supp_hwc = np.transpose(burst_full[0, idx], (1, 2, 0))
-            supp_work = np.transpose(
-                taichi_aot.resize(
-                    supp_hwc, (work_w, work_h), interpolation=taichi_aot.INTER_AREA
-                ),
-                (2, 0, 1),
-            )
-        else:
-            supp_work = burst_full[0, idx]
-
-        def pair_prog(p_val, p_msg):
-            if progress:
-                mapped = int(((idx - 1) + p_val / 100.0) / (frame_count - 1) * 100)
-                progress(mapped, f"Frame {idx}/{frame_count - 1}: {p_msg}")
-
-        weight_work, alpha_mean = infer_single_support_weight_map(
-            session,
-            ref_work,
-            supp_work,
-            tile_size=tile_size,
-            overlap=overlap,
-            ghost_penalty=ghost_penalty,
-            ghost_cutoff=ghost_cutoff,
-            stop_event=stop_event,
-            progress=pair_prog,
-        )
-        alpha_total += alpha_mean
-
-        fuse_support_frame_inplace(
-            sum_img,
-            weight_sum,
-            burst_full[0, idx],
-            weight_work,
-            full_h,
-            full_w,
-        )
-        del weight_work
-        if (work_h, work_w) != (full_h, full_w):
-            del supp_work
-
-    result = np.clip(sum_img / (weight_sum + 1e-8), 0.0, 1.0)
-    del sum_img, weight_sum
-    mean_alpha = alpha_total / max(1, frame_count - 1)
-    result_hwc = np.transpose(result, (1, 2, 0))
-    if progress:
-        progress(100, f"Finished ONNX; alpha={mean_alpha:.4f}")
-    return result_hwc, mean_alpha
-
-
-def run_weightnet_inference(
-    image_paths: Optional[Sequence[str | Path]] = None,
-    frames: Optional[Sequence[np.ndarray]] = None,
-    is_raw: Optional[bool] = None,
-    model_path: str | Path = DEFAULT_WEIGHTNET_ONNX,
-    work_scale: float = 0.50,
-    tile_size: int = 512,
-    overlap: float = 0.30,
-    ghost_penalty: Optional[float] = None,
-    ghost_cutoff: Optional[float] = None,
-    stop_event: Optional[threading.Event] = None,
-    progress_callback: Optional[Callable[[int, str], None]] = None,
-) -> tuple[np.ndarray, float]:
-    """
-    Self-contained inference engine:
-    Accepts list of image paths OR list of in-memory NumPy frames ->
-    executes tiled ONNX inference -> returns raw uncompressed float32 RGB array [H, W, 3] and mean alpha.
-    """
-    if frames is None and image_paths is None:
-        raise ValueError("Either image_paths or frames must be provided.")
-
-    if progress_callback:
-        progress_callback(5, "Loading FusionNet ONNX model...")
-    session = load_weightnet_onnx(model_path, runtime="auto", patch_size=tile_size)
-
-    if is_raw is None:
-        if image_paths:
-            is_raw = any(Path(p).suffix.lower() in RAW_EXTENSIONS for p in image_paths)
-        else:
-            is_raw = False
-
-    if ghost_penalty is None:
-        ghost_penalty = 1.30 if is_raw else 1.0
-    if ghost_cutoff is None:
-        ghost_cutoff = 0.05 if is_raw else 0.0
-
-    print(
-        f"[WeightNet Pipeline] RAW mode={is_raw} -> "
-        f"ghost_penalty={ghost_penalty:.2f}, ghost_cutoff={ghost_cutoff:.2f}"
-    )
-
-    if progress_callback:
-        progress_callback(10, "Loading and preparing burst frames...")
-
-    if frames is not None and len(frames) > 0:
-        norm_images = normalize_burst_frames(frames, is_raw=is_raw)
-    else:
-        norm_images = load_burst_images(image_paths)
-
-    burst = burst_images_to_array(norm_images)
-    del norm_images
-
-    def internal_progress(val, msg):
-        if progress_callback:
-            mapped_val = 15 + int(val * 0.80)
-            progress_callback(mapped_val, msg)
-
-    result_fp32, alpha = run_collab_onnx_inference(
-        session,
-        burst,
-        tile_size=tile_size,
-        work_scale=work_scale,
-        overlap=overlap,
-        ghost_penalty=ghost_penalty,
-        ghost_cutoff=ghost_cutoff,
-        stop_event=stop_event,
-        progress=internal_progress,
-    )
-    return result_fp32, alpha

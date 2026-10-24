@@ -13,6 +13,7 @@ import numpy as np
 
 from taichi_vision.taichi_aot import TaichiGPUBuffer
 
+from ...shared_utils import RAW_EXTENSIONS, apply_orientation, read_orientation
 from .facade import api as _facade
 
 
@@ -25,49 +26,11 @@ __all__ = [
 ]
 
 
-_RAW_EXTENSIONS = frozenset(
-    {
-        ".dng",
-        ".cr2",
-        ".cr3",
-        ".nef",
-        ".arw",
-        ".rw2",
-        ".orf",
-        ".raf",
-        ".pef",
-        ".srw",
-    }
-)
-
-
-def _read_orientation(path: Path) -> int:
-    from PIL import Image
-
-    try:
-        with Image.open(path) as img:
-            exif = img.getexif()
-            return int(exif.get(0x0112, 1))
-    except Exception:
-        return 1
-
-
-def _apply_orientation(image: np.ndarray, orientation: int) -> np.ndarray:
-    if orientation == 2:
-        return np.fliplr(image)
-    if orientation == 3:
-        return np.rot90(image, 2)
-    if orientation == 4:
-        return np.flipud(image)
-    if orientation == 5:
-        return np.rot90(np.fliplr(image), -1)
-    if orientation == 6:
-        return np.rot90(image, -1)
-    if orientation == 7:
-        return np.rot90(np.fliplr(image), 1)
-    if orientation == 8:
-        return np.rot90(image, 1)
-    return image
+# Single-source helpers from shared_utils; the private aliases keep the
+# resident facade re-export surface (AC1) stable.
+_RAW_EXTENSIONS = RAW_EXTENSIONS
+_read_orientation = read_orientation
+_apply_orientation = apply_orientation
 
 
 def _normalize_rgb_host_frame(image: np.ndarray) -> np.ndarray:

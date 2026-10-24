@@ -692,25 +692,3 @@ class AOTOpticalFlowAligner:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-
-
-def align_support_frame(
-    ref_rgb_f32: np.ndarray,
-    supp_rgb_f32: np.ndarray,
-    *,
-    work_scale: float = 0.50,
-    tile_size: int = 16,
-    search_dist: int = 2,
-    max_search_radius: int = 12,
-    stop_event: Optional[threading.Event] = None,
-    progress: Optional[Callable[[int, str], None]] = None,
-) -> np.ndarray:
-    """Convenience functional wrapper for single pair alignment."""
-    with AOTOpticalFlowAligner(
-        ref_rgb_f32,
-        work_scale=work_scale,
-        tile_size=tile_size,
-        search_dist=search_dist,
-        max_search_radius=max_search_radius,
-    ) as aligner:
-        return aligner.align_frame(supp_rgb_f32, stop_event=stop_event)

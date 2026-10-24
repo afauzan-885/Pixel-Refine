@@ -31,10 +31,9 @@ from .hdr_fusion import (
 )
 
 
-_RAW_EXTENSIONS = {
-    ".dng", ".cr2", ".cr3", ".nef", ".arw", ".rw2", ".orf", ".raf",
-    ".pef", ".srw",
-}
+from pixel_refine_desktop.enhance_stack.core.algorithm.shared_utils import (
+    RAW_EXTENSIONS as _RAW_EXTENSIONS,
+)
 _HISTOGRAM_BINS = 256
 
 
