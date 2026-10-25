@@ -14,7 +14,9 @@
 #include <vector>
 #include <mutex>
 #include <limits>
+#define PIXEL_REFINE_TAICHI_AOT_ENGINE_BUILD 1
 #include "native_memory_control.h"
+#undef PIXEL_REFINE_TAICHI_AOT_ENGINE_BUILD
 #include "native_memory_ledger.h"
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <immintrin.h>
@@ -2051,7 +2053,7 @@ static bool memory_control_header(EngineContext *ctx, const void *object,
   return true;
 }
 
-EXPORT int ti_aot_get_memory_snapshot(void *runtime, TiAotMemorySnapshotV1 *output) {
+int ti_aot_get_memory_snapshot(void *runtime, TiAotMemorySnapshotV1 *output) {
   return memory_boundary<int>(runtime, "ti_aot_get_memory_snapshot", 0,
       [=](EngineContext *ctx, ti::Runtime *) -> int {
     if (!memory_control_header(ctx, output, sizeof(*output), "memory snapshot"))
@@ -2109,7 +2111,7 @@ EXPORT int ti_aot_get_memory_snapshot(void *runtime, TiAotMemorySnapshotV1 *outp
   });
 }
 
-EXPORT int ti_aot_set_memory_limits(void *runtime, const TiAotMemoryLimitsV1 *limits) {
+int ti_aot_set_memory_limits(void *runtime, const TiAotMemoryLimitsV1 *limits) {
   return memory_boundary<int>(runtime, "ti_aot_set_memory_limits", 0,
       [=](EngineContext *ctx, ti::Runtime *) -> int {
     if (!memory_control_header(ctx, limits, sizeof(*limits), "memory limits"))
@@ -2132,8 +2134,8 @@ EXPORT int ti_aot_set_memory_limits(void *runtime, const TiAotMemoryLimitsV1 *li
   });
 }
 
-EXPORT int ti_aot_trim_memory_cache(void *runtime, uint64_t target_bytes,
-                                    uint64_t target_entries, TiAotMemoryTrimV1 *output) {
+int ti_aot_trim_memory_cache(void *runtime, uint64_t target_bytes,
+                             uint64_t target_entries, TiAotMemoryTrimV1 *output) {
   return memory_boundary<int>(runtime, "ti_aot_trim_memory_cache", 0,
       [=](EngineContext *ctx, ti::Runtime *rt) -> int {
     if (!memory_control_header(ctx, output, sizeof(*output), "memory trim"))

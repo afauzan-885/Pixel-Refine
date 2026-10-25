@@ -43,15 +43,29 @@ typedef struct TiAotMemoryTrimV1 {
 static_assert(sizeof(TiAotMemoryLimitsV1) == 48, "memory limits ABI layout");
 static_assert(sizeof(TiAotMemorySnapshotV1) == 272, "memory snapshot ABI layout");
 static_assert(sizeof(TiAotMemoryTrimV1) == 48, "memory trim ABI layout");
+#endif
+
+#if defined(_WIN32) && defined(PIXEL_REFINE_TAICHI_AOT_ENGINE_BUILD)
+#define TI_AOT_MEMORY_CONTROL_EXPORT __declspec(dllexport)
+#else
+#define TI_AOT_MEMORY_CONTROL_EXPORT
+#endif
+
+#ifdef __cplusplus
 extern "C" {
 #endif
 // Return 1 on success, 0 on error; inspect get_last_engine_error(runtime).
-int ti_aot_get_memory_snapshot(void *runtime, TiAotMemorySnapshotV1 *output);
-int ti_aot_set_memory_limits(void *runtime, const TiAotMemoryLimitsV1 *limits);
+TI_AOT_MEMORY_CONTROL_EXPORT int ti_aot_get_memory_snapshot(
+    void *runtime, TiAotMemorySnapshotV1 *output);
+TI_AOT_MEMORY_CONTROL_EXPORT int ti_aot_set_memory_limits(
+    void *runtime, const TiAotMemoryLimitsV1 *limits);
 // Reclaim only idle private staging. Targets are remaining cache caps; 0/0
 // requests a full trim. Partial progress is reported even on native free error.
-int ti_aot_trim_memory_cache(void *runtime, uint64_t target_bytes,
-                             uint64_t target_entries, TiAotMemoryTrimV1 *output);
+TI_AOT_MEMORY_CONTROL_EXPORT int ti_aot_trim_memory_cache(
+    void *runtime, uint64_t target_bytes, uint64_t target_entries,
+    TiAotMemoryTrimV1 *output);
 #ifdef __cplusplus
 }
 #endif
+
+#undef TI_AOT_MEMORY_CONTROL_EXPORT
