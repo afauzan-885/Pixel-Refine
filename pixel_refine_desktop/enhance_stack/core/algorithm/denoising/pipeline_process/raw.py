@@ -7,6 +7,7 @@ reached through :func:`pipeline_process.facade.api` so
 path.
 """
 
+import os
 import queue
 import sys
 import threading
@@ -29,6 +30,14 @@ from .facade import api as _facade
 from .telemetry import PipelineTelemetry
 
 __all__ = ["_run_shared_raw_provider_pipeline"]
+
+# Diagnostic mode for the in-place analysis-proxy slots.  When enabled, each
+# optimized dispatch also runs once into a freshly allocated buffer and the
+# two outputs are compared bit-for-bit inside the same frame.  Cross-run
+# comparison is impossible because CFA accumulation uses unordered device
+# atomics, so the in-frame dual dispatch is the accuracy oracle.
+PROXY_INPLACE_VERIFY = False
+LAST_PROXY_INPLACE_VERIFICATION = None
 
 @runtime_entrypoint
 def _run_shared_raw_provider_pipeline(
@@ -145,6 +154,17 @@ def _run_shared_raw_provider_pipeline(
     weight_analysis_params = None
     spatial_state = None
     mean_alpha = 1.0
+    verify_mode = bool(PROXY_INPLACE_VERIFY)
+    verifications: list[dict[str, object]] = []
+    # Kill-switch for the fused in-place analysis-proxy dispatches on the
+    # fusionet/spatial_fusion RAW lane.  Disabling restores the historical
+    # allocating resize->enhance chain exactly, which keeps an A/B
+    # accuracy comparison possible inside one process (the burst itself
+    # is not bit-reproducible across processes because CFA accumulation
+    # uses unordered device atomics).
+    proxy_inplace_enabled = os.environ.get(
+        "PIXEL_REFINE_RAW_PROXY_INPLACE", "1"
+    ).strip().lower() not in {"0", "false", "off", "no"}
 
     def _cancelled():
         if stop_event is None:
@@ -161,11 +181,34 @@ def _run_shared_raw_provider_pipeline(
         except TypeError:
             progress_callback(percent, console)
 
+    def _digest(buffer):
+        import hashlib
+
+        engine.sync()
+        return hashlib.sha256(
+            np.ascontiguousarray(buffer.to_numpy()).tobytes()
+        ).hexdigest()[:16]
+
+    def _record_verification(site, equal, scratch_digest, fresh_digest):
+        verifications.append(
+            {
+                "site": site,
+                "equal": bool(equal),
+                "scratch": scratch_digest,
+                "fresh": fresh_digest,
+            }
+        )
+        if not equal:
+            print(
+                f"[RAW ProxyInplace][VERIFY] MISMATCH site={site} "
+                f"scratch={scratch_digest} fresh={fresh_digest}"
+            )
+
     def _warp_analysis(proxy_gpu, transform, shape):
         if transform is None:
             return proxy_gpu
+        work_h, work_w = (int(shape[0]), int(shape[1]))
         if isinstance(transform, np.ndarray) and transform.ndim == 2 and transform.shape == (3, 3):
-            work_h, work_w = (int(shape[0]), int(shape[1]))
             scaled = scale_homography(
                 transform,
                 source_shape=geometry.full_shape,
@@ -180,8 +223,8 @@ def _run_shared_raw_provider_pipeline(
         return taichi_aot.remap_with_flow(
             proxy_gpu,
             transform,
-            int(shape[0]),
-            int(shape[1]),
+            work_h,
+            work_w,
             return_gpu=True,
         )
 
@@ -296,23 +339,68 @@ def _run_shared_raw_provider_pipeline(
                     f"Gain={float(weight_analysis_params.get('gain', 1.0)):.2f}x"
                 )
 
+            ref_proxy_kwargs = dict(
+                work_shape=geometry.align_shape,
+                analysis_params=analysis_params,
+                ghost_penalty=ghost_penalty,
+                ghost_penalty_min=ghost_penalty_min,
+                # The reference proxy fuses resize -> AutoEnhance in the
+                # work-grid buffer.  The full-resolution carrier is never
+                # marked disposable: the helper's preserve_noise_source
+                # gate keeps it intact for the independent noise proxy,
+                # and a geometry match falls back to an exact copy.
+                # With the kill-switch off this reproduces the historical
+                # share_ref_weight_proxy behaviour exactly.
+                in_place=(
+                    share_ref_weight_proxy
+                    or (
+                        proxy_inplace_enabled
+                        and normalized_engine in ("fusionet", "spatial_fusion")
+                    )
+                ),
+                source_is_disposable=share_ref_weight_proxy,
+                noise_source_gpu=(
+                    ref_proxy_full_gpu
+                    if normalized_engine in ("fusionet", "spatial_fusion")
+                    else None
+                ),
+                noise_analysis_params=noise_analysis_params,
+            )
             ref_analysis_gpu, ref_noise_score, ghost_penalty = (
                 _facade().prepare_reference_analysis_and_noise(
                     ref_proxy_full_gpu,
-                    work_shape=geometry.align_shape,
-                    analysis_params=analysis_params,
-                    ghost_penalty=ghost_penalty,
-                    ghost_penalty_min=ghost_penalty_min,
-                    in_place=share_ref_weight_proxy,
-                    source_is_disposable=share_ref_weight_proxy,
-                    noise_source_gpu=(
-                        ref_proxy_full_gpu
-                        if normalized_engine in ("fusionet", "spatial_fusion")
-                        else None
-                    ),
-                    noise_analysis_params=noise_analysis_params,
+                    **ref_proxy_kwargs,
                 )
             )
+            if (
+                verify_mode
+                and ref_proxy_kwargs["in_place"]
+                and ref_analysis_gpu is not ref_proxy_full_gpu
+            ):
+                baseline_kwargs = dict(ref_proxy_kwargs)
+                baseline_kwargs["in_place"] = False
+                base_gpu, base_score, base_penalty = (
+                    _facade().prepare_reference_analysis_and_noise(
+                        ref_proxy_full_gpu,
+                        **baseline_kwargs,
+                    )
+                )
+                try:
+                    fresh_digest = _digest(base_gpu)
+                    scratch_digest = _digest(ref_analysis_gpu)
+                    _record_verification(
+                        "reference_proxy",
+                        (
+                            fresh_digest == scratch_digest
+                            and base_score == ref_noise_score
+                            and base_penalty == ghost_penalty
+                        ),
+                        scratch_digest,
+                        fresh_digest,
+                    )
+                finally:
+                    if base_gpu is not ref_proxy_full_gpu:
+                        _facade()._destroy_work_item(base_gpu)
             if share_ref_weight_proxy:
                 ref_weight_analysis_gpu = ref_analysis_gpu
             if ref_proxy_full_gpu is not ref_analysis_gpu:
@@ -514,6 +602,13 @@ def _run_shared_raw_provider_pipeline(
             except Exception:
                 _work_scratch = None
 
+        _analysis_scratches = tuple(
+            slot
+            for slot in (_demosaic_scratch, _work_scratch)
+            if slot is not None
+        )
+        _analysis_scratch_ids = frozenset(id(slot) for slot in _analysis_scratches)
+
         def _load_support_dng_payload(index):
             return provider.load_support_dng_payload_host(index)
 
@@ -564,15 +659,43 @@ def _run_shared_raw_provider_pipeline(
                     # Build the independent WeightNet/SpatialFusion proxy only when
                     # it differs from the alignment analysis proxy.
                     if normalized_engine in ("fusionet", "spatial_fusion") and not share_support_weight_proxy:
-                        support_weight_analysis = _facade().prepare_analysis_proxy_gpu(
-                            support_linear_full,
+                        # Fuse resize -> AutoEnhance: the tone-map writes
+                        # straight into the resized work-grid buffer instead
+                        # of a second full proxy.  The source is the
+                        # (half-)resolution demosaic carrier that the
+                        # alignment proxy still reads, so it is NOT marked
+                        # disposable; when the analysis geometry matches the
+                        # source shape the helper takes its exact-copy branch
+                        # and the demosaic scratch stays untouched.
+                        proxy_kwargs = dict(
                             work_shape=geometry.weight_shape,
                             analysis_params=(
                                 weight_analysis_params
                                 if normalized_engine == "fusionet"
                                 else None
                             ),
+                            in_place=proxy_inplace_enabled,
                         )
+                        support_weight_analysis = _facade().prepare_analysis_proxy_gpu(
+                            support_linear_full,
+                            **proxy_kwargs,
+                        )
+                        if verify_mode and proxy_inplace_enabled:
+                            baseline_kwargs = dict(proxy_kwargs)
+                            baseline_kwargs["in_place"] = False
+                            fresh_proxy = _facade().prepare_analysis_proxy_gpu(
+                                support_linear_full, **baseline_kwargs
+                            )
+                            fresh_digest = _digest(fresh_proxy)
+                            scratch_digest = _digest(support_weight_analysis)
+                            _record_verification(
+                                "weight_linear_proxy",
+                                fresh_digest == scratch_digest,
+                                scratch_digest,
+                                fresh_digest,
+                            )
+                            if fresh_proxy is not support_linear_full:
+                                _facade()._destroy_work_item(fresh_proxy)
                         if support_weight_analysis is support_linear_full:
                             support_weight_analysis = taichi_aot.copy(
                                 support_weight_analysis, return_gpu=True
@@ -589,8 +712,7 @@ def _run_shared_raw_provider_pipeline(
                     )
                     if (
                         support_linear_full is not support_analysis
-                        and support_linear_full is not _demosaic_scratch
-                        and support_linear_full is not _work_scratch
+                        and id(support_linear_full) not in _analysis_scratch_ids
                     ):
                         _facade()._destroy_work_item(support_linear_full)
                     support_linear_full = None
@@ -626,7 +748,7 @@ def _run_shared_raw_provider_pipeline(
                             alignment_preview = None
 
                 if normalized_engine not in ("fusionet", "spatial_fusion"):
-                    if support_analysis is not _demosaic_scratch and support_analysis is not _work_scratch:
+                    if id(support_analysis) not in _analysis_scratch_ids:
                         _facade()._destroy_work_item(support_analysis)
                     support_analysis = None
 
@@ -637,7 +759,11 @@ def _run_shared_raw_provider_pipeline(
                         normalized_engine == "fusionet"
                         and geometry.weight_shape == geometry.align_shape
                     ):
-                        if alignment_preview is not None and alignment_preview is not support_analysis:
+                        if (
+                            alignment_preview is not None
+                            and alignment_preview is not support_analysis
+                            and id(alignment_preview) not in _analysis_scratch_ids
+                        ):
                             _facade()._destroy_work_item(alignment_preview)
                         alignment_preview = None
                     aligned_weight_proxy, unused_preview = _facade()._prepare_raw_aligned_analysis(
@@ -649,12 +775,14 @@ def _run_shared_raw_provider_pipeline(
                     if (
                         unused_preview is not None
                         and unused_preview is not support_weight_analysis
+                        and id(unused_preview) not in _analysis_scratch_ids
                     ):
                         _facade()._destroy_work_item(unused_preview)
                     alignment_preview = None
                     if (
                         support_weight_analysis is not support_analysis
                         and support_weight_analysis is not aligned_weight_proxy
+                        and id(support_weight_analysis) not in _analysis_scratch_ids
                     ):
                         _facade()._destroy_work_item(support_weight_analysis)
                     if normalized_engine == "spatial_fusion":
@@ -662,7 +790,7 @@ def _run_shared_raw_provider_pipeline(
                     else:
                         aligned_analysis_weight = aligned_weight_proxy
                     if aligned_weight_proxy is not support_analysis:
-                        if support_analysis is not _demosaic_scratch and support_analysis is not _work_scratch:
+                        if id(support_analysis) not in _analysis_scratch_ids:
                             _facade()._destroy_work_item(support_analysis)
                         support_analysis = None
                     support_weight_analysis = None
@@ -699,11 +827,11 @@ def _run_shared_raw_provider_pipeline(
                     )
                     weight_gpu = spatial_weight_work_gpu
                     alpha = 1.0
-                    if aligned_weight_rgb is not support_analysis and aligned_weight_rgb is not _demosaic_scratch and aligned_weight_rgb is not _work_scratch:
+                    if aligned_weight_rgb is not support_analysis and id(aligned_weight_rgb) not in _analysis_scratch_ids:
                         _facade()._destroy_work_item(aligned_weight_rgb)
                     aligned_weight_rgb = None
                     if support_analysis is not None:
-                        if support_analysis is not _demosaic_scratch and support_analysis is not _work_scratch:
+                        if id(support_analysis) not in _analysis_scratch_ids:
                             _facade()._destroy_work_item(support_analysis)
                         support_analysis = None
                 elif normalized_engine == "fusionet":
@@ -1026,7 +1154,7 @@ def _run_shared_raw_provider_pipeline(
                         if aligned_analysis_weight is not None:
                             if support_analysis is aligned_analysis_weight:
                                 support_analysis = None
-                            if aligned_analysis_weight is not _demosaic_scratch and aligned_analysis_weight is not _work_scratch:
+                            if id(aligned_analysis_weight) not in _analysis_scratch_ids:
                                 _facade()._destroy_work_item(aligned_analysis_weight)
                             aligned_analysis_weight = None
                         del support_chw, weight_chw
@@ -1035,7 +1163,7 @@ def _run_shared_raw_provider_pipeline(
 
                 # Release all analysis RGB proxies before CFA accumulation,
                 # which is the largest transient allocation of this frame.
-                released_ids = {id(_demosaic_scratch), id(_work_scratch)}
+                released_ids = set(_analysis_scratch_ids)
                 for buffer in (
                     aligned_weight_rgb,
                     support_weight_analysis,
@@ -1053,11 +1181,11 @@ def _run_shared_raw_provider_pipeline(
                 # only needs the mosaic frame, the transform and the weight map,
                 # so both full-resolution RGB proxies can go before it runs.
                 if support_analysis is not None:
-                    if support_analysis is not _demosaic_scratch and support_analysis is not _work_scratch:
+                    if id(support_analysis) not in _analysis_scratch_ids:
                         _facade()._destroy_work_item(support_analysis)
                     support_analysis = None
                 if aligned_analysis_weight is not None:
-                    if aligned_analysis_weight is not _demosaic_scratch and aligned_analysis_weight is not _work_scratch:
+                    if id(aligned_analysis_weight) not in _analysis_scratch_ids:
                         _facade()._destroy_work_item(aligned_analysis_weight)
                     aligned_analysis_weight = None
 
@@ -1075,7 +1203,7 @@ def _run_shared_raw_provider_pipeline(
                 )
                 pipeline_telemetry.emit(f"blend_{ordinal}")
             finally:
-                released_ids = {id(_demosaic_scratch), id(_work_scratch)}
+                released_ids = set(_analysis_scratch_ids)
                 for buffer in (
                     aligned_weight_rgb,
                     support_weight_analysis,
@@ -1095,6 +1223,14 @@ def _run_shared_raw_provider_pipeline(
         mean_alpha = alpha_total / max(1, total_supports)
         result = provider.finalize(mean_alpha)
         pipeline_telemetry.emit("complete")
+        if verify_mode:
+            globals()["LAST_PROXY_INPLACE_VERIFICATION"] = {
+                "verifications": list(verifications),
+                "all_equal": all(
+                    bool(item.get("equal", False)) for item in verifications
+                ),
+                "count": len(verifications),
+            }
         return _facade()._export_result(result.value), result.mean_alpha
     finally:
         if aligner is not None:
