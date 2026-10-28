@@ -254,10 +254,26 @@ if TAICHI_AVAILABLE:
         M = ti.Matrix([[0.0] * 8 for _ in range(8)])
         b_vec = ti.Vector([0.0] * 8)
         indices = ti.Vector([i0, i1, i2, i3])
+        center1 = ti.Vector([0.0, 0.0])
+        center2 = ti.Vector([0.0, 0.0])
         for r in range(4):
             idx = indices[r]
-            x1 = pts1[idx, 0]; y1 = pts1[idx, 1]
-            x2 = pts2[idx, 0]; y2 = pts2[idx, 1]
+            center1 += ti.Vector([pts1[idx, 0], pts1[idx, 1]]) * 0.25
+            center2 += ti.Vector([pts2[idx, 0], pts2[idx, 1]]) * 0.25
+        radius1 = 0.0
+        radius2 = 0.0
+        for r in range(4):
+            idx = indices[r]
+            radius1 += (ti.Vector([pts1[idx, 0], pts1[idx, 1]]) - center1).norm_sqr() * 0.25
+            radius2 += (ti.Vector([pts2[idx, 0], pts2[idx, 1]]) - center2).norm_sqr() * 0.25
+        scale1 = ti.sqrt(2.0 / ti.max(radius1, 1.e-20))
+        scale2 = ti.sqrt(2.0 / ti.max(radius2, 1.e-20))
+        for r in range(4):
+            idx = indices[r]
+            x1 = (pts1[idx, 0] - center1[0]) * scale1
+            y1 = (pts1[idx, 1] - center1[1]) * scale1
+            x2 = (pts2[idx, 0] - center2[0]) * scale2
+            y2 = (pts2[idx, 1] - center2[1]) * scale2
 
             row0 = r * 2
             M[row0, 0] = x1; M[row0, 1] = y1; M[row0, 2] = 1.0
@@ -276,11 +292,17 @@ if TAICHI_AVAILABLE:
         H[0, 0] = h[0]; H[0, 1] = h[1]; H[0, 2] = h[2]
         H[1, 0] = h[3]; H[1, 1] = h[4]; H[1, 2] = h[5]
         H[2, 0] = h[6]; H[2, 1] = h[7]; H[2, 2] = 1.0
+        source_t = ti.Matrix([[scale1, 0.0, -scale1 * center1[0]],
+                              [0.0, scale1, -scale1 * center1[1]], [0.0, 0.0, 1.0]])
+        target_inv = ti.Matrix([[1.0 / scale2, 0.0, center2[0]],
+                                [0.0, 1.0 / scale2, center2[1]], [0.0, 0.0, 1.0]])
+        H = target_inv @ H @ source_t
+        if ti.abs(H[2, 2]) > 1.e-12:
+            H /= H[2, 2]
         return H
 
     @ti.func
     def _check_collinear(pts: ti.types.ndarray(ti.f32, ndim=2), i0: int, i1: int, i2: int, i3: int) -> bool:
-        eps = 10.0
         collinear = False
         
         x0, y0 = pts[i0, 0], pts[i0, 1]
@@ -288,14 +310,28 @@ if TAICHI_AVAILABLE:
         x2, y2 = pts[i2, 0], pts[i2, 1]
         x3, y3 = pts[i3, 0], pts[i3, 1]
         
-        a1 = ti.abs(x0*(y1 - y2) + x1*(y2 - y0) + x2*(y0 - y1))
-        a2 = ti.abs(x0*(y1 - y3) + x1*(y3 - y0) + x3*(y0 - y1))
-        a3 = ti.abs(x0*(y2 - y3) + x2*(y3 - y0) + x3*(y0 - y2))
-        a4 = ti.abs(x1*(y2 - y3) + x2*(y3 - y1) + x3*(y1 - y2))
+        a1 = ti.abs((x1-x0)*(y2-y0) - (x2-x0)*(y1-y0))
+        a2 = ti.abs((x1-x0)*(y3-y0) - (x3-x0)*(y1-y0))
+        a3 = ti.abs((x2-x0)*(y3-y0) - (x3-x0)*(y2-y0))
+        a4 = ti.abs((x2-x1)*(y3-y1) - (x3-x1)*(y2-y1))
         
+        # Dimensionless triangle area, independent of pixel scale/origin.
+        span_sq = ti.max((x1-x0)**2 + (y1-y0)**2, (x2-x0)**2 + (y2-y0)**2,
+                         (x3-x0)**2 + (y3-y0)**2, (x2-x1)**2 + (y2-y1)**2,
+                         (x3-x1)**2 + (y3-y1)**2, (x3-x2)**2 + (y3-y2)**2)
+        eps = ti.max(span_sq * 1.e-6, 1.e-20)
         if a1 < eps or a2 < eps or a3 < eps or a4 < eps:
             collinear = True
         return collinear
+
+    @ti.func
+    def _homography_rand(seed: ti.u32) -> ti.u32:
+        # Avalanche all bits before modulo. The old LCG low bits forced each
+        # sample position into a fixed residue class when N was divisible by 4.
+        value = seed + ti.u32(0x9e3779b9)
+        value = (value ^ (value >> 16)) * ti.u32(0x85ebca6b)
+        value = (value ^ (value >> 13)) * ti.u32(0xc2b2ae35)
+        return value ^ (value >> 16)
 
     @ti.kernel
     def ransac_homography_kernel(
@@ -311,38 +347,29 @@ if TAICHI_AVAILABLE:
         thresh_sq = reproj_threshold * reproj_threshold
 
         for hyp_idx in range(n_hypotheses):
-            seed = _lcg_rand(ti.u32(hyp_idx) + ti.u32(seed_offset) + ti.u32(2654435769))
-
-            # progressive/random sampling with collinearity check
+            seed = _homography_rand(ti.u32(hyp_idx) + ti.u32(seed_offset))
             i0 = 0; i1 = 0; i2 = 0; i3 = 0
-            for retry in range(5):
-                seed = _lcg_rand(seed)
+            valid = False
+            for retry in range(16):
+                seed = _homography_rand(seed)
                 i0 = int(seed % ti.u32(n_pts))
-                seed = _lcg_rand(seed)
+                seed = _homography_rand(seed)
                 i1 = int(seed % ti.u32(n_pts))
-                for _ in range(8):
-                    if i1 == i0:
-                        seed = _lcg_rand(seed)
-                        i1 = int(seed % ti.u32(n_pts))
-                seed = _lcg_rand(seed)
+                seed = _homography_rand(seed)
                 i2 = int(seed % ti.u32(n_pts))
-                for _ in range(8):
-                    if i2 == i0 or i2 == i1:
-                        seed = _lcg_rand(seed)
-                        i2 = int(seed % ti.u32(n_pts))
-                seed = _lcg_rand(seed)
+                seed = _homography_rand(seed)
                 i3 = int(seed % ti.u32(n_pts))
-                for _ in range(8):
-                    if i3 == i0 or i3 == i1 or i3 == i2:
-                        seed = _lcg_rand(seed)
-                        i3 = int(seed % ti.u32(n_pts))
-                
-                if not _check_collinear(pts1, i0, i1, i2, i3):
+                distinct = i0 != i1 and i0 != i2 and i0 != i3 and i1 != i2 and i1 != i3 and i2 != i3
+                if distinct and not _check_collinear(pts1, i0, i1, i2, i3) and not _check_collinear(pts2, i0, i1, i2, i3):
+                    valid = True
                     break
 
-            H = _build_and_solve_homography(pts1, pts2, i0, i1, i2, i3, n_pts)
+            H = ti.Matrix.zero(ti.f32, 3, 3)
+            if valid:
+                H = _build_and_solve_homography(pts1, pts2, i0, i1, i2, i3, n_pts)
+                valid = ti.abs(H.determinant()) > 1.e-12
 
-            # Hitung konsensus dengan soft-scoring Tukey's Biweight (MAGSAC++)
+            # Historical soft Tukey score (not full MAGSAC++).
             score_acc = 0.0
             for pt_idx in range(n_pts):
                 x1 = pts1[pt_idx, 0]; y1 = pts1[pt_idx, 1]
@@ -356,7 +383,7 @@ if TAICHI_AVAILABLE:
                 dy = proj_y - y2
                 err_sq = dx * dx + dy * dy
 
-                if err_sq < thresh_sq:
+                if valid and ti.abs(denom) > 1.e-10 and err_sq < thresh_sq:
                     diff = 1.0 - err_sq / thresh_sq
                     score_acc += diff * diff
 

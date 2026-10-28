@@ -150,7 +150,6 @@ def _resolve_engine_analysis_params(
     if (
         str(weight_engine).strip().lower() == "spatial_fusion"
         and str(mode).strip().lower() == "natural"
-        and ANALYSIS_AUTO_ENHANCE_MODE != "natural"
     ):
         return None
     return _facade()._resolve_reference_analysis_params(
@@ -295,19 +294,47 @@ def resolve_noise_adaptive_penalty(
     )
     if minimum > maximum:
         minimum, maximum = maximum, minimum
-    if score <= 0.50:
+    if score <= 0.0001:
         active = maximum
-    elif score < 0.90:
-        t = (score - 0.50) / 0.40
-        factor = 0.5 * (1.0 + np.cos(np.pi * t))
-        active = float(minimum + (maximum - minimum) * factor)
-    else:
+    elif score >= 0.999:
         active = minimum
+    else:
+        t = (score - 0.0001) / (0.999 - 0.0001)
+        active = float(maximum - t * (maximum - minimum))
     print(
         f"[GPU Pipeline] Noise-Adaptive Ghost Penalty: score={score:.4f} "
         f"-> penalty={active:.2f} (range=[{minimum:.2f}, {maximum:.2f}])"
     )
     return score, float(active)
+
+
+def resolve_noise_adaptive_safety(
+    score: Optional[float],
+    *,
+    max_safety: float,
+    max_safety_min: float = 0.01,
+) -> float:
+    """Derive noise-adaptive max_safety, pressed down towards 0.01 as noise increases."""
+    if score is None:
+        return float(max_safety)
+
+    maximum = float(max_safety)
+    minimum = float(max_safety_min)
+    if minimum > maximum:
+        minimum, maximum = maximum, minimum
+    s = float(score)
+    if s <= 0.0001:
+        active = maximum
+    elif s >= 0.999:
+        active = minimum
+    else:
+        t = (s - 0.0001) / (0.999 - 0.0001)
+        active = float(maximum - t * (maximum - minimum))
+    print(
+        f"[GPU Pipeline] Noise-Adaptive Max Safety: score={s:.4f} "
+        f"-> max_safety={active:.4f} (range=[{minimum:.4f}, {maximum:.4f}])"
+    )
+    return float(active)
 
 
 def prepare_reference_analysis_and_noise(

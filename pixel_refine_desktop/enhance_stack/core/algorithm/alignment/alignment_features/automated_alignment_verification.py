@@ -21,7 +21,7 @@ def calculate_ssim(img1, img2):
 
     img1 = img1.astype(np.float64)
     img2 = img2.astype(np.float64)
-    kernel = np.ones((11, 11), np.float64) / 121.0
+    kernel = np.ones((11, 11), np.float32) / np.float32(121.0)
 
     mu1 = cv2.filter2D(img1, -1, kernel)
     mu2 = cv2.filter2D(img2, -1, kernel)

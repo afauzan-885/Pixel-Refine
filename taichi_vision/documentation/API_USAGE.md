@@ -95,8 +95,8 @@ error; the application must not silently use another GPU.
 | `zncc()` | Zero-mean normalized cross-correlation. |
 | `ransac_flow_cleanup()` | Remove flow outliers with a RANSAC threshold. |
 | `ransac_flow_cleanup_aot()` | Explicit AOT name for flow cleanup. |
-| `remap()` | Remap an image using `map_x` and `map_y`. |
-| `remap_with_flow()` | Warp an image using an `(H,W,2)` flow field. |
+| `remap()` | Canonical warp: one packed `(H,W,2)` coordinate field with `coordinate_mode`. |
+| `remap_with_flow()` | Compatibility adapter for `remap(..., coordinate_mode="displacement_xy")`. |
 | `smooth_flow_gpu()` | Smooth a flow field before warping. |
 | `build_flow_maps()` | Build coordinate maps from flow/transform data. |
 | `farneback_flow()` | Dense Farneback optical flow. |
@@ -106,7 +106,96 @@ error; the application must not silently use another GPU.
 | `warp_perspective()` | 3x3 homography warp. |
 | `warp_affine_aot()` | 2x3 affine warp from the extended AOT API. |
 
-## RAW demosaicing
+### Resident image warps
+
+`warp_affine_aot()` and `warp_perspective()` infer the result location from the
+source. NumPy images still return NumPy by default; an existing
+`TaichiGPUBuffer` now returns a device-resident buffer by default. Set
+`return_gpu=False` explicitly to request a NumPy result (and the associated
+readback). Both functions retain caller ownership of the source; release the
+returned buffer when finished. Image pixel loops remain in AOT Taichi; matrix
+inversion/validation remains a small host-side setup operation.
+
+```python
+warped_gpu = warp_affine_aot(image_gpu, affine_2x3, dsize)  # no image readback
+warped_np = warp_affine_aot(image_gpu, affine_2x3, dsize, return_gpu=False)
+warped_gpu = warp_perspective(image_gpu, homography_3x3, dsize)
+```
+
+## Remap: canonical contract and resident usage
+
+`remap()` is the single warp entry point and stays as short as `cv2.remap`.
+Everything that can be inferred is inferred.
+
+```python
+out = remap(src, flow)              # flow (H,W,2) displacement -> NumPy result
+out = remap(src, map)               # map  (H,W,2) absolute (x, y)
+out = remap(src_gpu, flow_gpu)      # GPU operands -> GPU result, no host copy
+```
+
+Full signature, with the optional controls spelled out:
+
+```python
+remap(
+    src,                  # (H,W) or (H,W,3); GPU buffer keeps work resident
+    coordinates,           # (H,W,2) float32
+    output_size=None,     # defaults to src spatial shape
+    coordinate_mode=None,  # inferred; "displacement_xy" or "absolute_xy"
+    return_gpu=None,      # inferred from operands: GPU in -> GPU out
+    dst=None,             # optional reusable destination buffer
+    session=None,         # defaults to the active/default BufferSession
+)
+```
+
+Inference rules:
+
+- `output_size` falls back to `src.shape[:2]`.
+- `coordinate_mode` is `"displacement_xy"` unless the split-map form
+  (`remap(src, map_x, map_y)` or `map_x=`/`map_y=`) selects `"absolute_xy"`.
+- `return_gpu` follows the operands: any GPU buffer means the result stays on
+  the device; host arrays return NumPy.
+- `session` resolves to the innermost `with BufferSession(...)` block on the
+  current thread, otherwise a lazily created process default.
+- `absolute_xy` needs host coordinates and raises `NotImplementedError` for
+  device coordinates instead of silently copying to the host.
+
+### Efficient resident usage
+
+```python
+from taichi_vision.taichi_algorithm.buffer_session import BufferSession
+
+with BufferSession(engine=aot.engine) as session:
+    src_gpu, _ = session.upload_if_needed(src, is_vector=True)
+    flow_gpu, _ = session.upload_if_needed(flow)
+    dst_gpu = session.acquire_buffer((h, w, 3), dtype=np.float32,
+                                     is_vector=True, tag="remap_dst")
+    for frame_flow in flow_frames:
+        out_gpu = remap(src_gpu, frame_flow, dst=dst_gpu)
+    session.sync()
+    result_np = dst_gpu.to_numpy()   # the only host transfer
+```
+
+Guidelines:
+
+- Pass GPU buffers for `src` and `coordinates`; `upload_if_needed` caches by
+  array identity, so repeated calls do not re-upload.
+- Reuse one `dst` for a frame loop. With `return_gpu` results and no `dst`, the
+  returned buffer is caller-owned and must be released by the caller; a
+  session scratch slot would be recycled underneath you.
+- Keep `dst` distinct from `src`: bilinear sampling reads neighbouring taps, so
+  an in-place remap would read already-written pixels.
+- Call `to_numpy()` only at the pipeline boundary. It dominates the cost
+  (roughly 50-65 ms for an 11 MB 720p float32 frame on an Intel UHD 620 Vulkan
+  device, versus about 6.5 ms of kernel compute).
+- Never bounce through NumPy between GPU stages just to pass data along.
+
+Measured on Vulkan (Intel UHD Graphics 620), source/output float32 720x1280x3,
+flow float32 720x1280x2: resident GPU-to-GPU median about 8.1 ms versus about
+64 ms for the host-array path, bit-identical output. The compact call and the
+long explicit call measured 8.13 ms and 8.11 ms respectively, so the short form
+costs nothing. Absolute maps and other backends (CUDA/OpenGL) are unverified.
+
+
 
 The demosaic functions accept Bayer RAW data and the corresponding CFA/white
 balance parameters. `half_res` returns half resolution; `1channel` returns a
@@ -168,6 +257,29 @@ preview = aot.demosaic(raw, method="dcb", half_res=True)
 | `find_homography()` | Homography estimation with robust outlier cleanup. |
 | `get_fed_step_sizes()` | FED step schedule for diffusion preprocessing. |
 
+### Kontrak numerik estimasi geometri
+
+`find_homography()` adalah estimator **hybrid**, bukan komputasi GPU-only:
+hipotesis empat titik dan skor konsensus berjalan di AOT; shortlist maksimal
+8 kandidat per putaran direfine di host menggunakan normalized SVD float64,
+geometric least squares, dan iterasi mask inlier. Input GPU memerlukan readback
+korespondensi untuk tahap host ini. `return_gpu=True` meng-upload mask final
+int32 `(N,)`; keluaran host tetap uint8 `(N,1)`. Error perangkat diteruskan,
+bukan dialihkan ke estimator CPU/OpenCV. Signature dan seed tetap kompatibel.
+Nama `method="MAGSAC++"` historis tetap diterima, tetapi kernel menggunakan
+soft Tukey scoring, bukan implementasi penuh MAGSAC++.
+
+`alignment.quality.ransac_transform(model="affine")` tetap estimator referensi
+NumPy/CPU. Fitting affine dinormalisasi; seleksi dan local refinement memakai
+truncated reprojection cost (MSAC), tanpa mengganti affine menjadi similarity
+atau homography menjadi affine pada distribusi yang lemah. Data kolinear
+persis ditolak; strip tipis/cluster sempit dengan noise tetap dapat menghasilkan
+error extrapolasi besar. Mask inlier bukan jaminan akurasi di seluruh frame.
+
+Untuk parity `warp_affine`/`warp_perspective`, gunakan matriks **dan border**
+yang sama. Default kernel menggunakan reflect-101; membandingkannya dengan
+OpenCV `BORDER_CONSTANT=0` mencampurkan beda border dengan error interpolasi.
+
 ## Segmentation, thresholding, and restoration
 
 | API | Use |
@@ -227,9 +339,17 @@ These entry points are exported for focused experiments and are marked
 frames = [aot.InputArray(frame.astype("float32")) for frame in burst]
 smoothed = [aot.gaussian_blur(frame, sigma=1.0, return_gpu=True) for frame in frames]
 
-# Alignment followed by warp.
+# Alignment followed by warp (canonical packed-coordinate form).
 flow = aot.farneback_flow(smoothed[0], smoothed[1], return_gpu=True)
-aligned = aot.remap_with_flow(smoothed[1], flow, *smoothed[0].shape[:2], return_gpu=True)
+aligned = aot.remap(
+    smoothed[1],
+    flow,
+    output_size=smoothed[0].shape[:2],
+    coordinate_mode="displacement_xy",
+    return_gpu=True,
+)
+# remap_with_flow(smoothed[1], flow, *smoothed[0].shape[:2], return_gpu=True)
+# is the equivalent compatibility adapter.
 
 # Edge and feature preview.
 edges = aot.canny_aot(aot.rgb2gray(image), low_threshold=40, high_threshold=120)

@@ -186,7 +186,7 @@ def save_project(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "active_batch_id": active_batch_id,
         "database_snapshot": "session.sqlite",
-        "batch_parameters": "batch_parameters.json",
+        "batch_parameters": "ProjectParameters.json",
     }
 
     with tempfile.TemporaryDirectory(prefix="pixelrefine_prf_") as temp_dir:
@@ -205,8 +205,11 @@ def save_project(
             archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
             archive.write(snapshot, "session.sqlite")
             if parameters_path.is_file():
+                archive.write(parameters_path, "ProjectParameters.json")
+                # Also include batch_parameters.json as alias for backwards compatibility
                 archive.write(parameters_path, "batch_parameters.json")
             else:
+                archive.writestr("ProjectParameters.json", "{}\n")
                 archive.writestr("batch_parameters.json", "{}\n")
 
     remember_project(str(destination_path))
@@ -235,7 +238,10 @@ def restore_project_session(project_path: str, database_path: str) -> Dict[str, 
                 if target_path.exists():
                     target_path.unlink()
                 shutil.copy2(temp_path / "session.sqlite", target_path)
-                parameters = archive.read("batch_parameters.json")
+                try:
+                    parameters = archive.read("ProjectParameters.json")
+                except KeyError:
+                    parameters = archive.read("batch_parameters.json")
             parameter_path = _json_path()
             parameter_path.parent.mkdir(parents=True, exist_ok=True)
             parameter_path.write_bytes(parameters)
@@ -268,9 +274,11 @@ def load_project(
             with tempfile.TemporaryDirectory(prefix="pixelrefine_prf_load_") as temp_dir:
                 temp_path = Path(temp_dir)
                 archive.extract("session.sqlite", temp_path)
-                parameters = json.loads(
-                    archive.read("batch_parameters.json").decode("utf-8")
-                )
+                try:
+                    raw_params = archive.read("ProjectParameters.json")
+                except KeyError:
+                    raw_params = archive.read("batch_parameters.json")
+                parameters = json.loads(raw_params.decode("utf-8"))
                 result = _merge_snapshot(
                     str(temp_path / "session.sqlite"),
                     database_path,

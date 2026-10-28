@@ -1,3 +1,4 @@
+from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 import json
 import os
 import shutil
@@ -90,7 +91,7 @@ class BatchPreloaderThread(QThread):
             )
             valid_paths = [p for p in raw_paths if os.path.exists(p)]
 
-            json_path = getattr(self, "json_path", os.path.join("database", "align", "batch_parameter.json"))
+            json_path = getattr(self, "json_path", batch_parameter_manager.get_json_path())
             state = {}
             if os.path.exists(json_path):
                 try:
@@ -222,7 +223,7 @@ class BulkPageLayout(QWidget):
                 tempfile.gettempdir(), f"pixel_refine_session_{os.getpid()}.sqlite"
             )
         self.database_manager = DatabaseManager(session_path)
-        self.json_path = os.path.join("database", "align", "batch_parameter.json")
+        self.json_path = batch_parameter_manager.get_json_path()
         self.param_watcher = QFileSystemWatcher(self)
         self.param_watcher.fileChanged.connect(self._on_parameters_file_changed)
 

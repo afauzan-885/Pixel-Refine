@@ -162,7 +162,7 @@ def _histogram_analysis(rgb: np.ndarray) -> tuple[float, float]:
         gray, bins=_HISTOGRAM_BINS, range=(0.0, 1.0)
     )
     total = max(1, int(counts.sum()))
-    probabilities = counts.astype(np.float64) / total
+    probabilities = counts.astype(np.float32) / np.float32(total)
     centers = (edges[:-1] + edges[1:]) * 0.5
     exposure_suitability = float(
         np.sum(

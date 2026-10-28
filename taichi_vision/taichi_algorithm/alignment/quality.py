@@ -236,22 +236,31 @@ def estimate_affine(source: np.ndarray, target: np.ndarray, *, weights: np.ndarr
     """Least-squares 2-D affine estimate with finite/rank checks."""
 
     src, dst = validate_correspondences(source, target, min_points=3)
-    design = np.column_stack((src, np.ones(len(src), dtype=np.float64)))
+    src_n, src_t = _normalize_points(src)
+    dst_n, dst_t = _normalize_points(dst)
+    design = np.column_stack((src_n, np.ones(len(src), dtype=np.float64)))
     if weights is not None:
-        w = np.asarray(weights, dtype=np.float64).reshape(-1)
-        if len(w) != len(src):
-            raise ValueError("weights length does not match correspondences")
-        scale = np.sqrt(np.clip(w, 0.0, None))[:, None]
+        w = _validated_weights(weights, len(src))
+        scale = np.sqrt(w)[:, None]
         design = design * scale
-        dst = dst * scale
-    if np.linalg.matrix_rank(design) < 3:
-        raise TransformEstimationError("affine correspondences are rank deficient")
-    coeff, _, rank, _ = np.linalg.lstsq(design, dst, rcond=None)
+        dst_n = dst_n * scale
+    coeff, _, rank, _ = np.linalg.lstsq(design, dst_n, rcond=None)
     if int(rank) < 3 or not np.isfinite(coeff).all():
-        raise TransformEstimationError("affine least-squares solve failed")
-    matrix = np.eye(3, dtype=np.float64)
-    matrix[:2, :] = coeff.T
+        raise TransformEstimationError("affine correspondences are rank deficient")
+    normalized = np.eye(3, dtype=np.float64)
+    normalized[:2, :] = coeff.T
+    matrix = np.linalg.solve(dst_t, normalized @ src_t)
+    matrix[2] = [0., 0., 1.]
     return matrix
+
+
+def _validated_weights(weights: np.ndarray, count: int) -> np.ndarray:
+    w = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if len(w) != count:
+        raise ValueError("weights length does not match correspondences")
+    if not np.isfinite(w).all() or np.any(w < 0) or not np.any(w > 0):
+        raise ValueError("weights must be finite, nonnegative, and not all zero")
+    return w
 
 
 def _normalize_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -262,9 +271,9 @@ def _normalize_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         [[scale, 0.0, -scale * center[0]], [0.0, scale, -scale * center[1]], [0.0, 0.0, 1.0]],
         dtype=np.float64,
     )
-    homogeneous = np.column_stack((points, np.ones(len(points), dtype=np.float64)))
-    normalized = homogeneous @ transform.T
-    return normalized[:, :2], transform
+    # Subtract before scaling: avoid cancellation for a small cluster at a
+    # large coordinate origin.
+    return (points - center) * scale, transform
 
 
 def estimate_homography(source: np.ndarray, target: np.ndarray, *, weights: np.ndarray | None = None) -> np.ndarray:
@@ -273,23 +282,22 @@ def estimate_homography(source: np.ndarray, target: np.ndarray, *, weights: np.n
     src, dst = validate_correspondences(source, target, min_points=4)
     src_n, src_t = _normalize_points(src)
     dst_n, dst_t = _normalize_points(dst)
-    rows = []
-    for (x, y), (u, v) in zip(src_n, dst_n):
-        rows.append([-x, -y, -1.0, 0.0, 0.0, 0.0, u * x, u * y, u])
-        rows.append([0.0, 0.0, 0.0, -x, -y, -1.0, v * x, v * y, v])
-    design = np.asarray(rows, dtype=np.float64)
+    x, y = src_n.T
+    u, v = dst_n.T
+    design = np.zeros((2 * len(src), 9), dtype=np.float64)
+    design[0::2, :3] = -np.column_stack((x, y, np.ones(len(src))))
+    design[1::2, 3:6] = design[0::2, :3]
+    design[0::2, 6:] = np.column_stack((u * x, u * y, u))
+    design[1::2, 6:] = np.column_stack((v * x, v * y, v))
     if weights is not None:
-        w = np.asarray(weights, dtype=np.float64).reshape(-1)
-        if len(w) != len(src):
-            raise ValueError("weights length does not match correspondences")
-        design *= np.repeat(np.sqrt(np.clip(w, 0.0, None)), 2)[:, None]
-    if np.linalg.matrix_rank(design) < 8:
+        w = _validated_weights(weights, len(src))
+        design *= np.repeat(np.sqrt(w), 2)[:, None]
+    # Only the minimal 8x9 system needs a full V to retain its null vector.
+    # A full U on a large correspondence set wastes O(N^2) memory.
+    _, singular_values, vh = np.linalg.svd(design, full_matrices=len(src) == 4)
+    rank_tol = singular_values[0] * max(design.shape) * np.finfo(np.float64).eps
+    if np.count_nonzero(singular_values > rank_tol) < 8:
         raise TransformEstimationError("homography correspondences are rank deficient")
-    _, singular_values, vh = np.linalg.svd(design, full_matrices=True)
-    if singular_values[-1] > max(singular_values[0], 1.0) * 1.0e-10:
-        # A non-zero smallest singular value is normal for noisy data; only a
-        # clearly rank-deficient design should be rejected above.
-        pass
     h = vh[-1].reshape(3, 3)
     try:
         matrix = np.linalg.inv(dst_t) @ h @ src_t
@@ -298,6 +306,96 @@ def estimate_homography(source: np.ndarray, target: np.ndarray, *, weights: np.n
     if abs(matrix[2, 2]) <= 1.0e-12 or not np.isfinite(matrix).all():
         raise TransformEstimationError("homography solve produced an invalid matrix")
     return matrix / matrix[2, 2]
+
+
+def _consensus_errors(source, target, matrix):
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        residual = project_points(source, matrix) - target
+        squared = np.einsum("ij,ij->i", residual, residual)
+    return np.where(np.isfinite(squared), squared, np.inf)
+
+
+def _msac_cost(squared_errors, threshold):
+    return float(np.minimum(squared_errors, threshold * threshold).sum())
+
+
+def _refine_projective_geometric(source, target, matrix, iterations=15):
+    """Damped geometric least squares in normalized float64 coordinates.
+
+    Solve the augmented Jacobian directly, not J.T @ J. No affine prior or
+    transform-model substitution is used for poorly supported projectivity.
+    """
+    src, src_t = _normalize_points(source)
+    dst, dst_t = _normalize_points(target)
+    h = dst_t @ matrix @ np.linalg.inv(src_t)
+    if abs(h[2, 2]) < 1.e-12:
+        return matrix
+    h /= h[2, 2]
+    damping = 1.e-4
+    x, y = src.T
+    for _ in range(iterations):
+        denom = src @ h[2, :2] + 1.
+        if np.any(np.abs(denom) < 1.e-10):
+            break
+        prediction = (src @ h[:2, :2].T + h[:2, 2]) / denom[:, None]
+        residual = (prediction - dst).ravel()
+        base = np.column_stack((x, y, np.ones(len(src)))) / denom[:, None]
+        jacobian = np.zeros((len(src) * 2, 8))
+        jacobian[0::2, :3] = base
+        jacobian[1::2, 3:6] = base
+        jacobian[0::2, 6:] = -prediction[:, 0, None] * base[:, :2]
+        jacobian[1::2, 6:] = -prediction[:, 1, None] * base[:, :2]
+        diagonal = np.maximum(np.linalg.norm(jacobian, axis=0), 1.e-8)
+        step, _, _, _ = np.linalg.lstsq(
+            np.vstack((jacobian, np.diag(np.sqrt(damping) * diagonal))),
+            np.concatenate((-residual, np.zeros(8))), rcond=None,
+        )
+        proposal = h.copy()
+        proposal.ravel()[:8] += step
+        error = _consensus_errors(src, dst, proposal).sum()
+        if error < residual @ residual:
+            h = proposal
+            damping = max(damping * .2, 1.e-12)
+            if np.linalg.norm(step) < 1.e-10:
+                break
+        else:
+            damping *= 10.
+    result = np.linalg.solve(dst_t, h @ src_t)
+    if not np.isfinite(result).all() or abs(result[2, 2]) <= 1.e-12:
+        return matrix
+    return result / result[2, 2]
+
+
+def _refine_consensus(source, target, matrix, *, model, threshold, iterations=8):
+    """Local optimization; never accept a worse truncated reprojection cost."""
+    fit = estimate_affine if model == "affine" else estimate_homography
+    minimum = 3 if model == "affine" else 4
+    best = matrix
+    squared = _consensus_errors(source, target, best)
+    cost = _msac_cost(squared, threshold)
+    mask = squared <= threshold * threshold
+    for _ in range(iterations):
+        if mask.sum() < minimum:
+            break
+        try:
+            candidate = fit(source[mask], target[mask])
+            if model == "homography":
+                candidate = _refine_projective_geometric(source[mask], target[mask], candidate)
+        except (ValueError, np.linalg.LinAlgError, TransformEstimationError):
+            break
+        if not np.isfinite(candidate).all():
+            break
+        errors = _consensus_errors(source, target, candidate)
+        candidate_cost = _msac_cost(errors, threshold)
+        if candidate_cost > cost:
+            break
+        best, cost = candidate, candidate_cost
+        next_mask = errors <= threshold * threshold
+        if np.array_equal(mask, next_mask):
+            mask = next_mask
+            break
+        mask = next_mask
+    return best, mask, cost
 
 
 def ransac_transform(
@@ -335,31 +433,27 @@ def ransac_transform(
     threshold = max(float(reprojection_threshold), np.finfo(np.float64).eps)
     best_matrix: np.ndarray | None = None
     best_mask: np.ndarray | None = None
-    best_score: tuple[int, float] = (-1, float("inf"))
+    best_cost = float("inf")
     for _ in range(max(int(iterations), 1)):
         indices = rng.choice(len(src), size=sample_size, replace=False)
         try:
             matrix = fit(src[indices], dst[indices])
         except (ValueError, np.linalg.LinAlgError, TransformEstimationError):
             continue
-        projected = project_points(src, matrix, model=key)
-        errors = np.linalg.norm(projected - dst, axis=1)
-        mask = np.isfinite(errors) & (errors <= threshold)
-        count = int(mask.sum())
-        median = float(np.median(errors[mask])) if count else float("inf")
-        score = (count, median)
-        if count > best_score[0] or (count == best_score[0] and median < best_score[1]):
-            best_score = score
+        errors = _consensus_errors(src, dst, matrix)
+        cost = _msac_cost(errors, threshold)
+        if cost < best_cost:
+            matrix, mask, cost = _refine_consensus(
+                src, dst, matrix, model=key, threshold=threshold,
+            )
+            best_cost = cost
             best_matrix, best_mask = matrix, mask
 
     if best_matrix is None or best_mask is None or int(best_mask.sum()) < sample_size:
         raise TransformEstimationError(f"RANSAC could not find a valid {key} model")
-    try:
-        refined = fit(src[best_mask], dst[best_mask])
-    except (ValueError, np.linalg.LinAlgError, TransformEstimationError):
-        refined = best_matrix
-    errors = np.linalg.norm(project_points(src, refined, model=key) - dst, axis=1)
-    final_mask = np.isfinite(errors) & (errors <= threshold)
+    refined, final_mask, _ = _refine_consensus(
+        src, dst, best_matrix, model=key, threshold=threshold,
+    )
     options = dict(quality_kwargs or {})
     options.setdefault("min_inliers", sample_size)
     quality = evaluate_transform(

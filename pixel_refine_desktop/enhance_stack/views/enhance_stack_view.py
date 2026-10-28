@@ -121,9 +121,20 @@ class EnhanceStackView(WorkspaceView):
         )
         about_action.triggered.connect(self._show_about_project)
 
+    def _flush_active_settings(self):
+        """Flush active panel/algorithm parameter changes into the store and disk before saving."""
+        panel = self._active_display_panel()
+        right_panel = getattr(panel, "right_panel", None) if panel else None
+        if right_panel and hasattr(right_panel, "flush_pending_batch_settings"):
+            try:
+                right_panel.flush_pending_batch_settings()
+            except Exception as exc:
+                print(f"[EnhanceStackView] Warning during flush_pending_batch_settings: {exc}")
+
     def _save_project(self, blocking=False):
         if self._save_thread is not None and self._save_thread.isRunning():
             return False
+        self._flush_active_settings()
         if self._current_project_path:
             try:
                 if blocking:
@@ -136,6 +147,7 @@ class EnhanceStackView(WorkspaceView):
         return self._save_project_as(blocking=blocking)
 
     def _save_project_as(self, blocking=False):
+        self._flush_active_settings()
         path, _ = QFileDialog.getSaveFileName(
             self,
             getattr(language_config, "PROJECT_SAVE_AS", "Save Project As..."),

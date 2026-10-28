@@ -336,10 +336,11 @@ def _project_aot(
     try:
         from .. import aot_api
 
+        coordinates = np.stack((safe_x, safe_y), axis=-1)
         sampled = aot_api.remap(
             np.ascontiguousarray(src, dtype=np.float32),
-            np.ascontiguousarray(safe_x),
-            np.ascontiguousarray(safe_y),
+            coordinates,
+            coordinate_mode="absolute_xy",
             return_gpu=False,
         )
     except (FileNotFoundError, ImportError, KeyError, OSError, RuntimeError) as exc:

@@ -50,7 +50,6 @@ from taichi_vision.backend_config import (
 )
 from taichi_vision.device_selection import (
     is_translation_device,
-    make_device_selector,
     query_vulkan_memory_budget,
     resolve_device_selector,
     scan_vulkan_device_records,
@@ -436,32 +435,6 @@ def _read_cached_device_id():
         )
     except Exception:
         return None
-
-
-def _write_cached_device_id(device_id):
-    try:
-        ordinal = int(device_id)
-        devices = scan_vulkan_device_records()
-        record = next(
-            (item for item in devices if int(item.get("ordinal", -1)) == ordinal),
-            None,
-        )
-        if record is None:
-            return
-        payload = {
-            "schema": 2,
-            "cached_ordinal": ordinal,
-            "selector": make_device_selector(record),
-            "driver_version": record.get("driver_version", "unknown"),
-            "driver_uuid": record.get("driver_uuid", ""),
-        }
-        os.makedirs(os.path.dirname(_DEVICE_CACHE_PATH), exist_ok=True)
-        staging = _DEVICE_CACHE_PATH + ".tmp"
-        with open(staging, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
-        os.replace(staging, _DEVICE_CACHE_PATH)
-    except Exception:
-        pass
 
 
 def enable_experiment_mode(enabled=True):
@@ -2558,10 +2531,6 @@ class AOTModuleWrapper:
 
             future.add_done_callback(_release)
         return future
-
-    def _dummy_run(self):
-        pass  # For keeping refs if needed
-
 
 class AOTEngine:
     _instances = {}
@@ -6050,9 +6019,6 @@ class AOTEngine:
                     if inst is self:
                         AOTEngine._instances.pop(key, None)
 
-                # 7. Kill tracked child processes (vulkaninfo, etc.)
-                _kill_tracked_children()
-
 
 # =========================================================================
 # Zombie GPU Process Cleanup
@@ -6062,32 +6028,6 @@ class AOTEngine:
 
 import subprocess as _subprocess
 import gc as _gc
-
-_child_pids = set()  # PIDs spawned by this process (tracked for cleanup)
-_child_pids_lock = threading.Lock()
-
-
-def _track_child_pid(pid):
-    """Register a child process PID for later cleanup."""
-    with _child_pids_lock:
-        _child_pids.add(pid)
-
-
-def _kill_tracked_children():
-    """Kill all tracked child processes to prevent zombies."""
-    with _child_pids_lock:
-        pids = list(_child_pids)
-        _child_pids.clear()
-    for pid in pids:
-        try:
-            if os.name == "nt":
-                _subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=5
-                )
-            else:
-                os.kill(pid, signal.SIGKILL)
-        except Exception:
-            pass
 
 
 def _cleanup_zombie_gpu_processes():
@@ -6190,10 +6130,7 @@ def emergency_cleanup():
     # 2. Kill zombie GPU processes
     _cleanup_zombie_gpu_processes()
 
-    # 3. Kill any tracked child processes
-    _kill_tracked_children()
-
-    # 4. Force Python garbage collection
+    # 3. Force Python garbage collection
     _gc.collect()
 
     sys.stderr.write("[AOTEngine] Emergency cleanup complete.\n")
@@ -6331,11 +6268,7 @@ def _global_cleanup(reason: str = "atexit", force: bool = False):
             pass
     AOTEngine._instances.clear()
 
-    # Kill zombie GPU processes and tracked children to prevent VRAM leaks
-    try:
-        _kill_tracked_children()
-    except Exception:
-        pass
+    # Kill zombie GPU processes to prevent VRAM leaks
     try:
         _cleanup_zombie_gpu_processes()
     except Exception:

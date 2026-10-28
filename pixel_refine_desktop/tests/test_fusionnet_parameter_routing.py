@@ -313,3 +313,47 @@ def test_pixel_resolution_schema_displays_percentage_of_total_pixels():
     assert _dropdown_display_value(field, 0.50) == "50%"
     assert float(_dropdown_stored_value(field, "25%")) == 0.25
     assert "total working pixels" in field["tooltip"]
+
+def test_linear_noise_adaptive_ghost_penalty_and_max_safety(monkeypatch):
+    import pytest
+    from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.analysis import (
+        resolve_noise_adaptive_penalty,
+        resolve_noise_adaptive_safety,
+    )
+    import sys
+    import taichi_vision.taichi_algorithm.enhancement.estimate_noise
+    mod = sys.modules["taichi_vision.taichi_algorithm.enhancement.estimate_noise"]
+
+    # 1. Test resolve_noise_adaptive_penalty
+    # Noise below min threshold (clean frame) -> penalty remains maximum (e.g. 3.50)
+    monkeypatch.setattr(mod, "estimate_noise", lambda *args, **kwargs: (0.00005, 0.00001))
+    _, p_clean = resolve_noise_adaptive_penalty(None, ghost_penalty=3.50, ghost_penalty_min=1.0)
+    assert pytest.approx(p_clean, rel=1e-3) == 3.50
+
+    # Noise above max threshold (noisy frame) -> penalty pressed down to minimum (1.0)
+    monkeypatch.setattr(mod, "estimate_noise", lambda *args, **kwargs: (0.9999, 0.1))
+    _, p_noisy = resolve_noise_adaptive_penalty(None, ghost_penalty=3.50, ghost_penalty_min=1.0)
+    assert pytest.approx(p_noisy, rel=1e-3) == 1.0
+
+    # Mid noise (~0.50) -> linear midway penalty = 3.50 - 0.5 * (3.50 - 1.0) = 2.25
+    mid_score = 0.0001 + 0.5 * (0.999 - 0.0001)
+    monkeypatch.setattr(mod, "estimate_noise", lambda *args, **kwargs: (mid_score, 0.05))
+    _, p_mid = resolve_noise_adaptive_penalty(None, ghost_penalty=3.50, ghost_penalty_min=1.0)
+    assert pytest.approx(p_mid, rel=1e-3) == 2.25
+
+    # 2. Test resolve_noise_adaptive_safety
+    # Clean frame -> max_safety remains user setting (1.30)
+    s_clean = resolve_noise_adaptive_safety(0.00005, max_safety=1.30, max_safety_min=0.01)
+    assert pytest.approx(s_clean, rel=1e-3) == 1.30
+
+    # Noisy frame -> max_safety pressed down towards 0.01
+    s_noisy = resolve_noise_adaptive_safety(0.9999, max_safety=1.30, max_safety_min=0.01)
+    assert pytest.approx(s_noisy, rel=1e-3) == 0.01
+
+    # Mid noise (~0.50) -> linear midway safety = 1.30 - 0.5 * (1.30 - 0.01) = 0.655
+    s_mid = resolve_noise_adaptive_safety(mid_score, max_safety=1.30, max_safety_min=0.01)
+    assert pytest.approx(s_mid, rel=1e-3) == 0.655
+
+    # None score -> fallback to user setting
+    s_none = resolve_noise_adaptive_safety(None, max_safety=1.30, max_safety_min=0.01)
+    assert s_none == 1.30

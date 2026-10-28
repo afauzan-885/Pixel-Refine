@@ -17,8 +17,8 @@ FUSIONNET_DEFAULTS = {
     "fusionnet_work_pixel_fraction": 0.50,
     "fusionnet_max_neighbor_candidates": 4,
     "fusionnet_patch_search_radius": 5,
-    "fusionnet_max_safety": 0.30,
-    "fusionnet_ghost_penalty": 1.5,
+    "fusionnet_max_safety": 1.30,
+    "fusionnet_ghost_penalty": 3.50,
 }
 
 FUSIONNET_DENOISING_MODES = ("standard", "deep_analysis")
@@ -95,23 +95,19 @@ def _normalize_fusionnet_config(config):
         normalized["fusionnet_work_pixel_fraction"] = FUSIONNET_DEFAULTS[
             "fusionnet_work_pixel_fraction"
         ]
-    try:
-        raw_safety = source.get(
-            "fusionnet_max_safety",
-            source.get("max_safety", normalized.get("fusionnet_max_safety", 0.30)),
-        )
-        normalized["fusionnet_max_safety"] = max(0.01, min(2.0, float(raw_safety)))
-    except (TypeError, ValueError):
-        normalized["fusionnet_max_safety"] = FUSIONNET_DEFAULTS["fusionnet_max_safety"]
+    if "fusionnet_max_safety" in source or "max_safety" in source:
+        try:
+            raw_safety = source.get("fusionnet_max_safety", source.get("max_safety"))
+            normalized["fusionnet_max_safety"] = max(0.01, min(2.0, float(raw_safety)))
+        except (TypeError, ValueError):
+            normalized["fusionnet_max_safety"] = FUSIONNET_DEFAULTS["fusionnet_max_safety"]
 
-    try:
-        raw_penalty = source.get(
-            "fusionnet_ghost_penalty",
-            source.get("ghost_penalty", normalized.get("fusionnet_ghost_penalty", 1.5)),
-        )
-        normalized["fusionnet_ghost_penalty"] = max(0.1, min(5.0, float(raw_penalty)))
-    except (TypeError, ValueError):
-        normalized["fusionnet_ghost_penalty"] = FUSIONNET_DEFAULTS["fusionnet_ghost_penalty"]
+    if "fusionnet_ghost_penalty" in source or "ghost_penalty" in source:
+        try:
+            raw_penalty = source.get("fusionnet_ghost_penalty", source.get("ghost_penalty"))
+            normalized["fusionnet_ghost_penalty"] = max(0.1, min(5.0, float(raw_penalty)))
+        except (TypeError, ValueError):
+            normalized["fusionnet_ghost_penalty"] = FUSIONNET_DEFAULTS["fusionnet_ghost_penalty"]
 
     return normalized
 
@@ -187,23 +183,23 @@ PARAMETER_SCHEMA = [
         "key": "fusionnet_max_safety",
         "label": "Max Safety",
         "type": "slider",
-        "default": 0.30,
+        "default": 1.30,
         "min": 1,
         "max": 200,
         "scale": 0.01,
         "value_type": "float",
-        "tooltip": "Maximum additive WeightNet safety-head bias (0.01 to 2.00, default 0.30).",
+        "tooltip": "Maximum additive WeightNet safety-head bias (0.01 to 2.00, default 1.30).",
     },
     {
         "key": "fusionnet_ghost_penalty",
         "label": "Ghost Penalty",
         "type": "slider",
-        "default": 1.5,
+        "default": 3.50,
         "min": 10,
         "max": 500,
         "scale": 0.01,
         "value_type": "float",
-        "tooltip": "Noise-adaptive ghost penalty multiplier (0.1 to 5.0, default 1.5).",
+        "tooltip": "Noise-adaptive ghost penalty multiplier (0.1 to 5.0, default 3.50).",
     },
 ]
 
@@ -262,6 +258,8 @@ def load_fusionnet_config_for_batch(batch_id=None):
                 for key in (
                     "fusionnet_max_neighbor_candidates",
                     "fusionnet_patch_search_radius",
+                    "fusionnet_max_safety",
+                    "fusionnet_ghost_penalty",
                 ):
                     if key in nested:
                         config[key] = normalized_nested[key]
@@ -292,6 +290,8 @@ def load_fusionnet_config_for_batch(batch_id=None):
                 for key in (
                     "fusionnet_max_neighbor_candidates",
                     "fusionnet_patch_search_radius",
+                    "fusionnet_max_safety",
+                    "fusionnet_ghost_penalty",
                 ):
                     if key in batch:
                         config[key] = normalized_batch[key]
@@ -341,6 +341,8 @@ def save_fusionnet_config(config_to_save):
             "fusionnet_work_pixel_fraction": normalized[
                 "fusionnet_work_pixel_fraction"
             ],
+            "fusionnet_max_safety": normalized["fusionnet_max_safety"],
+            "fusionnet_ghost_penalty": normalized["fusionnet_ghost_penalty"],
             # Keep equivalent linear scale for older app versions.
             "fusionnet_work_resolution": linear_scale,
         }

@@ -90,8 +90,8 @@ if TAICHI_AVAILABLE:
         """
         for r, c in ti.ndrange(h_dst, w_dst):
             # Map full-res pixel to flow-space coordinates
-            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
-            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+            fx = float(c) * float(w_flow - 1) / float(ti.max(w_dst - 1, 1))
+            fy = float(r) * float(h_flow - 1) / float(ti.max(h_dst - 1, 1))
 
             # Bilinear sample each channel from the 3D flow tensor
             sampled_dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
@@ -121,8 +121,8 @@ if TAICHI_AVAILABLE:
         """
         for r, c in ti.ndrange(h_dst, w_dst):
             # Normalized flow coordinates (maps full-res pixel to flow space)
-            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
-            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+            fx = float(c) * float(w_flow - 1) / float(ti.max(w_dst - 1, 1))
+            fy = float(r) * float(h_flow - 1) / float(ti.max(h_dst - 1, 1))
 
             # Bilinear sample the low-res flow
             sampled_dx = bilinear_at(dx, fx, fy, h_flow, w_flow)
@@ -191,8 +191,8 @@ if TAICHI_AVAILABLE:
         scale_y: float,
     ):
         for r, c in ti.ndrange(h_dst, w_dst):
-            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
-            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+            fx = float(c) * float(w_flow - 1) / float(ti.max(w_dst - 1, 1))
+            fy = float(r) * float(h_flow - 1) / float(ti.max(h_dst - 1, 1))
             sampled_dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
             sampled_dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
             src_x = float(c) + sampled_dx * scale_x
@@ -214,8 +214,8 @@ if TAICHI_AVAILABLE:
         scale_y: float,
     ):
         for r, c in ti.ndrange(h_dst, w_dst):
-            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
-            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+            fx = float(c) * float(w_flow - 1) / float(ti.max(w_dst - 1, 1))
+            fy = float(r) * float(h_flow - 1) / float(ti.max(h_dst - 1, 1))
             sampled_dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
             sampled_dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
             src_x = float(c) + sampled_dx * scale_x
@@ -231,8 +231,8 @@ if TAICHI_AVAILABLE:
     ):
         for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
             gr, gc = r + offset_y, c + offset_x
-            fx = float(gc) * float(w_flow - 1) / float(w_dst - 1)
-            fy = float(gr) * float(h_flow - 1) / float(h_dst - 1)
+            fx = float(gc) * float(w_flow - 1) / float(ti.max(w_dst - 1, 1))
+            fy = float(gr) * float(h_flow - 1) / float(ti.max(h_dst - 1, 1))
             dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
             dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
             dst[r, c] = bilinear_at(
@@ -251,8 +251,8 @@ if TAICHI_AVAILABLE:
     ):
         for r, c in ti.ndrange(dst.shape[0], dst.shape[1]):
             gr, gc = r + offset_y, c + offset_x
-            fx = float(gc) * float(w_flow - 1) / float(w_dst - 1)
-            fy = float(gr) * float(h_flow - 1) / float(h_dst - 1)
+            fx = float(gc) * float(w_flow - 1) / float(ti.max(w_dst - 1, 1))
+            fy = float(gr) * float(h_flow - 1) / float(ti.max(h_dst - 1, 1))
             dx = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 0)
             dy = bilinear_at_3ch(flow, fx, fy, h_flow, w_flow, 1)
             dst[r, c] = bilinear_at_vec3(
@@ -276,8 +276,8 @@ if TAICHI_AVAILABLE:
         scale_y: ti.f32,
     ):
         for n, r, c in ti.ndrange(n_items, h_dst, w_dst):
-            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
-            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+            fx = float(c) * float(w_flow - 1) / float(ti.max(w_dst - 1, 1))
+            fy = float(r) * float(h_flow - 1) / float(ti.max(h_dst - 1, 1))
             x0 = int(ti.floor(fx))
             y0 = int(ti.floor(fy))
             x1 = ti.min(x0 + 1, w_flow - 1)
@@ -332,8 +332,8 @@ if TAICHI_AVAILABLE:
         scale_y: ti.f32,
     ):
         for n, r, c, ch in ti.ndrange(n_items, h_dst, w_dst, 3):
-            fx = float(c) * float(w_flow - 1) / float(w_dst - 1)
-            fy = float(r) * float(h_flow - 1) / float(h_dst - 1)
+            fx = float(c) * float(w_flow - 1) / float(ti.max(w_dst - 1, 1))
+            fy = float(r) * float(h_flow - 1) / float(ti.max(h_dst - 1, 1))
             x0 = int(ti.floor(fx))
             y0 = int(ti.floor(fy))
             x1 = ti.min(x0 + 1, w_flow - 1)
@@ -492,14 +492,27 @@ def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
                 or hasattr(map_x, "to_numpy")
                 or hasattr(map_y, "to_numpy")
             )
-            res_buf = aot.remap(src, map_x, map_y, return_gpu=is_taichi)
+            map_x_np = map_x.to_numpy() if hasattr(map_x, "to_numpy") else map_x
+            map_y_np = map_y.to_numpy() if hasattr(map_y, "to_numpy") else map_y
+            coordinates = np.stack(
+                (np.asarray(map_x_np, dtype=np.float32), np.asarray(map_y_np, dtype=np.float32)),
+                axis=-1,
+            )
+            res_buf = aot.remap(
+                src,
+                coordinates,
+                coordinate_mode="absolute_xy",
+                return_gpu=is_taichi,
+                dst=dst,
+            )
             if dst is not None:
-                if is_taichi:
-                    from ..common import copy_field
+                if res_buf is not dst:
+                    if is_taichi:
+                        from ..common import copy_field
 
-                    copy_field(res_buf, dst)
-                else:
-                    dst[:] = res_buf
+                        copy_field(res_buf, dst)
+                    else:
+                        dst[:] = res_buf
                 return dst
             return res_buf
 
@@ -583,10 +596,15 @@ def remap_with_flow(src, flow, full_h, full_w, dst=None, buffer_provider="pool")
         from ..common import _get_aot
 
         aot = _get_aot()
-        if aot and hasattr(aot, "remap_with_flow"):
+        if aot and hasattr(aot, "remap"):
             is_taichi = hasattr(src, "to_numpy") or hasattr(flow, "to_numpy")
-            res_buf = aot.remap_with_flow(
-                src, flow, full_h, full_w, return_gpu=is_taichi, dst=dst
+            res_buf = aot.remap(
+                src,
+                flow,
+                output_size=(full_h, full_w),
+                coordinate_mode="displacement_xy",
+                return_gpu=is_taichi,
+                dst=dst,
             )
             return res_buf
 

@@ -23,6 +23,44 @@ from taichi_vision.taichi_aot.engine import engine as default_engine, TaichiGPUB
 _ownership_lock = threading.RLock()
 _ownership_records = weakref.WeakValueDictionary()
 
+# Innermost active BufferSession on this thread. Lets resident APIs such as
+# remap() reuse the caller's session without threading a parameter through
+# every call site.
+_active_session = threading.local()
+_default_session = None
+_default_session_lock = threading.Lock()
+
+
+def current_session():
+    """Return the innermost active session for this thread, else the default."""
+    stack = getattr(_active_session, "stack", None)
+    if stack:
+        return stack[-1]
+    return get_default_session()
+
+
+def get_default_session():
+    """Return the process-wide default resident session, creating it lazily."""
+    global _default_session
+    session = _default_session
+    if session is not None and not session._closed:
+        return session
+    with _default_session_lock:
+        if _default_session is None or _default_session._closed:
+            _default_session = BufferSession(tag="default")
+        return _default_session
+
+
+def reset_default_session() -> None:
+    """Drop the default session without forcing a second close on close()."""
+    global _default_session
+    with _default_session_lock:
+        session = _default_session
+        _default_session = None
+    if session is not None:
+        session.close()
+
+
 
 class _OwnedResource:
     """Python-only ownership metadata; the resource itself is never copied."""
@@ -88,6 +126,7 @@ class BufferSession:
 
     __slots__ = (
         "engine",
+        "tag",
         "_leased_buffers",
         "_scratch_cache",
         "_ring_pools",
@@ -106,8 +145,9 @@ class BufferSession:
         "__weakref__",
     )
 
-    def __init__(self, engine=None, sync_on_exit: bool = True):
+    def __init__(self, engine=None, sync_on_exit: bool = True, tag: Optional[str] = None):
         self.engine = engine if engine is not None else default_engine
+        self.tag = tag
         self._leased_buffers: Dict[int, Any] = {}
         self._scratch_cache: Dict[Tuple, Any] = {}
         self._ring_pools: Dict[Tuple, List[TaichiGPUBuffer]] = {}
@@ -716,7 +756,7 @@ class BufferSession:
         Executes the entire alignment and warping chain resident in GPU memory.
         """
         self.reset_ring()
-        from taichi_vision.taichi_algorithm.aot_api import remap_with_flow
+        from taichi_vision.taichi_algorithm.aot_api import remap
 
         h, w = reference.shape[:2]
 
@@ -736,11 +776,11 @@ class BufferSession:
             )
 
             # 2. Warping resident in GPU
-            warped = remap_with_flow(
+            warped = remap(
                 target,
                 flow_gpu,
-                h,
-                w,
+                output_size=(h, w),
+                coordinate_mode="displacement_xy",
                 return_gpu=return_gpu,
                 dst=dst,
                 session=self,
@@ -779,6 +819,11 @@ class BufferSession:
 
     def __enter__(self) -> BufferSession:
         self._assert_open()
+        stack = getattr(_active_session, "stack", None)
+        if stack is None:
+            stack = []
+            _active_session.stack = stack
+        stack.append(self)
         return self
 
     def close(self) -> None:
@@ -786,6 +831,12 @@ class BufferSession:
         self.__exit__(None, None, None)
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        stack = getattr(_active_session, "stack", None)
+        if stack:
+            for index in range(len(stack) - 1, -1, -1):
+                if stack[index] is self:
+                    del stack[index]
+                    break
         with _ownership_lock:
             if self._closed:
                 return
@@ -825,4 +876,9 @@ class BufferSession:
             raise first_error
 
 
-__all__ = ["BufferSession"]
+__all__ = [
+    "BufferSession",
+    "current_session",
+    "get_default_session",
+    "reset_default_session",
+]

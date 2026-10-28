@@ -665,9 +665,21 @@ def sparse_to_dense_warp(
             flow = np.stack((safe_x - xx, safe_y - yy), axis=2).astype(
                 np.float32, copy=False
             )
-            output = aot_api.remap_with_flow(src, flow, height, width, return_gpu=False)
+            output = aot_api.remap(
+                src,
+                flow,
+                output_size=(height, width),
+                coordinate_mode="displacement_xy",
+                return_gpu=False,
+            )
         else:
-            output = aot_api.remap(src, safe_x, safe_y, return_gpu=False)
+            coordinates = np.stack((safe_x, safe_y), axis=-1)
+            output = aot_api.remap(
+                src,
+                coordinates,
+                coordinate_mode="absolute_xy",
+                return_gpu=False,
+            )
     except (FileNotFoundError, ImportError, KeyError, OSError, RuntimeError) as exc:
         raise NotImplementedError(
             "sparse-to-dense AOT warp requires target-qualified remap artifacts; "

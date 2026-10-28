@@ -308,6 +308,10 @@ class ResidentWeightNet(ResidentONNXGraph):
     @_serialized
     def infer(self, reference, support, *, overlap, ghost_penalty, ghost_cutoff,
               stop_event=None, rank=None, **unused):
+        if "max_safety" in unused and unused["max_safety"] is not None:
+            ms = float(unused["max_safety"])
+            if abs(ms - self.max_safety) > 1e-6:
+                self.max_safety = ms
         if reference.owner is not self or support.owner is not self or reference.shape != support.shape:
             raise ValueError("Resident WeightNet requires same-owner matching analysis buffers")
         _, height, width = reference.shape
@@ -482,6 +486,10 @@ class ResidentWeightNet(ResidentONNXGraph):
         return self._offset_cache[key]
 
     def candidates(self, reference, support, offsets, *, max_neighbors, telemetry, **options):
+        if "max_safety" in options and options["max_safety"] is not None:
+            ms = float(options["max_safety"])
+            if abs(ms - self.max_safety) > 1e-6:
+                self.max_safety = ms
         import time
         _, height, width = support.shape
         started = time.perf_counter()

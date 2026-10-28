@@ -348,6 +348,7 @@ from pixel_refine_desktop.app_core.project_file_association import (
 from pixel_refine_desktop.enhance_stack.core.logic.project_archive import (
     restore_project_session,
 )
+from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 
 # from desktop.ui.views.panorama import PanoramaPage
 import config
@@ -962,7 +963,7 @@ def main():
             ):
                 if os.path.isfile(path):
                     os.remove(path)
-            parameter_path = os.path.join("database", "align", "batch_parameter.json")
+            parameter_path = batch_parameter_manager.get_json_path()
             os.makedirs(os.path.dirname(parameter_path), exist_ok=True)
             with open(parameter_path, "w", encoding="utf-8") as handle:
                 handle.write("{}\n")

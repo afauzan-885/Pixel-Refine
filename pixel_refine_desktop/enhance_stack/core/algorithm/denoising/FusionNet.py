@@ -10,6 +10,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import gc
 import math
 import os
+from pathlib import Path
 import numpy as np
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
@@ -41,10 +42,10 @@ class FusionNetDenoisingAlgorithm:
         "fusionnet_patch_search_radius": 5,
         "input_channels": 1,
         "tile_overlap": 0.20,  # Tile overlap ratio (20% optimal for speed & seamless blend)
-        "analysis_auto_enhance_mode": "analysis",
-        "ghost_penalty": 1.5,
+        "analysis_auto_enhance_mode": "natural",
+        "ghost_penalty": 3.50,
         "ghost_penalty_min": 1.0,
-        "max_safety": 0.30,
+        "max_safety": 1.30,
     }
 
     def _load_inputs(self, ctx, frames):
@@ -168,7 +169,7 @@ class FusionNetDenoisingAlgorithm:
         # Natural is the shared denoising analysis policy for alignment,
         # weight inference, and reference-noise estimation. Ignore stale
         # per-batch overrides so all paths remain consistent.
-        analysis_auto_enhance_mode = "analysis"
+        analysis_auto_enhance_mode = "natural"
         denoising_mode = str(
             params.get(
                 "fusionnet_denoising_mode",
@@ -248,7 +249,7 @@ class FusionNetDenoisingAlgorithm:
             runtime=weightnet_runtime,
             patch_size=config["tile_size"],
             input_channels=config["input_channels"],
-            max_safety=config.get("max_safety", 0.30),
+            max_safety=config.get("max_safety", 1.30),
         )
         config["alignment_config"].setdefault("work_scale", config["work_scale"])
         result, mean_alpha = run_resident_pipeline(
@@ -268,6 +269,7 @@ class FusionNetDenoisingAlgorithm:
             overlap=config["overlap"],
             ghost_penalty=config["ghost_penalty"],
             ghost_penalty_min=config["ghost_penalty_min"],
+            max_safety=config.get("max_safety", 1.30),
             analysis_auto_enhance_mode=config["analysis_auto_enhance_mode"],
             ghost_cutoff=0.0,
             chroma_sensitivity=config["chroma_sensitivity"],
@@ -448,7 +450,7 @@ class FusionNetDenoisingAlgorithm:
                 runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "dml"),
                 patch_size=tile_size,
                 input_channels=config["input_channels"],
-                max_safety=config.get("max_safety", 0.30),
+                max_safety=config.get("max_safety", 1.30),
             )
 
             with AOTOpticalFlowAligner(
@@ -531,7 +533,7 @@ class FusionNetDenoisingAlgorithm:
                         ghost_cutoff=0.0,
                         chroma_sensitivity=1.0,
                         stop_event=stop_ev,
-                        max_safety=config.get("max_safety", 0.30),
+                        max_safety=config.get("max_safety", 1.30),
                     )
                     alpha_total += alpha_mean
                     del supp_work
@@ -557,23 +559,28 @@ class FusionNetDenoisingAlgorithm:
         if update_prog:
             update_prog(96, "Finalizing deep fusion output...")
 
-        res_chw = np.clip(sum_img / (weight_sum + 1e-8), 0.0, 1.0)
-        del sum_img, weight_sum
-        gc.collect()
-
-        res_fp32 = np.ascontiguousarray(
-            np.transpose(res_chw, (1, 2, 0)), dtype=np.float32
-        )
-        del res_chw
+        # Normalize and clamp in place.  The accumulator is not read again, so
+        # allocating a division result plus a clip result (two more full-size
+        # float32 buffers) would only raise the peak host footprint.
+        weight_sum += np.float32(1e-8)
+        np.divide(sum_img, weight_sum, out=sum_img)
+        np.clip(sum_img, np.float32(0.0), np.float32(1.0), out=sum_img)
+        del weight_sum
         gc.collect()
 
         mean_alpha = alpha_total / max(1, total_supp)
 
-        if res_fp32 is None:
-            return None
-
-        # Always convert float32 to high-precision 16-bit uint16 TIFF [0, 65535]
-        result = np.clip(res_fp32 * 65535.0 + 0.5, 0.0, 65535.0).astype(np.uint16)
+        # Scale to the uint16 transport range before the transpose, then let the
+        # channel-last copy cast straight into the output dtype.  This replaces
+        # the previous float32 intermediate plus a separate astype pass.
+        np.multiply(sum_img, np.float32(65535.0), out=sum_img)
+        np.add(sum_img, np.float32(0.5), out=sum_img)
+        np.clip(sum_img, np.float32(0.0), np.float32(65535.0), out=sum_img)
+        result = np.ascontiguousarray(
+            np.transpose(sum_img, (1, 2, 0)), dtype=np.uint16
+        )
+        del sum_img
+        gc.collect()
 
         print(
             f"[FusionNet] Pipeline finished successfully: shape={result.shape} dtype={result.dtype} mean_alpha={mean_alpha:.4f}"

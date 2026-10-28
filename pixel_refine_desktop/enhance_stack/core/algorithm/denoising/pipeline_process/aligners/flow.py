@@ -430,22 +430,24 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
             warped_primary = None
             if supp_linear_gpu is not None:
                 prim_h, prim_w = (int(v) for v in supp_linear_gpu.shape[:2])
-                warped_primary = taichi_aot.remap_with_flow(
+                warped_primary = taichi_aot.remap(
                     supp_linear_gpu,
                     flow_gpu,
-                    prim_h,
-                    prim_w,
+                    output_size=(prim_h, prim_w),
+                    coordinate_mode="displacement_xy",
                     return_gpu=True,
+                    session=_facade()._buffer_session(),
                 )
             warped_secondary = None
             if secondary_frame_to_warp is not None:
                 sec_h, sec_w = (int(v) for v in secondary_frame_to_warp.shape[:2])
-                warped_secondary = taichi_aot.remap_with_flow(
+                warped_secondary = taichi_aot.remap(
                     secondary_frame_to_warp,
                     flow_gpu,
-                    sec_h,
-                    sec_w,
+                    output_size=(sec_h, sec_w),
+                    coordinate_mode="displacement_xy",
                     return_gpu=True,
+                    session=_facade()._buffer_session(),
                 )
             if return_transform:
                 retained_flow = self._resident_flow_view(flow_gpu)
@@ -614,22 +616,24 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
             warped_primary = None
             if supp_linear_gpu is not None:
                 prim_h, prim_w = (int(v) for v in supp_linear_gpu.shape[:2])
-                warped_primary = taichi_aot.remap_with_flow(
+                warped_primary = taichi_aot.remap(
                     supp_linear_gpu,
                     flow_gpu,
-                    prim_h,
-                    prim_w,
+                    output_size=(prim_h, prim_w),
+                    coordinate_mode="displacement_xy",
                     return_gpu=True,
+                    session=_facade()._buffer_session(),
                 )
             warped_secondary = None
             if secondary_frame_to_warp is not None:
                 sec_h, sec_w = (int(v) for v in secondary_frame_to_warp.shape[:2])
-                warped_secondary = taichi_aot.remap_with_flow(
+                warped_secondary = taichi_aot.remap(
                     secondary_frame_to_warp,
                     flow_gpu,
-                    sec_h,
-                    sec_w,
+                    output_size=(sec_h, sec_w),
+                    coordinate_mode="displacement_xy",
                     return_gpu=True,
+                    session=_facade()._buffer_session(),
                 )
             if return_transform:
                 retained_flow = self._resident_flow_view(flow_gpu)

@@ -9,6 +9,7 @@ facade keeps reaching the live call path.
 
 from __future__ import annotations
 
+import gc
 import os
 import queue
 import sys
@@ -69,6 +70,7 @@ def run_gpu_resident_pipeline(
     overlap: float = 0.30,
     ghost_penalty: float = 1.0,
     ghost_penalty_min: Optional[float] = None,
+    max_safety: Optional[float] = None,
     ghost_cutoff: float = 0.05,
     chroma_sensitivity: float = 6.0,
     storage_mode: str = "direct",
@@ -334,7 +336,7 @@ def run_gpu_resident_pipeline(
         )
     if weight_analysis_params is not None:
         print(
-            "[GPU Pipeline] FusionNet WeightNet AutoEnhance (analysis): "
+            "[GPU Pipeline] FusionNet WeightNet AutoEnhance (natural): "
             f"Gain={weight_analysis_params['gain']:.2f}x "
             "(reference-derived parameters reused for weight inference)"
         )
@@ -384,6 +386,7 @@ def run_gpu_resident_pipeline(
     ref_analysis_flow_gpu = None
     ref_analysis_gpu = None
     ref_noise_score = None
+    active_max_safety = None
     if needs_analysis:
         ref_analysis_flow_gpu, ref_noise_score, ghost_penalty = (
             _facade().prepare_reference_analysis_and_noise(
@@ -408,6 +411,20 @@ def run_gpu_resident_pipeline(
         analysis_context.reference_proxy = ref_analysis_gpu
         analysis_context.alignment_reference = ref_analysis_gpu
         analysis_context.noise_score = ref_noise_score
+
+        target_safety = (
+            float(max_safety)
+            if max_safety is not None
+            else getattr(session, "max_safety", None)
+        )
+        if target_safety is not None:
+            active_max_safety = _facade().resolve_noise_adaptive_safety(
+                ref_noise_score,
+                max_safety=target_safety,
+                max_safety_min=0.01,
+            )
+            if session is not None and hasattr(session, "max_safety"):
+                session.max_safety = active_max_safety
 
     ref_work_rgb_np = None
     weightnet_gray_gpu = None
@@ -614,12 +631,15 @@ def run_gpu_resident_pipeline(
         # These engines produce one color-neutral confidence value per pixel.
         # Keep its accumulator scalar and broadcast only while updating RGB;
         # do not retain a redundant full-resolution vec3 weight sum.
-        weight_sum_gpu = engine.upload(np.ones((target_h, target_w), dtype=np.float32))
+        weight_shape = (target_h, target_w)
     else:
         # FusionNet/WeightNet outputs a 3-channel (vec3) weightmap [H, W, 3].
-        weight_sum_gpu = engine.upload(
-            np.ones((target_h, target_w, 3), dtype=np.float32)
-        )
+        weight_shape = (target_h, target_w, 3)
+    # The weight accumulator lives as long as the run but must be released with
+    # it, so it is owned by BufferSession instead of ad-hoc engine.upload().
+    weight_sum_gpu, _weight_seeded = buffer_session.upload_if_needed(
+        np.ones(weight_shape, dtype=np.float32), refresh=True
+    )
     if weight_engine == "average":
         # Uniform weights are invariant across support frames. Keep one
         # resident work-resolution buffer instead of allocating and uploading
@@ -1246,6 +1266,8 @@ def run_gpu_resident_pipeline(
                             stop_event=stop_event,
                             telemetry=telemetry,
                         )
+                        if active_max_safety is not None:
+                            options["max_safety"] = active_max_safety
                         candidate_maps = _facade()._iter_deep_support_candidate_maps(
                             session,
                             ref_work_rgb_np,
@@ -1381,6 +1403,7 @@ def run_gpu_resident_pipeline(
                         chroma_sensitivity=chroma_sensitivity,
                         stop_event=stop_event,
                         return_scalar=(weightnet_channels == 1),
+                        max_safety=active_max_safety,
                     )
                     upload_workspace = (
                         weightnet_upload_workspaces[curr_idx & 1]
@@ -1585,6 +1608,8 @@ def run_gpu_resident_pipeline(
                             stop_event=stop_event,
                             telemetry=telemetry,
                         )
+                        if active_max_safety is not None:
+                            options["max_safety"] = active_max_safety
                         for candidate_index, (
                             rank_indices,
                             _rank_valid,

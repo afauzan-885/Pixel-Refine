@@ -57,6 +57,7 @@ from .analysis import (
     prepare_weightnet_reference_input,
     prepare_weightnet_support_input,
     resolve_noise_adaptive_penalty,
+    resolve_noise_adaptive_safety,
 )
 from .executor.run import run_gpu_resident_pipeline
 from .frames import (
@@ -89,6 +90,7 @@ __all__ = [
     "prepare_analysis_proxy_gpu",
     "prepare_reference_analysis_and_noise",
     "resolve_noise_adaptive_penalty",
+    "resolve_noise_adaptive_safety",
     "apply_clahe_16bit_reference",
     "apply_precomputed_transfer_map",
     "prepare_weightnet_reference_input",

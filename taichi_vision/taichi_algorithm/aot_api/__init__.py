@@ -4863,8 +4863,8 @@ def phase_correlation(ref, comp, use_hanning=True):
 
 
 @_block_recovery("remap")
-def remap(src, map_x, map_y, return_gpu=False):
-    """Taichi AOT Remap (OpenCV Parity API)"""
+def _remap_explicit_maps_legacy(src, map_x, map_y, return_gpu=False):
+    """Legacy explicit-map implementation retained for internal compatibility."""
     if (
         isinstance(src, np.ndarray)
         and isinstance(map_x, np.ndarray)
@@ -5037,7 +5037,7 @@ def remap(src, map_x, map_y, return_gpu=False):
 
 @_vulkan_host_accessible
 @_block_recovery("remap_with_flow")
-def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None, session=None):
+def _remap_with_flow_impl(src, flow, full_h, full_w, return_gpu=False, dst=None, session=None):
     """
     Fused remap with flow: bilinear interpolate flow on-the-fly + warp src image.
     Eliminates need for map_x, map_y full-res buffers (~91.6 MB VRAM saved).
@@ -5253,8 +5253,9 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None, sessi
         if dst is not None and isinstance(dst, TaichiGPUBuffer):
             dst_buf = dst
         elif return_gpu:
-            from taichi_vision.taichi_aot.engine import engine as aot_engine
-            dst_buf = aot_engine.allocate(dst_shape, dtype=np.float32, is_vector=is_3d)
+            # A returned GPU buffer outlives this call, so it must not be a
+            # session scratch slot or session-owned resource; the caller owns it.
+            dst_buf = engine.allocate(dst_shape, dtype=np.float32, is_vector=is_3d)
         else:
             dst_buf = session.acquire_buffer(dst_shape, dtype=np.float32, is_vector=is_3d)
         src_v = src_buf if getattr(src_buf, "is_vector", False) or not is_3d else src_buf.view_as_vector(True)
@@ -5416,6 +5417,163 @@ def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None, sessi
                 dst[:] = res_f32
                 return dst
             return res_f32
+
+
+def remap(
+    src,
+    coordinates=None,
+    *legacy_map_args,
+    output_size=None,
+    coordinate_mode=None,
+    return_gpu=None,
+    dst=None,
+    session=None,
+    map_x=None,
+    map_y=None,
+):
+    """Warp an image from one packed XY coordinate field.
+
+    Compact form, mirroring ``cv2.remap``::
+
+        out = remap(src, flow)        # flow (H,W,2) displacement
+        out = remap(src, map)         # map  (H,W,2) absolute (x, y)
+        out = remap(src_gpu, flow)    # stays on the device, returns a GPU buffer
+
+    Everything else is inferred:
+
+    * ``output_size`` defaults to the source spatial shape.
+    * ``coordinate_mode`` is ``"displacement_xy"`` unless ``map_x=...``/``map_y=...``
+      or a two-positional-argument split-map call is used, which selects
+      ``"absolute_xy"``.
+    * ``return_gpu`` follows the input: a GPU ``src``/``coordinates`` keeps the
+      result on the device, host arrays return a NumPy array.
+    * ``session`` defaults to the active :class:`BufferSession` (innermost
+      ``with`` block) and otherwise to a lazily created default session, so
+      resident buffers are reused without threading a parameter everywhere.
+    * ``dst`` defaults to a reusable session scratch slot.
+
+    ``coordinates`` is ``(H, W, 2)`` float32. ``"displacement_xy"`` holds
+    ``(dx, dy)``; ``"absolute_xy"`` holds per-output-pixel source ``(x, y)`` and
+    is normalized to displacement before the shared core runs. ``absolute_xy``
+    requires host coordinates; device coordinates raise ``NotImplementedError``
+    rather than silently copying to the host.
+
+    The positional split-map form ``remap(src, map_x, map_y)`` and the
+    ``map_x=``/``map_y=`` keywords remain supported for compatibility.
+    """
+    # Infer the coordinate meaning from the legacy shapes when not given.
+    if map_x is not None or map_y is not None:
+        if coordinates is not None or legacy_map_args:
+            raise TypeError("do not mix packed coordinates with legacy map_x/map_y keywords")
+        if map_x is None or map_y is None:
+            raise TypeError("legacy remap requires both map_x and map_y")
+        coordinates = map_x
+        legacy_map_args = (map_y,)
+
+    if legacy_map_args:
+        if coordinates is None or len(legacy_map_args) not in (1, 2):
+            raise TypeError("legacy remap accepts map_x, map_y, and optional return_gpu")
+        map_y = legacy_map_args[0]
+        if len(legacy_map_args) == 2:
+            return_gpu = bool(legacy_map_args[1])
+        map_x = coordinates
+        if hasattr(map_x, "to_numpy"):
+            map_x = map_x.to_numpy()
+        if hasattr(map_y, "to_numpy"):
+            map_y = map_y.to_numpy()
+        map_x = np.asarray(map_x, dtype=np.float32)
+        map_y = np.asarray(map_y, dtype=np.float32)
+        if map_x.ndim != 2 or map_x.shape != map_y.shape:
+            raise ValueError("map_x and map_y must be matching 2D arrays")
+        coordinates = np.empty((*map_x.shape, 2), dtype=np.float32)
+        coordinates[..., 0] = map_x
+        coordinates[..., 1] = map_y
+        coordinate_mode = "absolute_xy"
+        output_size = map_x.shape
+
+    # Infer the coordinate meaning from the packed field when the caller did
+    # not say: a pair of 2D maps was already converted above; otherwise the
+    # compact form is displacement flow.
+    if coordinate_mode is None:
+        coordinate_mode = "displacement_xy"
+
+    if coordinate_mode == "absolute_xy":
+        if isinstance(coordinates, TaichiGPUBuffer):
+            raise NotImplementedError(
+                "absolute_xy currently requires host coordinates; pass "
+                "coordinate_mode='displacement_xy' or an ArrayInterface-typed "
+                "device buffer to keep the remap resident on the device"
+            )
+        xy = np.asarray(coordinates)
+        if xy.dtype != np.float32:
+            raise TypeError("absolute_xy coordinates must use float32")
+        if xy.ndim != 3 or xy.shape[-1] != 2 or min(xy.shape[:2]) < 1:
+            raise ValueError("absolute_xy coordinates must have shape (H, W, 2)")
+        inferred_size = (int(xy.shape[0]), int(xy.shape[1]))
+        if output_size is not None and tuple(map(int, output_size)) != inferred_size:
+            raise ValueError("absolute_xy output_size must match coordinate dimensions")
+        flow = np.empty_like(xy, dtype=np.float32, order="C")
+        flow[..., 0] = xy[..., 0] - np.arange(xy.shape[1], dtype=np.float32)[None, :]
+        flow[..., 1] = xy[..., 1] - np.arange(xy.shape[0], dtype=np.float32)[:, None]
+        output_size = inferred_size
+    elif coordinate_mode == "displacement_xy":
+        if isinstance(coordinates, np.ndarray) and coordinates.dtype != np.float32:
+            raise TypeError("displacement_xy coordinates must use float32")
+        shape = tuple(getattr(coordinates, "shape", ()))
+        if len(shape) != 3 or int(shape[2]) != 2 or int(shape[0]) < 1 or int(shape[1]) < 1:
+            raise ValueError("displacement_xy coordinates must have shape (H, W, 2)")
+        if output_size is None:
+            src_shape = tuple(getattr(src, "shape", ()))
+            if len(src_shape) < 2:
+                raise ValueError("output_size is required when source dimensions are unavailable")
+            output_size = src_shape[:2]
+        if len(output_size) != 2:
+            raise ValueError("output_size must be (height, width)")
+        output_size = tuple(map(int, output_size))
+    else:
+        raise ValueError("coordinate_mode must be 'absolute_xy' or 'displacement_xy'")
+
+    full_h, full_w = output_size
+    if full_h <= 0 or full_w <= 0:
+        raise ValueError("output_size dimensions must be positive")
+
+    displacement = flow if coordinate_mode == "absolute_xy" else coordinates
+
+    # Infer residency from the inputs so callers never choose it by hand: any
+    # device-side operand means the whole chain can stay on the device.
+    device_resident = isinstance(src, TaichiGPUBuffer) or isinstance(
+        displacement, TaichiGPUBuffer
+    )
+    if return_gpu is None:
+        return_gpu = device_resident
+
+    if session is None and (device_resident or return_gpu):
+        from taichi_vision.taichi_algorithm.buffer_session import current_session
+
+        session = current_session()
+
+    return _remap_with_flow_impl(
+        src,
+        displacement,
+        full_h,
+        full_w,
+        return_gpu=return_gpu,
+        dst=dst,
+        session=session,
+    )
+
+
+def remap_with_flow(src, flow, full_h, full_w, return_gpu=False, dst=None, session=None):
+    """Compatibility adapter; new callers should use :func:`remap`."""
+    return remap(
+        src,
+        flow,
+        output_size=(full_h, full_w),
+        coordinate_mode="displacement_xy",
+        return_gpu=return_gpu,
+        dst=dst,
+        session=session,
+    )
 
 
 def remap_with_flow_tile(
@@ -11597,8 +11755,11 @@ def find_homography(
     seed: int | None = None,
 ) -> tuple:
     """
-    Estimasi matriks Homografi 3x3 menggunakan GPU RANSAC / MAGSAC++.
-    API menyerupai implementasi homography standar (RANSAC).
+    Estimasi homography hybrid: hipotesis/konsensus AOT GPU, refinement CPU
+    float64 (normalized SVD dan geometric least squares). Input GPU dibaca
+    sekali ke host untuk refinement; ini bukan fallback ketika GPU gagal.
+    Nama metode historis tetap diterima; pencarian memakai skor soft Tukey,
+    bukan implementasi penuh algoritma MAGSAC++.
 
     Args:
         pts1  (np.ndarray | TaichiGPUBuffer): Array titik sumber, shape (N, 2) float32 [x, y].
@@ -11607,7 +11768,7 @@ def find_homography(
         ransacReprojThreshold (float): Jarak re-proyeksi maksimum inlier (piksel).
         n_hypotheses (int): Jumlah iterasi RANSAC paralel di GPU (default 1024).
         max_iters (int)   : Jumlah putaran pencarian ulang untuk memperbaiki akurasi.
-        return_gpu (bool) : Jika True, mengembalikan mask dalam TaichiGPUBuffer (zero-copy VRAM).
+        return_gpu (bool) : Jika True, upload mask final ke TaichiGPUBuffer (bukan zero-copy).
         seed (int | None): Optional deterministic RANSAC seed. ``None`` keeps
             the historical time-based seed. ``PIXEL_REFINE_RANSAC_SEED`` is
             accepted as an environment-level opt-in for separate RGB/RAW runs.
@@ -11616,176 +11777,23 @@ def find_homography(
         H    (np.ndarray | None): Matriks Homografi 3x3 float64, atau None jika gagal.
         mask (np.ndarray | TaichiGPUBuffer | None): Mask biner inlier shape (N, 1) uint8 atau TaichiGPUBuffer.
     """
-    if pts1 is None or pts2 is None:
-        return None, None
+    from ..alignment.homography_aot import find_homography_hybrid
 
-    # Deteksi input dari GPU Buffer atau NumPy
-    is_pts1_gpu = isinstance(pts1, TaichiGPUBuffer)
-    is_pts2_gpu = isinstance(pts2, TaichiGPUBuffer)
-
-    n_pts = pts1.shape[0]
-    if n_pts < 4:
-        return None, None
-
-    # Handle Upload ke GPU jika input berupa numpy array
-    pts1_gpu = (
-        pts1
-        if is_pts1_gpu
-        else upload(np.ascontiguousarray(pts1.reshape(-1, 2), dtype=np.float32))
+    return find_homography_hybrid(
+        pts1, pts2, ransacReprojThreshold, n_hypotheses, max_iters, return_gpu, seed,
     )
-    pts2_gpu = (
-        pts2
-        if is_pts2_gpu
-        else upload(np.ascontiguousarray(pts2.reshape(-1, 2), dtype=np.float32))
-    )
-
-    H_cand_gpu = engine.allocate((n_hypotheses, 9), dtype=np.float32)
-    inlier_cnt_gpu = engine.allocate((n_hypotheses,), dtype=np.int32)
-
-    best_H_flat = None
-    best_inliers = -1
-
-    import time
-
-    if seed is None:
-        seed_override = os.environ.get("PIXEL_REFINE_RANSAC_SEED", "").strip()
-        if seed_override:
-            try:
-                seed = int(seed_override)
-            except ValueError:
-                seed = None
-    seed_base = (
-        int(seed) & 0x7FFFFFFF
-        if seed is not None
-        else int(time.time() * 1000) & 0x7FFFFFFF
-    )
-
-    for iteration in range(max_iters):
-        seed_offset = (seed_base + iteration * 31337) & 0x7FFFFFFF
-
-        # Jalankan 1024 hipotesis RANSAC secara paralel di GPU (dari modul ransac)
-        _mod("ransac").run(
-            "ransac_homography",
-            pts1=pts1_gpu,
-            pts2=pts2_gpu,
-            n_pts=n_pts,
-            n_hypotheses=n_hypotheses,
-            reproj_threshold=float(ransacReprojThreshold),
-            H_candidates=H_cand_gpu,
-            inlier_counts=inlier_cnt_gpu,
-            seed_offset=seed_offset,
-        )
-
-        # Download hanya vektor inlier count kecil (1024 int) — sangat cepat
-        inlier_counts_np = inlier_cnt_gpu.to_numpy()
-        best_idx = int(np.argmax(inlier_counts_np))
-        best_count = int(inlier_counts_np[best_idx])
-
-        if best_count > best_inliers:
-            best_inliers = best_count
-            H_cand_np = H_cand_gpu.to_numpy()
-            best_H_flat = H_cand_np[best_idx]  # 9-element flat
-
-    H_cand_gpu.release()
-    inlier_cnt_gpu.release()
-
-    if best_H_flat is None:
-        if not is_pts1_gpu:
-            pts1_gpu.release()
-        if not is_pts2_gpu:
-            pts2_gpu.release()
-        return None, None
-
-    # Hasilkan mask inlier pada GPU menggunakan matriks RANSAC terbaik
-    H_flat_gpu = upload(best_H_flat)
-    mask_gpu = engine.allocate((n_pts,), dtype=np.int32)
-
-    _mod("ransac").run(
-        "generate_inlier_mask",
-        pts1=pts1_gpu,
-        pts2=pts2_gpu,
-        H_best=H_flat_gpu,
-        n_pts=n_pts,
-        reproj_threshold=float(ransacReprojThreshold),
-        mask_out=mask_gpu,
-    )
-
-    # ── Least-Squares refinement (Weighted Least Squares) ───────────
-    ATA_gpu = engine.allocate((8, 8), dtype=np.float32)
-    ATb_gpu = engine.allocate((8,), dtype=np.float32)
-
-    _mod("ransac").run(
-        "refine_homography",
-        pts1=pts1_gpu,
-        pts2=pts2_gpu,
-        mask=mask_gpu,
-        n_pts=n_pts,
-        reproj_threshold=float(ransacReprojThreshold),
-        ATA_out=ATA_gpu,
-        ATb_out=ATb_gpu,
-    )
-
-    ATA_np = ATA_gpu.to_numpy().astype(np.float64)
-    ATb_np = ATb_gpu.to_numpy().astype(np.float64)
-
-    ATA_gpu.release()
-    ATb_gpu.release()
-
-    H = best_H_flat.reshape(3, 3).astype(np.float64)
-
-    # Selesaikan ATA*h = ATb di CPU
-    try:
-        h_refined = np.linalg.solve(ATA_np, ATb_np)
-        H_refined = np.array(
-            [
-                [h_refined[0], h_refined[1], h_refined[2]],
-                [h_refined[3], h_refined[4], h_refined[5]],
-                [h_refined[6], h_refined[7], 1.0],
-            ],
-            dtype=np.float64,
-        )
-        H = H_refined
-    except np.linalg.LinAlgError:
-        pass  # Gunakan H dari RANSAC jika LS singular
-
-    # Re-generate mask final menggunakan H yang sudah di-refine
-    H_flat_refined = H.ravel().astype(np.float32)
-    H_flat_gpu2 = upload(H_flat_refined)
-    mask_gpu2 = engine.allocate((n_pts,), dtype=np.int32)
-
-    _mod("ransac").run(
-        "generate_inlier_mask",
-        pts1=pts1_gpu,
-        pts2=pts2_gpu,
-        H_best=H_flat_gpu2,
-        n_pts=n_pts,
-        reproj_threshold=float(ransacReprojThreshold),
-        mask_out=mask_gpu2,
-    )
-
-    # Bersihkan input GPU Buffer jika kita yang mengalokasikannya secara lokal
-    if not is_pts1_gpu:
-        pts1_gpu.release()
-    if not is_pts2_gpu:
-        pts2_gpu.release()
-    H_flat_gpu.release()
-    mask_gpu.release()
-    H_flat_gpu2.release()
-
-    if return_gpu:
-        return H, mask_gpu2
-    else:
-        mask_np = mask_gpu2.to_numpy().astype(np.uint8).reshape(-1, 1)
-        mask_gpu2.release()
-        return H, mask_np
 
 
 @_block_recovery("warp_perspective")
-def warp_perspective(src, M, dsize, return_gpu=False, dst=None):
+def warp_perspective(src, M, dsize, return_gpu=None, dst=None):
+    """GPU perspective warp; GPU input defaults to a device-resident result.
+
+    NumPy inputs keep the historical host result. Pass ``return_gpu=False``
+    explicitly to read a resident input's result back to NumPy.
     """
-    GPU-accelerated Warp Perspective menggunakan Taichi AOT.
-    API menyerupai warp perspective standar.
-    """
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    if return_gpu is None:
+        return_gpu = is_gpu
     if isinstance(src, np.ndarray) and dst is None:
         source = np.ascontiguousarray(src, dtype=np.float32)
         w_dst, h_dst = dsize
@@ -11868,8 +11876,8 @@ def warp_perspective(src, M, dsize, return_gpu=False, dst=None):
                 matrix_buf.destroy()
             return upload(result) if return_gpu else result
 
-    is_gpu = isinstance(src, TaichiGPUBuffer)
     src_buf = src if is_gpu else upload(src)
+    owns_src = not is_gpu
 
     h_src, w_src = src_buf.shape[:2]
     w_dst, h_dst = dsize
@@ -11916,22 +11924,27 @@ def warp_perspective(src, M, dsize, return_gpu=False, dst=None):
         "warp_perspective_offset_f32_3d" if is_3d else "warp_perspective_offset_f32_2d"
     )
 
-    _mod("remap").run(
-        graph,
-        src=src_v,
-        M_inv=M_inv_gpu,
-        dst=dst_v,
-        h_src=h_src,
-        w_src=w_src,
-        offset_y=0,
-        offset_x=0,
-    )
-
-    M_inv_gpu.release()
-    if not is_gpu:
-        src_buf.release()
-
-    return dst_buf if return_gpu else dst_buf.to_numpy()
+    try:
+        _mod("remap").run(
+            graph,
+            src=src_v,
+            M_inv=M_inv_gpu,
+            dst=dst_v,
+            h_src=h_src,
+            w_src=w_src,
+            offset_y=0,
+            offset_x=0,
+        )
+        if return_gpu:
+            return dst_buf
+        result = dst_buf.to_numpy()
+        if dst is None:
+            dst_buf.release()
+        return result
+    finally:
+        M_inv_gpu.release()
+        if owns_src:
+            src_buf.release()
 
 
 # ===========================================================================

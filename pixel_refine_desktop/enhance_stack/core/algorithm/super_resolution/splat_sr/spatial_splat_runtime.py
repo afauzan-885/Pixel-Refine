@@ -314,8 +314,10 @@ class SpatialSplatAOT:
                         tile_buffers,
                     ) = pending_tiles.pop(0)
                     try:
-                        tile_coverage = np.array(
-                            coverage_buf.to_numpy(), dtype=np.float32, copy=True
+                        # ``to_numpy`` already returns a fresh host array in the
+                        # buffer dtype (float32); ``copy=True`` duplicated the tile.
+                        tile_coverage = np.ascontiguousarray(
+                            coverage_buf.to_numpy(), dtype=np.float32
                         )
                         if accumulator is None:
                             denominator[
@@ -326,8 +328,8 @@ class SpatialSplatAOT:
                                 tile_y0:tile_y1, tile_x0:tile_x1
                             ] += tile_coverage
                         for tile_channel, result_buf in enumerate(result_buffers):
-                            tile_result = np.array(
-                                result_buf.to_numpy(), dtype=np.float32, copy=True
+                            tile_result = np.ascontiguousarray(
+                                result_buf.to_numpy(), dtype=np.float32
                             )
                             if accumulator is None:
                                 numerator[

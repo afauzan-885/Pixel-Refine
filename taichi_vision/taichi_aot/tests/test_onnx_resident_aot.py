@@ -98,19 +98,12 @@ def test_resident_patch_stitch_matches_existing_helper_and_never_downloads(tmp_p
             candidate_count=len(offsets), neighbor_count=2, cell_size=cell_size)
         actual_coarse = coarse.buffer if hasattr(coarse, "buffer") else coarse
         actual_coarse = actual_coarse.to_numpy()
-        assert actual_coarse.shape == (2, coarse_h, coarse_w)
-        assert np.all((actual_coarse >= -1) & (actual_coarse < len(offsets)))
-        pixelwise_gpu = executor.allocate((2, 14, 14), np.int32)
-        try:
-            executor.dispatch(
-                "multi_patch_topk_kernel", reference=view(ref_gpu.buffer, reference.shape),
-                candidate=view(support_gpu.buffer, support.shape), offsets=proxy_offsets,
-                indices=pixelwise_gpu, height=14, width=14, channels=1,
-                candidate_count=len(offsets), neighbor_count=2, cell_size=1)
-            actual_pixelwise = (pixelwise_gpu.buffer if hasattr(pixelwise_gpu, "buffer") else pixelwise_gpu).to_numpy()
-            np.testing.assert_array_equal(actual_pixelwise, expected_selection.indices)
-        finally:
-            pixelwise_gpu.destroy()
+        expected_coarse = np.empty_like(actual_coarse)
+        for cy in range(coarse_h):
+            for cx in range(coarse_w):
+                y, x = min(13, cy * cell_size + cell_size // 2), min(13, cx * cell_size + cell_size // 2)
+                expected_coarse[:, cy, cx] = expected_selection.indices[:, y, x]
+        np.testing.assert_array_equal(actual_coarse, expected_coarse)
         def forbidden(*args, **kwargs):
             raise AssertionError("patch/candidate host readback")
         with monkeypatch.context() as checks:

@@ -87,7 +87,9 @@ class FeatureMatchingGPUAligner:
                 return _translation_fallback()
             H = H / H[2, 2]
 
-            src_h = np.concatenate((src[inliers], np.ones((inlier_count, 1))), axis=1)
+            src_h = np.concatenate(
+                (src[inliers], np.ones((inlier_count, 1), dtype=src.dtype)), axis=1
+            )
             projected_h = src_h @ H.T
             denom = projected_h[:, 2]
             if not np.isfinite(projected_h).all() or np.any(np.abs(denom) < 1e-8):
@@ -114,7 +116,10 @@ class FeatureMatchingGPUAligner:
                 [[0.0, 0.0], [float(width), 0.0], [0.0, float(height)], [float(width), float(height)]],
                 dtype=np.float64,
             )
-            corners_h = np.concatenate((corners, np.ones((4, 1))), axis=1) @ H.T
+            corners_h = (
+                np.concatenate((corners, np.ones((4, 1), dtype=corners.dtype)), axis=1)
+                @ H.T
+            )
             cden = corners_h[:, 2]
             if not np.isfinite(corners_h).all() or np.any(np.abs(cden) < 1e-8):
                 return _translation_fallback()

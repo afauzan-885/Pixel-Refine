@@ -14,8 +14,10 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import (
 )
 
 
-# Centralized JSON path for batch parameters
-BATCH_PARAMETER_PATH = os.path.join("database", "align", "batch_parameter.json")
+# Centralized JSON path for project parameters (Single Source of Truth)
+PROJECT_PARAMETERS_PATH = os.path.join("database", "align", "ProjectParameters.json")
+LEGACY_BATCH_PARAMETER_PATH = os.path.join("database", "align", "batch_parameter.json")
+BATCH_PARAMETER_PATH = PROJECT_PARAMETERS_PATH
 ALGORITHM_PARAMETER_CONTAINER = "algorithm_params"
 
 
@@ -165,13 +167,17 @@ def load_json_state(path: Optional[str] = None, default: Optional[Dict] = None) 
     """
     if path is None:
         path = BATCH_PARAMETER_PATH
+        # Transparent migration fallback: if ProjectParameters.json does not exist yet,
+        # but legacy batch_parameter.json exists, load from legacy path.
+        if not os.path.exists(path) and os.path.exists(LEGACY_BATCH_PARAMETER_PATH):
+            path = LEGACY_BATCH_PARAMETER_PATH
 
     if default is None:
         default = {}
 
     if os.path.exists(path):
         try:
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             return default

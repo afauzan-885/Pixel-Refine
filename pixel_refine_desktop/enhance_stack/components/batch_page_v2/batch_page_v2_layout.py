@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
 import shutil
 import subprocess
 import os
@@ -110,7 +111,7 @@ class BatchPageV2Layout(QWidget):
         # self.store = DataStore()
 
         # Bind to settings file
-        json_path = os.path.join("database", "align", "batch_parameter.json")
+        json_path = batch_parameter_manager.get_json_path()
         self.store.bind_to_file(json_path)
 
         self.main_layout = QVBoxLayout(self)

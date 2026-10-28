@@ -164,8 +164,30 @@ def ssim_aot(img1, img2, window_size=11, data_range=None, k1=0.01, k2=0.03):
     return score / channels
 
 
-def warp_affine_aot(src, matrix, dsize):
-    data = _as_f32(src)
+def warp_affine_aot(src, matrix, dsize, return_gpu=None, dst=None):
+    """Affine warp; GPU inputs stay resident unless ``return_gpu=False``.
+
+    Host arrays retain the historical NumPy result by default. Matrix inversion
+    is a small host-side setup step; image pixels are not read back unless the
+    caller explicitly requests a host result.
+    """
+    from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+
+    is_gpu = isinstance(src, TaichiGPUBuffer)
+    if is_gpu:
+        if np.dtype(src.dtype) != np.dtype(np.float32):
+            raise TypeError("resident warp_affine input must be float32")
+        data = src
+        data_shape = tuple(src.shape)
+        if src.is_vector and len(data_shape) == 2:
+            data_shape = (*data_shape, src.vector_dim)
+        elif src.is_vector and len(data_shape) == 3 and data_shape[2] != src.vector_dim:
+            raise ValueError("resident vector buffer shape does not match vector_dim")
+    else:
+        data = _as_f32(src)
+        data_shape = data.shape
+    if return_gpu is None:
+        return_gpu = is_gpu
     matrix = np.asarray(matrix, dtype=np.float32)
     if matrix.shape != (2, 3):
         raise ValueError("matrix must have shape (2, 3)")
@@ -175,16 +197,20 @@ def warp_affine_aot(src, matrix, dsize):
     homogeneous = np.eye(3, dtype=np.float32)
     homogeneous[:2] = matrix
     inverse = np.linalg.inv(homogeneous)[:2].astype(np.float32)
-    graph = "warp_affine_3d" if data.ndim == 3 else "warp_affine_2d"
-    scalars = {"h_src": data.shape[0], "w_src": data.shape[1], "h_dst": height, "w_dst": width}
-    if data.ndim == 3:
-        scalars["channels"] = data.shape[2]
-        shape = (height, width, data.shape[2])
-    elif data.ndim == 2:
+    if len(data_shape) == 3:
+        graph = "warp_affine_3d"
+        scalars = {"h_src": data_shape[0], "w_src": data_shape[1], "h_dst": height,
+                   "w_dst": width, "channels": data_shape[2]}
+        shape = (height, width, data_shape[2])
+    elif len(data_shape) == 2:
+        graph = "warp_affine_2d"
+        scalars = {"h_src": data_shape[0], "w_src": data_shape[1], "h_dst": height, "w_dst": width}
         shape = (height, width)
     else:
         raise ValueError("warp_affine input must be 2D or 3D")
-    return _dispatch("warp_affine", graph, inputs={"src": data, "matrix": inverse}, outputs={"dst": (shape, np.float32)}, scalars=scalars)
+    outputs = {"dst": dst if dst is not None else (shape, np.float32)}
+    return _dispatch("warp_affine", graph, inputs={"src": data, "matrix": inverse},
+                     outputs=outputs, scalars=scalars, return_gpu=bool(return_gpu))
 
 
 def _filter2d_dispatch(data, padded, kh, kw):

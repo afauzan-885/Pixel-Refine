@@ -84,12 +84,14 @@ class PanoramaPrimitiveTests(unittest.TestCase):
 
         captured = {}
 
-        def fake_remap(src, map_x, map_y, *, return_gpu=False):
+        def fake_remap(
+            src, coordinates, *, coordinate_mode, return_gpu=False
+        ):
             captured["src"] = src
-            captured["map_x"] = map_x
-            captured["map_y"] = map_y
+            captured["coordinates"] = coordinates
+            captured["coordinate_mode"] = coordinate_mode
             captured["return_gpu"] = return_gpu
-            return np.zeros((*map_x.shape, src.shape[2]), dtype=np.float32)
+            return np.zeros((*coordinates.shape[:2], src.shape[2]), dtype=np.float32)
 
         with patch("taichi_vision.taichi_algorithm.aot_api.remap", fake_remap):
             result = project_image(
@@ -103,17 +105,16 @@ class PanoramaPrimitiveTests(unittest.TestCase):
 
         self.assertEqual(result.backend, "aot")
         self.assertFalse(captured["return_gpu"])
-        self.assertEqual(captured["map_x"].shape, result.valid.shape)
-        self.assertEqual(captured["map_y"].shape, result.valid.shape)
-        self.assertTrue(np.isfinite(captured["map_x"]).all())
-        self.assertTrue(np.isfinite(captured["map_y"]).all())
+        self.assertEqual(captured["coordinate_mode"], "absolute_xy")
+        self.assertEqual(captured["coordinates"].shape, (*result.valid.shape, 2))
+        self.assertTrue(np.isfinite(captured["coordinates"]).all())
         # Invalid inverse-map entries are replaced with a safe coordinate
         # before dispatch; remap must never receive NaN/Inf or an out-of-range
         # coordinate that could trigger backend-specific border behaviour.
-        self.assertTrue((captured["map_x"] >= 0.0).all())
-        self.assertTrue((captured["map_x"] <= self.image.shape[1] - 1).all())
-        self.assertTrue((captured["map_y"] >= 0.0).all())
-        self.assertTrue((captured["map_y"] <= self.image.shape[0] - 1).all())
+        self.assertTrue((captured["coordinates"][..., 0] >= 0.0).all())
+        self.assertTrue((captured["coordinates"][..., 0] <= self.image.shape[1] - 1).all())
+        self.assertTrue((captured["coordinates"][..., 1] >= 0.0).all())
+        self.assertTrue((captured["coordinates"][..., 1] <= self.image.shape[0] - 1).all())
 
     def test_taichi_projection_matches_numpy_reference(self) -> None:
         # This is a CPU-JIT parity gate.  The implementation uses no AOT

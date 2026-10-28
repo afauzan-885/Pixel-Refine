@@ -2,7 +2,7 @@
 
 Computes dense hierarchical optical flow (dx, dy) between reference and
 support frames with the 3-layer coarse-to-fine pyramid and warps support
-frames through the native remap_with_flow graph.
+frames through the canonical AOT remap API.
 """
 
 import gc
@@ -150,7 +150,6 @@ class AOTOpticalFlowAligner:
         self.flow_l0_raw = None
         self._smooth_weights = None
         self.smooth_flow_l0 = None
-        self._remap_mod = None
         self.last_flow_gpu = None
         self._retained_flow_owner = None
         self._flow_view_in_flight = False
@@ -273,7 +272,6 @@ class AOTOpticalFlowAligner:
                         pass
                     setattr(self, attr, None)
                 self.flow_l0_raw = None
-                self._remap_mod = None
                 print(
                     "[FlowNet] compute_flow v2 unavailable at runtime; "
                     f"using legacy graph: {type(exc).__name__}: {exc}"
@@ -339,68 +337,6 @@ class AOTOpticalFlowAligner:
         # Fence before the next producer overwrites the reusable flow owner.
         self._flow_view_in_flight = True
 
-    def _remap_resident(self, src, flow, full_h, full_w):
-        """Submit an f32 resident remap without the public host-sync boundary."""
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
-
-        if (
-            not isinstance(src, TaichiGPUBuffer)
-            or np.dtype(src.dtype) != np.dtype(np.float32)
-            or np.dtype(flow.dtype) != np.dtype(np.float32)
-            or len(src.shape) not in (2, 3)
-        ):
-            return None
-
-        is_3d = len(src.shape) == 3
-        channels = int(src.shape[2]) if is_3d else 1
-        if is_3d and channels != 3:
-            return None
-
-        dst_shape = (int(full_h), int(full_w), channels) if is_3d else (
-            int(full_h),
-            int(full_w),
-        )
-        dst = self.engine.allocate(
-            dst_shape,
-            dtype=np.float32,
-            is_vector=is_3d,
-            vector_dim=channels,
-        )
-        try:
-            src_view = (
-                src
-                if not is_3d or getattr(src, "is_vector", False)
-                else src.view_as_vector(True, channels)
-            )
-            dst_view = (
-                dst
-                if not is_3d or getattr(dst, "is_vector", False)
-                else dst.view_as_vector(True, channels)
-            )
-            flow_view = (
-                flow.view_as_vector(False)
-                if getattr(flow, "is_vector", False)
-                else flow
-            )
-            self._remap_mod.run(
-                "remap_with_flow_f32_3d" if is_3d else "remap_with_flow_f32_2d",
-                src=src_view,
-                flow=flow_view,
-                dst=dst_view,
-                h_src=int(src.shape[0]),
-                w_src=int(src.shape[1]),
-                h_dst=int(full_h),
-                w_dst=int(full_w),
-                h_flow=int(flow.shape[0]),
-                w_flow=int(flow.shape[1]),
-                scale_x=float(full_w) / float(flow.shape[1]),
-                scale_y=float(full_h) / float(flow.shape[0]),
-            )
-            return dst
-        except Exception:
-            dst.destroy()
-            return None
-
     def align_frame(
         self,
         supp_rgb_f32: Union[np.ndarray, "TaichiGPUBuffer"],
@@ -419,9 +355,13 @@ class AOTOpticalFlowAligner:
         If `secondary_frame_to_warp` is given, returns a tuple `(warped_primary, warped_secondary)`.
         """
         from taichi_vision import taichi_aot
+        from ..pipeline_process.facade import api as _facade
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
             taichi_bridge,
         )
+
+        remap = _facade()._managed_api(taichi_aot).remap
+        remap_session = _facade()._buffer_session()
 
         if stop_event is not None:
             if hasattr(stop_event, "is_set") and stop_event.is_set():
@@ -504,72 +444,11 @@ class AOTOpticalFlowAligner:
                     pass
             comp_pyramid = ()
 
-            # The resident v2 route keeps the exact same two-pass Gaussian
-            # kernels but reuses their temporary/weight buffers and does not
+            # The v2 route fuses flow stitching; the legacy route retains the
+            # established two-pass smoothing graph. Both routes use the same
+            # canonical remap API for output warping.
             if used_fast_graph:
-                # Flow is already smoothly stitched via fused WOLA in the AOT graph;
-                # no external Gaussian blur is required.
                 active_flow_gpu = self.flow_l0
-                warped = None
-                if supp_rgb_f32 is not None:
-                    prim_shape = getattr(
-                        supp_rgb_f32, "shape", (self.full_h, self.full_w)
-                    )
-                    prim_h, prim_w = int(prim_shape[0]), int(prim_shape[1])
-                    if return_gpu:
-                        warped = self._remap_resident(
-                            supp_rgb_f32,
-                            active_flow_gpu,
-                            prim_h,
-                            prim_w,
-                        )
-                        if warped is None:
-                            warped = taichi_aot.remap_with_flow(
-                                supp_rgb_f32,
-                                active_flow_gpu,
-                                prim_h,
-                                prim_w,
-                                return_gpu=True,
-                            )
-                    else:
-                        warped = taichi_aot.remap_with_flow(
-                            supp_rgb_f32,
-                            active_flow_gpu,
-                            prim_h,
-                            prim_w,
-                            return_gpu=False,
-                        )
-
-                if secondary_frame_to_warp is not None:
-                    sec_shape = getattr(
-                        secondary_frame_to_warp,
-                        "shape",
-                        (self.full_h, self.full_w),
-                    )
-                    sec_h, sec_w = int(sec_shape[0]), int(sec_shape[1])
-                    if return_gpu:
-                        warped_secondary = self._remap_resident(
-                            secondary_frame_to_warp,
-                            active_flow_gpu,
-                            sec_h,
-                            sec_w,
-                        )
-                        if warped_secondary is None:
-                            warped_secondary = taichi_aot.remap_with_flow(
-                                secondary_frame_to_warp,
-                                active_flow_gpu,
-                                sec_h,
-                                sec_w,
-                                return_gpu=True,
-                            )
-                    else:
-                        warped_secondary = taichi_aot.remap_with_flow(
-                            secondary_frame_to_warp,
-                            active_flow_gpu,
-                            sec_h,
-                            sec_w,
-                            return_gpu=False,
-                        )
             else:
                 flow_source = self.flow_l0
                 if self.smooth_flow_l0 is None or getattr(
@@ -586,34 +465,38 @@ class AOTOpticalFlowAligner:
                 )
                 active_flow_gpu = smooth_flow_gpu
                 transient_flow_gpu = smooth_flow_gpu
-                warped = None
-                if supp_rgb_f32 is not None:
-                    prim_shape = getattr(
-                        supp_rgb_f32, "shape", (self.full_h, self.full_w)
-                    )
-                    prim_h, prim_w = int(prim_shape[0]), int(prim_shape[1])
-                    warped = taichi_aot.remap_with_flow(
-                        supp_rgb_f32,
-                        active_flow_gpu,
-                        prim_h,
-                        prim_w,
-                        return_gpu=return_gpu,
-                    )
 
-                if secondary_frame_to_warp is not None:
-                    sec_shape = getattr(
-                        secondary_frame_to_warp,
-                        "shape",
-                        (self.full_h, self.full_w),
-                    )
-                    sec_h, sec_w = int(sec_shape[0]), int(sec_shape[1])
-                    warped_secondary = taichi_aot.remap_with_flow(
-                        secondary_frame_to_warp,
-                        active_flow_gpu,
-                        sec_h,
-                        sec_w,
-                        return_gpu=return_gpu,
-                    )
+            warped = None
+            warped_secondary = None
+            if supp_rgb_f32 is not None:
+                prim_shape = getattr(
+                    supp_rgb_f32, "shape", (self.full_h, self.full_w)
+                )
+                prim_h, prim_w = int(prim_shape[0]), int(prim_shape[1])
+                warped = remap(
+                    supp_rgb_f32,
+                    active_flow_gpu,
+                    output_size=(prim_h, prim_w),
+                    coordinate_mode="displacement_xy",
+                    return_gpu=return_gpu,
+                    session=remap_session,
+                )
+
+            if secondary_frame_to_warp is not None:
+                sec_shape = getattr(
+                    secondary_frame_to_warp,
+                    "shape",
+                    (self.full_h, self.full_w),
+                )
+                sec_h, sec_w = int(sec_shape[0]), int(sec_shape[1])
+                warped_secondary = remap(
+                    secondary_frame_to_warp,
+                    active_flow_gpu,
+                    output_size=(sec_h, sec_w),
+                    coordinate_mode="displacement_xy",
+                    return_gpu=return_gpu,
+                    session=remap_session,
+                )
 
             # ``stream_primary`` was historically accepted but did not alter
             # graph submission.  Keep it for API compatibility while the
