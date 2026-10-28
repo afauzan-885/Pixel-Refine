@@ -797,6 +797,75 @@ def test_pipeline_execution_context_borrowed_and_buffer_delegation():
     assert arr == "fake_array" and uploaded is True
 
 
+def test_runtime_and_context_share_ownership_aware_borrow_semantics():
+    class MockSession:
+        def __init__(self):
+            self._owned_resources = {}
+            self._borrowed_resources = {}
+            self.borrow_calls = 0
+            self.release_calls = 0
+            self.borrowed_context_calls = 0
+
+        def own(self, resource, releaser=None):
+            self._owned_resources[id(resource)] = resource
+            return resource
+
+        def borrow(self, resource, from_session=None):
+            self.borrow_calls += 1
+            self._borrowed_resources[id(resource)] = (resource, 1)
+            return resource
+
+        def release_borrow(self, resource):
+            self.release_calls += 1
+            self._borrowed_resources.pop(id(resource), None)
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def borrowed(self, resource, from_session=None):
+            self.borrowed_context_calls += 1
+            self.borrow(resource, from_session=from_session)
+            try:
+                yield resource
+            finally:
+                self.release_borrow(resource)
+
+    from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
+        PipelineExecutionContext,
+        PipelineOptions,
+    )
+
+    session = MockSession()
+    runtime = PipelineRuntime(session_factory=lambda _: session)
+    context = PipelineExecutionContext(session=session, options=PipelineOptions())
+    unowned = object()
+
+    # Both facades pass unowned values through without creating a session lease.
+    assert runtime.borrow(unowned) is unowned
+    assert context.borrow(unowned) is unowned
+    with runtime.borrowed(unowned) as value:
+        assert value is unowned
+    with context.borrowed(unowned) as value:
+        assert value is unowned
+    runtime.release_borrow(unowned)
+    context.release_borrow(unowned)
+    assert session.borrow_calls == 0
+    assert session.release_calls == 0
+    assert session.borrowed_context_calls == 0
+
+    # Owned resources use the same delegated borrow/release path in both facades.
+    owned = object()
+    runtime.own(owned)
+    assert runtime.borrow(owned) is owned
+    runtime.release_borrow(owned)
+    context.own(owned)
+    with context.borrowed(owned) as value:
+        assert value is owned
+    assert session.borrow_calls == 2
+    assert session.release_calls == 2
+    assert session.borrowed_context_calls == 1
+
+
 def test_pipeline_support_lease_borrowed_delegation():
     class MockSession:
         def __init__(self):

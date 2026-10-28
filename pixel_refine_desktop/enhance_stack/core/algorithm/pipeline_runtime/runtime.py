@@ -17,6 +17,7 @@ from functools import wraps
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from .contracts import (
+    _BufferSessionFacade,
     PipelineCancelledError,
     PipelineExecutionContext,
     PipelineOptions,
@@ -376,7 +377,7 @@ _active_runtime: contextvars.ContextVar[PipelineRuntime | None] = contextvars.Co
 )
 
 
-class PipelineRuntime:
+class PipelineRuntime(_BufferSessionFacade):
     """Per-job runtime for ordered frames, bounded prefetch, and session lifetime."""
 
     def __init__(
@@ -520,100 +521,6 @@ class PipelineRuntime:
                         engine = get_engine()
                     self._session = BufferSession(engine=engine, sync_on_exit=False)
             return self._session
-
-    @contextmanager
-    def borrowed(self, resource: Any, *, from_session: Any = None):
-        """Scope a borrow lease on a GPU buffer/resource while passing it to the caller."""
-        session = self.ensure_session()
-        if session is not None and hasattr(session, "borrowed") and resource is not None:
-            owned = getattr(session, "_owned_resources", None)
-            if owned is not None and id(resource) in owned:
-                with session.borrowed(resource, from_session=from_session) as val:
-                    yield val
-                return
-        yield resource
-
-    def borrow(self, resource: Any, *, from_session: Any = None) -> Any:
-        """Pin a buffer/resource in the underlying BufferSession."""
-        session = self.ensure_session()
-        if session is not None and hasattr(session, "borrow") and resource is not None:
-            owned = getattr(session, "_owned_resources", None)
-            if owned is not None and id(resource) in owned:
-                return session.borrow(resource, from_session=from_session)
-        return resource
-
-    def release_borrow(self, resource: Any) -> None:
-        """Release a previously pinned borrow on the underlying BufferSession."""
-        session = self.ensure_session()
-        if session is not None and hasattr(session, "release_borrow") and resource is not None:
-            borrowed_res = getattr(session, "_borrowed_resources", None)
-            if borrowed_res is not None and id(resource) in borrowed_res:
-                session.release_borrow(resource)
-
-    def own(self, resource: Any, releaser: Any = None) -> Any:
-        """Register ownership of a buffer/resource with the underlying BufferSession."""
-        session = self.ensure_session()
-        if session is not None and hasattr(session, "own") and resource is not None:
-            return session.own(resource, releaser=releaser)
-        return resource
-
-    def acquire_buffer(
-        self,
-        shape: tuple[int, ...],
-        dtype: Any = None,
-        is_vector: bool = False,
-        vector_dim: int = 1,
-    ) -> Any:
-        """Acquire a reusable scratch buffer from the underlying BufferSession cache."""
-        session = self.ensure_session()
-        if session is not None and hasattr(session, "acquire_buffer"):
-            kwargs = {"dtype": dtype} if dtype is not None else {}
-            return session.acquire_buffer(
-                shape, is_vector=is_vector, vector_dim=vector_dim, **kwargs
-            )
-        raise RuntimeError("Current PipelineRuntime session does not provide a buffer allocator")
-
-    def acquire_ring_buffer(
-        self,
-        name: str,
-        shape: tuple[int, ...],
-        depth: int = 4,
-        dtype: Any = None,
-        is_vector: bool = False,
-        vector_dim: int = 1,
-    ) -> Any:
-        """Acquire or advance a ring buffer slot from the underlying BufferSession."""
-        session = self.ensure_session()
-        if session is not None and hasattr(session, "acquire_ring_buffer"):
-            kwargs = {"dtype": dtype} if dtype is not None else {}
-            return session.acquire_ring_buffer(
-                name, shape, depth=depth, is_vector=is_vector, vector_dim=vector_dim, **kwargs
-            )
-        raise RuntimeError("Current PipelineRuntime session does not provide a ring buffer allocator")
-
-    def upload_if_needed(
-        self, array: Any, is_vector: bool = False, vector_dim: int = 1
-    ) -> tuple[Any, bool]:
-        """Upload a host array or view existing GPU buffer via BufferSession."""
-        session = self.ensure_session()
-        if session is not None and hasattr(session, "upload_if_needed"):
-            return session.upload_if_needed(array, is_vector=is_vector, vector_dim=vector_dim)
-        return array, False
-
-    def get_or_create_grayscale(self, frame: Any, is_vector: bool = False) -> Any:
-        """Get or compute cached grayscale representation in BufferSession."""
-        session = self.ensure_session()
-        if session is not None and hasattr(session, "get_or_create_grayscale"):
-            return session.get_or_create_grayscale(frame, is_vector=is_vector)
-        return frame
-
-    @property
-    def managed_api(self) -> Any:
-        """Access BufferSession's managed AOT API facade if available."""
-        session = self.ensure_session()
-        if session is not None and hasattr(session, "managed_api"):
-            return session.managed_api
-        return None
 
     def iter_supports(
         self,

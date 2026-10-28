@@ -41,10 +41,10 @@ class FusionNetDenoisingAlgorithm:
         "fusionnet_patch_search_radius": 5,
         "input_channels": 1,
         "tile_overlap": 0.20,  # Tile overlap ratio (20% optimal for speed & seamless blend)
-        "analysis_auto_enhance_mode": "natural",
-        "ghost_penalty": 1.5,  # Maximum ghost penalty for clean/low-noise regions
-        "ghost_penalty_min": 1.0,  # Minimum ghost penalty for high-noise regions
-        "max_safety": 0.30,  # Maximum additive WeightNet safety-head bias
+        "analysis_auto_enhance_mode": "analysis",
+        "ghost_penalty": 1.5,
+        "ghost_penalty_min": 1.0,
+        "max_safety": 0.30,
     }
 
     def _load_inputs(self, ctx, frames):
@@ -168,7 +168,7 @@ class FusionNetDenoisingAlgorithm:
         # Natural is the shared denoising analysis policy for alignment,
         # weight inference, and reference-noise estimation. Ignore stale
         # per-batch overrides so all paths remain consistent.
-        analysis_auto_enhance_mode = "natural"
+        analysis_auto_enhance_mode = "analysis"
         denoising_mode = str(
             params.get(
                 "fusionnet_denoising_mode",
@@ -202,15 +202,22 @@ class FusionNetDenoisingAlgorithm:
             "analysis_auto_enhance_mode": analysis_auto_enhance_mode,
             "overlap": max(0.0, min(0.95, overlap)),
             "ghost_penalty": float(
-                params.get("ghost_penalty", self.DEFAULT_CONFIG["ghost_penalty"])
+                params.get(
+                    "fusionnet_ghost_penalty",
+                    params.get("ghost_penalty", self.DEFAULT_CONFIG["ghost_penalty"]),
+                )
             ),
             "ghost_penalty_min": float(
                 params.get(
-                    "ghost_penalty_min", self.DEFAULT_CONFIG["ghost_penalty_min"]
+                    "ghost_penalty_min",
+                    self.DEFAULT_CONFIG["ghost_penalty_min"],
                 )
             ),
             "max_safety": float(
-                params.get("fusionnet_max_safety", params.get("max_safety", self.DEFAULT_CONFIG.get("max_safety", 0.30)))
+                params.get(
+                    "fusionnet_max_safety",
+                    params.get("max_safety", self.DEFAULT_CONFIG["max_safety"]),
+                )
             ),
             "chroma_sensitivity": float(params.get("chroma_sensitivity", 1.0)),
             "alignment_plan": getattr(ctx, "alignment_selection_name", None)

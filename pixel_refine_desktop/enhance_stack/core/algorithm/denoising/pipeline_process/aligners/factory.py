@@ -105,28 +105,41 @@ def _buffer_session():
 
 
 def _managed_api(api):
-    session = _facade()._buffer_session()
-    return session.managed_api(api) if session is not None else api
+    runtime = current_pipeline_runtime()
+    if runtime is None:
+        return api
+    managed_api = runtime.managed_api
+    return managed_api(api) if managed_api is not None else api
 
 
 def _track_gpu_result(result):
-    session = _facade()._buffer_session()
-    return session.track_result(result) if session is not None else result
+    runtime = current_pipeline_runtime()
+    if runtime is None:
+        return result
+    return runtime.ensure_session().track_result(result)
 
 
 def _own_component(component, *, releaser=None):
-    session = _facade()._buffer_session()
-    return session.own(component, releaser=releaser) if session is not None else component
+    runtime = current_pipeline_runtime()
+    return runtime.own(component, releaser=releaser) if runtime is not None else component
 
 
 def _export_result(result):
-    session = _facade()._buffer_session()
-    return session.detach(session.own(result)) if session is not None else result
+    runtime = current_pipeline_runtime()
+    if runtime is None:
+        return result
+    session = runtime.ensure_session()
+    return session.detach(runtime.own(result))
 
 
 def _destroy_work_item(item):
-    """Safely destroy GPU buffers or nested tuples of GPU buffers."""
+    """Release work buffers through the active session when one exists."""
     if item is None:
+        return
+    runtime = current_pipeline_runtime()
+    session = runtime.buffer_session if runtime is not None else None
+    if session is not None:
+        session.release_tree(item)
         return
     if isinstance(item, tuple):
         for el in item:
@@ -143,17 +156,33 @@ def _destroy_work_item(item):
 
 
 def _destroy_work_item_except(item, protected):
-    """Destroy queued work buffers without releasing a shared carrier."""
-    if item is None:
+    """Release queued work except a carrier shared with another stage."""
+    if item is None or item is protected:
         return
-    session = _facade()._buffer_session()
-    if session is not None:
-        session.release_tree(item)
-        return
-    values = item if isinstance(item, tuple) else (item,)
+
     seen = set()
-    for value in values:
+
+    def without_protected(value):
         if value is None or value is protected or id(value) in seen:
-            continue
+            return None
+        if isinstance(value, (tuple, list)):
+            seen.add(id(value))
+            retained = tuple(
+                child for child in (without_protected(item) for item in value)
+                if child is not None
+            )
+            return retained or None
         seen.add(id(value))
+        return value
+
+    unprotected = without_protected(item)
+    if unprotected is None:
+        return
+    runtime = current_pipeline_runtime()
+    session = runtime.buffer_session if runtime is not None else None
+    if session is not None:
+        session.release_tree(unprotected)
+        return
+    values = unprotected if isinstance(unprotected, (tuple, list)) else (unprotected,)
+    for value in values:
         _facade()._destroy_work_item(value)

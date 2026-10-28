@@ -5,8 +5,31 @@ import zipfile
 
 from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
     SpatialScratchCache,
+    _compute_tile_starts as _canonical_compute_tile_starts,
     _tcm_graph_available,
 )
+from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi.compute_spatial import (
+    _compute_tile_starts as _app_compute_tile_starts,
+)
+
+
+def test_app_tile_starts_reexports_canonical_for_cpu_cases():
+    cases = (
+        (1, 1, 0.3, [0]),
+        (2, 4, 0.3, [0]),
+        (8, 3, 0.3, [0, 2, 4, 6]),
+        (10, 4, 0.0, [0, 4, 8]),
+        (11, 4, 0.25, [0, 3, 6, 9]),
+        (16, 5, 0.5, [0, 2, 4, 6, 8, 10, 12, 14]),
+        (7, 3, -0.2, [0, 3, 6]),
+        (7, 3, 1.2, [0, 1, 2, 3, 4, 5, 6]),
+        (5, 2, 0.9, [0, 1, 2, 3, 4]),
+    )
+    for length, tile, overlap, expected in cases:
+        canonical = _canonical_compute_tile_starts(length, tile, overlap)
+        application = _app_compute_tile_starts(length, tile, overlap)
+        assert canonical == expected
+        assert application == canonical
 
 
 def test_optional_clear_graph_is_metadata_gated(tmp_path):

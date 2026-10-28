@@ -5,6 +5,10 @@ import sys
 import importlib
 from functools import lru_cache
 
+from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
+    _compute_tile_starts,
+)
+
 # If run directly for compilation, force JIT mode
 if __name__ == "__main__":
     os.environ["AOT_MODE"] = "0"
@@ -1529,16 +1533,6 @@ def _tcm_graph_available_cached(
         return False
     except (OSError, KeyError, zipfile.BadZipFile, TypeError, ValueError):
         return False
-
-
-def _compute_tile_starts(length, tile, overlap=0.3):
-    """Compute tile start indices matching the application convention."""
-    overlap = max(0.0, min(float(overlap), 0.9))
-    stride = max(1, int(tile * (1.0 - overlap)))
-    starts = list(range(0, length, stride))
-    if not starts:
-        starts = [0]
-    return starts
 
 
 def _regular_tile_stride(starts, explicit_stride=None):

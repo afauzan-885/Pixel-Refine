@@ -46,7 +46,19 @@ def test_batch_fusionnet_payload_is_authoritative():
     assert resolved["tile_size"] == 512
 
 
-def test_fusionnet_default_ghost_penalty_maximum_is_one():
+def test_fusionnet_default_ghost_penalty_maximum_is_one(monkeypatch):
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising import (
+        fusionnet_parameter_settings,
+    )
+
+    monkeypatch.setattr(
+        fusionnet_parameter_settings,
+        "load_fusionnet_config_for_batch",
+        lambda _batch_id: {
+            "ghost_penalty": 1.0,
+            "ghost_penalty_min": 0.65,
+        },
+    )
     ctx = SimpleNamespace(
         batch_id=None,
         params={},

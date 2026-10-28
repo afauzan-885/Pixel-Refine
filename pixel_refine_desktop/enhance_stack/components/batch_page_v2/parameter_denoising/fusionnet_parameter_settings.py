@@ -18,6 +18,7 @@ FUSIONNET_DEFAULTS = {
     "fusionnet_max_neighbor_candidates": 4,
     "fusionnet_patch_search_radius": 5,
     "fusionnet_max_safety": 0.30,
+    "fusionnet_ghost_penalty": 1.5,
 }
 
 FUSIONNET_DENOISING_MODES = ("standard", "deep_analysis")
@@ -95,10 +96,23 @@ def _normalize_fusionnet_config(config):
             "fusionnet_work_pixel_fraction"
         ]
     try:
-        raw_safety = source.get("fusionnet_max_safety", source.get("max_safety", normalized.get("fusionnet_max_safety", 0.30)))
+        raw_safety = source.get(
+            "fusionnet_max_safety",
+            source.get("max_safety", normalized.get("fusionnet_max_safety", 0.30)),
+        )
         normalized["fusionnet_max_safety"] = max(0.01, min(2.0, float(raw_safety)))
     except (TypeError, ValueError):
         normalized["fusionnet_max_safety"] = FUSIONNET_DEFAULTS["fusionnet_max_safety"]
+
+    try:
+        raw_penalty = source.get(
+            "fusionnet_ghost_penalty",
+            source.get("ghost_penalty", normalized.get("fusionnet_ghost_penalty", 1.5)),
+        )
+        normalized["fusionnet_ghost_penalty"] = max(0.1, min(5.0, float(raw_penalty)))
+    except (TypeError, ValueError):
+        normalized["fusionnet_ghost_penalty"] = FUSIONNET_DEFAULTS["fusionnet_ghost_penalty"]
+
     return normalized
 
 
@@ -179,6 +193,17 @@ PARAMETER_SCHEMA = [
         "scale": 0.01,
         "value_type": "float",
         "tooltip": "Maximum additive WeightNet safety-head bias (0.01 to 2.00, default 0.30).",
+    },
+    {
+        "key": "fusionnet_ghost_penalty",
+        "label": "Ghost Penalty",
+        "type": "slider",
+        "default": 1.5,
+        "min": 10,
+        "max": 500,
+        "scale": 0.01,
+        "value_type": "float",
+        "tooltip": "Noise-adaptive ghost penalty multiplier (0.1 to 5.0, default 1.5).",
     },
 ]
 

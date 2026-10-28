@@ -432,7 +432,6 @@ class RawPipelineProvider:
         self._cfa_plane_shape = None
         self._cfa_planes_host = None
         self._cfa_planes_gpu = None
-        self._cfa_buffer_session = None
         self._cfa_planes_initialized = False
         self._cfa_staged_carrier = None
         self._finalized = False
@@ -610,7 +609,6 @@ class RawPipelineProvider:
         self._cfa_plane_shape = shape_key
         self._cfa_planes_host = host_planes
         self._cfa_planes_gpu = gpu_planes
-        self._cfa_buffer_session = buffer_session
 
     def accumulate(self, frame: ProviderFrame, transform=None, weight_map=None) -> None:
         """Warp one CFA carrier and accumulate it with the shared weight map."""
@@ -739,10 +737,7 @@ class RawPipelineProvider:
             _release(getattr(self, name, None))
             setattr(self, name, None)
         if self._cfa_planes_gpu is not None:
-            if self._cfa_buffer_session is not None:
-                self._cfa_buffer_session.release_tree(self._cfa_planes_gpu)
-            else:
-                _release(self._cfa_planes_gpu)
+            _release(self._cfa_planes_gpu)
             self._cfa_planes_gpu = None
         # The cached RawMosaicFrame owns the decoded host carrier.  Drop it at
         # the same lifecycle boundary as the GPU accumulator so a completed
@@ -750,7 +745,6 @@ class RawPipelineProvider:
         self._reference_frame = None
         self._cfa_planes_host = None
         self._cfa_plane_shape = None
-        self._cfa_buffer_session = None
         self._cfa_planes_initialized = False
         self._cfa_staged_carrier = None
         self._engine = None

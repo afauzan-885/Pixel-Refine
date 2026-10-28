@@ -84,13 +84,10 @@ def load_weightnet_onnx(
                 artifact = neural.find_prebaked_tcm(f"weightnet_{patch_size}", backend)
 
         if artifact is not None and Path(artifact).is_file():
-            model_bytes = selected_weightnet_model_bytes(
-                source, patch_size, search_dirs
-            )
             session = ResidentWeightNet(
-                Path(artifact), **resident_weightnet_load_kwargs(model_bytes)
+                Path(artifact), artifact_only=True
             )
-            print(f"[WeightNet AOT] backend={session.engine.arch} patch={patch_size} model={Path(artifact).name} host_patch_readback=0")
+            print(f"[WeightNet AOT] backend={session.engine.arch} patch={patch_size} model={Path(artifact).name} (TCM only) host_patch_readback=0")
             session.max_safety = float(max_safety)
             return session
 

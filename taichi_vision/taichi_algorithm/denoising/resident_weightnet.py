@@ -202,6 +202,7 @@ class ResidentWeightNet(ResidentONNXGraph):
         self._persistent.append(self.identity)
         self._max_safety_val = 0.30
         self.max_safety_buf = None
+        self._safety_bias_binding = self.metadata.get("bindings", {}).get("attn.safety_head.bias")
         if "max_safety" in self.metadata.get("inputs", []):
             self.max_safety_buf = self.engine.upload(
                 np.array([self._max_safety_val], dtype=np.float32), is_vector=False
@@ -211,6 +212,7 @@ class ResidentWeightNet(ResidentONNXGraph):
         if self.max_safety_buf is not None:
             static_inputs["max_safety"] = self.max_safety_buf
         self._static_device_outputs = self.prepare_static_device_bindings(static_inputs)
+
     @property
     def max_safety(self):
         return getattr(self, "_max_safety_val", 0.30)
@@ -238,6 +240,23 @@ class ResidentWeightNet(ResidentONNXGraph):
                 "max_safety": self.max_safety_buf,
             }
             self._static_device_outputs = self.prepare_static_device_bindings(static_inputs)
+        elif getattr(self, "_safety_bias_binding", None) in self.buffers:
+            binding_name = self._safety_bias_binding
+            old_buf = self.buffers.get(binding_name)
+            new_buf = self.engine.upload(
+                np.array([self._max_safety_val], dtype=np.float32), is_vector=False
+            )
+            self.buffers[binding_name] = new_buf
+            if hasattr(self, "_static_args") and binding_name in self._static_args:
+                self._static_args[binding_name] = new_buf
+            if old_buf in self._persistent:
+                self._persistent.remove(old_buf)
+            self._persistent.append(new_buf)
+            if old_buf is not None:
+                try:
+                    old_buf.destroy()
+                except Exception:
+                    pass
 
 
     def allocate(self, shape, dtype=np.float32):
