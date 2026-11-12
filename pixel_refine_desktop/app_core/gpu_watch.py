@@ -66,7 +66,7 @@ def signals() -> GpuAvailabilitySignals:
 
 def _default_probe():
     """Re-enumerate from the driver (never from the short-lived cache)."""
-    from taichi_vision.device_selection import scan_vulkan_device_records
+    from taichi.device_selection import scan_vulkan_device_records
 
     return scan_vulkan_device_records(fresh=True)
 
@@ -98,7 +98,7 @@ def saved_gpu_selector():
 
 def _resolve_saved_device(selector, records):
     """Return the record matching ``selector`` or ``None``."""
-    from taichi_vision.device_selection import resolve_device_selector
+    from taichi.device_selection import resolve_device_selector
 
     ordinal = resolve_device_selector(selector, records)
     if ordinal is None:

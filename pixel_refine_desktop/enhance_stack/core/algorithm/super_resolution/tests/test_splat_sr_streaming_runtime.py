@@ -122,7 +122,7 @@ def test_path_source_decodes_only_requested_indices(monkeypatch):
 
 
 def test_recipe_processes_one_support_and_inverts_flow_in_place(monkeypatch):
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     monkeypatch.setattr(
         taichi_aot,

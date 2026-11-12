@@ -36,7 +36,7 @@ Usage (JIT):
     result = local_tone_map(hdr_image)
 
 Usage (AOT):
-    import taichi_vision.taichi_aot as ta
+    from taichi_vision.taichi_algorithm import aot_api as ta
     result = ta.tone_map(hdr_image, method='local')
 """
 

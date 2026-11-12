@@ -1,4 +1,4 @@
-"""Host frame decoding and GPU upload for the resident pipeline.
+﻿"""Host frame decoding and GPU upload for the resident pipeline.
 
 Owns the RGB host normalisation, EXIF orientation handling, the RAW extension
 table, and the single-image GPU loader. Cross-module helpers are reached
@@ -6,12 +6,13 @@ through the resident facade so monkeypatched entry points stay live.
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 from pathlib import Path
 
 import numpy as np
 
-from taichi_vision.taichi_aot import TaichiGPUBuffer
+from taichi.aot_engine import TaichiGPUBuffer
 
 from ...shared_utils import RAW_EXTENSIONS, apply_orientation, read_orientation
 from .facade import api as _facade
@@ -53,7 +54,8 @@ def load_frame_to_gpu(
     RAW/DNG:  demosaic (Hamilton) -> GPU float32 RGB
     Standard: imread -> GPU uint8 BGR -> cvtColor BGR->RGB -> GPU float32
     """
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
+    import taichi.aot_engine as _ti_rt
     taichi_aot = _facade()._managed_api(taichi_aot)
 
     path = Path(path)
@@ -69,7 +71,7 @@ def load_frame_to_gpu(
             # Keep the conversion in the Taichi Vision/native cast boundary.
             # Hamilton currently emits f32, but this compatibility branch is
             # still needed for older uint8/uint16 demosaic artifacts.
-            converted_gpu = taichi_aot.cast(
+            converted_gpu = _ti_rt.cast(
                 rgb_gpu, np.float32, host_accessible=True
             )
             if converted_gpu is not rgb_gpu:
@@ -91,4 +93,4 @@ def load_frame_to_gpu(
     rgb_f32 = _facade()._normalize_rgb_host_frame(img_rgb)
     del img_rgb
 
-    return taichi_aot.upload(rgb_f32)
+    return _ti_rt.upload(rgb_f32)

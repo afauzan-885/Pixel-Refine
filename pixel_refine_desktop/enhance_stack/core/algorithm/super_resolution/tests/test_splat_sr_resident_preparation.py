@@ -1,10 +1,11 @@
 """Resident preparation: exposure parity and no intermediate image readback."""
+import taichi.aot_engine as _ti_rt
 import os
 os.environ.setdefault("PIXEL_REFINE_AOT_ARCH", "cpu")
 import numpy as np
 import pytest
-from taichi_vision import taichi_aot as aot
-from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+from taichi_vision import algorithm as aot
+from taichi import TaichiGPUBuffer
 from taichi_vision.taichi_algorithm.buffer_session import BufferSession
 
 
@@ -18,11 +19,11 @@ def test_resident_exposure_matches_float32_median(count):
         reference[0, :20] = [0, np.nan, np.inf, .99] * 5
     expected = SplatSRAlgorithm._estimate_exposure_gain(reference, support)
     with BufferSession() as session:
-        ref = session.own(aot.upload(reference))
-        supp = session.own(aot.upload(support))
+        ref = session.own(_ti_rt.upload(reference))
+        supp = session.own(_ti_rt.upload(support))
         gain = aot.resident_exposure_gain(ref, supp, session=session)
         observed = gain.to_numpy()[0]
-        print(f"[EXPOSURE] backend={aot.backend_info()} shape={reference.shape} dtype=float32 expected={expected} got={observed}")
+        print(f"[EXPOSURE] backend={_ti_rt.backend_info()} shape={reference.shape} dtype=float32 expected={expected} got={observed}")
         np.testing.assert_allclose(observed, expected, atol=3e-7, rtol=3e-7)
 
 
@@ -102,7 +103,7 @@ def test_weightnet_pipeline_reads_only_model_luma(tmp_path, monkeypatch, work_sc
     assert readbacks == [work_shape, work_shape]
     assert inference_shapes == [((1, *work_shape), (1, *work_shape))]
     assert provider._resident_reference is None
-    print(f"[WEIGHTNET BOUNDARY STUB] backend={aot.backend_info()} shape={reference.shape} dtype=float32 work_scale={work_scale} readbacks={readbacks}")
+    print(f"[WEIGHTNET BOUNDARY STUB] backend={_ti_rt.backend_info()} shape={reference.shape} dtype=float32 work_scale={work_scale} readbacks={readbacks}")
 
 
 def test_resident_flow_resize_preserves_component_geometry():
@@ -111,12 +112,12 @@ def test_resident_flow_resize_preserves_component_geometry():
     rng = np.random.default_rng(122)
     source = rng.uniform(-2, 2, (31, 37, 2)).astype(np.float32)
     with BufferSession() as session:
-        gpu = session.own(aot.upload(source))
+        gpu = session.own(_ti_rt.upload(source))
         result = aot.resident_resize_flow(gpu, 49, 53, factor=1.37, session=session)
         observed = result.to_numpy()
     expected = cv2.resize(source, (53, 49), interpolation=cv2.INTER_LINEAR) * np.float32(1.37)
     error = float(np.max(np.abs(observed-expected)))
-    print(f"[FLOW RESIZE] backend={aot.backend_info()} shape={source.shape} dtype=float32 max_abs={error}")
+    print(f"[FLOW RESIZE] backend={_ti_rt.backend_info()} shape={source.shape} dtype=float32 max_abs={error}")
     np.testing.assert_allclose(observed, expected, atol=2e-5, rtol=2e-5)
 
 
@@ -128,14 +129,14 @@ def test_taichi_warp_difference_is_bounded():
     flow = rng.uniform(-1, 1, (61, 67, 2)).astype(np.float32)
     # Measure the common interior; TV and OpenCV also have different border contracts.
     with BufferSession() as session:
-        src = session.own(aot.upload(image))
-        motion = session.own(aot.upload(flow))
+        src = session.own(_ti_rt.upload(image))
+        motion = session.own(_ti_rt.upload(flow))
         observed = aot.resident_warp_gray(src, motion, session=session).to_numpy()
     y, x = np.mgrid[:61, :67].astype(np.float32)
     expected = cv2.remap(image, x+flow[...,0], y+flow[...,1], cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_REFLECT101)
     error = float(np.max(np.abs(observed[2:-2, 2:-2]-expected[2:-2, 2:-2])))
-    print(f"[WARP] backend={aot.backend_info()} shape={image.shape} dtype=float32 interior_max_abs={error}")
+    print(f"[WARP] backend={_ti_rt.backend_info()} shape={image.shape} dtype=float32 interior_max_abs={error}")
     assert error < .025
 
 
@@ -164,6 +165,6 @@ def test_resident_pipeline_tracks_host_contract_output(tmp_path, monkeypatch):
             prefetch_depth=0, reliability_provider=provider, exposure_normalization=True)
         images.append(tifffile.imread(output).astype(np.float32) / np.float32(65535))
     delta = np.abs(images[0]-images[1])
-    print(f"[PIPELINE PARITY] backend={aot.backend_info()} shape={reference.shape} dtype=float32 mean_abs={delta.mean()} max_abs={delta.max()}")
+    print(f"[PIPELINE PARITY] backend={_ti_rt.backend_info()} shape={reference.shape} dtype=float32 mean_abs={delta.mean()} max_abs={delta.max()}")
     assert float(delta.mean()) < 5e-4
     assert float(delta.max()) < .02

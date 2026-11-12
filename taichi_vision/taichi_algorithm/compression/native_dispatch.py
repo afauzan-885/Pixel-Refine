@@ -25,7 +25,7 @@ from typing import Any, Mapping, Optional, Protocol, Sequence, Tuple
 def _load_native_codec_abi() -> Any:
     """Load the ABI source without executing the legacy taichi_aot facade.
 
-    Importing ``taichi_vision.taichi_aot.native_codec_abi`` through Python's
+    Importing ``taichi_vision.taichi_algorithm.compression.native_codec_abi`` through Python's
     normal package machinery first executes ``taichi_aot/__init__.py``.  That
     compatibility facade imports the legacy NumPy-backed engine, which would
     make an explicitly native compression import fail the no-NumPy contract
@@ -35,7 +35,7 @@ def _load_native_codec_abi() -> Any:
     that case reusing it preserves class identity for its isolated test.
     """
 
-    qualified_name = "taichi_vision.taichi_aot.native_codec_abi"
+    qualified_name = "taichi_vision.taichi_algorithm.compression.native_codec_abi"
     existing = sys.modules.get(qualified_name)
     if existing is not None and hasattr(existing, "NativeTensor"):
         return existing
@@ -44,7 +44,7 @@ def _load_native_codec_abi() -> Any:
     if existing is not None and hasattr(existing, "NativeTensor"):
         return existing
     root = Path(__file__).resolve().parents[3]
-    source = root / "taichi_vision" / "taichi_aot" / "native_codec_abi.py"
+    source = root / "taichi_vision" / "taichi_algorithm" / "compression" / "native_codec_abi.py"
     spec = importlib.util.spec_from_file_location(private_name, source)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load native codec ABI source: {source}")
@@ -296,7 +296,7 @@ def _native_library_path(backend: str, device_id: int = 0) -> tuple[Path, list[A
         candidates.append(Path(explicit))
     staged_bundle = None
     try:
-        from taichi_vision.llvm20_runtime_paths import bundle_root as staged_bundle_root
+        from taichi.runtime_paths import bundle_root as staged_bundle_root
 
         staged_target = target_variant or _native_target_variant(backend, device_id)
         staged_bundle = staged_bundle_root(staged_target)
@@ -380,7 +380,7 @@ def _default_native_tcm(module_name: str, backend: str, device_id: int) -> Path:
         root = Path(explicit_root).expanduser().resolve()
     else:
         try:
-            from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
+            from taichi.runtime_paths import tcm_root as staged_tcm_root
 
             staged_root = staged_tcm_root(target)
         except (ImportError, OSError, ValueError):

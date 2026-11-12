@@ -35,7 +35,7 @@ class ImagePathSource:
                 load_rgb_linear_image(self.paths[index]), dtype=np.float32
             )
             if self._shape is not None and image.shape[:2] != self._shape:
-                from taichi_vision import taichi_aot
+                from taichi_vision import algorithm as taichi_aot
 
                 target_h, target_w = self._shape
                 image = taichi_aot.resize(
@@ -241,7 +241,7 @@ class SplatSRRecipe:
 
     def prepare_reference(self, reference, context):
         from functools import partial
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         from .tiled_accumulator import TiledHannAccumulator, RamAccumulatorBacking
 
         context.check_cancelled()
@@ -387,7 +387,7 @@ class SplatSRRecipe:
                 del warped_analysis
 
     def process_support(self, index, support, state, context):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.splat_sr.legacy import (
             SplatSRAlgorithm,
         )

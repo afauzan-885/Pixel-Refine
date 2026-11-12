@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from taichi_vision.taichi_aot.backend_manager import BackendManager
-from taichi_vision.taichi_aot.capabilities import (
+from taichi.backend_manager import BackendManager
+from taichi.capabilities import (
     backend_candidates,
     classify_device,
 )

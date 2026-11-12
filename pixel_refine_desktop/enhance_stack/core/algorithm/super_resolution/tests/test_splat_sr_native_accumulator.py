@@ -1,10 +1,11 @@
 """Numerical and lifetime gates for native accumulation without image readbacks."""
+import taichi.aot_engine as _ti_rt
 import os
 os.environ.setdefault("PIXEL_REFINE_AOT_ARCH", "cpu")
 import numpy as np
 import pytest
-from taichi_vision import taichi_aot
-from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+from taichi_vision import algorithm as taichi_aot
+from taichi import TaichiGPUBuffer
 from taichi_vision.taichi_algorithm.buffer_session import BufferSession
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.splat_sr.tiled_accumulator import (
     NativeAccumulatorBacking, RamAccumulatorBacking, TiledHannAccumulator,
@@ -52,7 +53,7 @@ def test_native_matches_ram_without_image_readback(shape, block, empty, monkeypa
                                                backing_factory=NativeAccumulatorBacking)
             if not empty:
                 accumulator.add_frame(reference, None, None)
-            gpu_confidence = session.own(taichi_aot.upload(confidence))
+            gpu_confidence = session.own(_ti_rt.upload(confidence))
             accumulator.add_frame(support, flow, gpu_confidence)
             assert session.borrowed_count == 0
             assert accumulator.readbacks == 0
@@ -61,7 +62,7 @@ def test_native_matches_ram_without_image_readback(shape, block, empty, monkeypa
             assert accumulator.backing.acc_den is None
         got = materialize(result)  # Output remains mapped after the job session closes.
         error = float(np.max(np.abs(got - expected)))
-        print(f"[NATIVE SR] device={taichi_aot.backend_info()} shape={reference.shape} "
+        print(f"[NATIVE SR] device={_ti_rt.backend_info()} shape={reference.shape} "
               f"dtype=float32 empty={empty} max_abs={error:.9g}")
         np.testing.assert_allclose(got, expected, atol=1e-5, rtol=1e-5)
         assert not result[0:4, 0:4].flags.writeable
@@ -97,7 +98,7 @@ def test_native_cancellation_and_mapping_failure_release_owner(stage, monkeypatc
                                                backing_factory=NativeAccumulatorBacking)
             if stage == "add":
                 accumulator.check_cancelled = cancel
-            confidence = session.own(taichi_aot.upload(np.ones(reference.shape[:2], np.float32)))
+            confidence = session.own(_ti_rt.upload(np.ones(reference.shape[:2], np.float32)))
             try:
                 accumulator.add_frame(reference, None, confidence)
             finally:

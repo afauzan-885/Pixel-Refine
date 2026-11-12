@@ -30,7 +30,7 @@ def active_backend():
     except Exception:
         pass
     try:
-        from taichi_vision import taichi_aot
+        import taichi.aot_engine as taichi_aot
 
         return str(getattr(taichi_aot.engine, "arch", "cpu")).strip().lower()
     except Exception:

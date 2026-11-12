@@ -307,7 +307,7 @@ class BurstPreloadWorker(QThread):
             if img_array is not None and not self._is_aborted:
                 img_array = self._cap_extreme_frame(img_array)
                 if img_array.dtype != np.uint8:
-                    from taichi_vision import taichi_aot
+                    import taichi.aot_engine as taichi_aot
                     img_array = taichi_aot.cast(img_array, np.uint8)
 
                 img_array = np.ascontiguousarray(img_array)
@@ -1726,7 +1726,7 @@ class DisplayPanel(QWidget):
             pass
 
         try:
-            from taichi_vision import taichi_aot
+            import taichi.aot_engine as taichi_aot
 
             taichi_aot.trim_memory_pool()
         except Exception:

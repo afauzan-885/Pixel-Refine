@@ -12,8 +12,7 @@ import os
 from typing import Optional, Tuple
 
 import numpy as np
-
-from taichi_vision.taichi_aot import TaichiGPUBuffer, get_engine
+from taichi.aot_engine import TaichiGPUBuffer, get_engine
 
 from .facade import api as _facade
 
@@ -224,7 +223,7 @@ def prepare_analysis_proxy_gpu(
     the second full-resolution buffer is pure waste.
     """
 
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     taichi_aot = _facade()._managed_api(taichi_aot)
 
@@ -454,7 +453,7 @@ def prepare_weightnet_reference_input(
 
     if getattr(session, "runtime", None) == "taichi_aot":
         return session.prepare_reference(analysis_gpu)
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     taichi_aot = _facade()._managed_api(taichi_aot)
 

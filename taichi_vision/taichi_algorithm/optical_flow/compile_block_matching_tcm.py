@@ -223,7 +223,7 @@ def compile_block_matching_flow(arch=ti.vulkan, out_dir=None):
     tcm_path = _package_tcm(module, out_dir, f"block_matching_{arch_name}.tcm")
 
     try:
-        from taichi_vision.taichi_aot.artifact_targets import detect_target
+        from taichi.artifact_targets import detect_target
         target = detect_target(backend=arch_name, device="0")
         target_candidates = {
             os.path.join(out_dir, target.target_id),

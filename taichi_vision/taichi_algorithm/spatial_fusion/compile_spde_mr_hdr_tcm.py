@@ -15,7 +15,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import taichi as ti
 
-from taichi_vision.taichi_aot.artifact_targets import detect_target
+from taichi.artifact_targets import detect_target
 from taichi_vision.taichi_algorithm.spatial_fusion.spde_mr_hdr import (
     _expand_patch_maps_f32,
     _score_patch_grid_f32,

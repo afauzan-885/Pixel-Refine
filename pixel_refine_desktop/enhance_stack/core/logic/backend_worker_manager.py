@@ -19,7 +19,7 @@ import threading
 import subprocess
 from typing import Optional, Dict, Any, Callable
 
-from taichi_vision.backend_config import BackendConfig, backend_env
+from taichi.backend_config import BackendConfig, backend_env
 
 
 class WindowsJobObject:
@@ -504,8 +504,12 @@ class BackendWorkerManager:
         env.update(backend_env(backend_config))
         env["AOT_ARCH"] = arch
         env["AOT_DEVICE"] = device_id
+        # Mirror to legacy keys for compatibility with backend worker checks
+        env["PIXEL_REFINE_AOT_ARCH"] = arch
+        env["PIXEL_REFINE_AOT_DEVICE"] = device_id
         if arch == "cuda":
             env["CUDA_DEVICE"] = device_id
+            env["PIXEL_REFINE_CUDA_DEVICE"] = device_id
         else:
             for key in (
                 "CUDA_EXPECTED_NAME", "CUDA_DEVICE", "PIXEL_REFINE_CUDA_DEVICE"

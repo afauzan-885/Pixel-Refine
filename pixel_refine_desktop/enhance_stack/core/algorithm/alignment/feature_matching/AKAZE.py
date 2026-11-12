@@ -105,7 +105,7 @@ class AKAZEAlgorithm:
             return None, None, None, None
 
         try:
-            from taichi_vision import taichi_aot
+            from taichi_vision import algorithm as taichi_aot
 
             # Taichi Vision owns feature extraction, descriptor matching, and
             # the RANSAC homography.  The point arrays are intentionally the
@@ -176,7 +176,7 @@ class AKAZEAlgorithm:
         if H is None:
             return img_to_warp
 
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         h, w = reference.shape[:2]
         warped = taichi_aot.warp_perspective(

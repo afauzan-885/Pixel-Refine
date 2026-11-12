@@ -1,3 +1,4 @@
+import taichi.aot_engine as _ti_rt
 import numpy as np
 import cv2
 import os
@@ -11,9 +12,9 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from taichi_vision.taichi_aot.engine import AOTEngine
+from taichi.aot_engine import AOTEngine
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import taichi_bridge
-from taichi_vision import taichi_aot
+from taichi_vision import algorithm as taichi_aot
 
 def load_image(path):
     """Load DNG or common image format. Returns float32 RGB numpy array."""
@@ -85,7 +86,7 @@ def test_real_dataset_alignment():
     print(f"[WORK] Work resolution: {w_work}x{h_work}")
     
     # Grayscale + Resize to work resolution using Taichi AOT
-    ref_gpu = taichi_aot.upload(img_ref_rgb, force_8bit=False)
+    ref_gpu = _ti_rt.upload(img_ref_rgb, force_8bit=False)
     ref_gray_gpu = taichi_aot.rgb2gray(ref_gpu)
     
     # 1024x1024 for Phase Correlation (no FFT padding)
@@ -117,7 +118,7 @@ def test_real_dataset_alignment():
         img_comp_rgb = load_image(os.path.join(dataset_path, fname))
         
         # 1. Grayscale + Resize comp using Taichi AOT
-        comp_gpu = taichi_aot.upload(img_comp_rgb, force_8bit=False)
+        comp_gpu = _ti_rt.upload(img_comp_rgb, force_8bit=False)
         comp_gray_gpu = taichi_aot.rgb2gray(comp_gpu)
         comp_gray_pc_gpu = taichi_aot.resize(comp_gray_gpu, (1024, 1024), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
         # Synchronize GPU to ensure resize kernel has completed writing to comp_gray_pc_gpu
@@ -150,7 +151,7 @@ def test_real_dataset_alignment():
         comp_pre_warped_rgb = taichi_aot.warp_perspective(img_comp_rgb, H_translation, return_gpu=False)
 
         # Grayscale + Resize pre-warped comp to work resolution using Taichi AOT
-        comp_pw_gpu = taichi_aot.upload(comp_pre_warped_rgb, force_8bit=False)
+        comp_pw_gpu = _ti_rt.upload(comp_pre_warped_rgb, force_8bit=False)
         comp_pw_gray_gpu = taichi_aot.rgb2gray(comp_pw_gpu)
         comp_pw_gray_work_gpu = taichi_aot.resize(comp_pw_gray_gpu, (w_work, h_work), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
         

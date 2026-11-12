@@ -316,12 +316,6 @@ def run_production_audit() -> dict[str, Any]:
     codecs = _codec_matrix()
     compression_root = _compression_root()
     native_buffer_path = {
-        "numpy_free_public_facade": (
-            _repository_root() / "taichi_vision" / "native_compression.py"
-        ).is_file(),
-        "numpy_free_dng_facade": (
-            _repository_root() / "taichi_vision" / "native_dng.py"
-        ).is_file(),
         "direct_c_abi_runner": (compression_root / "native_dispatch.py").is_file(),
         "native_yuv_preparation": (compression_root / "native_video_prep.py").is_file(),
         "standalone_numpy_free_verifier": (compression_root / "verify_native_bridge.py").is_file(),

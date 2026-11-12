@@ -1,10 +1,11 @@
 """Block Flow must filter the reference, not silently skip it due to import order."""
+import taichi.aot_engine as _ti_rt
 
 import cv2
 import numpy as np
 import pytest
 
-from taichi_vision import taichi_aot as aot
+from taichi_vision import algorithm as aot
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.flownet_inference import (
     AOTOpticalFlowAligner,
 )
@@ -13,7 +14,7 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine
 @pytest.mark.parametrize(("noise_score", "kernel_size"), [(0.1, 0), (0.45, 3), (0.8, 5)])
 def test_reference_prefilter_uses_shared_score(monkeypatch, noise_score, kernel_size):
     array = np.random.default_rng(74).random((64, 80, 3), dtype=np.float32)
-    source_owner = aot.upload(array)
+    source_owner = _ti_rt.upload(array)
     source = source_owner.view_as_vector(False)
     calls = []
     original_filter = aot.box_filter
@@ -33,7 +34,7 @@ def test_reference_prefilter_uses_shared_score(monkeypatch, noise_score, kernel_
         assert calls == ([kernel_size] if kernel_size else [])
         expected = array if not kernel_size else cv2.boxFilter(
             array, -1, (kernel_size, kernel_size), normalize=True, borderType=cv2.BORDER_REPLICATE)
-        expected_owner = aot.upload(expected)
+        expected_owner = _ti_rt.upload(expected)
         expected_gray = aot.rgb2gray(expected_owner)
         actual = aligner.ref_l0.to_numpy()
         assert np.isfinite(actual).all()

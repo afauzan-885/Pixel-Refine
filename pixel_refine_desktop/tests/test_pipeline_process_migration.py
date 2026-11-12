@@ -36,7 +36,7 @@ def test_canonical_resident_exports_public_entrypoints():
 def test_weightnet_reference_has_no_clahe(monkeypatch):
     import cv2
     import numpy as np
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     def forbidden(*args, **kwargs):
         raise AssertionError("CLAHE must not run in FusionNet")
@@ -224,7 +224,7 @@ def test_raw_analysis_transform_keeps_dense_flow_in_work_domain():
 def test_raw_feature_apap_returns_local_flow_and_cleans_up_failed_remap(monkeypatch):
     import numpy as np
     import pytest
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.OFB import OFBAlgorithm
     from taichi_vision.taichi_algorithm.alignment import apap as apap_module
 
@@ -256,7 +256,9 @@ def test_raw_feature_apap_returns_local_flow_and_cleans_up_failed_remap(monkeypa
     monkeypatch.setattr(taichi_aot, "cvtColor", lambda *args, **kwargs: Buffer(np.zeros((48, 64))))
     monkeypatch.setattr(taichi_aot, "resize", lambda *args, **kwargs: Buffer(np.zeros((48, 64))))
     monkeypatch.setattr(taichi_aot, "match_feature_reference", lambda *args, **kwargs: (reference, support))
-    monkeypatch.setattr(taichi_aot, "upload", upload)
+    import taichi.aot_engine as _runtime_api
+
+    monkeypatch.setattr(_runtime_api, "upload", upload)
     monkeypatch.setattr(taichi_aot, "remap_with_flow", remap)
     monkeypatch.setattr(OFBAlgorithm, "_find_homography", lambda *args, **kwargs: (np.eye(3), None))
     original_fit_apap = apap_module.fit_apap
@@ -301,7 +303,7 @@ def test_raw_feature_apap_returns_local_flow_and_cleans_up_failed_remap(monkeypa
 
 def test_feature_apap_alignment_keeps_image_carriers_on_device(monkeypatch):
     import numpy as np
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.feature_matching.OFB import OFBAlgorithm
     from taichi_vision.taichi_algorithm.alignment import mesh_warp
 
@@ -585,48 +587,22 @@ def test_raw_pipeline_provider_reuses_host_and_gpu_cfa_plane_slots(monkeypatch):
 
 
 def test_aot_engine_write_into_reuses_existing_host_visible_buffer(monkeypatch):
-    import importlib
-    import threading
     import numpy as np
 
-    engine_module = importlib.import_module("taichi_vision.taichi_aot.engine")
-    calls = []
+    from taichi.aot_engine import get_engine
 
-    class FakeLibrary:
-        @staticmethod
-        def write_to_gpu_buffer(runtime, handle, address, size):
-            calls.append(("write", runtime, handle, address, size))
-
-    engine = engine_module.AOTEngine.__new__(engine_module.AOTEngine)
-    engine.runtime = object()
-    engine._generation = 0
-    engine.arch = "vulkan"
-    engine._native_context_owner_thread_id = None
-    engine._lock = threading.RLock()
-    engine.sync = lambda: calls.append(("sync",))
-    monkeypatch.setattr(engine_module, "_LIB", FakeLibrary())
-    monkeypatch.setattr(engine_module, "_init_aot_bridge", lambda: None)
-    monkeypatch.setattr(engine_module, "_heartbeat", lambda: None)
-    monkeypatch.setattr(engine_module, "_op_begin", lambda _name: None)
-    monkeypatch.setattr(engine_module, "_op_end", lambda: None)
-
+    engine = get_engine()
     source = np.arange(12, dtype=np.float32).reshape(3, 4)
-    destination = engine_module.TaichiGPUBuffer(
-        size_bytes=source.nbytes,
-        handle=123,
-        shape=source.shape,
-        dtype=np.float32,
-        engine=engine,
-        host_accessible=True,
-    )
+    destination = engine.allocate(source.shape, dtype=np.float32)
+    handle_before = destination.handle
+    try:
+        result = engine.write_into(destination, source)
 
-    result = engine.write_into(destination, source)
-
-    assert result is destination
-    assert calls[0] == ("sync",)
-    assert calls[1][0:3] == ("write", engine.runtime, 123)
-    assert calls[1][3] == source.ctypes.data
-    assert calls[1][4] == source.nbytes
+        assert result is destination
+        assert destination.handle == handle_before, "write_into must not reallocate"
+        np.testing.assert_array_equal(destination.to_numpy(), source)
+    finally:
+        destination.release()
 
 
 def test_resident_source_mode_rejects_unknown_domains_before_execution():
@@ -807,7 +783,7 @@ def test_fusionnet_keeps_luminance_model_as_default_and_only_route():
 
 def test_analysis_proxy_enhances_disposable_same_size_source_in_place(monkeypatch):
     from types import SimpleNamespace
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from taichi_vision.taichi_algorithm.enhancement import auto_enhance
 
     source = SimpleNamespace(shape=(4, 6, 3))
@@ -840,7 +816,7 @@ def test_analysis_proxy_enhances_disposable_same_size_source_in_place(monkeypatc
 
 def test_analysis_proxy_uses_exact_copy_for_nondisposable_native_source(monkeypatch):
     from types import SimpleNamespace
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from taichi_vision.taichi_algorithm.enhancement import auto_enhance
 
     source = SimpleNamespace(shape=(4, 6, 3))
@@ -881,7 +857,7 @@ def test_analysis_proxy_uses_exact_copy_for_nondisposable_native_source(monkeypa
 def test_raw_analysis_defaults_to_full_bilinear_and_preserves_cfa(monkeypatch):
     from types import SimpleNamespace
     import numpy as np
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.raw_pipeline import provider, metadata
 
     samples = np.arange(48, dtype=np.uint16).reshape(6, 8)

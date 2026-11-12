@@ -198,7 +198,7 @@ class MFDenoiserAlgorithm:
     def _configure_compute_runtime(ctx, frame_shape=None):
         """Connect pipeline to the shared adaptive block/VRAM runtime."""
         try:
-            from taichi_vision import taichi_aot
+            import taichi.aot_engine as taichi_aot
 
             engine = taichi_aot.get_engine()
             backend = str(getattr(engine, "arch", "")).strip().lower()
@@ -225,7 +225,7 @@ class MFDenoiserAlgorithm:
         if not ctx.compute_runtime.get("available"):
             return
         try:
-            from taichi_vision import taichi_aot
+            import taichi.aot_engine as taichi_aot
 
             stats = taichi_aot.get_block_cache_stats()
             device = stats.get("device", {})

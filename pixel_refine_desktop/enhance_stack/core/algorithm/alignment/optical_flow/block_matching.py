@@ -115,7 +115,7 @@ class BlockMatching(LucasKanade):
 
     def _build_opengl_safe_params(self, reference_gray, config):
         params = self._build_lk_params(config)
-        from taichi_vision import taichi_aot
+        import taichi.aot_engine as taichi_aot
         if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
             params["maxLevel"] = 0
             if max(reference_gray.shape[:2]) > 768:
@@ -163,7 +163,7 @@ class BlockMatching(LucasKanade):
         cfg.setdefault("conservative_vram", False)
         cfg.setdefault("_reference_cache_key", id(reference))
         try:
-            from taichi_vision import taichi_aot
+            import taichi.aot_engine as taichi_aot
 
             pool = getattr(taichi_aot.engine, "buffer_pool", None)
             if pool is not None and hasattr(pool, "set_budget"):

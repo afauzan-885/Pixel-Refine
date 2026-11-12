@@ -13,12 +13,13 @@ Exposed as ``taichi_aot.spatial_merging``.  Supports two modes:
 Noise & motion thresholds are auto-estimated from the reference frame when
 not supplied (see ``noise_estimation``).
 """
+import taichi.aot_engine as _ti_rt
 
 from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from taichi_vision.taichi_aot import TaichiGPUBuffer, get_engine
+from taichi.aot_engine import TaichiGPUBuffer, get_engine
 
 
 def _as_gpu_work_gray(
@@ -28,14 +29,15 @@ def _as_gpu_work_gray(
     work_w: int,
 ) -> TaichiGPUBuffer:
     """Convert a frame (numpy or GPU) to a work-resolution grayscale GPU buffer."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
+
 
     if isinstance(frame, np.ndarray):
         arr = np.asarray(frame, dtype=np.float32)
         if np.issubdtype(frame.dtype, np.integer):
             scale = 65535.0 if frame.dtype.itemsize > 1 else 255.0
             arr = arr.astype(np.float32) / scale
-        frame_gpu = taichi_aot.upload(np.ascontiguousarray(arr, dtype=np.float32))
+        frame_gpu = _ti_rt.upload(np.ascontiguousarray(arr, dtype=np.float32))
     elif isinstance(frame, TaichiGPUBuffer):
         frame_gpu = frame
     else:
@@ -75,14 +77,14 @@ def _as_gpu_full_hwc(
     frame,
 ) -> TaichiGPUBuffer:
     """Convert a frame to a full-resolution HWC float32 GPU buffer."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
     if isinstance(frame, np.ndarray):
         arr = np.asarray(frame, dtype=np.float32)
         if np.issubdtype(frame.dtype, np.integer):
             scale = 65535.0 if frame.dtype.itemsize > 1 else 255.0
             arr = arr.astype(np.float32) / scale
-        return taichi_aot.upload(np.ascontiguousarray(arr, dtype=np.float32))
+        return _ti_rt.upload(np.ascontiguousarray(arr, dtype=np.float32))
     if isinstance(frame, TaichiGPUBuffer):
         if frame.dtype != np.float32:
             return frame.cast(np.float32)
@@ -145,7 +147,7 @@ def spatial_merging(
     )
     from .noise_estimation import resolve_spatial_thresholds
 
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
     mode = str(mode).strip().lower()
     if mode not in ("weights", "fuse"):
@@ -186,8 +188,8 @@ def spatial_merging(
     from .compute_spatial import _compute_tile_starts
     row_starts = _compute_tile_starts(work_h, tile_size, overlap=overlap)
     col_starts = _compute_tile_starts(work_w, tile_size, overlap=overlap)
-    _rows_gpu = taichi_aot.upload(np.asarray(row_starts, dtype=np.int32))
-    _cols_gpu = taichi_aot.upload(np.asarray(col_starts, dtype=np.int32))
+    _rows_gpu = _ti_rt.upload(np.asarray(row_starts, dtype=np.int32))
+    _cols_gpu = _ti_rt.upload(np.asarray(col_starts, dtype=np.int32))
 
     own_scratch = scratch_cache is None
     if own_scratch:

@@ -1,3 +1,4 @@
+import taichi.aot_engine as _ti_rt
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import json
 import os
@@ -293,10 +294,11 @@ class RAFTFlow(LucasKanade):
             return None
 
         try:
-            from taichi_vision import taichi_aot
+            from taichi_vision import algorithm as taichi_aot
+            import taichi.aot_engine as _ti_rt
 
             full_h, full_w = target.shape[:2]
-            with taichi_aot.engine.reserve_device_execution("raft_remap"):
+            with _ti_rt.engine.reserve_device_execution("raft_remap"):
                 warped = taichi_aot.remap_with_flow(
                     target.astype(np.float32, copy=False),
                     flow,

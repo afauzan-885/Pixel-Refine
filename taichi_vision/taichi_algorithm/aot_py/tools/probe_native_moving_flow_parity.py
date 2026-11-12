@@ -6,6 +6,7 @@ promotes the result to the native evidence registry automatically.
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import argparse
 import json
@@ -21,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 def run(*, size: int = 64, block_size: int = 16) -> dict[str, object]:
-    from taichi_vision import taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
     from taichi_vision.taichi_algorithm import aot_api
 
     size = int(size)
@@ -48,11 +49,11 @@ def run(*, size: int = 64, block_size: int = 16) -> dict[str, object]:
     aot_api.set_block_mode(True, size=block_size, threshold_bytes=0)
     blocked = np.asarray(aot_api.farneback_flow(reference, current, **params))
     repeated = np.asarray(aot_api.farneback_flow(reference, current, **params))
-    plan = getattr(taichi_aot.engine._local, "last_block_plan", None)
+    plan = getattr(_ti_rt.engine._local, "last_block_plan", None)
     max_error = float(np.max(np.abs(blocked - full)))
     return {
-        "backend": str(getattr(taichi_aot.engine, "arch", "unknown")),
-        "device": str(getattr(taichi_aot.engine, "gpu_name", "") or ""),
+        "backend": str(getattr(_ti_rt.engine, "arch", "unknown")),
+        "device": str(getattr(_ti_rt.engine, "gpu_name", "") or ""),
         "shape": list(blocked.shape),
         "block_size": block_size,
         "finite": bool(np.isfinite(blocked).all()),

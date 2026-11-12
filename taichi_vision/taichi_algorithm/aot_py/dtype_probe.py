@@ -75,8 +75,8 @@ def main():
     }
 
     try:
-        from taichi_vision import taichi_aot as ta
-        from taichi_vision.taichi_aot.engine import engine
+        from taichi_vision.taichi_algorithm import aot_api as ta
+        from taichi.aot_engine import engine
     except Exception as exc:  # pragma: no cover - environment failure
         message = str(exc).strip().splitlines()
         result["runtime"] = {

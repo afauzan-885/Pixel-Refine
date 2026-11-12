@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from taichi_vision.taichi_aot.block import (
+from taichi.block import (
     BlockCache,
     BlockGrid,
     block_coverage_report,
@@ -16,8 +16,8 @@ from taichi_vision.taichi_aot.block import (
     operation_contract,
     registered_block_adapters,
 )
-from taichi_vision.taichi_aot.generic_block import BlockComputeSpec, GenericBlockExecutor
-from taichi_vision.taichi_aot.block_adapters import (
+from taichi.generic_block import BlockComputeSpec, GenericBlockExecutor
+from taichi.block_adapters import (
     LOW_RISK_ADAPTER_OPERATIONS,
     ACCUMULATOR_ADAPTER_OPERATIONS,
     COORDINATE_ADAPTER_OPERATIONS,

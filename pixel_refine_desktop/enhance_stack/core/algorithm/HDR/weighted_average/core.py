@@ -37,7 +37,7 @@ def srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
 
 def estimate_noise_taichi(gray: np.ndarray, session) -> float:
     """Estimate noise on Taichi's selected backend; failures stay explicit."""
-    from taichi_vision import taichi_aot
+    import taichi.aot_engine as taichi_aot
     from taichi_vision.taichi_algorithm.enhancement.estimate_noise import (
         estimate_noise,
     )

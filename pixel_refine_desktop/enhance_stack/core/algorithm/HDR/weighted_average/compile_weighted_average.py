@@ -15,7 +15,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import taichi as ti
 
-from taichi_vision.taichi_aot.artifact_targets import detect_target
+from taichi.artifact_targets import detect_target
 from taichi_vision.taichi_algorithm.image_processing.hdr_weighted import (
     accumulate_weighted_rgb_flat_f32,
     hdr_weight_rgb_flat_f32,

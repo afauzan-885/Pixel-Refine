@@ -22,7 +22,7 @@ import threading
 import zipfile
 
 import numpy as np
-from taichi_vision.taichi_aot.device_invocation import (
+from taichi_vision.taichi_algorithm.neural.device_invocation import (
     Access, DeviceView, DeviceViewDescriptor, SerialDeviceInvocations,
 )
 
@@ -34,7 +34,7 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
     """Compile an admitted static FP32 model, without changing engine.py."""
     import onnx
     import taichi as ti
-    from taichi_vision.taichi_aot.onnx_native_graph import NativeGraph
+    from taichi_vision.taichi_algorithm.neural.onnx_native_graph import NativeGraph
     from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
 
     model = onnx.load_model_from_string(model_bytes)
@@ -100,8 +100,8 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         ti.init(arch=arch, offline_cache=False)
     if ti.lang.impl.current_cfg().arch != arch:
         raise RuntimeError(f"Compiler did not initialize requested backend {backend}")
-    from taichi_vision.taichi_aot.artifact_targets import detect_target
-    from taichi_vision.taichi_aot.tcm_contract import RUNTIME_ABI_VERSION
+    from taichi.artifact_targets import detect_target
+    from taichi.tcm_contract import RUNTIME_ABI_VERSION
     from taichi_vision.taichi_algorithm.denoising.resident_manifest import (
         archive_member_hashes,
         configured_runtime_abi,
@@ -161,7 +161,7 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
     def record(kernel, *values):
         if kernel in (ti.tensor.add, ti.tensor.subtract, ti.tensor.multiply, ti.tensor.divide):
             op_code = {ti.tensor.add: 0, ti.tensor.subtract: 1, ti.tensor.multiply: 2, ti.tensor.divide: 3}[kernel]
-            from taichi_vision.taichi_aot.onnx_native_graph import _binary_flat
+            from taichi_vision.taichi_algorithm.neural.onnx_native_graph import _binary_flat
             kernel = _binary_flat
             values = (values[0], values[1], values[2], op_code)
         target = getattr(kernel, "_primal", None)
@@ -206,9 +206,9 @@ def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_too
         source = Path(folder) / "specialized_graph.py"
         source.write_text(
             "import taichi as ti\nfrom math import inf, nan\n"
-            "from taichi_vision.taichi_aot.onnx_native_graph import _activation\n"
-            "from taichi_vision.taichi_aot.weightnet_gate_fusions import _stable_softplus\n"
-            "from taichi_vision.taichi_aot.onnx_native_graph import _weightnet_fused_tile_statistics\n"
+            "from taichi_vision.taichi_algorithm.neural.onnx_native_graph import _activation\n"
+            "from taichi_vision.taichi_algorithm.neural.weightnet_gate_fusions import _stable_softplus\n"
+            "from taichi_vision.taichi_algorithm.neural.onnx_native_graph import _weightnet_fused_tile_statistics\n"
             + "\n\n".join(sources), encoding="utf-8"
         )
         spec = importlib.util.spec_from_file_location("_resident_specialized_graph", source)
@@ -355,7 +355,7 @@ class ResidentONNXGraph:
 
     def __init__(self, path, *, engine=None, model_sha256=None, artifact_only=False):
         if engine is None:
-            from taichi_vision import taichi_aot
+            import taichi.aot_engine as taichi_aot
             engine = taichi_aot.get_engine()
         self.engine = engine
         self.path = Path(path).resolve()
@@ -365,8 +365,8 @@ class ResidentONNXGraph:
         self._view_thread = threading.get_ident()
         self._invocations = SerialDeviceInvocations(self._view_guard, self._view_sync, engine._lock)
         self.buffers = {}
-        from taichi_vision.taichi_aot.artifact_targets import detect_target
-        from taichi_vision.taichi_aot.tcm_contract import RUNTIME_ABI_VERSION
+        from taichi.artifact_targets import detect_target
+        from taichi.tcm_contract import RUNTIME_ABI_VERSION
         from taichi_vision.taichi_algorithm.denoising.resident_manifest import (
             configured_runtime_abi,
             read_resident_archive,
@@ -426,7 +426,7 @@ class ResidentONNXGraph:
         engine._assert_native_context_owner("resident leased invocation")
 
     def _view_sync(self):
-        from taichi_vision.taichi_aot.engine import _raise_native_engine_error
+        from taichi.aot_engine import _raise_native_engine_error
         with self.engine._lock:
             self._view_guard()
             self.engine.sync()
@@ -435,7 +435,7 @@ class ResidentONNXGraph:
             _raise_native_engine_error(self.engine.runtime, "Resident invocation completion")
 
     def device_view(self, buffer, *, shape=None, offset_bytes=0, strides_bytes=()):
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi.aot_engine import TaichiGPUBuffer
         with self._invocations.lock, self.engine._lock:
             self._view_guard()
             if (not isinstance(buffer, TaichiGPUBuffer) or buffer.engine is not self.engine
@@ -525,7 +525,7 @@ class ResidentONNXGraph:
             return self._run_device_impl(inputs)
 
     def _run_device_impl(self, inputs):
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi.aot_engine import TaichiGPUBuffer
         inputs = dict(inputs)
         if "max_safety" in self.metadata.get("inputs", []) and "max_safety" not in inputs:
             if not hasattr(self, "_default_max_safety_buf") or self._default_max_safety_buf is None:
@@ -557,7 +557,7 @@ class ResidentONNXGraph:
 
     def _prepare_static_device_bindings_impl(self, inputs):
         """Pre-bind persistent GPU input buffers once to eliminate Python allocation/validation in hot tile loops."""
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi.aot_engine import TaichiGPUBuffer
         inputs = dict(inputs)
         if "max_safety" in self.metadata.get("inputs", []) and "max_safety" not in inputs:
             if not hasattr(self, "_default_max_safety_buf") or self._default_max_safety_buf is None:
@@ -600,7 +600,7 @@ class ResidentONNXGraph:
 
     def _run_impl(self, output_names=None, input_feed=None, return_gpu=False, borrowed_outputs=False):
         """Execute model with support for NumPy, PyTorch, and TaichiGPUBuffer inputs."""
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi.aot_engine import TaichiGPUBuffer
         if input_feed is None:
             input_feed = {}
         else:

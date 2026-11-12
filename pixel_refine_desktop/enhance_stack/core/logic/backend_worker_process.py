@@ -245,7 +245,7 @@ class WorkerRunner:
     @staticmethod
     def _initialize_engine():
         """Load the configured runtime and fail startup if it cannot initialize."""
-        import taichi_vision.taichi_aot as ta_aot
+        import taichi.aot_engine as ta_aot
         ta_aot.get_engine()
 
     @staticmethod
@@ -764,7 +764,7 @@ class WorkerRunner:
     def _cleanup_after_pipeline(self):
         # --- Universal Post-Task Memory Cleanup ---
         try:
-            import taichi_vision.taichi_aot as ta_aot
+            import taichi.aot_engine as ta_aot
             engine = ta_aot.get_engine()
             if hasattr(engine, "buffer_pool") and hasattr(engine.buffer_pool, "clear"):
                 engine.buffer_pool.clear()

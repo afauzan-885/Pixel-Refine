@@ -10,6 +10,7 @@ Covers the two halves of the contract and their interface:
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import os
 import unittest
@@ -23,7 +24,7 @@ os.environ.setdefault("PIXEL_REFINE_AOT_ARCH", "cpu")
 import cv2
 import numpy as np
 
-from taichi_vision import taichi_aot
+from taichi_vision import algorithm as taichi_aot
 from taichi_vision.taichi_algorithm.spatial_fusion import compute_spatial as spatial
 from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
     _compute_tile_starts,
@@ -71,7 +72,7 @@ class ReliabilityMapTest(unittest.TestCase):
     """The weight map is an evaluator: normalized, gated, overlap-independent."""
 
     def _reliability(self, motion: float, tile: int = 32):
-        eng = taichi_aot.engine
+        eng = _ti_rt.engine
         h = w = 128
         y, x = np.mgrid[0:h, 0:w].astype(np.float32)
         reference = np.clip(
@@ -81,8 +82,8 @@ class ReliabilityMapTest(unittest.TestCase):
         current[40:72, 40:72] = 1.0  # ghost patch
         rows = np.asarray(_compute_tile_starts(h, tile, overlap=0.25), dtype=np.int32)
         cols = np.asarray(_compute_tile_starts(w, tile, overlap=0.25), dtype=np.int32)
-        ref_gpu = taichi_aot.upload(reference)
-        cur_gpu = taichi_aot.upload(current)
+        ref_gpu = _ti_rt.upload(reference)
+        cur_gpu = _ti_rt.upload(current)
         out = eng.allocate((h, w), dtype=np.float32, host_accessible=True)
         try:
             spatial.generate_spatial_weights_taichi(
@@ -161,7 +162,7 @@ class HannBlendTest(unittest.TestCase):
         window = taichi_aot.generate_hanning_window_2d(
             (tile, tile), exclude_boundary=True
         )
-        taichi_aot.engine.sync()
+        _ti_rt.engine.sync()
         got = np.asarray(window.to_numpy(), dtype=np.float32)
         window.destroy()
 
@@ -197,7 +198,7 @@ class HannBlendTest(unittest.TestCase):
 
     def test_hann_blend_and_normalization_reproduce_the_input(self):
         """A weighted average over overlapping windows is exact."""
-        eng = taichi_aot.engine
+        eng = _ti_rt.engine
         size, tile, stride = 96, 48, 24
         y, x = np.mgrid[0:size, 0:size].astype(np.float32)
         truth = np.stack(
@@ -216,8 +217,8 @@ class HannBlendTest(unittest.TestCase):
         acc_den = eng.allocate((size, size), dtype=np.float32)
         clear_f32_3d_taichi(acc_num)
         clear_f32_2d_taichi(acc_den)
-        coverage_src = taichi_aot.upload(np.ones((tile, tile), dtype=np.float32))
-        reference = taichi_aot.upload(truth)
+        coverage_src = _ti_rt.upload(np.ones((tile, tile), dtype=np.float32))
+        reference = _ti_rt.upload(truth)
         try:
             tiles = 0
             for y0 in range(0, size, stride):
@@ -225,7 +226,7 @@ class HannBlendTest(unittest.TestCase):
                     if y0 + tile > size or x0 + tile > size:
                         continue
                     for channel in range(3):
-                        plane = taichi_aot.upload(
+                        plane = _ti_rt.upload(
                             np.ascontiguousarray(
                                 truth[y0 : y0 + tile, x0 : x0 + tile, channel]
                             )

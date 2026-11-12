@@ -5,6 +5,7 @@ The mask excludes newly exposed pixels; optical flow uses support sampling
 offsets (x + dx, y + dy), matching remap_with_flow.
 """
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import argparse
 import json
@@ -79,9 +80,9 @@ def quality_cases():
 
 
 def run_flow(ref, comp, *, smooth, radius=32, distance=6):
-    from taichi_vision import taichi_aot as aot
-    engine = aot.get_engine()
-    module = aot.load_tcm("compute_flow")
+    from taichi_vision.taichi_algorithm import aot_api as aot
+    engine = _ti_rt.get_engine()
+    module = _ti_rt.load_tcm("compute_flow")
     buffers = []
     args = {}
     try:
@@ -99,7 +100,7 @@ def run_flow(ref, comp, *, smooth, radius=32, distance=6):
             buffers.append(buf)
             args[name] = buf
         graph = "align_end_to_end_3layer_adaptive_" + ("smooth" if smooth else "blocky")
-        if smooth and aot.aot_graph_available("compute_flow", "align_end_to_end_3layer_adaptive_smooth_wola"):
+        if smooth and _ti_rt.aot_graph_available("compute_flow", "align_end_to_end_3layer_adaptive_smooth_wola"):
             graph = "align_end_to_end_3layer_adaptive_smooth_wola"
             buf = engine.allocate((((ref.shape[0] + 15) // 16) * 8,
                                    ((ref.shape[1] + 15) // 16) * 8, 2),
@@ -125,7 +126,7 @@ def main():
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--repeat", type=int, default=1)
     options = parser.parse_args()
-    from taichi_vision import taichi_aot as aot
+    from taichi_vision.taichi_algorithm import aot_api as aot
     results = []
     for smooth in (False, True):
         for name, ref, comp, truth, mask, limit in quality_cases():
@@ -148,7 +149,7 @@ def main():
                                    and ("sky" not in name or error.max() <= .1)))
             results.append(row)
             print(json.dumps(row), flush=True)
-    report = dict(backend=aot.backend_info(), radius=options.radius,
+    report = dict(backend=_ti_rt.backend_info(), radius=options.radius,
                   distance=options.distance, results=results)
     options.report.parent.mkdir(parents=True, exist_ok=True)
     options.report.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")

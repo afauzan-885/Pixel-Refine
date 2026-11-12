@@ -619,7 +619,7 @@ def run(
 
     # Import only after backend selection variables are set.
     from taichi_vision.taichi_algorithm import aot_api as aot
-    from taichi_vision.taichi_aot import engine
+    from taichi.aot_engine import engine
     _validate_runtime_selection(engine, backend, device)
 
     rng = np.random.default_rng(1234)

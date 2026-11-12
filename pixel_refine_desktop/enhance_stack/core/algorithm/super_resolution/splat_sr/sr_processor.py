@@ -41,7 +41,7 @@ class SuperResolutionProcessor(TileProcessor):
 
     def preprocess_batch(self, batch_float, shared_data):
         """Compute sub-pixel shifts and weight maps from the loaded batch."""
-        from taichi_vision.taichi_aot import phase_correlation
+        from taichi_vision.taichi_algorithm import phase_correlation
 
         if len(batch_float) < 2:
             shared_data["error"] = "Need at least 2 images for SR"

@@ -41,7 +41,7 @@ def runtime_capabilities(backend, device=""):
     device, so an unadmitted device yields ``safe=False`` and fails the
     manifest comparison instead of being silently accepted.
     """
-    from taichi_vision.taichi_aot.capabilities import classify_device
+    from taichi.capabilities import classify_device
 
     backend = str(backend).lower()
     if backend == "cuda" and not str(device or "").strip():

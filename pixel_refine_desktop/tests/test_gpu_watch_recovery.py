@@ -38,7 +38,7 @@ def _device_record():
 
 
 def _selector():
-    from taichi_vision.device_selection import make_device_selector
+    from taichi.device_selection import make_device_selector
 
     return make_device_selector(_device_record())
 

@@ -38,7 +38,7 @@ def _get_aot():
             _AOT_ENGINE = taichi_aot
         except (ImportError, ValueError):
             try:
-                import taichi_vision.taichi_aot as taichi_aot
+                from taichi_vision.taichi_algorithm import aot_api as taichi_aot
                 _AOT_ENGINE = taichi_aot
             except ImportError:
                 pass
@@ -875,7 +875,7 @@ def split(img):
     if AOT_MODE:
         aot = _get_aot()
         if aot:
-            from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+            from taichi.aot_engine import TaichiGPUBuffer
             is_gpu = isinstance(img, TaichiGPUBuffer)
             img_v = img if is_gpu else aot.upload(img)
             
@@ -946,7 +946,7 @@ def merge(channels):
     if AOT_MODE:
         aot = _get_aot()
         if aot:
-            from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+            from taichi.aot_engine import TaichiGPUBuffer
             is_gpu = isinstance(channels[0], TaichiGPUBuffer)
             h, w = channels[0].shape[0], channels[0].shape[1]
             c = len(channels)
@@ -1031,7 +1031,7 @@ def extract_channel(img, ch):
     if AOT_MODE:
         aot = _get_aot()
         if aot:
-            from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+            from taichi.aot_engine import TaichiGPUBuffer
             is_gpu = isinstance(img, TaichiGPUBuffer)
             img_v = img if is_gpu else aot.upload(img)
             res_gpu = aot.extract_channel(img_v, ch)
@@ -1148,7 +1148,7 @@ def copy(img):
     if AOT_MODE:
         aot = _get_aot()
         if aot:
-            from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+            from taichi.aot_engine import TaichiGPUBuffer
             is_gpu = isinstance(img, TaichiGPUBuffer)
             return aot.copy(img, return_gpu=is_gpu)
 

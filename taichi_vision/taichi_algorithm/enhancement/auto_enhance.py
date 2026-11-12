@@ -456,7 +456,7 @@ def sample_auto_enhance_luma_gpu(src_gpu: Any, max_samples: int = 500000) -> np.
     a compact float32 buffer, preserving percentile semantics while reducing
     the host transfer to at most ``max_samples * 4`` bytes.
     """
-    from taichi_vision.taichi_aot import get_engine
+    from taichi.aot_engine import get_engine
     from taichi_vision.taichi_algorithm.aot_api import _mod
 
     shape = tuple(int(value) for value in getattr(src_gpu, "shape", ()))
@@ -511,7 +511,7 @@ def apply_auto_enhance_gpu(
     Executes AutoEnhance directly inside GPU VRAM via Taichi AOT / TCM module.
     Zero PCIe transfer, pure GPU shader performance.
     """
-    from taichi_vision.taichi_aot import get_engine, TaichiGPUBuffer
+    from taichi.aot_engine import get_engine, TaichiGPUBuffer
     from taichi_vision.taichi_algorithm.aot_api import _mod
 
     engine = get_engine()
@@ -591,7 +591,7 @@ def AutoEnhance(
     use_gpu = is_gpu_in or return_gpu
     if not use_gpu:
         try:
-            from taichi_vision.taichi_aot import get_engine
+            from taichi.aot_engine import get_engine
             engine = get_engine()
             backend_name = getattr(engine, "backend_name", "").lower()
             if backend_name in ("vulkan", "cuda", "opengl"):
@@ -600,7 +600,7 @@ def AutoEnhance(
             pass
 
     if use_gpu:
-        from taichi_vision.taichi_aot import upload, TaichiGPUBuffer
+        from taichi.aot_engine import upload, TaichiGPUBuffer
 
         src_gpu = (
             src if is_gpu_in else upload(np.ascontiguousarray(src, dtype=np.float32))

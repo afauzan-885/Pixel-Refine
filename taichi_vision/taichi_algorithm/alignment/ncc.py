@@ -122,7 +122,7 @@ def zncc(image, template):
     """Entry point for ZNCC alignment."""
     if os.environ.get("AOT_MODE", "1") == "1":
         try:
-            from taichi_vision import taichi_aot
+            from taichi_vision.taichi_algorithm import aot_api as taichi_aot
             res = taichi_aot.zncc(image, template, return_gpu=True)
             if res is not None:
                 return res

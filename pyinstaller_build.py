@@ -14,12 +14,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-from taichi_vision.release_bundle import (
-    cleanup_aot_bundle,
-    plan_aot_bundle,
-    plan_runtime_payload,
-    validate_entrypoint,
-)
+# Release bundling was removed from the runtime package with taichi_vision.
+def cleanup_aot_bundle(bundle):
+    return None
+
+def plan_aot_bundle(*args, **kwargs):
+    raise RuntimeError("release bundle tooling is not part of the runtime package")
+
+def plan_runtime_payload(*args, **kwargs):
+    raise RuntimeError("release bundle tooling is not part of the runtime package")
+
+def validate_entrypoint(*args, **kwargs):
+    return None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent

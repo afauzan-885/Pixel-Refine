@@ -1,5 +1,6 @@
 """Regresi numerik geometri; GPU opt-in dengan PIXEL_REFINE_TEST_GPU_GEOMETRY=1."""
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import os
 import unittest
@@ -116,9 +117,9 @@ class GeometryAccuracyTests(unittest.TestCase):
 class GeometryGPUAccuracyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_algorithm import aot_api as taichi_aot
         cls.api = taichi_aot
-        print("Geometry GPU runtime:", taichi_aot.backend_info(), flush=True)
+        print("Geometry GPU runtime:", _ti_rt.backend_info(), flush=True)
 
     def test_minimal_four_points(self):
         source = np.array([[0, 0], [180, 0], [175, 110], [0, 120.]], dtype=np.float32)

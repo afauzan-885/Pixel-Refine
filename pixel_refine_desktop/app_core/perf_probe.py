@@ -82,7 +82,7 @@ def engine_memory() -> dict:
         pass
 
     try:
-        from taichi_vision import taichi_aot
+        import taichi.aot_engine as taichi_aot
 
         status = taichi_aot.get_memory_status(force=False)
         if not isinstance(status, dict):

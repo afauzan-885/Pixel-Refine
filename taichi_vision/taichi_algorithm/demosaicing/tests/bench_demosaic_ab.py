@@ -17,6 +17,7 @@ Example:
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import argparse
 import json
@@ -48,7 +49,7 @@ def worker(args) -> int:
 
     os.environ["PIXEL_REFINE_AOT_ARCH"] = args.backend
     os.environ["AOT_ARCH"] = args.backend
-    import taichi_vision.taichi_aot as api
+    from taichi_vision.taichi_algorithm import aot_api as api
 
     report = {"tcm_root": os.environ.get("PIXEL_REFINE_AOT_TCM_ROOT", "<ambient>"), "results": {}}
     outputs = {}
@@ -60,7 +61,7 @@ def worker(args) -> int:
             bayer = deterministic_bayer(size)
             scalars = (1.4, 1.0, 1.6, 1.02, cmatrix, 0.0, 1.0, 0, 1, 3, 2)
 
-            buffer = api.upload(bayer)
+            buffer = _ti_rt.upload(bayer)
             timings = []
             output = None
             try:

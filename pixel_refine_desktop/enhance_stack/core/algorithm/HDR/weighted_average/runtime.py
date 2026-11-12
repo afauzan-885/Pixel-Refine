@@ -1,4 +1,4 @@
-"""Target-aware dispatch for the packaged weighted-average HDR TCM."""
+﻿"""Target-aware dispatch for the packaged weighted-average HDR TCM."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import numpy as np
 
 
 def _asset_path(engine) -> Path:
-    from taichi_vision.taichi_aot.artifact_targets import detect_target, resolve_artifact
-    from taichi_vision.llvm20_runtime_paths import (
+    from taichi.artifact_targets import detect_target, resolve_artifact
+    from taichi.runtime_paths import (
         application_assets_root,
         tcm_root,
     )
@@ -54,8 +54,8 @@ def _asset_path(engine) -> Path:
 
 
 def _run_weight_graph(image, laplacian, scalars):
-    from taichi_vision.taichi_aot.engine import InputArray, OutputArray
-    from taichi_vision.taichi_aot import get_engine
+    from taichi.aot_engine import InputArray, OutputArray
+    from taichi.aot_engine import get_engine
 
     engine = get_engine()
     rgb = np.ascontiguousarray(image, dtype=np.float32)
@@ -123,8 +123,8 @@ def compute_weights_aot(
 
 def accumulate_weighted_aot(image, weights, result):
     """Accumulate one weighted RGB frame using the packaged Taichi graph."""
-    from taichi_vision.taichi_aot.engine import InputArray
-    from taichi_vision.taichi_aot import get_engine
+    from taichi.aot_engine import InputArray
+    from taichi.aot_engine import get_engine
 
     engine = get_engine()
     rgb = np.ascontiguousarray(image, dtype=np.float32)

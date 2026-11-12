@@ -511,12 +511,10 @@ class PipelineRuntime(_BufferSessionFacade):
                 if self._session_factory is not None:
                     self._session = self._session_factory(engine)
                 else:
-                    from taichi_vision.taichi_algorithm.buffer_session import (
-                        BufferSession,
-                    )
+                    from taichi import BufferSession
 
                     if engine is None:
-                        from taichi_vision.taichi_aot import get_engine
+                        from taichi.aot_engine import get_engine
 
                         engine = get_engine()
                     self._session = BufferSession(engine=engine, sync_on_exit=False)

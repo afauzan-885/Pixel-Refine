@@ -163,7 +163,7 @@ def estimate_noise(src: Any, *, session=None) -> Tuple[float, float]:
     only need the operational value should use ``score, _ = estimate_noise``.
     """
     if hasattr(src, "to_numpy") and hasattr(src, "shape"):
-        from taichi_vision.taichi_aot import get_engine
+        from taichi.aot_engine import get_engine
         from taichi_vision.taichi_algorithm.aot_api import _mod
 
         engine = get_engine()

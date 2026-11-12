@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from taichi_vision.cuda_arch_matrix import (
+from taichi.cuda_arch_matrix import (
     _run_target_probe,
     bridge_target_status,
     normalize_compute_capability,
@@ -17,7 +17,7 @@ from taichi_vision.taichi_algorithm.aot_py.validate_cuda_tcm_codegen import (
     _target_gate_diagnostics,
     _unsupported_ir_features,
 )
-from taichi_vision.taichi_aot.llvm20_profiles import CUDA_X86_64_WINDOWS_NVIDIA
+from taichi.llvm20_profiles import CUDA_X86_64_WINDOWS_NVIDIA
 
 
 def test_bridge_manifest_keeps_blackwell_variant_tokens_lossless() -> None:
@@ -72,7 +72,7 @@ def test_nvidia_smi_query_keeps_thor_device(monkeypatch) -> None:
             stderr="",
         )
 
-    monkeypatch.setattr("taichi_vision.cuda_arch_matrix.subprocess.run", fake_run)
+    monkeypatch.setattr("taichi.cuda_arch_matrix.subprocess.run", fake_run)
     devices = query_nvidia_smi()
     assert devices and devices[0]["compute_capability"] == 101
     assert devices[0]["target"] == "sm_101"
@@ -83,7 +83,7 @@ def test_nvidia_smi_query_is_fail_closed_for_nonzero_status(monkeypatch) -> None
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        "taichi_vision.cuda_arch_matrix.subprocess.run",
+        "taichi.cuda_arch_matrix.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(
             returncode=1,
             stdout="0, NVIDIA RTX, 580.1, 8.9, 8192\n",
@@ -97,7 +97,7 @@ def test_nvidia_smi_query_skips_malformed_rows_and_keeps_quoted_names(monkeypatc
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        "taichi_vision.cuda_arch_matrix.subprocess.run",
+        "taichi.cuda_arch_matrix.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(
             returncode=0,
             stdout=(
@@ -118,7 +118,7 @@ def test_nvidia_smi_query_rejects_invalid_physical_metadata(monkeypatch) -> None
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        "taichi_vision.cuda_arch_matrix.subprocess.run",
+        "taichi.cuda_arch_matrix.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(
             returncode=0,
             stdout=(
@@ -232,7 +232,7 @@ def test_llvm20_cuda_profile_covers_lowered_and_blackwell_variants() -> None:
 
 
 def test_full_graph_summary_does_not_promote_partial_sweep() -> None:
-    from taichi_vision.cuda_arch_matrix import normalize_cuda_target
+    from taichi.cuda_arch_matrix import normalize_cuda_target
 
     target = normalize_cuda_target("sm_61")
     result = {
@@ -307,7 +307,7 @@ def test_nvcc_probe_passes_explicit_stdin_operand(monkeypatch) -> None:
         calls.append((command, kwargs))
         return SimpleNamespace(returncode=0, stdout=".target sm_61\n", stderr="")
 
-    monkeypatch.setattr("taichi_vision.cuda_arch_matrix.subprocess.run", fake_run)
+    monkeypatch.setattr("taichi.cuda_arch_matrix.subprocess.run", fake_run)
     result = _run_target_probe("nvcc", "sm_61", mode="nvcc", timeout=1)
 
     assert result["ok"] is True
@@ -321,7 +321,7 @@ def test_compile_probe_reports_explicit_coverage_summary(monkeypatch) -> None:
     """Aggregate coverage must distinguish compile-only support from runtime."""
 
     from types import SimpleNamespace
-    from taichi_vision.cuda_arch_matrix import probe_compiler_targets
+    from taichi.cuda_arch_matrix import probe_compiler_targets
 
     def fake_run(command, **kwargs):
         target = next(item for item in command if str(item).startswith("--gpu-architecture="))
@@ -332,7 +332,7 @@ def test_compile_probe_reports_explicit_coverage_summary(monkeypatch) -> None:
             stderr="",
         )
 
-    monkeypatch.setattr("taichi_vision.cuda_arch_matrix.subprocess.run", fake_run)
+    monkeypatch.setattr("taichi.cuda_arch_matrix.subprocess.run", fake_run)
     report = probe_compiler_targets("nvcc", ["sm_61", "sm_120"], mode="nvcc")
     assert report["summary"] == {
         "requested_targets": 2,

@@ -1,10 +1,11 @@
 """Native box-filter ABI regression: scalar HWC and vec3 share physical storage."""
+import taichi.aot_engine as _ti_rt
 
 import cv2
 import numpy as np
 import pytest
 
-from taichi_vision import taichi_aot as aot
+from taichi_vision.taichi_algorithm import aot_api as aot
 
 
 @pytest.mark.parametrize("kernel_size", [3, 5])
@@ -12,7 +13,7 @@ from taichi_vision import taichi_aot as aot
 @pytest.mark.parametrize("destination", ["allocated", "same_layout", "opposite_layout"])
 def test_rgb_box_filter_matches_graph_layout(kernel_size, is_vector, destination):
     array = np.random.default_rng(417).random((37, 43, 3), dtype=np.float32)
-    engine = aot.get_engine()
+    engine = _ti_rt.get_engine()
     source_owner = engine.upload(array)
     # Upload canonicalizes RGB as vec3; demosaic/analysis can instead expose
     # the same storage as scalar HWC, which triggered the original failure.
@@ -50,7 +51,7 @@ def test_rgb_box_filter_matches_graph_layout(kernel_size, is_vector, destination
 @pytest.mark.parametrize("kernel_size", [3, 5])
 def test_grayscale_box_filter_remains_scalar(kernel_size):
     array = np.random.default_rng(19).random((37, 43), dtype=np.float32)
-    source = aot.get_engine().upload(array, is_vector=False)
+    source = _ti_rt.get_engine().upload(array, is_vector=False)
     output = None
     try:
         output = aot.box_filter(source, kernel_size=kernel_size, return_gpu=True)

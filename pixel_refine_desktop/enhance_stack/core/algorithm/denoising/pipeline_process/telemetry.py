@@ -1,4 +1,4 @@
-"""Optional resident-pipeline memory telemetry.
+﻿"""Optional resident-pipeline memory telemetry.
 
 The Taichi engine already exposes live, pooled, and retired byte counters.
 This wrapper keeps telemetry out of the hot path unless explicitly enabled
@@ -86,10 +86,10 @@ def get_memory_telemetry_str(engine: Any = None) -> str:
         pass
 
     try:
-        from taichi_vision.device_selection import query_vulkan_memory_budget
+        from taichi.device_selection import query_vulkan_memory_budget
 
         if engine is None:
-            from taichi_vision.taichi_aot import get_engine
+            from taichi.aot_engine import get_engine
 
             engine = get_engine()
         dev_id = getattr(engine, "device_id", 0)

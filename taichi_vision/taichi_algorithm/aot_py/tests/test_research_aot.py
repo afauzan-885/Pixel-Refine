@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 
-from taichi_vision import taichi_aot as ta
+from taichi_vision.taichi_algorithm import aot_api as ta
 
 
 def _check(name, actual, expected, *, atol=2e-5, rtol=2e-5):

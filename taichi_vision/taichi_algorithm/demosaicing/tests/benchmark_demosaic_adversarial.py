@@ -8,6 +8,7 @@ the same sensor samples as Taichi Vision.
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import argparse
 import json
@@ -240,7 +241,7 @@ def run_algorithm(
 ) -> tuple[np.ndarray, dict]:
     """Run one full-frame AOT graph and report dispatch/readback timings."""
     function = getattr(taichi_aot, method)
-    input_bayer = taichi_aot.upload(bayer) if resident_input else bayer
+    input_bayer = _ti_rt.upload(bayer) if resident_input else bayer
     args = (
         input_bayer,
         1.0,
@@ -331,7 +332,7 @@ def run_benchmark(
     os.environ["PIXEL_REFINE_AOT_ARCH"] = backend
     os.environ["AOT_ARCH"] = backend
     os.environ.setdefault("AOT_MODE", "1")
-    from taichi_vision import taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
     all_scenes = {
         "contrast_edges": (make_contrast_edges(size), True),

@@ -171,7 +171,7 @@ def warp_affine_aot(src, matrix, dsize, return_gpu=None, dst=None):
     is a small host-side setup step; image pixels are not read back unless the
     caller explicitly requests a host result.
     """
-    from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+    from taichi.aot_engine import TaichiGPUBuffer
 
     is_gpu = isinstance(src, TaichiGPUBuffer)
     if is_gpu:

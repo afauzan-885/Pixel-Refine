@@ -1,6 +1,7 @@
 """Real-DNG block pipeline: demosaic, flow, remap, sharpen, fusion, NLM."""
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import argparse
 import gc
@@ -11,7 +12,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from taichi_vision import taichi_aot as aot
+from taichi_vision.taichi_algorithm import aot_api as aot
 from taichi_vision.taichi_algorithm.aot_py.tests.stress_optical_flow_blocks import VramSampler
 
 
@@ -65,7 +66,7 @@ def preview(image, width=1200):
 def run(args):
     args.output.mkdir(parents=True, exist_ok=True)
     stages = {}
-    aot.set_block_mode(
+    _ti_rt.set_block_mode(
         enabled=True,
         size=args.block_size,
         threshold_bytes=0,
@@ -74,8 +75,8 @@ def run(args):
         adaptive_memory=True,
         device_cache_enabled=False,
     )
-    aot.engine.clear_block_cache()
-    cache_before = aot.get_block_cache_stats()
+    _ti_rt.engine.clear_block_cache()
+    cache_before = _ti_rt.get_block_cache_stats()
 
     ref = timed(stages, "demosaic_reference", lambda: aot.demosaic(str(args.reference), method="hamilton"))
     comp = timed(stages, "demosaic_comparison", lambda: aot.demosaic(str(args.comparison), method="hamilton"))
@@ -182,9 +183,9 @@ def run(args):
         "block_size": args.block_size,
         "stages": stages,
         "metrics": metrics,
-        "memory": aot.get_memory_status(force=True),
+        "memory": _ti_rt.get_memory_status(force=True),
         "cache_before": cache_before,
-        "cache_after": aot.get_block_cache_stats(),
+        "cache_after": _ti_rt.get_block_cache_stats(),
     }
     (args.output / "real_dng_pipeline_report.json").write_text(
         json.dumps(report, indent=2), encoding="ascii"

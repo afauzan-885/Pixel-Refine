@@ -1,13 +1,14 @@
-"""Taichi Vision OFB/AKAZE feature aligner with native descriptors."""
+﻿"""Taichi Vision OFB/AKAZE feature aligner with native descriptors."""
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import os
 from typing import Optional, Tuple
 
 import numpy as np
 
-from taichi_vision.taichi_aot import TaichiGPUBuffer, get_engine
+from taichi.aot_engine import TaichiGPUBuffer, get_engine
 
 from ..contracts import scale_homography
 from ..facade import api as _facade
@@ -146,7 +147,8 @@ class FeatureMatchingGPUAligner:
         full_shape: Optional[Tuple[int, int]] = None,
         feature_config: Optional[dict] = None,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
+        import taichi.aot_engine as _ti_rt
         taichi_aot = _facade()._managed_api(taichi_aot)
 
         self.feature_type = str(feature_type).lower().strip()
@@ -198,7 +200,7 @@ class FeatureMatchingGPUAligner:
         # Vulkan, and OpenGL have target-qualified feature graphs; CPU keeps
         # the established stateless path as a compatibility fallback.
         try:
-            feature_arch = str(getattr(taichi_aot.engine, "arch", "")).lower()
+            feature_arch = str(getattr(_ti_rt.engine, "arch", "")).lower()
             if (
                 feature_arch in {"cuda", "vulkan", "opengl"}
                 and os.environ.get("TAICHI_CUDA_FEATURE_CACHE", "1") != "0"
@@ -239,10 +241,10 @@ class FeatureMatchingGPUAligner:
                     resident_algorithm_allowed
                     and resident_match_backend_allowed
                     and os.environ.get("TAICHI_FEATURE_RESIDENT_MATCHES", "1") != "0"
-                    and taichi_aot.aot_graph_available(
+                    and _ti_rt.aot_graph_available(
                         self.feature_type, "compact_matches_to_points"
                     )
-                    and taichi_aot.aot_graph_available(
+                    and _ti_rt.aot_graph_available(
                         self.feature_type, "pack_compacted_points"
                     )
                 )
@@ -274,7 +276,7 @@ class FeatureMatchingGPUAligner:
         return_gpu=True,
         return_transform: bool = False,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         taichi_aot = _facade()._managed_api(taichi_aot)
 
         if stop_event is not None:
@@ -333,6 +335,11 @@ class FeatureMatchingGPUAligner:
                 )
         finally:
             _facade()._destroy_work_item(supp_gray_gpu)
+
+        if matched is not None and (
+            len(matched) < 2 or matched[0] is None or matched[1] is None
+        ):
+            matched = None
 
         H_matrix = None
         apap_ref_points = None
@@ -519,7 +526,7 @@ class FeatureMatchingGPUAligner:
                     flow = apap_warp.to_flow(
                         (33, 33), full_shape=(self.target_h, self.target_w)
                     )
-                    flow_gpu = taichi_aot.upload(flow, is_vector=False)
+                    flow_gpu = _ti_rt.upload(flow, is_vector=False)
                     warped_primary = None
                     warped_secondary = None
                     try:
@@ -585,7 +592,7 @@ class FeatureMatchingGPUAligner:
                 warped_primary_np = OFBAlgorithm._warp_perspective(
                     primary_np, H_prim, (prim_w, prim_h)
                 )
-                warped_primary = taichi_aot.upload(
+                warped_primary = _ti_rt.upload(
                     np.ascontiguousarray(warped_primary_np), is_vector=False
                 )
             else:
@@ -639,7 +646,7 @@ class FeatureMatchingGPUAligner:
                     warped_secondary_np = OFBAlgorithm._warp_perspective(
                         secondary_np, H_work, (self.work_w, self.work_h)
                     )
-                    warped_secondary = taichi_aot.upload(
+                    warped_secondary = _ti_rt.upload(
                         np.ascontiguousarray(warped_secondary_np), is_vector=False
                     )
                 else:

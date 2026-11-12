@@ -1,4 +1,4 @@
-"""Reusable host staging workspaces for WeightNet readback and upload.
+﻿"""Reusable host staging workspaces for WeightNet readback and upload.
 
 Both workspaces register themselves with the resident component lifecycle so
 their host arrays are released together with the owning session.
@@ -10,7 +10,7 @@ from typing import Optional
 
 import numpy as np
 
-from taichi_vision.taichi_aot import TaichiGPUBuffer
+from taichi.aot_engine import TaichiGPUBuffer
 
 from .facade import api as _facade
 

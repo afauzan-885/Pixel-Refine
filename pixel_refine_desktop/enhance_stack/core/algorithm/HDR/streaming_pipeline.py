@@ -64,7 +64,7 @@ def _load_rgb(path: str | os.PathLike) -> np.ndarray:
         # the selected Taichi backend, then read back the one frame needed by
         # HDR analysis/fusion. The non-resident return path may enter a
         # different block adapter for full-resolution RAW images.
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         decoded_gpu = taichi_aot.demosaic(
             str(path), method="hamilton", return_gpu=True

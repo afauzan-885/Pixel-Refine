@@ -17,7 +17,7 @@ import weakref
 from contextlib import contextmanager
 from typing import Any, Optional, Tuple, Dict, List
 
-from taichi_vision.taichi_aot.engine import engine as default_engine, TaichiGPUBuffer
+from taichi.aot_engine import engine as default_engine, TaichiGPUBuffer
 
 
 _ownership_lock = threading.RLock()

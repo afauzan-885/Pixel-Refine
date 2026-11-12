@@ -1,16 +1,17 @@
-"""GPU-resident dense optical-flow aligners for the resident pipeline.
+﻿"""GPU-resident dense optical-flow aligners for the resident pipeline.
 
 Block Matching, Lucas-Kanade, and Farneback each keep a native reference
 pyramid alive for the whole burst and reuse one resident flow destination.
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 from typing import Optional, Tuple
 
 import numpy as np
 
-from taichi_vision.taichi_aot import TaichiGPUBuffer, get_engine
+from taichi.aot_engine import TaichiGPUBuffer, get_engine
 
 from ..facade import api as _facade
 from .base import _ResidentFlowBufferMixin
@@ -56,7 +57,8 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
         full_shape: Optional[Tuple[int, int]] = None,
         alignment_config: Optional[dict] = None,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
+        import taichi.aot_engine as _ti_rt
         taichi_aot = _facade()._managed_api(taichi_aot)
         from taichi_vision.taichi_algorithm.pyramid.pyramid import (
             build_image_pyramid_gpu,
@@ -151,7 +153,7 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
         return_gpu=True,
         return_transform: bool = False,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         taichi_aot = _facade()._managed_api(taichi_aot)
         from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
 
@@ -279,7 +281,7 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
         full_shape: Optional[Tuple[int, int]] = None,
         alignment_config: Optional[dict] = None,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         taichi_aot = _facade()._managed_api(taichi_aot)
         from taichi_vision.taichi_algorithm.pyramid.pyramid import (
             build_image_pyramid_gpu,
@@ -370,7 +372,7 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
         return_gpu=True,
         return_transform: bool = False,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         taichi_aot = _facade()._managed_api(taichi_aot)
         from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
 
@@ -486,11 +488,11 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
 
 def _scale_f32_scalar_gpu(source_gpu, scale: float):
     """Scale a scalar f32 resident buffer without a host round-trip."""
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     taichi_aot = _facade()._managed_api(taichi_aot)
     from taichi_vision.taichi_algorithm.aot_api import _mod
 
-    output = _facade()._managed_api(taichi_aot.get_engine()).allocate(
+    output = _facade()._managed_api(_ti_rt.get_engine()).allocate(
         tuple(int(value) for value in source_gpu.shape), dtype=np.float32
     )
     _mod("common").run(
@@ -510,7 +512,7 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
         alignment_config: Optional[dict] = None,
         **_unused,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         taichi_aot = _facade()._managed_api(taichi_aot)
         from taichi_vision.taichi_algorithm.pyramid.pyramid import build_image_pyramid_gpu
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.farneback_flow import (
@@ -564,7 +566,7 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
         return_gpu=True,
         return_transform: bool = False,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         taichi_aot = _facade()._managed_api(taichi_aot)
 
         if stop_event is not None:

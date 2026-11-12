@@ -1,5 +1,6 @@
 """RAM ownership, allocation admission and disk-versus-RAM parity gates."""
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import os
 import weakref
@@ -11,7 +12,7 @@ import numpy as np
 import psutil
 import pytest
 
-from taichi_vision import taichi_aot
+from taichi_vision import algorithm as taichi_aot
 from taichi_vision.taichi_algorithm.buffer_session import BufferSession
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.splat_sr.tiled_accumulator import (
     RamAccumulatorBacking, TiledRGBResult, TiledHannAccumulator, _TileBacking,
@@ -108,7 +109,7 @@ def test_fault_cleanup_retires_ram_and_borrows(fault, monkeypatch):
     try:
         accumulator = TiledHannAccumulator(reference, session=session, block_size=64)
         backing = accumulator.backing
-        confidence = session.own(taichi_aot.upload(np.ones(reference.shape[:2], np.float32)))
+        confidence = session.own(_ti_rt.upload(np.ones(reference.shape[:2], np.float32)))
         def fail(*args, **kwargs):
             raise RuntimeError("injected patch fault")
         if fault == "dispatch":
@@ -116,7 +117,7 @@ def test_fault_cleanup_retires_ram_and_borrows(fault, monkeypatch):
             with pytest.raises(RuntimeError, match="injected patch fault"):
                 accumulator.add_frame(reference, None, confidence)
         elif fault == "readback":
-            from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+            from taichi import TaichiGPUBuffer
             monkeypatch.setattr(TaichiGPUBuffer, "to_numpy", fail)
             with pytest.raises(RuntimeError, match="injected patch fault"):
                 accumulator.add_frame(reference, None, confidence)
@@ -165,7 +166,7 @@ def test_ram_and_disk_same_graph_same_hann_are_identical(empty_coverage, tmp_pat
         try:
             with BufferSession() as session:
                 accumulator = TiledHannAccumulator(reference, session=session, block_size=64, backing_factory=factory)
-                device_confidence = session.own(taichi_aot.upload(confidence))
+                device_confidence = session.own(_ti_rt.upload(confidence))
                 accumulator.add_frame(reference, None, device_confidence)
                 accumulator.add_frame(support, flow, device_confidence)
                 result = accumulator.finalize()
@@ -176,6 +177,6 @@ def test_ram_and_disk_same_graph_same_hann_are_identical(empty_coverage, tmp_pat
         finally:
             if result is not None:
                 result.close()
-    print(f"[RAM-DISK PARITY] device={taichi_aot.backend_info()} input={reference.shape} dtype=float32 empty={empty_coverage} max_abs={np.max(np.abs(outputs[0]-outputs[1])):.8g}")
+    print(f"[RAM-DISK PARITY] device={_ti_rt.backend_info()} input={reference.shape} dtype=float32 empty={empty_coverage} max_abs={np.max(np.abs(outputs[0]-outputs[1])):.8g}")
     np.testing.assert_array_equal(outputs[0], outputs[1])
     assert not list(tmp_path.glob("pixelrefine_splat_tiles_*"))

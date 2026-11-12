@@ -6,12 +6,13 @@ oracles and must not enable automatic dispatch or native GPU evidence.
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import unittest
 
 import numpy as np
 
-import taichi_vision.taichi_aot as taichi_aot
+from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
 
 class CoordinateWarpDemosaicAdapterTests(unittest.TestCase):
@@ -28,7 +29,7 @@ class CoordinateWarpDemosaicAdapterTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        taichi_aot.set_block_mode(False, threshold_bytes=512 * 1024 * 1024)
+        _ti_rt.set_block_mode(False, threshold_bytes=512 * 1024 * 1024)
 
     def test_coordinate_warp_registration_is_semantic_and_fail_closed(self):
         for operation in taichi_aot.COORDINATE_WARP_ADAPTER_OPERATIONS:

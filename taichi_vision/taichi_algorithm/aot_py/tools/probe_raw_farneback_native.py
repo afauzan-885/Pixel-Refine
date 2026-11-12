@@ -15,6 +15,7 @@ Example (PowerShell)::
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import argparse
 import json
@@ -24,7 +25,7 @@ import time
 
 import numpy as np
 
-from taichi_vision import taichi_aot
+from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 from taichi_vision.taichi_algorithm.compression.dng_aot import (
     encode_dng_aot,
     read_dng_aot,
@@ -82,7 +83,7 @@ def run_probe(
     )
     elapsed = time.perf_counter() - started
     flow_array = np.asarray(flow, dtype=np.float32)
-    runtime = taichi_aot.engine
+    runtime = _ti_rt.engine
     loaded = tuple(sorted(str(key) for key in getattr(taichi_aot, "_module_cache", {})))
     max_error = float(np.max(np.abs(flow_array))) if flow_array.size else 0.0
     return {

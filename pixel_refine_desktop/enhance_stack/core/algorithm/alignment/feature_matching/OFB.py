@@ -71,7 +71,7 @@ class OFBAlgorithm:
         src_points, dst_points, *, threshold=5.0, hypotheses=256, refinements=2
     ):
         """Estimate support-to-reference motion through the public AOT API."""
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         return taichi_aot.find_homography(
             np.ascontiguousarray(src_points, dtype=np.float32),
@@ -86,7 +86,7 @@ class OFBAlgorithm:
     @staticmethod
     def _warp_perspective(image, homography, dsize):
         """Warp an array through the backend-neutral AOT route used by OFB."""
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         return taichi_aot.warp_perspective(
             np.ascontiguousarray(image, dtype=np.float32),
@@ -136,7 +136,7 @@ class OFBAlgorithm:
             return None, None, None, None
 
         try:
-            from taichi_vision import taichi_aot
+            from taichi_vision import algorithm as taichi_aot
 
             matched = taichi_aot.ofb(
                 ref_gray,

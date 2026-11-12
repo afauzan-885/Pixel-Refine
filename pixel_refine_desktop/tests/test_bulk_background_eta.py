@@ -267,7 +267,7 @@ def test_worker_ipc_returns_declared_outputs(category, method, result, monkeypat
     from pixel_refine_desktop.enhance_stack.core.logic import backend_worker_process as worker
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising import MFDenoiser
     from pixel_refine_desktop.enhance_stack.core.algorithm import HDR
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     monkeypatch.setattr(taichi_aot, "get_engine", lambda: None)
     monkeypatch.setattr(MFDenoiser, "running_mf_denoiser", lambda **kwargs: result)

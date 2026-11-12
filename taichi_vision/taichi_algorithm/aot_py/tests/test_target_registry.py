@@ -10,7 +10,7 @@ import tempfile
 import unittest
 import zipfile
 
-from taichi_vision.taichi_aot.artifact_targets import TargetSpec, _artifact_matches_target
+from taichi.artifact_targets import TargetSpec, _artifact_matches_target
 
 
 ROOT = Path(__file__).resolve().parents[4]

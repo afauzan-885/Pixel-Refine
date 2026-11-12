@@ -1,6 +1,7 @@
 """Native tile parity, bounded allocation and backing-store lifecycle gates."""
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import os
 
@@ -10,9 +11,9 @@ import numpy as np
 import pytest
 import tifffile
 
-from taichi_vision import taichi_aot
+from taichi_vision import algorithm as taichi_aot
 from taichi_vision.taichi_algorithm.buffer_session import BufferSession
-from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+from taichi import TaichiGPUBuffer
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.splat_sr.spatial_splat_runtime import (
     SessionHannAccumulator,
 )
@@ -69,7 +70,7 @@ def test_tiled_gpu_confidence_matches_resident_hann_with_motion(shape, block_siz
         assert not hasattr(tiled, "confidence_scratch")
         assert not hasattr(tiled, "zero_crop_flow")
         tiled.add_frame(reference, None, None)
-        device_confidence = session.own(taichi_aot.upload(confidence))
+        device_confidence = session.own(_ti_rt.upload(confidence))
         tiled.add_frame(support, flow, device_confidence)
         assert session.borrowed_count == 0
         assert tiled.readbacks == tiled.tiles_processed
@@ -90,7 +91,7 @@ def test_tiled_gpu_confidence_matches_resident_hann_with_motion(shape, block_siz
         print(
             f"[TILED SR] backend={tiled.backend} input={reference.shape} "
             f"dtype=float32 tile={block_size} max_abs={max_abs:.8g} "
-            f"device={taichi_aot.backend_info()}"
+            f"device={_ti_rt.backend_info()}"
         )
         np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4)
         assert all(
@@ -169,7 +170,7 @@ def test_cancel_during_tiles_releases_backing_and_confidence_borrow(tmp_path, mo
         asset_dir=os.environ.get("SPLATSR_TEST_TILE_ASSETS"),
     )
     backing = accumulator.backing
-    confidence = session.own(taichi_aot.upload(np.ones(reference.shape[:2], np.float32)))
+    confidence = session.own(_ti_rt.upload(np.ones(reference.shape[:2], np.float32)))
     try:
         with pytest.raises(RuntimeError, match="injected tile cancellation"):
             accumulator.add_frame(reference, None, confidence)

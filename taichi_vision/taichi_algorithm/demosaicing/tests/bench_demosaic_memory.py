@@ -168,7 +168,7 @@ def main(argv=None) -> int:
 
     os.environ["PIXEL_REFINE_AOT_ARCH"] = args.backend
     os.environ["AOT_ARCH"] = args.backend
-    import taichi_vision.taichi_aot as api
+    from taichi_vision.taichi_algorithm import aot_api as api
 
     height, width = RESOLUTIONS[args.size]
     print(f"generating {width}x{height} ({height * width / 1e6:.2f} MP) synthetic Bayer...")

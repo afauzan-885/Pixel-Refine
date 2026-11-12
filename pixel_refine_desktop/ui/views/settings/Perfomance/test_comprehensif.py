@@ -1,3 +1,4 @@
+import taichi.aot_engine as _ti_rt
 import os
 
 os.environ["VK_LOADER_DEBUG"] = "error"
@@ -96,7 +97,7 @@ def run_fast_hardware_test():
                 raise
             # Inputs are already GPU buffers. Synchronization closes the
             # dispatch before reading the clock, without downloading output.
-            taichi_aot.engine.sync()
+            _ti_rt.engine.sync()
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             valid = bool(validator(value)) and valid
             if iteration >= benchmark_warmup_runs:
@@ -121,8 +122,8 @@ def run_fast_hardware_test():
         gray = ((x * 0.7 + y * 0.3) / 1023.0).astype(np.float32)
         # Upload once, before timing. Every measured operation receives GPU
         # buffers and returns GPU buffers, so host transfer is excluded.
-        gray_gpu = taichi_aot.upload(gray)
-        flow_gpu = taichi_aot.upload(
+        gray_gpu = _ti_rt.upload(gray)
+        flow_gpu = _ti_rt.upload(
             np.zeros((benchmark_height, benchmark_width, 2), dtype=np.float32)
         )
         resident_inputs.extend((gray_gpu, flow_gpu))
@@ -770,7 +771,7 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
         )
 
         # OpenGL additionally validates the stable GPU-buffer return path.
-        if str(getattr(taichi_aot.engine, "arch", "")).lower() in {"opengl", "gles"}:
+        if str(getattr(_ti_rt.engine, "arch", "")).lower() in {"opengl", "gles"}:
             gpu_flow = calcOpticalFlowPyrLK(flow_a, flow_b, return_gpu=True)
             gpu_ok = hasattr(gpu_flow, "to_numpy") and gpu_flow.to_numpy().shape == (
                 sh,
@@ -1037,12 +1038,12 @@ def run_comprehensive_test():
         # before the large-frame gate; the production engine uses the same
         # context-preserving reinit path for this lifecycle boundary.
         if (
-            str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl"
-            and "intel" in str(getattr(taichi_aot.engine, "gpu_name", "")).lower()
+            str(getattr(_ti_rt.engine, "arch", "")).lower() == "opengl"
+            and "intel" in str(getattr(_ti_rt.engine, "gpu_name", "")).lower()
         ):
             print("[Deep Analysis] Reclaiming Intel OpenGL buffers before 24 MP gate")
-            taichi_aot.engine.reinit()
-        stress_result = run_pipeline_stress_test(taichi_aot.engine, img_full)
+            _ti_rt.engine.reinit()
+        stress_result = run_pipeline_stress_test(_ti_rt.engine, img_full)
         # A deep matrix must not turn a deliberately rejected resident-memory
         # admission into a false backend crash.  The stress gate reports the
         # limitation explicitly and the remaining parity tests stay usable.
@@ -1356,7 +1357,7 @@ if __name__ == "__main__":
                         pass
             except Exception:
                 pass
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         selected_test = (
             run_fast_hardware_test if "--fast" in sys.argv else run_comprehensive_test

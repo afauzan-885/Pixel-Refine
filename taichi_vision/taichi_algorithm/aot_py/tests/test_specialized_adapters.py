@@ -10,16 +10,16 @@ import unittest
 
 import numpy as np
 
-import taichi_vision.taichi_aot as taichi_aot_facade
+from taichi_vision.taichi_algorithm import aot_api as taichi_aot_facade
 from taichi_vision.taichi_algorithm import aot_api
 
-from taichi_vision.taichi_aot.block import (
+from taichi.block import (
     can_auto_block,
     can_auto_partition_dispatch,
     can_partition_block,
     registered_block_adapters,
 )
-from taichi_vision.taichi_aot.block_adapters import (
+from taichi.block_adapters import (
     BRIEF_PATTERN_ADAPTER_OPERATIONS,
     FLOW_MAP_ADAPTER_OPERATIONS,
     NORMALIZATION_ADAPTER_OPERATIONS,

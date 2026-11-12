@@ -1,6 +1,7 @@
 """Large synthetic block optical-flow benchmark with known ground truth."""
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import argparse
 import gc
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from taichi_vision import taichi_aot as aot
+from taichi_vision.taichi_algorithm import aot_api as aot
 
 
 class VramSampler:
@@ -160,7 +161,7 @@ def run(args):
             p, n, maxLevel=2, grid_step=16, winSize=(13, 13)
         ),
     }
-    aot.set_block_mode(
+    _ti_rt.set_block_mode(
         not args.disable_blocks,
         size=args.block_size,
         threshold_bytes=0,
@@ -175,7 +176,7 @@ def run(args):
         )
         del inverse
         scenario_result = {"remap": remap_stats, "algorithms": {}}
-        aot.engine.clear_block_cache()
+        _ti_rt.engine.clear_block_cache()
 
         for name, algorithm in algorithms.items():
             flow, cold = timed(name + "_cold", lambda: algorithm(ref, comparison))
@@ -191,7 +192,7 @@ def run(args):
             gc.collect()
         output["scenarios"][scenario] = scenario_result
         del truth, comparison
-        aot.engine.clear_block_cache()
+        _ti_rt.engine.clear_block_cache()
         gc.collect()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -1,11 +1,11 @@
-"""Resident aligner factory and pipeline-runtime bookkeeping helpers."""
+﻿"""Resident aligner factory and pipeline-runtime bookkeeping helpers."""
 
 from __future__ import annotations
 
 from functools import wraps
 from typing import Optional, Tuple
 
-from taichi_vision.taichi_aot import TaichiGPUBuffer
+from taichi.aot_engine import TaichiGPUBuffer
 
 from ....pipeline_runtime import current_pipeline_runtime
 from ..facade import api as _facade

@@ -13,7 +13,7 @@ _ROOT = Path(__file__).resolve().parents[7]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from taichi_vision.taichi_aot.artifact_targets import detect_target
+from taichi.artifact_targets import detect_target
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.neural_compiler.onnx_resident_aot import compile_resident_onnx
 
 

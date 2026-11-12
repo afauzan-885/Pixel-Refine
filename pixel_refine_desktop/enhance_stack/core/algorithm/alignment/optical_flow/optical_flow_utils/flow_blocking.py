@@ -1,3 +1,4 @@
+import taichi.aot_engine as _ti_rt
 def _parse_bool(value, default=True):
     if value is None:
         return default
@@ -186,10 +187,11 @@ def iter_flow_tiles(width, height, cols=4, rows=3, overlap=0.20):
 
 def iter_runtime_flow_blocks(width, height, halo=0):
     """Yield flow regions from the shared compute-block runtime."""
-    from taichi_vision import taichi_aot
-    from taichi_vision.taichi_aot.block import BlockGrid
+    from taichi_vision import algorithm as taichi_aot
+    import taichi.aot_engine as _ti_rt
+    from taichi.block import BlockGrid
 
-    runtime_config = taichi_aot.get_block_config()
+    runtime_config = _ti_rt.get_block_config()
     if not runtime_config.enabled:
         yield {"valid": (0, 0, width, height), "roi": (0, 0, width, height)}
         return
@@ -237,7 +239,7 @@ def warp_tile_with_flow(target_tile, flow):
     # Keep the CPU facade on the same Taichi Vision remap implementation used
     # by the resident GPU route. This preserves the public tiled compositor
     # while removing the historical OpenCV remap dependency.
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     return taichi_aot.remap_with_flow(
         np.ascontiguousarray(target_tile),
@@ -431,8 +433,8 @@ def align_with_block_flow(
     # Block grids can contain thousands of regions for large images.  Keep
     # only the bounded futures/results live instead of materialising every
     # block descriptor up front.
-    from taichi_vision import taichi_aot
-    runtime_config = taichi_aot.get_block_config()
+    from taichi_vision import algorithm as taichi_aot
+    runtime_config = _ti_rt.get_block_config()
     if runtime_config.enabled:
         # ``BlockConfig.normalized_size()`` is a ``(height, width)`` pair.
         # The old scalar assumption only surfaced when the runtime block mode

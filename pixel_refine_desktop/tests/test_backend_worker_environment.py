@@ -2,7 +2,7 @@
 
 import pytest
 
-from taichi_vision.backend_config import requested_backend
+from taichi.backend_config import requested_backend
 from pixel_refine_desktop.enhance_stack.core.logic import backend_worker_manager
 
 

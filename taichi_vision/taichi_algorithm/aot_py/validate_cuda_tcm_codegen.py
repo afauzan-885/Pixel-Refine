@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from taichi_vision.cuda_arch_matrix import CudaTarget, normalize_cuda_target
+from taichi.cuda_arch_matrix import CudaTarget, normalize_cuda_target
 
 
 DEFAULT_ROOT = (

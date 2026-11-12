@@ -35,8 +35,8 @@ from taichi_vision.taichi_algorithm.alignment.apap import (
     _map_tps_points_kernel,
     _solve_tps_pivoted_kernel,
 )
-from taichi_vision.taichi_aot.artifact_targets import detect_target
-from taichi_vision.taichi_aot.tcm_contract import (
+from taichi.artifact_targets import detect_target
+from taichi.tcm_contract import (
     attach_manifest,
     build_manifest_from_archive,
 )

@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-import taichi_vision.taichi_aot as taichi_aot
+from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
 
 class BoundedSemanticAdapterTests(unittest.TestCase):

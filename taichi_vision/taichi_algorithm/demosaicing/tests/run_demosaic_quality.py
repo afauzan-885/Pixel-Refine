@@ -116,7 +116,7 @@ def configure_backend(backend: str) -> None:
 
 
 def _import_api():
-    from taichi_vision import taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
     return taichi_aot
 

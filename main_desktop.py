@@ -113,7 +113,7 @@ def _bootstrap_aot_backend_from_settings():
     except Exception:
         return
 
-    from taichi_vision.backend_config import normalize_backend
+    from taichi.backend_config import normalize_backend
 
     arch = normalize_backend(
         settings.get("device_backend_arch") or "cpu",
@@ -129,7 +129,7 @@ def _bootstrap_aot_backend_from_settings():
     selector = settings.get("device_selector")
     if arch in ("vulkan", "opengl") and not isinstance(selector, dict):
         # One-time migration from settings written before stable selectors.
-        from taichi_vision.device_selection import make_device_selector
+        from taichi.device_selection import make_device_selector
 
         legacy_name = str(settings.get("device_backend") or "")
         if legacy_name and "cpu" not in legacy_name.lower():
@@ -137,7 +137,7 @@ def _bootstrap_aot_backend_from_settings():
             settings["device_selector"] = selector
     if arch in ("vulkan", "opengl") and isinstance(selector, dict):
         try:
-            from taichi_vision.device_selection import (
+            from taichi.device_selection import (
                 resolve_device_selector,
                 scan_vulkan_device_records,
             )
@@ -212,7 +212,7 @@ def _bootstrap_aot_backend_from_settings():
                         device_id_int = 0 if arch == "opengl" else -1
                     break
 
-    from taichi_vision.backend_config import BackendConfig, backend_env
+    from taichi.backend_config import BackendConfig, backend_env
 
     canonical_config = BackendConfig(
         backend=arch or "cpu",
@@ -396,14 +396,14 @@ def _cleanup_aot_backend(reason="app-shutdown"):
         except Exception:
             pass
         import gc
-        import taichi_vision.taichi_aot as taichi_aot
+        import taichi.aot_engine as _ti_rt
 
         try:
-            taichi_aot.unload_all_modules()
+            _ti_rt.unload_all_modules()
         except Exception:
             pass
         try:
-            taichi_aot.engine.destroy()
+            _ti_rt.engine.destroy()
         except Exception:
             pass
         try:

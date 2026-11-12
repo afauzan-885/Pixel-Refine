@@ -24,6 +24,7 @@ Graphs packaged by ``compile_spatial_tcm`` (all float32):
     generate_fine_weights_4passes, generate_spatial_weights_compact_v1,
     postprocess_spatial_weight
 """
+import taichi.aot_engine as _ti_rt
 
 import numpy as np
 import os
@@ -4367,7 +4368,7 @@ def _resolve_backend_arch():
     if not arch_str:
         # engine.py controls the runtime backend; read it when available.
         try:
-            from taichi_vision.taichi_aot import get_engine
+            from taichi.aot_engine import get_engine
 
             arch_str = str(getattr(get_engine(), "arch", "")).strip().lower()
         except Exception:
@@ -4559,11 +4560,11 @@ def _resolve_spatial_tcm(engine):
         )
     )
     try:
-        from taichi_vision.taichi_aot.artifact_targets import (
+        from taichi.artifact_targets import (
             detect_target,
             resolve_artifact,
         )
-        from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
+        from taichi.runtime_paths import tcm_root as staged_tcm_root
 
         target = detect_target(
             backend=arch,
@@ -4701,8 +4702,9 @@ def generate_spatial_weights_taichi(
     """
     Calculates the weight map for a single frame relative to the reference using Taichi AOT.
     """
-    import taichi_vision.taichi_aot as taichi_aot
-    engine = taichi_aot.engine
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
+
+    engine = _ti_rt.engine
     scratch = kwargs.get("scratch_cache")
 
     if noise_sigma is None or (isinstance(noise_sigma, (int, float)) and noise_sigma <= 0.0):
@@ -4724,10 +4726,10 @@ def generate_spatial_weights_taichi(
         if scratch is None and buf is not None:
             buf.destroy()
 
-    if not isinstance(row_starts, taichi_aot.TaichiGPUBuffer):
-        row_starts = taichi_aot.upload(np.asarray(row_starts, dtype=np.int32))
-    if not isinstance(col_starts, taichi_aot.TaichiGPUBuffer):
-        col_starts = taichi_aot.upload(np.asarray(col_starts, dtype=np.int32))
+    if not isinstance(row_starts, _ti_rt.TaichiGPUBuffer):
+        row_starts = _ti_rt.upload(np.asarray(row_starts, dtype=np.int32))
+    if not isinstance(col_starts, _ti_rt.TaichiGPUBuffer):
+        col_starts = _ti_rt.upload(np.asarray(col_starts, dtype=np.int32))
 
     # Load Module (backend-aware)
     tcm_path = _resolve_spatial_tcm(engine)
@@ -4755,13 +4757,7 @@ def generate_spatial_weights_taichi(
         )
     else:
         zeros = np.zeros(weight_map_sum.shape, dtype=np.float32)
-        from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
-        _LIB.write_to_gpu_buffer(
-            _RUNTIME,
-            weight_map_sum.handle,
-            zeros.ctypes.data,
-            weight_map_sum.size_bytes,
-        )
+        weight_map_sum.write(zeros)
 
     if profile_hotspots:
         engine.sync()
@@ -5085,16 +5081,9 @@ def generate_spatial_weights_taichi(
                             w=int(w),
                         )
                 else:
-                    from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
-
                     for plane in (reliability_num, reliability_den):
                         zeros = np.zeros(plane.shape, dtype=np.float32)
-                        _LIB.write_to_gpu_buffer(
-                            _RUNTIME,
-                            plane.handle,
-                            zeros.ctypes.data,
-                            plane.size_bytes,
-                        )
+                        plane.write(zeros)
                 mod.run(
                     "generate_reliability_weights_4passes",
                     current=analysis_input,
@@ -5221,8 +5210,8 @@ def accumulate_spatial_merging_taichi(
     For the 3D path, weight_map_sum_full must also be 3D (h_full, w_full, 3)
     to support correct per-channel normalization.
     """
-    import taichi_vision.taichi_aot as taichi_aot
-    engine = taichi_aot.engine
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
+    engine = _ti_rt.engine
 
     # Load Module (backend-aware)
     tcm_path = _resolve_spatial_tcm(engine)
@@ -5283,9 +5272,9 @@ def accumulate_spatial_merging_region_taichi(
     finalize=False,
 ):
     """Accumulate one disjoint output region from a resident RGB frame."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     h_full, w_full = (int(final_image_sum.shape[0]), int(final_image_sum.shape[1]))
     offset_y, offset_x = (int(offset[0]), int(offset[1]))
@@ -5349,9 +5338,9 @@ def accumulate_spatial_merging_tile_taichi(
     The function intentionally has no CPU fallback: callers must use the
     matching backend TCM or select the validated full-frame path.
     """
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     h_full, w_full = (int(full_shape[0]), int(full_shape[1]))
     offset_y, offset_x = (int(offset[0]), int(offset[1]))
@@ -5418,9 +5407,9 @@ def clear_f32_3d_taichi(dst):
     frame's values, so a reconstruction accumulator must be cleared explicitly.
     Doing it on the device avoids a host allocation the size of the accumulator.
     """
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     if not _tcm_graph_available(tcm_path, "clear_f32_3d"):
         raise RuntimeError(
@@ -5441,9 +5430,9 @@ def clear_f32_3d_taichi(dst):
 
 def clear_f32_2d_taichi(dst):
     """Zero a resident single-channel f32 buffer on the active backend."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     if not _tcm_graph_available(tcm_path, "clear_f32_2d"):
         raise RuntimeError(
@@ -5479,9 +5468,9 @@ def accumulate_tile_hann_taichi(
     Like the other offset accumulators this helper is fail-closed: a missing
     graph is reported instead of silently changing the blend on the host.
     """
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     tile_h, tile_w = int(result_tile.shape[0]), int(result_tile.shape[1])
     channel = int(channel)
@@ -5540,9 +5529,9 @@ def accumulate_average_taichi(
     weight_map_sum_full,
 ):
     """Accumulate one uniformly weighted RGB frame on the active AOT backend."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     if not _tcm_graph_available(tcm_path, "accumulate_average"):
         raise RuntimeError(
@@ -5583,9 +5572,9 @@ def accumulate_average_sum_region_taichi(
     denominator=None,
 ):
     """Accumulate a uniform-weight RGB region without a weight-map buffer."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     graph_name = "accumulate_average_sum_region"
     if not _tcm_graph_available(tcm_path, graph_name):
@@ -5631,9 +5620,9 @@ def accumulate_average_tile_taichi(
     offset,
 ):
     """Uniformly accumulate one local RGB tile into global accumulators."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     if not _tcm_graph_available(tcm_path, "accumulate_average_offset"):
         raise RuntimeError(
@@ -5685,9 +5674,9 @@ def remap_accumulate_tile_taichi(
     global accumulators, so no temporary aligned tile or synchronization is
     required between neighboring dispatches.
     """
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     h_dst, w_dst = int(full_shape[0]), int(full_shape[1])
     offset_y, offset_x = int(offset[0]), int(offset[1])
@@ -5804,9 +5793,9 @@ def remap_accumulate_average_sum_tile_taichi(
     denominator=None,
 ):
     """Remap and average-accumulate one tile without uniform weight storage."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     graph_name = "remap_accumulate_average_sum_tile"
     if not _tcm_graph_available(tcm_path, graph_name):
@@ -5871,9 +5860,9 @@ def remap_accumulate_cfa_weighted_taichi(
     The function performs no download and leaves all supplied buffers owned by
     the caller.
     """
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     scalar_weight = len(weight_map_work.shape) == 2
     graph_name = (
@@ -6035,9 +6024,9 @@ def accumulate_cfa_homography_taichi(
     established remap contract), then reused for all four CFA planes.  No
     intermediate warped plane is allocated and no buffer is downloaded.
     """
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     scalar_weight = len(weight_map_work.shape) == 2
     graph_name = (
@@ -6079,7 +6068,7 @@ def accumulate_cfa_homography_taichi(
         return buf.view_as_vector(False) if getattr(buf, "is_vector", False) else buf
 
     phase_y, phase_x = (int(phase_origin[0]) & 1, int(phase_origin[1]) & 1)
-    m_inv_gpu = taichi_aot.upload(np.ascontiguousarray(matrix_inv))
+    m_inv_gpu = _ti_rt.upload(np.ascontiguousarray(matrix_inv))
     mod = engine.load(tcm_path)
     try:
         for index, source_plane in enumerate(source_planes):
@@ -6124,9 +6113,9 @@ def accumulate_cfa_homography_taichi(
 
 def normalize_accumulator_cfa_taichi(cfa_sum, cfa_weight):
     """Normalize a scalar RAW accumulator in place without a host round-trip."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     graph_name = "normalize_accumulator_cfa"
     if not _tcm_graph_available(tcm_path, graph_name):
@@ -6158,9 +6147,9 @@ def normalize_accumulator_regions_taichi(
     tile_size=None,
 ):
     """Normalize a resident RGB accumulator in place over disjoint regions."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     h, w = int(sum_img.shape[0]), int(sum_img.shape[1])
     if tuple(int(v) for v in sum_img.shape) != (h, w, 3):
@@ -6234,8 +6223,8 @@ def mean_division_vec3_weight_taichi(
     Returns:
         TaichiGPUBuffer (h, w, 3) — normalized result.
     """
-    import taichi_vision.taichi_aot as taichi_aot
-    engine = taichi_aot.engine
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
+    engine = _ti_rt.engine
 
     tcm_path = _resolve_spatial_tcm(engine)
     mod = engine.load(tcm_path)
@@ -6300,14 +6289,14 @@ def postprocess_spatial_weight_taichi(
     fusion stage.  A separate destination is used deliberately so the graph
     never relies on in-place aliasing at the AOT ABI boundary.
     """
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
     if len(weight_map.shape) != 2:
         raise ValueError("SpatialFusion weight map must be a 2D float32 buffer")
     if np.dtype(weight_map.dtype) != np.dtype(np.float32):
         raise ValueError("SpatialFusion weight map must be float32")
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm(engine)
     mod = engine.load(tcm_path)
     if not _tcm_graph_available(tcm_path, "postprocess_spatial_weight"):

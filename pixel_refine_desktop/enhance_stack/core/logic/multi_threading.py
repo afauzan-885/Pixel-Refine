@@ -16,8 +16,9 @@ taichi_lock = threading.Lock()
 def _cleanup_taichi_memory():
     """Universal memory cleanup for Taichi buffers and OS working set."""
     try:
-        from taichi_vision import taichi_aot
-        engine = taichi_aot.get_engine()
+        from taichi_vision import algorithm as taichi_aot
+        import taichi.aot_engine as _ti_rt
+        engine = _ti_rt.get_engine()
         if hasattr(engine, "buffer_pool"):
             engine.buffer_pool.clear()
         if hasattr(engine, "_drain_retired"):
@@ -124,13 +125,14 @@ def load_raw_as_8bit_rgb(
     """Loads a RAW/DNG image and returns it as an 8-bit RGB numpy array using Hamilton Demosaic with rawpy fallback."""
     filename = os.path.basename(image_path)
     try:
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
+        import taichi.aot_engine as _ti_rt
 
         with taichi_lock:
             rgb_f32 = taichi_aot.demosaic(image_path, method="hamilton")
         if rgb_f32 is not None:
             rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
-            u8_res = taichi_aot.cast(rgb_f32, np.uint8)
+            u8_res = _ti_rt.cast(rgb_f32, np.uint8)
             del rgb_f32
             _cleanup_taichi_memory()
             return u8_res
@@ -167,13 +169,14 @@ def load_raw_as_8bit_rgb_half_res(
     """Loads a RAW/DNG image and returns it as an 8-bit half-resolution RGB numpy array using Hamilton Demosaic with rawpy fallback."""
     filename = os.path.basename(image_path)
     try:
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
+        import taichi.aot_engine as _ti_rt
 
         with taichi_lock:
             rgb_f32 = taichi_aot.demosaic(image_path, method="bilinear", half_res=True)
         if rgb_f32 is not None:
             rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
-            u8_res = taichi_aot.cast(rgb_f32, np.uint8)
+            u8_res = _ti_rt.cast(rgb_f32, np.uint8)
             del rgb_f32
             _cleanup_taichi_memory()
             return u8_res

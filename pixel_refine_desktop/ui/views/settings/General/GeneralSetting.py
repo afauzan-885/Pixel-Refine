@@ -17,7 +17,7 @@ from pixel_refine_desktop.ui.views.settings.General.Language import language_con
 from UILibrary.modals import modal_confirm
 from .general_store import get_general_store
 from .helpers import restart_application
-from taichi_vision.device_selection import (
+from taichi.device_selection import (
     is_translation_device,
     make_device_selector,
     scan_cuda_device_records,
@@ -159,7 +159,7 @@ class HardwareBackendTestWorker(QObject):
         for index, option in enumerate(self.options, start=1):
             text = option.get("text", "")
             result_key = option.get("key", text)
-            from taichi_vision.backend_config import normalize_backend, parse_device_id
+            from taichi.backend_config import normalize_backend, parse_device_id
 
             backend = normalize_backend(option.get("backend", "cpu"), allow_auto=False)
             device_id = parse_device_id(option.get("device_id"), 0) or 0
@@ -1068,7 +1068,7 @@ class GeneralSettingsPage(Container, SyncMixin):
             return
 
         import os
-        from taichi_vision.backend_config import (
+        from taichi.backend_config import (
             normalize_backend,
             BackendConfig,
             backend_env,
@@ -1099,7 +1099,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         active_backend = backend
         active_device_id = device_id
         if auto_fallback and fallback_chain:
-            from taichi_vision.taichi_aot.capabilities import classify_device
+            from taichi.capabilities import classify_device
 
             raw_name = option.get("raw_name", "") or option.get("text", "")
             for cand in fallback_chain:

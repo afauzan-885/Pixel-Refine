@@ -59,7 +59,7 @@ class SpatialWeightMapGenerator:
         from taichi_vision.taichi_algorithm.spatial_fusion import (
             SpatialScratchCache,
         )
-        from taichi_vision import taichi_aot
+        import taichi.aot_engine as taichi_aot
 
         reference = np.ascontiguousarray(reference, dtype=np.float32)
         if reference.ndim != 2:

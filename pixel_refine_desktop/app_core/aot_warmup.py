@@ -59,7 +59,7 @@ def _startup_warmup_allowed() -> bool:
         return False
     if backend == "vulkan" and "intel" in vendor:
         try:
-            from taichi_vision.vulkan_probe import intel_vulkan_is_validated
+            from taichi.vulkan_probe import intel_vulkan_is_validated
 
             raw_device = os.environ.get("AOT_DEVICE", "").strip()
             device_id = int(raw_device) if raw_device else None
@@ -72,7 +72,7 @@ def _startup_warmup_allowed() -> bool:
                 return True
         except (ImportError, TypeError, ValueError):
             pass
-        from taichi_vision.graphics_compatibility import (
+        from taichi.graphics_compatibility import (
             graphics_compatibility_enabled,
         )
 
@@ -168,7 +168,7 @@ class AOTSilentWarmupWorker(QThread):
                     return
                 taichi_engine = None
                 try:
-                    import taichi_vision.taichi_aot as taichi_aot
+                    import taichi.aot_engine as taichi_aot
                     if hasattr(taichi_aot, "get_engine"):
                         taichi_engine = taichi_aot.get_engine()
                     elif hasattr(taichi_aot, "engine"):
@@ -186,10 +186,10 @@ class AOTSilentWarmupWorker(QThread):
                     return
 
                 if taichi_engine is None:
-                    from taichi_vision.taichi_aot import get_engine
+                    from taichi import get_engine
 
                     taichi_engine = get_engine()
-                from taichi_vision.taichi_aot.aot_module_loader import (
+                from taichi import (
                     AOTModuleLoader,
                 )
 

@@ -21,6 +21,7 @@ Example:
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import argparse
 import json
@@ -71,7 +72,7 @@ def measure(api, method: str, size: int, runs: int, bayer: np.ndarray):
     cmatrix = np.eye(3, dtype=np.float32)
     scalars = (1.4, 1.0, 1.6, 1.02, cmatrix, 0.0, 1.0, 0, 1, 3, 2)
 
-    buffer = api.upload(bayer)
+    buffer = _ti_rt.upload(bayer)
     wall = []
     cpu = []
     output = None
@@ -118,7 +119,7 @@ def main(argv=None) -> int:
 
     os.environ["PIXEL_REFINE_AOT_ARCH"] = args.backend
     os.environ["AOT_ARCH"] = args.backend
-    import taichi_vision.taichi_aot as api
+    from taichi_vision.taichi_algorithm import aot_api as api
 
     samples: dict[str, dict[str, dict[str, list[float]]]] = {"a": {}, "b": {}}
     cpu_samples: dict[str, dict[str, dict[str, list[float]]]] = {"a": {}, "b": {}}

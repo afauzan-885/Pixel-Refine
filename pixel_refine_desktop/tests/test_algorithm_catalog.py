@@ -263,7 +263,7 @@ def test_ofb_and_akaze_ignore_legacy_apap_warp_config(
         calls.append((image, matrix, dsize))
         return expected
 
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     monkeypatch.setattr(taichi_aot, "warp_perspective", warp_perspective)
     result = algorithm.align_frame(
@@ -480,7 +480,7 @@ def test_apap_caller_applies_ransac_mask_once_and_preserves_order():
 def test_apap_caller_reads_gpu_ransac_mask_before_cleanup():
     import numpy as np
 
-    from taichi_vision.taichi_aot import upload
+    from taichi.aot_engine import upload
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.resident_pipeline import (
         _select_ransac_inlier_correspondences,
     )

@@ -1,9 +1,10 @@
-"""Taichi AOT native optical flow alignment session (compute_flow.tcm).
+﻿"""Taichi AOT native optical flow alignment session (compute_flow.tcm).
 
 Computes dense hierarchical optical flow (dx, dy) between reference and
 support frames with the 3-layer coarse-to-fine pyramid and warps support
 frames through the canonical AOT remap API.
 """
+import taichi.aot_engine as _ti_rt
 
 import gc
 import os
@@ -17,9 +18,10 @@ _MODULE_CACHE = {}
 
 def load_compute_flow_module(engine=None):
     """Loads and caches the compute_flow AOT module on the active Taichi engine."""
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
+    import taichi.aot_engine as _ti_rt
 
-    return taichi_aot.load_tcm("compute_flow")
+    return _ti_rt.load_tcm("compute_flow")
 
 
 class AOTOpticalFlowAligner:
@@ -42,8 +44,8 @@ class AOTOpticalFlowAligner:
         smooth: bool = True,
         adaptive: bool = True,
     ):
-        from taichi_vision import taichi_aot
-        from taichi_vision.taichi_aot import get_engine
+        from taichi_vision import algorithm as taichi_aot
+        from taichi.aot_engine import get_engine
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
             taichi_bridge,
         )
@@ -285,8 +287,6 @@ class AOTOpticalFlowAligner:
 
     def _retain_flow(self, flow):
         """Expose the reusable flow through a non-owning resident view."""
-        from taichi_vision.taichi_aot.engine import _LIB
-
         previous = getattr(self, "last_flow_gpu", None)
         if previous is not None and hasattr(previous, "destroy"):
             previous.destroy()
@@ -307,18 +307,9 @@ class AOTOpticalFlowAligner:
                     (self.h0, self.w0, 2), dtype=np.float32, is_vector=False
                 )
                 self._retained_flow_owner = owner
-            try:
-                with self.engine._lock:
-                    _LIB.copy_gpu_buffer(
-                        self.engine.runtime,
-                        flow.handle,
-                        owner.handle,
-                        owner.nbytes,
-                    )
-            except Exception:
-                raise
+            owner._rust_buf.write_from_buffer(np.asarray(flow.to_numpy()))
 
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi.aot_engine import TaichiGPUBuffer
 
         retained = TaichiGPUBuffer(
             owner.size_bytes,
@@ -354,7 +345,7 @@ class AOTOpticalFlowAligner:
         analysis frame, and then applied to warp `supp_rgb_f32` (RAW linea r) and optionally `secondary_frame_to_warp`.
         If `secondary_frame_to_warp` is given, returns a tuple `(warped_primary, warped_secondary)`.
         """
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         from ..pipeline_process.facade import api as _facade
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
             taichi_bridge,

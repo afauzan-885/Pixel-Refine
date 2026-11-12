@@ -1,3 +1,4 @@
+import taichi.aot_engine as _ti_rt
 import numpy as np
 import os
 import gc
@@ -89,7 +90,8 @@ def process_in_gpu(
         'block_flow'        — HDR+ optical-flow tile matching (default)
         'block_correlation' — Hierarchical Phase Correlation
     """
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
+    import taichi.aot_engine as _ti_rt
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
         taichi_bridge,
     )
@@ -217,10 +219,10 @@ def process_in_gpu(
     spatial_scratch = SpatialScratchCache()
 
     def _run_gpu_merging_loop():
-        engine = taichi_aot.engine
+        engine = _ti_rt.engine
 
-        _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
-        _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
+        _sum_gpu = _ti_rt.upload(final_image_sum_full_res)
+        _weight_sum_full_gpu = _ti_rt.upload(weight_map_sum_full_res)
         # ``phase2_fine_analysis`` keeps ``base_window`` in its graph ABI for
         # compatibility, but the maintained kernel computes the window from
         # ``tile_h/tile_w`` and never reads that argument.  Do not allocate a
@@ -229,10 +231,10 @@ def process_in_gpu(
         # after the complete batch.
         _base_window_gpu = None
 
-        _rows_gpu = taichi_aot.upload(row_starts)
+        _rows_gpu = _ti_rt.upload(row_starts)
         _rows_gpu.dtype = np.int32
 
-        _cols_gpu = taichi_aot.upload(col_starts)
+        _cols_gpu = _ti_rt.upload(col_starts)
         _cols_gpu.dtype = np.int32
 
         _weight_work_gpu = engine.allocate(
@@ -383,7 +385,7 @@ def process_in_gpu(
                         pass_merge_range[1],
                         "Finalizing with simple mean calculation on GPU...",
                     )
-                _ref_full_gpu = taichi_aot.upload(reference_image_float)
+                _ref_full_gpu = _ti_rt.upload(reference_image_float)
                 _final_image_gpu = engine.allocate(
                     _sum_gpu.shape,
                     dtype=_sum_gpu.dtype,
@@ -429,7 +431,7 @@ def process_in_gpu(
                     except:
                         pass
             if os.environ.get("AOT_CLEAR_AFTER_OP", "0") == "1":
-                taichi_aot.unload_all_modules()
+                _ti_rt.unload_all_modules()
                 engine.buffer_pool.clear()
             spatial_scratch.clear()
             import gc

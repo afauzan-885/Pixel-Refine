@@ -615,7 +615,7 @@ def _get_aot_mesh_module():
         return _AOT_MESH_MODULE
     try:
         from taichi_vision.taichi_algorithm import aot_api
-        from taichi_vision.taichi_aot.engine import engine
+        from taichi.aot_engine import engine
 
         module = aot_api.load_tcm("apap_native")
         _AOT_MESH_MODULE = (engine, module)

@@ -5,12 +5,13 @@ Run with:
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 from time import perf_counter
 
 import numpy as np
 
-from taichi_vision import taichi_aot
+from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
 
 def _run(source):
@@ -26,19 +27,19 @@ def _run(source):
 
 def main():
     source = (np.arange(128 * 128, dtype=np.float32).reshape(128, 128) % 47) / 47.0
-    previous = taichi_aot.get_block_config()
+    previous = _ti_rt.get_block_config()
     try:
-        taichi_aot.set_block_mode(enabled=False)
+        _ti_rt.set_block_mode(enabled=False)
         _run(source)  # Load the graph before measuring full-frame execution.
         legacy, legacy_s = _run(source)
 
-        taichi_aot.set_block_mode(
+        _ti_rt.set_block_mode(
             enabled=True,
             size=64,
             threshold_bytes=1,
             cache_entries=16,
         )
-        taichi_aot.engine.clear_block_cache()
+        _ti_rt.engine.clear_block_cache()
 
         original_tile = taichi_aot._non_local_means_tile
         calls = 0
@@ -69,13 +70,13 @@ def main():
         print(f"block warm:        {warm_s:.4f}s, tile dispatches=0")
         print(f"warm cache speedup: {cold_s / warm_s:.2f}x")
     finally:
-        taichi_aot.engine.configure_blocks(
+        _ti_rt.engine.configure_blocks(
             enabled=previous.enabled,
             size=previous.size,
             threshold_bytes=previous.threshold_bytes,
             cache_entries=previous.cache_entries,
         )
-        taichi_aot.engine.clear_block_cache()
+        _ti_rt.engine.clear_block_cache()
 
 
 if __name__ == "__main__":

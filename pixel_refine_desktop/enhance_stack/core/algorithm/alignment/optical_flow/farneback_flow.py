@@ -1,3 +1,4 @@
+﻿import taichi.aot_engine as _ti_rt
 def _parse_bool(value, default=True):
     if value is None:
         return default
@@ -88,7 +89,7 @@ class FarnebackFlow:
         if not cached:
             return
         try:
-            from taichi_vision.taichi_aot import get_engine
+            from taichi.aot_engine import get_engine
 
             get_engine().sync()
         except Exception:
@@ -178,14 +179,15 @@ class FarnebackFlow:
             return None
         if hasattr(image, "handle"):
             if getattr(image, "is_vector", False) and getattr(image, "vector_dim", 0) >= 3:
-                from taichi_vision import taichi_aot
+                from taichi_vision import algorithm as taichi_aot
+                import taichi.aot_engine as _ti_rt
                 return taichi_aot.cvtColor(image, taichi_aot.COLOR_RGB2GRAY)
             return image
         img = np.ascontiguousarray(image)
         if img.ndim == 3 and img.shape[2] >= 3:
             # GPU-native color conversion eliminates CPU RAM footprint and computation latency
             try:
-                from taichi_vision import taichi_aot
+                from taichi_vision import algorithm as taichi_aot
                 img_f32 = (
                     img.astype(np.float32) / 255.0
                     if img.dtype == np.uint8
@@ -195,7 +197,7 @@ class FarnebackFlow:
                         else np.clip(img.astype(np.float32), 0.0, 1.0)
                     )
                 )
-                img_gpu = taichi_aot.upload(img_f32, is_vector=True, vector_dim=3)
+                img_gpu = _ti_rt.upload(img_f32, is_vector=True, vector_dim=3)
                 gray_gpu = taichi_aot.cvtColor(img_gpu, taichi_aot.COLOR_RGB2GRAY)
                 img_gpu.release()
                 gray_arr = gray_gpu.to_numpy() * 255.0
@@ -249,7 +251,7 @@ class FarnebackFlow:
             if return_gpu:
                 flow_cpu = flow.to_numpy()
                 flow_quant = self._quantize_to_blocks(flow_cpu, step)
-                from taichi_vision import taichi_aot
+                from taichi_vision import algorithm as taichi_aot
                 try:
                     flow.destroy()
                 except Exception:
@@ -257,7 +259,7 @@ class FarnebackFlow:
                         flow.release()
                     except Exception:
                         pass
-                return taichi_aot.upload(flow_quant, is_vector=True, vector_dim=2)
+                return _ti_rt.upload(flow_quant, is_vector=True, vector_dim=2)
             else:
                 flow_arr = np.asarray(flow[0] if isinstance(flow, tuple) else flow, dtype=np.float32)
                 return self._quantize_to_blocks(flow_arr, step)
@@ -317,7 +319,7 @@ class FarnebackFlow:
             return_gpu=True,
         )
 
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         try:
             return taichi_aot.remap_with_flow(
                 np.ascontiguousarray(tgt_warp),

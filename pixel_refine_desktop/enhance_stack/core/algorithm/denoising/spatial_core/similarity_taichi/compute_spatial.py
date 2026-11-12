@@ -1,3 +1,4 @@
+import taichi.aot_engine as _ti_rt
 import numpy as np
 import os
 import zipfile
@@ -1264,7 +1265,7 @@ def _resolve_spatial_tcm(engine):
 
     def _assets_dir():
         try:
-            from taichi_vision.llvm20_runtime_paths import application_assets_root
+            from taichi.runtime_paths import application_assets_root
 
             target = _detect_target()
             resolved = application_assets_root(target.target_id)
@@ -1286,7 +1287,7 @@ def _resolve_spatial_tcm(engine):
             return os.path.abspath(os.path.join(cur, "ui/data/aot_assets"))
 
     def _detect_target():
-        from taichi_vision.taichi_aot.artifact_targets import detect_target
+        from taichi.artifact_targets import detect_target
 
         if "target" not in target_cache:
             target_cache["target"] = detect_target(
@@ -1296,7 +1297,7 @@ def _resolve_spatial_tcm(engine):
         return target_cache["target"]
 
     def _resolve_in_root(root):
-        from taichi_vision.taichi_aot.artifact_targets import resolve_artifact
+        from taichi.artifact_targets import resolve_artifact
 
         resolved = resolve_artifact(
             root,
@@ -1308,7 +1309,7 @@ def _resolve_spatial_tcm(engine):
 
     def _resolve_target_tree():
         try:
-            from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
+            from taichi.runtime_paths import tcm_root as staged_tcm_root
 
             roots = []
             staged = staged_tcm_root(_detect_target().target_id)
@@ -1565,7 +1566,8 @@ def _coarse_texture_boost_into(src, dst, texture_amount, radius, blur_buf, tmp_b
     (``sync=False``); later readbacks sync as usual.  Bit-identical output is
     part of the optimisation contract.
     """
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision import algorithm as taichi_aot
+    import taichi.aot_engine as _ti_rt
     from taichi_vision.taichi_algorithm.aot_api import _COARSE_TEXTURE_IDENTITY_LUT
 
     taichi_aot.gaussian_blur(
@@ -1608,8 +1610,8 @@ def generate_spatial_weights_taichi(
     """
     Calculates the weight map for a single frame relative to the reference using Taichi AOT.
     """
-    import taichi_vision.taichi_aot as taichi_aot
-    engine = taichi_aot.engine
+    from taichi_vision import algorithm as taichi_aot
+    engine = _ti_rt.engine
     scratch = kwargs.get("scratch_cache")
 
     def _alloc(name, shape, dtype=np.float32, **alloc_kwargs):
@@ -1701,13 +1703,7 @@ def generate_spatial_weights_taichi(
             )
         else:
             zeros = np.zeros(weight_map_sum.shape, dtype=np.float32)
-            from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
-            _LIB.write_to_gpu_buffer(
-                _RUNTIME,
-                weight_map_sum.handle,
-                zeros.ctypes.data,
-                weight_map_sum.size_bytes,
-            )
+            weight_map_sum._rust_buf.write_from_buffer(zeros)
 
     if profile_hotspots:
         engine.sync()
@@ -2013,7 +2009,7 @@ def generate_spatial_weights_taichi(
         if row_starts_gpu is not None:
             row_starts_buf = row_starts_gpu
         elif not hasattr(row_starts, "handle"):
-            allocated_row_starts = taichi_aot.upload(np.asarray(row_starts, dtype=np.int32))
+            allocated_row_starts = _ti_rt.upload(np.asarray(row_starts, dtype=np.int32))
             per_frame_counters["tile_start_uploads"] += 1
             row_starts_buf = allocated_row_starts
         else:
@@ -2022,7 +2018,7 @@ def generate_spatial_weights_taichi(
         if col_starts_gpu is not None:
             col_starts_buf = col_starts_gpu
         elif not hasattr(col_starts, "handle"):
-            allocated_col_starts = taichi_aot.upload(np.asarray(col_starts, dtype=np.int32))
+            allocated_col_starts = _ti_rt.upload(np.asarray(col_starts, dtype=np.int32))
             per_frame_counters["tile_start_uploads"] += 1
             col_starts_buf = allocated_col_starts
         else:
@@ -2209,7 +2205,7 @@ def accumulate_spatial_merging_taichi(
     Accumulates a frame into the global sum using its processed weight map via common AOT.
     Supports both 1-channel (2D) and 3-channel (3D vec3) weight maps and accumulators.
     """
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     return taichi_aot.accumulate_weighted_frame(
         current_image_full=current_image_full,
         weight_map_work=weight_map_work,
@@ -2226,9 +2222,9 @@ def postprocess_spatial_weight_taichi(
     dst=None,
 ):
     """Apply SpatialFusion weight shaping on the active GPU backend."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     tcm_path = _resolve_spatial_tcm_cached(engine)
     mod = engine.load(tcm_path)
     if dst is None:
@@ -2259,8 +2255,8 @@ def mean_division_vec3_weight_taichi(
     dst=None,
 ):
     """Per-channel mean division on GPU using Taichi AOT."""
-    import taichi_vision.taichi_aot as taichi_aot
-    engine = taichi_aot.engine
+    from taichi_vision import algorithm as taichi_aot
+    engine = _ti_rt.engine
 
     tcm_path = _resolve_spatial_tcm_cached(engine)
     mod = engine.load(tcm_path)

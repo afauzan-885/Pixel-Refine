@@ -1,5 +1,6 @@
 """Evaluasi sintetis multi-seed; jalankan dengan Python venv dari root proyek."""
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import argparse
 import json
@@ -42,7 +43,8 @@ def make_case(distribution, noise, seed, model, *, outliers=0.2):
 
 def warp_parity_diagnostic():
     """Same-matrix comparison with both matched and mismatched borders."""
-    from taichi_vision import taichi_aot as aot
+    from taichi_vision.taichi_algorithm import aot_api as aot
+
     from taichi_vision.taichi_algorithm import warp_affine
 
     image = np.random.default_rng(43).random((127, 159, 3), dtype=np.float32)
@@ -57,7 +59,7 @@ def warp_parity_diagnostic():
                 actual = warp_affine(source, matrix[:2], (159, 127))
                 reference = lambda border: cv2.warpAffine(source, matrix[:2], (159, 127), flags=cv2.INTER_LINEAR, borderMode=border)
             else:
-                uploaded = aot.upload(source)
+                uploaded = _ti_rt.upload(source)
                 try:
                     actual = aot.warp_perspective(uploaded, matrix, (159, 127), return_gpu=False)
                 finally:
@@ -69,14 +71,14 @@ def warp_parity_diagnostic():
                            "reflect101_mae": float(np.abs(actual - matched).mean()),
                            "reflect101_max": float(np.abs(actual - matched).max()),
                            "constant_mae": float(np.abs(actual - constant).mean())})
-    return {"backend": aot.backend_info(), "cases": report}
+    return {"backend": _ti_rt.backend_info(), "cases": report}
 
 
 def run(output, seeds):
-    from taichi_vision import taichi_aot as aot
+    from taichi_vision.taichi_algorithm import aot_api as aot
 
     report = {"environment": {"python": platform.python_version(), "numpy": np.__version__,
-                               "opencv": cv2.__version__, "backend": aot.backend_info()},
+                               "opencv": cv2.__version__, "backend": _ti_rt.backend_info()},
               "configuration": {"seeds": seeds, "noise_px": [.25, .75, 2.], "n": 96,
                                 "outlier_fraction": .2, "threshold_px": 3., "validation_n": 2048},
               "cases": []}

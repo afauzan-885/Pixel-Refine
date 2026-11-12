@@ -23,7 +23,7 @@ project_root = os.path.abspath(
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-import taichi_vision.taichi_aot as ta_aot
+from taichi_vision.taichi_algorithm import aot_api as ta_aot
 
 
 def generate_siemens_star(size=512, spokes=32):

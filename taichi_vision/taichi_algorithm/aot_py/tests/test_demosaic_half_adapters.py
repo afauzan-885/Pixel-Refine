@@ -1,12 +1,13 @@
 """CPU parity gates for fused Hamilton/ARM 2x2 auxiliary demosaic paths."""
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import unittest
 
 import numpy as np
 
-import taichi_vision.taichi_aot as taichi_aot
+from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
 
 class DemosaicHalfAdapterTests(unittest.TestCase):
@@ -29,7 +30,7 @@ class DemosaicHalfAdapterTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         # Do not leak an explicit block policy into another test module.
-        taichi_aot.set_block_mode(False, threshold_bytes=512 * 1024 * 1024)
+        _ti_rt.set_block_mode(False, threshold_bytes=512 * 1024 * 1024)
 
     def _params(self, cfa):
         return {
@@ -81,11 +82,11 @@ class DemosaicHalfAdapterTests(unittest.TestCase):
                     if "rgb_half_res" in operation:
                         args.append(self.cmatrix)
                     args.extend((*self.levels, *cfa))
-                    taichi_aot.set_block_mode(
+                    _ti_rt.set_block_mode(
                         False, size=(4, 6), threshold_bytes=0
                     )
                     full = getattr(taichi_aot, operation)(*args)
-                    taichi_aot.set_block_mode(
+                    _ti_rt.set_block_mode(
                         True, size=(4, 6), threshold_bytes=0
                     )
                     tiled = getattr(taichi_aot, operation)(*args)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Protocol, TypeVar
+from typing import Any, Callable, Mapping, Protocol, TypeVar
 
 
 TReference = TypeVar("TReference")

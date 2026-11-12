@@ -3,7 +3,7 @@ Taichi-SfM (EXPERIMENTAL): End-to-End Structure-from-Motion Engine
 ===================================================
 Pipeline terpadu Structure-from-Motion (SfM) GPU-accelerated di Taichi.
 Menyediakan pemanggilan API sederhana:
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
     result = taichi_aot.sfm(images)
 
 Fitur:

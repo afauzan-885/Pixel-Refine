@@ -19,7 +19,7 @@ if project_root not in sys.path:
 
 
 # Import the Generic AOT Engine and Buffer Pool
-from taichi_vision.taichi_aot.engine import (
+from taichi.aot_engine import (
     AOTEngine,
     TaichiGPUBuffer,
     InputArray,
@@ -31,7 +31,7 @@ from taichi_vision.taichi_aot.engine import (
     backend_info,
     engine,
 )
-from taichi_vision.taichi_aot.backend_config import (
+from taichi import (
     BackendConfig,
     CANONICAL_BACKENDS,
     GPU_BACKENDS,
@@ -39,24 +39,24 @@ from taichi_vision.taichi_aot.backend_config import (
     normalize_vendor,
     backend_env,
 )
-from taichi_vision.taichi_aot.capabilities import (
+from taichi import (
     BackendCapabilities,
     classify_device,
     backend_candidates,
 )
-from taichi_vision.taichi_aot.backend_manager import (
+from taichi import (
     BackendManager,
     BackendDecision,
     preflight_backend,
 )
-from taichi_vision.taichi_aot.artifact_targets import (
+from taichi import (
     TargetSpec,
     detect_target,
     resolve_artifact,
     load_target_manifest,
 )
-from taichi_vision.taichi_aot.aot_module_loader import AOTModuleLoader
-from taichi_vision.taichi_aot.engine import enable_experiment_mode, is_experiment_mode
+from taichi import AOTModuleLoader
+from taichi import enable_experiment_mode, is_experiment_mode
 from taichi_vision.taichi_algorithm.demosaicing.demosaic_runtime import (
     DemosaicBufferSet,
 )
@@ -64,18 +64,18 @@ from taichi_vision.taichi_algorithm.demosaicing.demosaic_graph_manifest import (
     resolve_graph_name,
     registered_graph_names,
 )
-from taichi_vision.taichi_aot.engine import (
+from taichi.aot_engine import (
     INTER_CUBIC,
     INTER_LINEAR,
     INTER_NEAREST,
     INTER_AREA,
 )
-from taichi_vision.taichi_aot.engine import (
+from taichi.aot_engine import (
     COLOR_BGR2GRAY,
     COLOR_RGB2GRAY,
     COLOR_GRAY2BGR,
 )
-from taichi_vision.taichi_aot.block import (
+from taichi.block import (
     BlockGrid,
     BlockRecord,
     BlockState,
@@ -116,7 +116,7 @@ from taichi_vision.taichi_aot.block import (
     block_coverage_report,
     checksum,
 )
-from taichi_vision.taichi_aot.block_adapters import (
+from taichi.block_adapters import (
     PartitionContext,
     LOW_RISK_ADAPTER_OPERATIONS,
     LOCAL_STENCIL_ADAPTER_OPERATIONS,
@@ -217,7 +217,7 @@ from taichi_vision.taichi_aot.block_adapters import (
     verify_map_reduce_parity,
     optical_flow_partition_gap_report,
 )
-from taichi_vision.taichi_aot.native_evidence import (
+from taichi.native_evidence import (
     NativePartitionEvidence,
     register_native_partition_evidence,
     lookup_native_partition_evidence,
@@ -234,7 +234,7 @@ from taichi_vision.taichi_aot.native_evidence import (
     register_verified_native_opengl_partition_evidence,
     register_verified_native_opengl_intel_evidence,
 )
-from taichi_vision.taichi_aot.generic_block import (
+from taichi.generic_block import (
     BlockComputeSpec,
     BlockTileContext,
     BlockPlanUnavailable,
@@ -245,7 +245,7 @@ from taichi_vision.taichi_aot.generic_block import (
     run_generic_blocks,
     run_registered_block_adapter,
 )
-from taichi_vision.taichi_aot.compute_block import (
+from taichi.compute_block import (
     ComputeBlockAnalysis,
     ComputeBlockMetadata,
     analyze_compute_block_source,
@@ -253,11 +253,11 @@ from taichi_vision.taichi_aot.compute_block import (
     current_compute_block_scope,
     get_compute_block_registry,
 )
-from taichi_vision.taichi_aot.pipeline_scheduler import (
+from taichi.pipeline_scheduler import (
     PipelineStage,
     run_block_pipeline,
 )
-from taichi_vision.taichi_aot.auto_pipeline import (
+from taichi.auto_pipeline import (
     AutoPipelinePlanner,
     GraphSpec,
     PipelinePlan,
@@ -3753,7 +3753,7 @@ def median_filter(src, return_gpu=False, dst=None, **kwargs):
     ):
         # RGB graph is enabled only after an isolated child-process probe.  A
         # crashing Intel driver therefore cannot take down the application.
-        from taichi_vision.taichi_aot.capabilities import opengl_native_probe
+        from taichi.capabilities import opengl_native_probe
 
         native_median_supported = opengl_native_probe("median")
     if np.dtype(median_dtype) != np.dtype(np.float32) or (
@@ -5074,11 +5074,7 @@ def _remap_with_flow_impl(src, flow, full_h, full_w, return_gpu=False, dst=None,
                 is_vector=False,
                 host_accessible=True,
             )
-            from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
-
-            _LIB.write_to_gpu_buffer(
-                _RUNTIME, flow_buf.handle, flow_array.ctypes.data, flow_buf.nbytes
-            )
+            flow_buf.write(flow_array)
             output_shape = (
                 (full_h, full_w, source.shape[2])
                 if source.ndim == 3
@@ -5307,19 +5303,12 @@ def _remap_with_flow_impl(src, flow, full_h, full_w, return_gpu=False, dst=None,
         flow_buf = engine.allocate(
             flow.shape, dtype=np.float32, is_vector=False, host_accessible=True
         )
-        from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
-
         flow_c = (
             flow
             if (isinstance(flow, np.ndarray) and flow.flags.c_contiguous and flow.dtype == np.float32)
             else np.ascontiguousarray(flow, dtype=np.float32)
         )
-        _LIB.write_to_gpu_buffer(
-            _RUNTIME,
-            flow_buf.handle,
-            flow_c.ctypes.data,
-            flow_buf.nbytes,
-        )
+        flow_buf.write(flow_c)
 
     h_src, w_src = src_buf.shape[:2]
     h_flow, w_flow = flow_buf.shape[:2]
@@ -12076,7 +12065,7 @@ def inpaint(src, mask, inpaint_radius=3, flags=0, return_gpu=False):
     Taichi AOT Inpainting.
     Dispatches individual kernels in sequence (distance transform, dilate, fill).
     """
-    from taichi_vision.taichi_aot.capabilities import opengl_native_probe
+    from taichi.capabilities import opengl_native_probe
 
     src_shape = getattr(src, "shape", ())
     src_dtype = getattr(src, "dtype", np.float32)
@@ -12999,7 +12988,7 @@ def guided_filter_aot(guide, src, radius=8, epsilon=1e-4, return_gpu=False):
     if radius_value < 0 or radius_value >= (1 << 24) or radius_value != radius:
         raise ValueError("radius must be an integer in the exact float32 range")
 
-    from taichi_vision.taichi_aot.capabilities import opengl_native_probe
+    from taichi.capabilities import opengl_native_probe
 
     if engine.arch.lower() in ("opengl", "gles") and (
         os.environ.get("PIXEL_REFINE_AOT_NATIVE_GUIDED", "1") != "1"
@@ -13411,7 +13400,7 @@ def seamless_clone_aot(
     return_gpu=False,
 ):
     """AOT Seamless Cloning (Poisson Image Editing)."""
-    from taichi_vision.taichi_aot.capabilities import opengl_native_probe
+    from taichi.capabilities import opengl_native_probe
 
     src_shape = getattr(src, "shape", ())
     dst_shape = getattr(dst_img, "shape", ())
@@ -14498,7 +14487,7 @@ def _pipeline_graph_specs(
     """
     names = tuple(str(name) for name in names)
     try:
-        from taichi_vision.taichi_aot.auto_pipeline import GraphSpec
+        from taichi.auto_pipeline import GraphSpec
 
         shape_tuple = tuple(max(1, int(value)) for value in shape)
         pixels = max(1, int(np.prod(shape_tuple, dtype=np.int64)))

@@ -23,7 +23,6 @@ def _load_stack():
         "taichi_vision": root / "taichi_vision",
         "taichi_vision.taichi_algorithm": root / "taichi_vision" / "taichi_algorithm",
         "taichi_vision.taichi_algorithm.compression": root / "taichi_vision" / "taichi_algorithm" / "compression",
-        "taichi_vision.taichi_aot": root / "taichi_vision" / "taichi_aot",
     }
     for name, path in package_paths.items():
         package = types.ModuleType(name)
@@ -40,7 +39,7 @@ def _load_stack():
         return module
 
     compression = root / "taichi_vision" / "taichi_algorithm" / "compression"
-    abi = load("taichi_vision.taichi_aot.native_codec_abi", root / "taichi_vision" / "taichi_aot" / "native_codec_abi.py")
+    abi = load("taichi_vision.taichi_algorithm.compression.native_codec_abi", root / "taichi_vision" / "taichi_algorithm" / "compression" / "native_codec_abi.py")
     dispatch = load("taichi_vision.taichi_algorithm.compression.native_dispatch", compression / "native_dispatch.py")
     prep = load("taichi_vision.taichi_algorithm.compression.native_video_prep", compression / "native_video_prep.py")
     verify = load("taichi_vision.taichi_algorithm.compression.verify_native_video_prep", compression / "verify_native_video_prep.py")

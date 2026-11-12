@@ -17,7 +17,7 @@ Usage (JIT):
     result = hdr_fuse(frames, noise_sigmas=None)
 
 Usage (AOT):
-    import taichi_vision.taichi_aot as ta
+    from taichi_vision.taichi_algorithm import aot_api as ta
     result = ta.hdr_fusion(frames)
 """
 

@@ -1,7 +1,8 @@
+﻿import taichi.aot_engine as _ti_rt
 import os
 import numpy as np
-from taichi_vision import taichi_aot
-from taichi_vision.taichi_aot import get_engine
+from taichi_vision import algorithm as taichi_aot
+from taichi.aot_engine import get_engine
 
 
 def _resolve_aot_asset(name, *, engine=None):
@@ -24,11 +25,11 @@ def _resolve_aot_asset(name, *, engine=None):
     # spatial crop dispatch, which looks like a lifecycle failure.
     arch = str(getattr(engine, "arch", "cpu")).lower()
     try:
-        from taichi_vision.taichi_aot.artifact_targets import (
+        from taichi.artifact_targets import (
             detect_target,
             resolve_artifact,
         )
-        from taichi_vision.llvm20_runtime_paths import tcm_root as staged_tcm_root
+        from taichi.runtime_paths import tcm_root as staged_tcm_root
 
         target = detect_target(
             backend=arch,
@@ -65,7 +66,7 @@ def _resolve_aot_asset(name, *, engine=None):
             )
             if resolved is not None:
                 return os.path.abspath(str(resolved))
-        from taichi_vision.llvm20_runtime_paths import application_assets_root
+        from taichi.runtime_paths import application_assets_root
 
         app_assets = application_assets_root(target.target_id)
         if app_assets is not None:
@@ -171,7 +172,7 @@ def _natural_tonemap_analysis_gpu(image, *, input_dtype=None):
     alignment/spatial analysis may use the display-like tone-mapped values,
     while fusion must continue to consume the original linear samples.
     """
-    from taichi_vision.taichi_aot import TaichiGPUBuffer
+    from taichi.aot_engine import TaichiGPUBuffer
 
     if isinstance(image, TaichiGPUBuffer):
         source = image.to_numpy()
@@ -197,7 +198,7 @@ def _natural_tonemap_analysis_gpu(image, *, input_dtype=None):
         **CALCULATION_TONE_MAPPING_PARAMS,
     )
     mapped = np.ascontiguousarray(np.clip(np.asarray(mapped, dtype=np.float32), 0.0, 1.0))
-    return taichi_aot.upload(mapped, force_8bit=False)
+    return _ti_rt.upload(mapped, force_8bit=False)
 
 
 def prepare_pyramid_aot(image_gpu, num_layers=3):
@@ -221,8 +222,8 @@ def prepare_reference_for_alignment(
     blur_work_gpu=None,
     num_layers=3,
 ):
-    """Prepare reference image pyramid on GPU. Returns (l0, l1, l2, ...) — caller must destroy all."""
-    from taichi_vision.taichi_aot import (
+    """Prepare reference image pyramid on GPU. Returns (l0, l1, l2, ...) â€” caller must destroy all."""
+    from taichi.aot_engine import (
         TaichiGPUBuffer,
     )
 
@@ -236,7 +237,7 @@ def prepare_reference_for_alignment(
     if is_raw_sensor:
         # FUSED RAW OPTIMIZATION: Decode Bayer directly to Grayscale 1-channel (Green-only fast luma)
         # Avoids allocating massive RGB intermediate VRAM buffers!
-        ref_gpu = taichi_aot.upload(reference_image_float, force_8bit=False)
+        ref_gpu = _ti_rt.upload(reference_image_float, force_8bit=False)
         # Get active camera parameters from engine if available
         engine = get_engine()
         wb_r = getattr(engine, "active_wb_r", 1.0)
@@ -276,7 +277,7 @@ def prepare_reference_for_alignment(
         if input_is_gpu_buf:
             ref_final = reference_image_float
         else:
-            ref_gpu = taichi_aot.upload(reference_image_float, force_8bit=True)
+            ref_gpu = _ti_rt.upload(reference_image_float, force_8bit=True)
             ref_final = ref_gpu
 
         if is_linear_mode:
@@ -320,8 +321,8 @@ def prepare_comparison_for_alignment(
     blur_work_gpu=None,
     num_layers=3,
 ):
-    """Prepare comparison image pyramid on GPU. Returns (l0, l1, l2, ...) — caller must destroy all."""
-    from taichi_vision.taichi_aot import (
+    """Prepare comparison image pyramid on GPU. Returns (l0, l1, l2, ...) â€” caller must destroy all."""
+    from taichi.aot_engine import (
         TaichiGPUBuffer,
     )
 
@@ -335,7 +336,7 @@ def prepare_comparison_for_alignment(
     if is_raw_sensor:
         # FUSED RAW OPTIMIZATION: Decode Bayer directly to Grayscale 1-channel (Green-only fast luma)
         # Avoids allocating massive RGB intermediate VRAM buffers!
-        comp_gpu = taichi_aot.upload(comp_image, force_8bit=False)
+        comp_gpu = _ti_rt.upload(comp_image, force_8bit=False)
         # Get active camera parameters from engine if available
         engine = get_engine()
         wb_r = getattr(engine, "active_wb_r", 1.0)
@@ -375,7 +376,7 @@ def prepare_comparison_for_alignment(
         if input_is_gpu_buf:
             comp_normalized = comp_image
         else:
-            comp_input = taichi_aot.upload(comp_image, force_8bit=True)
+            comp_input = _ti_rt.upload(comp_image, force_8bit=True)
             comp_normalized = normalize_image_gpu(comp_input, dtype=ref_dtype)
             if comp_input is not comp_normalized:
                 comp_input.release()
@@ -415,7 +416,7 @@ def prepare_reference_aot(
     reference_image_float, is_linear_mode, proxy_scale, work_res_h, work_res_w
 ):
     """Prepare reference image on GPU for merging. Returns (ref_work_res_pass2_gpu, ref_noise_sigma)."""
-    ref_gpu = taichi_aot.upload(reference_image_float)
+    ref_gpu = _ti_rt.upload(reference_image_float)
     ref_final = ref_gpu
 
     if is_linear_mode:
@@ -462,13 +463,13 @@ def prepare_frame_aot(
     ref_image_w,
 ):
     """Prepare comparison frame on GPU for merging. Returns (curr_full_gpu, curr_work_gray_gpu)."""
-    from taichi_vision.taichi_aot.engine import (
+    from taichi.aot_engine import (
         TaichiGPUBuffer,
     )
 
     input_is_gpu_buf = isinstance(img_orig, TaichiGPUBuffer)
 
-    uploaded = taichi_aot.upload(img_orig)
+    uploaded = _ti_rt.upload(img_orig)
     we_own_uploaded = not input_is_gpu_buf
 
     if is_linear_mode:

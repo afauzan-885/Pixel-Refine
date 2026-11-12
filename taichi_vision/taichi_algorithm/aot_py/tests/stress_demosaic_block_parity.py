@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     from taichi_vision.taichi_algorithm import aot_api as api
-    from taichi_vision.taichi_aot import engine
+    from taichi.aot_engine import engine
 
     method = str(args.method).strip().lower()
     # Every demosaic family that ships a block path must be parity-checked here;

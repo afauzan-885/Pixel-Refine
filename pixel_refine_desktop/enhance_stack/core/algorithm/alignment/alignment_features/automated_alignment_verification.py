@@ -10,9 +10,9 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from taichi_vision.taichi_aot.engine import AOTEngine
+from taichi.aot_engine import AOTEngine
 from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import taichi_bridge
-from taichi_vision import taichi_aot
+from taichi_vision import algorithm as taichi_aot
 
 def calculate_ssim(img1, img2):
     """Menghitung SSIM (Structural Similarity Index) secara manual untuk kontrol yang ketat"""

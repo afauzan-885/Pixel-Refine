@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Import only after the caller has selected the backend environment.
     from taichi_vision.taichi_algorithm import aot_api as api
-    from taichi_vision.taichi_aot import engine
+    from taichi.aot_engine import engine
 
     operations = _normalize_operations(args.operations.split(","))
     sizes = tuple(float(value) for value in args.sizes.split(",") if value.strip())

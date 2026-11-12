@@ -165,7 +165,7 @@ def test_hdr_path_pipeline_runs_alignment_and_fusion_through_recipe(monkeypatch,
 def test_noise_gpu_routing_respects_scalar_and_vector_graph_contract(monkeypatch, shape, graph):
     import importlib
 
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from taichi_vision.taichi_algorithm import aot_api
 
     noise = importlib.import_module("taichi_vision.taichi_algorithm.enhancement.estimate_noise")

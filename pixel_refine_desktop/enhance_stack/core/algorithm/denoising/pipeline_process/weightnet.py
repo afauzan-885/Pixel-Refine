@@ -100,7 +100,7 @@ def _select_multi_patch_candidates(
             search_candidate_count=0,
         )
 
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     offset_array = np.ascontiguousarray(
         [(int(offset.dx_proxy), int(offset.dy_proxy)) for offset in offsets],

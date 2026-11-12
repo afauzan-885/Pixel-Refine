@@ -1,3 +1,4 @@
+import taichi.aot_engine as _ti_rt
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import os
 import gc
@@ -167,14 +168,15 @@ def _hann_reconstruction_available(native_splat):
     here instead of letting a dispatch fail in the middle of a burst.  Callers
     fall back to the established same-backend block path.
     """
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
+    import taichi.aot_engine as _ti_rt
     from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
         _resolve_spatial_tcm,
         _tcm_graph_available,
     )
 
     try:
-        spatial_tcm = _resolve_spatial_tcm(taichi_aot.engine)
+        spatial_tcm = _resolve_spatial_tcm(_ti_rt.engine)
     except Exception as exc:
         return False, f"spatial TCM unresolved ({exc})"
     for graph in ("accumulate_tile_hann", "clear_f32_3d", "clear_f32_2d"):
@@ -471,7 +473,7 @@ class SplatSRAlgorithm:
         """Return ``(lk_flow, warped_target)`` using taichi_vision directly."""
         if stop_requested and stop_requested():
             return None
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
 
         reference = np.ascontiguousarray(reference, dtype=np.float32)
@@ -536,7 +538,7 @@ class SplatSRAlgorithm:
                 return_gpu=False,
             )
         except Exception as exc:
-            active_arch = str(getattr(taichi_aot.engine, "arch", "")).lower()
+            active_arch = str(getattr(_ti_rt.engine, "arch", "")).lower()
             if active_arch != "cpu":
                 raise
             # The CPU remap artifact may be quarantined after a runtime rebuild.
@@ -625,7 +627,7 @@ class SplatSRAlgorithm:
         """
         if stop_requested and stop_requested():
             return None
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         reference = np.ascontiguousarray(reference_gray, dtype=np.float32)
         target = np.ascontiguousarray(target_gray, dtype=np.float32)
@@ -805,7 +807,7 @@ class SplatSRAlgorithm:
         # Keep the resident-pipeline dual-buffer contract: v1 is an analysis
         # view for alignment/WeightNet only; the linear splat stack remains
         # untouched and is the sole reconstruction source.
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         def analysis_rgb(frame):
             frame = np.asarray(frame, dtype=np.float32)
@@ -1123,7 +1125,7 @@ class SplatSRAlgorithm:
                 hann_block = int(hann_block_size) if hann_block_size is not None else 0
                 hann_ov = float(hann_overlap) if hann_overlap is not None else 0.5
                 try:
-                    _mem = taichi_aot.get_memory_status(force=True)
+                    _mem = _ti_rt.get_memory_status(force=True)
                     _limit = int(_mem.get("pipeline_resident_limit", 0) or 0)
                 except Exception:
                     _limit = 0
@@ -1295,7 +1297,7 @@ class SplatSRAlgorithm:
                     )
             except Exception as native_error:
                 try:
-                    from taichi_vision.taichi_aot import get_engine
+                    from taichi import get_engine
 
                     active_backend = str(getattr(get_engine(), "arch", "cpu")).lower()
                 except Exception:
@@ -1508,7 +1510,7 @@ class SplatSRAlgorithm:
             )
         except Exception as native_error:
             try:
-                from taichi_vision.taichi_aot import get_engine
+                from taichi import get_engine
 
                 active_backend = str(getattr(get_engine(), "arch", "cpu")).lower()
             except Exception:
@@ -1625,7 +1627,7 @@ class SplatSRAlgorithm:
             num_frames = len(lr_frames)
 
             # 1. Estimate real sub-pixel shifts using Taichi AOT Phase Correlation
-            from taichi_vision.taichi_aot import phase_correlation
+            from taichi_vision.taichi_algorithm import phase_correlation
 
             if update_progress:
                 update_progress(3, "Estimating sub-pixel shifts...")
@@ -1837,7 +1839,7 @@ def _load_mfdenoiser_frames(image_paths, stop_requested=None, update_progress=No
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine.weightnet_inference import (
         load_rgb_linear_image,
     )
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     frames = []
     target_shape = None

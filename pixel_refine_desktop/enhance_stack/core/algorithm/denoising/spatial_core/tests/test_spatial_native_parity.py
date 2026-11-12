@@ -8,6 +8,7 @@ backend/device/shape/dtype configuration.  Passing this test does not by
 itself promote the global production gate; promotion requires the documented
 matrix of target devices and parameters.
 """
+import taichi.aot_engine as _ti_rt
 
 import os
 
@@ -27,10 +28,10 @@ def test_native_spatial_block_matches_same_backend_full_frame(monkeypatch):
     if not arch:
         pytest.skip("set PIXEL_REFINE_AOT_ARCH explicitly for native evidence")
 
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     import pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.spatial_fusion as spatial_fusion
 
-    engine = taichi_aot.engine
+    engine = _ti_rt.engine
     module_path = spatial_fusion.process_in_gpu.__module__
     assert module_path.endswith("spatial_pipeline")
 

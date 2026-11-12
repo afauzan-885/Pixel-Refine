@@ -508,7 +508,7 @@ def raw_optical_flow(
     current_guide = guide(current)
     default_runner = flow_runner is None
     if flow_runner is None:
-        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
         flow_runner = taichi_aot.farneback_flow
     previous_guide, current_guide = _prepare_flow_inputs(
@@ -574,7 +574,7 @@ def raw_optical_flow_dng(
     )
     default_runner = flow_runner is None
     if flow_runner is None:
-        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
         flow_runner = taichi_aot.farneback_flow
     previous_guide, current_guide = _prepare_flow_inputs(

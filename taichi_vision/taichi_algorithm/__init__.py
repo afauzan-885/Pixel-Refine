@@ -6,7 +6,7 @@ import numpy as np
 import os
 import importlib
 import builtins
-from taichi_vision.config import AOT_MODE
+from taichi_vision.taichi_algorithm.config import AOT_MODE
 
 ti = None
 if AOT_MODE == "0":
@@ -1421,7 +1421,7 @@ def calcOpticalFlowFarneback(
     dst=None,
 ):
     """OpenCV-style dense Farneback optical flow backed by taichi_aot."""
-    from taichi_vision import taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
     if preset != "opencv" or return_diagnostics:
         raise ValueError("Taichi AOT Farneback supports the OpenCV preset without diagnostics")
@@ -1905,3 +1905,29 @@ __all__ = [
     "remap_with_flow",
     "BufferSession",
 ]
+
+# Seamless AOT API forwarding for unified algorithm access
+from .aot_api import (
+    box_filter,
+    akaze,
+    akaze as AKAZE,
+    cvtColor,
+    resize,
+    rgb2gray,
+    bgr2gray,
+    remap,
+    remap_with_flow,
+    demosaic,
+    gaussian_blur,
+    median_filter,
+    sobel,
+    laplacian,
+    guided_filter_aot,
+    inpaint_aot,
+    clahe_aot,
+    canny_aot,
+)
+
+
+# Explicit export of the complete algorithm surface (no lazy fallback).
+from .aot_api import *  # noqa: F401,F403,E402

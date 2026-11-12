@@ -33,7 +33,7 @@ def main():
     args = _parse_args()
     from taichi_vision.taichi_algorithm.aot_api import cvtColor, COLOR_BGR2GRAY
     from taichi_vision.taichi_algorithm.buffer_session import BufferSession
-    from taichi_vision.taichi_aot.engine import (
+    from taichi.aot_engine import (
         backend_info,
         engine,
         get_backend_name,

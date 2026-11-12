@@ -13,7 +13,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[6]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from taichi_vision.taichi_aot.artifact_targets import detect_target
+from taichi.artifact_targets import detect_target
 from taichi_vision.taichi_algorithm.spatial_fusion.compile_spde_mr_hdr_tcm import (
     compile_spde_mr_hdr_tcm,
 )

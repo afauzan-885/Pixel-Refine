@@ -1,6 +1,7 @@
 """Bounded native RGB splatting with one RAM-backed HR accumulator."""
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 from contextlib import contextmanager
 import os
@@ -261,7 +262,7 @@ class DiskBackedRGB(TiledRGBResult):
 
 def _packed_view(buffer, shape):
     """Use the start of an owned scratch buffer as a smaller packed ndarray."""
-    from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+    from taichi import TaichiGPUBuffer
 
     shape = tuple(int(value) for value in shape)
     size_bytes = int(np.prod(shape)) * np.dtype(buffer.dtype).itemsize
@@ -290,7 +291,8 @@ class TiledHannAccumulator:
         overlap=0.25, radius=2.0, sigma=0.85, check_cancelled=None, asset_dir=None,
         backing_factory=RamAccumulatorBacking,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
+        import taichi.aot_engine as _ti_rt
         from .spatial_splat_runtime import SpatialSplatAOT, _force_host_visible
         from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
             _tcm_graph_available,
@@ -300,12 +302,12 @@ class TiledHannAccumulator:
         if self.reference.ndim != 3 or self.reference.shape[2] != 3:
             raise ValueError("tiled Splat SR requires linear RGB reference")
         self.session = session
-        self.engine = taichi_aot.engine
+        self.engine = _ti_rt.engine
         backend = str(getattr(self.engine, "arch", "cpu")).lower()
         backend = "opengl" if backend == "gles" else backend
         if asset_dir is None:
-            from taichi_vision.taichi_aot.artifact_targets import detect_target
-            from taichi_vision.llvm20_runtime_paths import application_assets_root
+            from taichi.artifact_targets import detect_target
+            from taichi.runtime_paths import application_assets_root
 
             target = detect_target(
                 backend=backend,
@@ -372,7 +374,7 @@ class TiledHannAccumulator:
                 yield y0, min(self.hr_h, y0 + self.block_size), x0, min(self.hr_w, x0 + self.block_size)
 
     def add_frame(self, frame_rgb, flow, confidence):
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi import TaichiGPUBuffer
 
         if isinstance(confidence, TaichiGPUBuffer):
             with self.session.borrowed(confidence):
@@ -380,8 +382,8 @@ class TiledHannAccumulator:
         return self._add_frame(frame_rgb, flow, confidence)
 
     def _add_frame(self, frame_rgb, flow, confidence):
-        from taichi_vision import taichi_aot
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi_vision import algorithm as taichi_aot
+        from taichi import TaichiGPUBuffer
         from .spatial_splat_runtime import SessionHannAccumulator, _force_host_visible
 
         if self.closed or self.finalized:
@@ -475,7 +477,7 @@ class TiledHannAccumulator:
         return tiles
 
     def _fallback_tile(self, y0, y1, x0, x1):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         sy0, sx0 = max(0, y0 // self.scale - 2), max(0, x0 // self.scale - 2)
         sy1 = min(self.lr_h, (y1 - 1) // self.scale + 3)

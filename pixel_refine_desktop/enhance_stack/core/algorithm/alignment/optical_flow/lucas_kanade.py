@@ -1,3 +1,4 @@
+﻿import taichi.aot_engine as _ti_rt
 def _parse_bool(value, default=True):
     if value is None:
         return default
@@ -103,7 +104,7 @@ LUCAS_KANADE_CPU_PRESETS = LUCAS_KANADE_PRESETS
 
 def _allocate_float_buffer_like(taichi_aot, image, host_accessible=False):
     is_color = image.ndim == 3
-    return taichi_aot.engine.allocate(
+    return _ti_rt.engine.allocate(
         image.shape,
         dtype=np.float32,
         is_vector=is_color,
@@ -263,7 +264,8 @@ class LucasKanade:
     @staticmethod
     def _vram_cleanup(reason="", *, clear_pool=True):
         try:
-            from taichi_vision import taichi_aot
+            from taichi_vision import algorithm as taichi_aot
+            import taichi.aot_engine as _ti_rt
 
             engine = getattr(taichi_aot, "engine", None)
             if engine is not None:
@@ -283,8 +285,8 @@ class LucasKanade:
         }
 
     def _init_tile_buffer(self, reference, tile, config=None, reuse_reference=None):
-        from taichi_vision import taichi_aot
-        from taichi_vision.taichi_aot import get_engine
+        from taichi_vision import algorithm as taichi_aot
+        from taichi.aot_engine import get_engine
 
         engine = get_engine()
         rx0, ry0, rx1, ry1 = tile["roi"]
@@ -299,13 +301,13 @@ class LucasKanade:
                 ref_gray_gpu = ref_roi
         else:
             if ref_roi.ndim == 3:
-                ref_color_gpu = taichi_aot.upload(
+                ref_color_gpu = _ti_rt.upload(
                     np.ascontiguousarray(ref_roi, dtype=np.float32), is_vector=True
                 )
                 ref_gray_gpu = taichi_aot.cvtColor(ref_color_gpu, taichi_aot.COLOR_RGB2GRAY)
                 ref_color_gpu.release()
             else:
-                ref_gray_gpu = taichi_aot.upload(
+                ref_gray_gpu = _ti_rt.upload(
                     np.ascontiguousarray(ref_roi, dtype=np.float32), is_vector=False
                 )
         is_color = reference.ndim == 3
@@ -325,7 +327,7 @@ class LucasKanade:
             )
         else:
             hanning_cpu = np.ones((roi_h, roi_w), dtype=np.float32)
-        hanning_gpu = taichi_aot.upload(
+        hanning_gpu = _ti_rt.upload(
             hanning_cpu,
             is_vector=False,
         )
@@ -383,7 +385,7 @@ class LucasKanade:
             "target_host": np.empty(shape, dtype=np.float32),
             "target_gray_host": np.empty((roi_h, roi_w), dtype=np.float32),
             "hanning_gpu": hanning_gpu,
-            "mask_gpu": taichi_aot.upload(mask_cpu, is_vector=False),
+            "mask_gpu": _ti_rt.upload(mask_cpu, is_vector=False),
             "warped_gpu": engine.allocate(
                 shape, dtype=np.float32, is_vector=is_color,
                 vector_dim=3 if is_color else 1,
@@ -500,7 +502,7 @@ class LucasKanade:
 
     def _align_frame_opengl_native(self, reference, target, config,
                                    matching_reference=None, matching_target=None):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         matching_reference = reference if matching_reference is None else matching_reference
         matching_target = target if matching_target is None else matching_target
         reference_gray = to_flow_gray_u8(matching_reference).astype(np.float32, copy=False)
@@ -534,8 +536,8 @@ class LucasKanade:
         matching_target = target if matching_target is None else matching_target
 
         try:
-            from taichi_vision import taichi_aot
-            if str(getattr(taichi_aot.engine, "arch", "")).lower() == "opengl":
+            from taichi_vision import algorithm as taichi_aot
+            if str(getattr(_ti_rt.engine, "arch", "")).lower() == "opengl":
                 return self._align_frame_opengl_native(
                     reference, target, config,
                     matching_reference=matching_reference,
@@ -562,14 +564,14 @@ class LucasKanade:
             )
 
         try:
-            from taichi_vision import taichi_aot
+            from taichi_vision import algorithm as taichi_aot
 
-            with taichi_aot.engine.reserve_device_execution(self.DEVICE_RESERVATION):
+            with _ti_rt.engine.reserve_device_execution(self.DEVICE_RESERVATION):
                 for module_name in self.GPU_MODULES:
                     taichi_aot._mod(module_name)
-                taichi_aot.engine.sync()
+                _ti_rt.engine.sync()
                 if not bool(config.get("retain_native_pool", False)):
-                    taichi_aot.engine.buffer_pool.clear()
+                    _ti_rt.engine.buffer_pool.clear()
                 res = self._align_frame_gpu_flow_remap(
                     reference,
                     target,
@@ -658,7 +660,7 @@ class LucasKanade:
         matching_target=None,
         return_gpu=False,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         t_total = time.perf_counter()
         profile = {
@@ -713,7 +715,7 @@ class LucasKanade:
 
         pending_stitch = []
         pending_stitch_bytes = 0
-        device_budget = taichi_aot.engine.get_device_block_cache().max_bytes
+        device_budget = _ti_rt.engine.get_device_block_cache().max_bytes
         stitch_batch_budget = max(1, device_budget // 2)
 
         def flush_stitch_batch():
@@ -721,7 +723,7 @@ class LucasKanade:
             if not pending_stitch:
                 return
             fence_start = time.perf_counter()
-            taichi_aot.engine.sync()
+            _ti_rt.engine.sync()
             profile["stitch"] += time.perf_counter() - fence_start
             for pending_idx in pending_stitch:
                 self._cleanup_tile_buffer(
@@ -809,7 +811,7 @@ class LucasKanade:
             profile["division_download"] = profile["division"] + profile["download"]
             return result
         finally:
-            taichi_aot.engine.sync()
+            _ti_rt.engine.sync()
             for pending_idx in list(pending_stitch):
                 self._cleanup_tile_buffer(
                     pending_idx,
@@ -821,10 +823,10 @@ class LucasKanade:
 
     @staticmethod
     def _build_tiles(width, height, config):
-        from taichi_vision import taichi_aot
-        from taichi_vision.taichi_aot.block import BlockGrid
+        from taichi_vision import algorithm as taichi_aot
+        from taichi.block import BlockGrid
 
-        runtime_config = taichi_aot.get_block_config()
+        runtime_config = _ti_rt.get_block_config()
         if not runtime_config.enabled:
             return [{
                 "roi": (0, 0, width, height),
@@ -852,14 +854,14 @@ class LucasKanade:
 
     @staticmethod
     def _create_gpu_accumulators(target):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         is_color = target.ndim == 3
-        accumulator = taichi_aot.upload(
+        accumulator = _ti_rt.upload(
             np.zeros(target.shape, dtype=np.float32),
             is_vector=is_color,
         )
-        weights = taichi_aot.upload(
+        weights = _ti_rt.upload(
             np.zeros(target.shape[:2], dtype=np.float32),
             is_vector=False,
         )
@@ -906,7 +908,7 @@ class LucasKanade:
         tile_idx=None,
         target_gray_full=None,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         rx0, ry0, rx1, ry1 = tile["roi"]
         ref_roi = reference[ry0:ry1, rx0:rx1]
@@ -920,8 +922,6 @@ class LucasKanade:
             warped_gpu = bufs["warped_gpu"]
             target_host = bufs["target_host"]
             target_gray_host = bufs["target_gray_host"]
-
-            from taichi_vision.taichi_aot.engine import _LIB, _RUNTIME
 
             t0 = time.perf_counter()
             target_gray_view = (
@@ -938,28 +938,18 @@ class LucasKanade:
                 color_elapsed = 0.0
             else:
                 np.copyto(target_host, target_roi_original, casting="unsafe")
-                _LIB.write_to_gpu_buffer(
-                    _RUNTIME,
-                    target_gpu.handle,
-                    target_host.ctypes.data,
-                    target_gpu.nbytes,
-                )
+                target_gpu._rust_buf.write_from_buffer(target_host)
                 color_elapsed = time.perf_counter() - t0
 
             t0 = time.perf_counter()
             if target_gray_view is not None:
                 np.copyto(target_gray_host, target_gray_view, casting="unsafe")
-                _LIB.write_to_gpu_buffer(
-                    _RUNTIME,
-                    target_gray_gpu.handle,
-                    target_gray_host.ctypes.data,
-                    target_gray_gpu.nbytes,
-                )
+                target_gray_gpu._rust_buf.write_from_buffer(target_gray_host)
             else:
                 target_gray_gpu = taichi_aot.cvtColor(target_gpu, taichi_aot.COLOR_RGB2GRAY)
             gray_elapsed = time.perf_counter() - t0
 
-            taichi_aot.engine.sync()
+            _ti_rt.engine.sync()
             if profile is not None:
                 profile["upload_color"] += color_elapsed
                 profile["upload_gray"] += gray_elapsed
@@ -972,9 +962,9 @@ class LucasKanade:
                 config,
                 reference_pyramid=bufs.get("reference_pyramid"),
             )
-            taichi_aot.engine.sync()
+            _ti_rt.engine.sync()
             if bool(config.get("conservative_vram", True)):
-                taichi_aot.engine.buffer_pool.clear()
+                _ti_rt.engine.buffer_pool.clear()
             if profile is not None:
                 profile["flow_calc"] += time.perf_counter() - t0
 
@@ -1004,7 +994,7 @@ class LucasKanade:
         flow_gpu = None
 
         try:
-            target_gpu = taichi_aot.upload(
+            target_gpu = _ti_rt.upload(
                 target_roi_original.astype(np.float32, copy=False),
                 is_vector=target_roi_original.ndim == 3,
             )
@@ -1012,13 +1002,13 @@ class LucasKanade:
             target_gray_cpu = to_flow_gray_u8(target_roi_original).astype(
                 np.float32, copy=False
             )
-            ref_gray_gpu = taichi_aot.upload(ref_gray_cpu, is_vector=False)
-            target_gray_gpu = taichi_aot.upload(target_gray_cpu, is_vector=False)
+            ref_gray_gpu = _ti_rt.upload(ref_gray_cpu, is_vector=False)
+            target_gray_gpu = _ti_rt.upload(target_gray_cpu, is_vector=False)
 
             indices = np.linspace(0.0, 1.0, 256, dtype=np.float32)
             s_curve = 0.5 - 0.5 * np.cos(np.pi * indices)
             lut_cpu = (1.0 - 0.50) * indices + 0.50 * s_curve
-            lut_gpu = taichi_aot.upload(lut_cpu, is_vector=False)
+            lut_gpu = _ti_rt.upload(lut_cpu, is_vector=False)
 
             ref_blur_gpu = taichi_aot.box_filter(ref_gray_gpu, kernel_size=5, return_gpu=True)
             target_blur_gpu = taichi_aot.box_filter(target_gray_gpu, kernel_size=5, return_gpu=True)
@@ -1040,14 +1030,14 @@ class LucasKanade:
                 return_gpu=True,
             )
 
-            taichi_aot.engine.sync()
+            _ti_rt.engine.sync()
 
             flow_gpu = self._calculate_flow_gpu_buffer(
                 ref_gray_enhanced,
                 target_gray_enhanced,
                 config,
             )
-            taichi_aot.engine.sync()
+            _ti_rt.engine.sync()
 
             roi_h, roi_w = ref_gray_gpu.shape[:2]
             warped_roi = taichi_aot.remap_with_flow(
@@ -1148,9 +1138,9 @@ class LucasKanade:
                 )
             valid_f[can_fill] = 1.0
 
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
-        compact_gpu = taichi_aot.upload(compact, is_vector=True, vector_dim=2)
+        compact_gpu = _ti_rt.upload(compact, is_vector=True, vector_dim=2)
         try:
             flow = taichi_aot.resize(
                 compact_gpu,

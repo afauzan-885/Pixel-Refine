@@ -25,7 +25,7 @@ class SplatSRAOTEngine:
 
     def __init__(self, lr_shape, hr_shape, num_frames, scale=2,
                  alpha=0.7, beta=0.01, btv_window=2):
-        from taichi_vision.taichi_aot import get_engine
+        from taichi import get_engine
         import ctypes
 
         self.scale = scale
@@ -44,7 +44,7 @@ class SplatSRAOTEngine:
 
         # Initialize engine and load TCM
         self._engine = get_engine()
-        from taichi_vision.llvm20_runtime_paths import application_assets_root
+        from taichi.runtime_paths import application_assets_root
 
         tcm_dir = application_assets_root("vulkan_x86_64_windows")
         if tcm_dir is None:

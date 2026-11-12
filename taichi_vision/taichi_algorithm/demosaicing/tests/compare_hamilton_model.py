@@ -62,7 +62,7 @@ def main(argv=None) -> int:
 
     os.environ["PIXEL_REFINE_AOT_ARCH"] = args.backend
     os.environ["AOT_ARCH"] = args.backend
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
     rng = np.random.default_rng(args.seed)
     bayer = rng.random((args.size, args.size), dtype=np.float32)

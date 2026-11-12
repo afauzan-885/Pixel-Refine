@@ -1,3 +1,4 @@
+﻿import taichi.aot_engine as _ti_rt
 import os
 
 os.environ["TI_ENABLE_CUDA_MALLOC_ASYNC"] = "0"
@@ -13,7 +14,8 @@ import onnxruntime as ort
 
 # Taichi AOT for GPU Farneback
 try:
-    import taichi_vision.taichi_aot as ta_aot
+    from taichi_vision import algorithm as ta_aot
+    import taichi.aot_engine as _ti_rt
 
     TAICHI_AOT_AVAILABLE = True
 except Exception:
@@ -229,13 +231,13 @@ def compute_flow_raft(
         session: ONNX session RAFT
         grid_rows, grid_cols: jumlah pembagian grid (vertikal x horizontal)
         model_input_size: resolusi model RAFT (H, W)
-        overlap_ratio: proporsi overlap antar tile (0–1)
+        overlap_ratio: proporsi overlap antar tile (0â€“1)
         progress_callback: callable(done_tiles, total_tiles) opsional
     Returns:
         final_flow: np.float32 [H, W, 2]
     """
     if session is None:
-        print("❌ Session RAFT tidak tersedia.")
+        print("âŒ Session RAFT tidak tersedia.")
         return None
 
     full_h, full_w, _ = ref_img.shape
@@ -258,7 +260,7 @@ def compute_flow_raft(
             coords.append((y_start, x_start, y_end, x_end))
 
     total_tiles = len(coords)
-    # print(f"🧩 Memproses grid {grid_rows}x{grid_cols} (total {total_tiles} tile)...")
+    # print(f"ðŸ§© Memproses grid {grid_rows}x{grid_cols} (total {total_tiles} tile)...")
 
     # --- Penampung hasil sementara ---
     final_flow = np.zeros((full_h, full_w, 2), dtype=np.float32)
@@ -268,7 +270,7 @@ def compute_flow_raft(
     # --- Proses tile satu per satu ---
     for tile_idx, (y_start, x_start, y_end, x_end) in enumerate(coords, 1):
         if stop_requested and stop_requested():
-            # print(f"⏹ Stop requested, tile {tile_idx}/{total_tiles} dihentikan")
+            # print(f"â¹ Stop requested, tile {tile_idx}/{total_tiles} dihentikan")
             return None
         try:
             # Ambil tile asli
@@ -293,7 +295,7 @@ def compute_flow_raft(
                 )
             )
             if flow_model_res is None:
-                print(f"⚠️ Gagal menghitung flow pada tile {tile_idx}/{total_tiles}")
+                print(f"âš ï¸ Gagal menghitung flow pada tile {tile_idx}/{total_tiles}")
                 continue
 
             flow_res, (y_start, x_start, y_end, x_end) = flow_model_res
@@ -318,10 +320,10 @@ def compute_flow_raft(
                 progress_callback(tile_idx, total_tiles)
 
         except Exception as e:
-            print(f"❌ Error tile {tile_idx}/{total_tiles}: {e}")
+            print(f"âŒ Error tile {tile_idx}/{total_tiles}: {e}")
 
     if successful_tiles == 0:
-        print("⚠️ RAFT gagal pada seluruh tile; flow tidak digunakan.")
+        print("âš ï¸ RAFT gagal pada seluruh tile; flow tidak digunakan.")
         return None
 
     # --- Normalisasi hasil gabungan ---
@@ -535,9 +537,9 @@ def save_aligned_image(
                 break
             counter += 1
 
-    # Don't konversi ke BGR — simpan langsung sebagai RGB
+    # Don't konversi ke BGR â€” simpan langsung sebagai RGB
     # Note: OpenCV imwrite uses BGR, but save_img here is expected to be BGR or handled accordingly.
-    # The original comment said "Jangan konversi ke BGR — simpan langsung sebagai RGB",
+    # The original comment said "Jangan konversi ke BGR â€” simpan langsung sebagai RGB",
     # but imwrite expects BGR. If the input is RGB, it will be saved with swapped channels.
     # We maintain original behavior but fix the naming.
     cv2.imwrite(output_path, save_img, [cv2.IMWRITE_JPEG_QUALITY, 98])
@@ -731,7 +733,7 @@ def _perform_alignment_flow_net(
     h5_file_handle=None,
 ):
     """Half-resolution 8-bit NanoFlow inference followed by original-data warp."""
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     if len(images) <= 1:
         return True
@@ -924,7 +926,7 @@ def perform_alignment_gpu(
             kwargs.get("h5_file_handle"),
         )
 
-    from taichi_vision.taichi_aot import get_engine
+    from taichi.aot_engine import get_engine
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
         taichi_bridge,
     )
@@ -993,7 +995,7 @@ def perform_alignment_gpu(
     try:
         # Definisikan GPU alignment task loop
         def _run_gpu_alignment_loop():
-            import taichi_vision.taichi_aot as taichi_aot
+            from taichi_vision import algorithm as taichi_aot
 
             file_dir = os.path.dirname(os.path.abspath(__file__))
             mod = None
@@ -1004,7 +1006,7 @@ def perform_alignment_gpu(
                     # ``farneback_flow_cpu.tcm`` names can silently select an
                     # incompatible bridge and are no longer the canonical
                     # desktop layout.
-                    from taichi_vision.taichi_aot.artifact_targets import (
+                    from taichi.artifact_targets import (
                         detect_target,
                         resolve_artifact,
                     )
@@ -1224,7 +1226,7 @@ def perform_alignment_gpu(
                                 h5_file_handle, f"image_{idx}", data, exif_data
                             )
                     except Exception as writer_err:
-                        print(f"⚠️ Error in background HDF5 writer thread: {writer_err}")
+                        print(f"âš ï¸ Error in background HDF5 writer thread: {writer_err}")
                     finally:
                         del data
                         write_queue.task_done()
@@ -1318,7 +1320,7 @@ def perform_alignment_gpu(
                         num_layers=n_layers,
                     )
 
-                    # 🚀 STEP 2: EKSEKUSI GRAF BESAR TAICHI (SUNTIKKAN SCALAR MAX SEARCH RADIUS & SCRATCH BUFFERS)
+                    # ðŸš€ STEP 2: EKSEKUSI GRAF BESAR TAICHI (SUNTIKKAN SCALAR MAX SEARCH RADIUS & SCRATCH BUFFERS)
                     # Build graph arguments based on flow backend
                     if flow_backend in ("farneback_jit", "farneback_aot"):
                         # The fused graph reduces CPU/CUDA submission overhead,
@@ -2077,7 +2079,7 @@ def perform_image_alignment(
                                     f"Peringatan: Alignment RAFT gagal untuk gambar {i+1}."
                                 )
                         except Exception as e:
-                            print(f"❌ Worker RAFT gagal untuk gambar {i+1}: {e}")
+                            print(f"âŒ Worker RAFT gagal untuk gambar {i+1}: {e}")
 
                         processed_count += 1
                         if update_progress:
@@ -2093,7 +2095,7 @@ def perform_image_alignment(
 
                         gc.collect()
 
-            print("✅ Alignment GPU RAFT selesai.")
+            print("âœ… Alignment GPU RAFT selesai.")
             return True
 
         except Exception as e:
@@ -2110,7 +2112,7 @@ def perform_image_alignment(
             # Menggunakan referensi grayscale yang sudah dipreprocess
             # Tetapi Farneback butuh uint8 0-255 biasanya lebih robust
             ref_gray_8u = (
-                ta_aot.cast(ref_preprocessed_cpp, np.uint8)
+                _ti_rt.cast(ref_preprocessed_cpp, np.uint8)
                 if ta_aot is not None
                 else np.clip(ref_preprocessed_cpp * 255.0, 0, 255).astype(np.uint8)
             )
@@ -2140,7 +2142,7 @@ def perform_image_alignment(
                     current_preproc, _ = preprocess_in_python(current_img_float)
 
                 current_gray_8u = (
-                    ta_aot.cast(current_preproc, np.uint8)
+                    _ti_rt.cast(current_preproc, np.uint8)
                     if ta_aot is not None
                     else np.clip(current_preproc * 255.0, 0, 255).astype(np.uint8)
                 )
@@ -2264,7 +2266,7 @@ def perform_image_alignment(
                             f"Alignment gambar {processed_count}/{num_images - 1} (Farneback)...",
                         )
 
-            print("✅ Alignment Farneback selesai.")
+            print("âœ… Alignment Farneback selesai.")
             return True, [None] * num_images
 
         except Exception as e:
@@ -2484,7 +2486,7 @@ def perform_image_alignment(
                             del aligned_img
                     except Exception as e:
                         print(
-                            f"❌ Worker C++ gagal untuk gambar {i+1} (saat fetch result): {e}"
+                            f"âŒ Worker C++ gagal untuk gambar {i+1} (saat fetch result): {e}"
                         )
 
                     gc.collect()
@@ -2501,7 +2503,7 @@ def perform_image_alignment(
                             f"Alignment gambar {processed_count}/{num_images - 1} (C++)...",
                         )
 
-            print("✅ Alignment C++ selesai.")
+            print("âœ… Alignment C++ selesai.")
 
             # Explicitly cleanup shared maps
             del x_coords_full, y_coords_full, reference_image_float

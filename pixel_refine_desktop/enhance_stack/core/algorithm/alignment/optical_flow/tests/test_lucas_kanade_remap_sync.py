@@ -27,7 +27,7 @@ def test_tiled_remap_is_queue_ordered_and_retires_flow_after_dispatch(
     monkeypatch, backend
 ):
     import taichi_vision
-    engine_module = importlib.import_module("taichi_vision.taichi_aot.engine")
+    engine_module = importlib.import_module("taichi.aot_engine")
 
     sync_calls = []
 

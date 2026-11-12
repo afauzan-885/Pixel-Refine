@@ -167,7 +167,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     configure_backend(args.backend)
-    import taichi_vision.taichi_aot as taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
     provider = status_provider(taichi_aot)
     before = memory_snapshot(provider)

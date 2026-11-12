@@ -1144,7 +1144,7 @@ def fit_apap_reference(
 
 def _load_apap_native_module():
     from taichi_vision.taichi_algorithm import aot_api
-    from taichi_vision.backend_config import requested_backend
+    from taichi.backend_config import requested_backend
 
     backend, _explicit, _source = requested_backend()
     if backend == "auto":

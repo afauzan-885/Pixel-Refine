@@ -6,7 +6,7 @@ import numpy as np
 def test_raw_decode_requests_resident_hamilton_and_releases_buffer(
     tmp_path, monkeypatch
 ):
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from pixel_refine_desktop.enhance_stack.core.algorithm.HDR.streaming_pipeline import (
         _load_rgb,
     )

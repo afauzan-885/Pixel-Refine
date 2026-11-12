@@ -1,4 +1,4 @@
-"""GPU-resident burst orchestration.
+﻿"""GPU-resident burst orchestration.
 
 ``run_gpu_resident_pipeline`` selects the RAW or RGB resident lane, prepares the
 analysis/weight contracts, drives the three stage workers, and blends the burst
@@ -8,6 +8,7 @@ facade keeps reaching the live call path.
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import gc
 import os
@@ -20,7 +21,7 @@ from typing import Callable, Optional, Sequence, Tuple
 
 import numpy as np
 
-from taichi_vision.taichi_aot import TaichiGPUBuffer, get_engine
+from taichi.aot_engine import TaichiGPUBuffer, get_engine
 
 from ....pipeline_runtime import (
     PipelineRuntime,
@@ -218,10 +219,11 @@ def run_gpu_resident_pipeline(
             _runtime=runtime,
         )
 
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
+    import taichi.aot_engine as _ti_rt
 
     taichi_aot = _facade()._managed_api(taichi_aot)
-    from taichi_vision.taichi_aot import get_engine
+    from taichi.aot_engine import get_engine
     from ...fusionet_engine.weightnet_inference import (
         DEFAULT_WEIGHTNET_ONNX,
         load_weightnet_onnx,
@@ -532,10 +534,10 @@ def run_gpu_resident_pipeline(
         spatial_col_starts = _compute_tile_starts(
             work_w, spatial_tile_w, overlap=spatial_overlap
         )
-        spatial_rows_gpu = taichi_aot.upload(
+        spatial_rows_gpu = _ti_rt.upload(
             np.asarray(spatial_row_starts, dtype=np.int32)
         )
-        spatial_cols_gpu = taichi_aot.upload(
+        spatial_cols_gpu = _ti_rt.upload(
             np.asarray(spatial_col_starts, dtype=np.int32)
         )
         spatial_weight_post_a_gpu = engine.allocate(
@@ -879,7 +881,7 @@ def run_gpu_resident_pipeline(
     # ------------------------------------------------------------------
     def _uploader_worker():
         try:
-            from taichi_vision.taichi_aot.engine import ensure_cuda_context
+            from taichi.aot_engine import ensure_cuda_context
 
             ensure_cuda_context()
         except Exception:
@@ -1014,7 +1016,7 @@ def run_gpu_resident_pipeline(
     # ------------------------------------------------------------------
     def _alignment_worker():
         try:
-            from taichi_vision.taichi_aot.engine import ensure_cuda_context
+            from taichi.aot_engine import ensure_cuda_context
 
             ensure_cuda_context()
         except Exception:
@@ -1220,7 +1222,7 @@ def run_gpu_resident_pipeline(
     def _weight_inference_worker():
         weight_slot = None
         try:
-            from taichi_vision.taichi_aot.engine import ensure_cuda_context
+            from taichi.aot_engine import ensure_cuda_context
 
             ensure_cuda_context()
         except Exception:
@@ -1794,7 +1796,7 @@ def run_gpu_resident_pipeline(
                         console=f"Memproses frame {curr_idx}/{total_supp} ({curr_name}) [{align_lbl} + Fusion]...",
                     )
 
-                if isinstance(weight_work_item, taichi_aot.TaichiGPUBuffer):
+                if isinstance(weight_work_item, _ti_rt.TaichiGPUBuffer):
                     weight_work_gpu = weight_work_item
                 else:
                     weight_work_gpu = engine.upload(weight_work_item)
@@ -1934,7 +1936,7 @@ def run_gpu_resident_pipeline(
                     if is_last_candidate:
                         backend_details = {}
                         try:
-                            from taichi_vision.taichi_aot import backend_info
+                            from taichi.aot_engine import backend_info
 
                             backend_details = backend_info()
                         except Exception:
@@ -1989,7 +1991,7 @@ def run_gpu_resident_pipeline(
                             _facade()._destroy_work_item(weight_work_item)
                         break
 
-                    if isinstance(weight_work_item, taichi_aot.TaichiGPUBuffer):
+                    if isinstance(weight_work_item, _ti_rt.TaichiGPUBuffer):
                         weight_work_gpu = weight_work_item
                     else:
                         weight_work_gpu = engine.upload(weight_work_item)

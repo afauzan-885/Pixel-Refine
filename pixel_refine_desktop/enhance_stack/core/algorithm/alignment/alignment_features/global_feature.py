@@ -1,3 +1,4 @@
+import taichi.aot_engine as _ti_rt
 # =========================================================================
 # === 1. IMPORTS & KONFIGURASI GLOBAL
 # =========================================================================
@@ -29,7 +30,8 @@ except ImportError:
 
 # Taichi AOT for GPU operations
 try:
-    import taichi_vision.taichi_aot as ta_aot
+    from taichi_vision import algorithm as ta_aot
+    import taichi.aot_engine as _ti_rt
 
     TAICHI_AOT_AVAILABLE = True
 except Exception:
@@ -311,7 +313,7 @@ def _prepare_image_array_from_raw(
         if not RAWPY_AVAILABLE:
             return None
 
-        import taichi_vision.taichi_aot as ta_aot
+        from taichi_vision import algorithm as ta_aot
         import config as app_config
 
         # Read the Bayer plane/calibration only.  Calling demosaic(path) would
@@ -360,12 +362,12 @@ def _prepare_image_array_from_raw(
                 mode in {"block", "always"}
                 or (mode == "auto" and frame_mp > float(block_settings.get("threshold_mp", 12.0)))
             )
-            active_blocks = ta_aot.get_block_config()
+            active_blocks = _ti_rt.get_block_config()
             if (
                 bool(getattr(active_blocks, "enabled", False)) != block_enabled
                 or active_blocks.normalized_size()[0] != block_size
             ):
-                ta_aot.set_block_mode(
+                _ti_rt.set_block_mode(
                     enabled=block_enabled,
                     size=block_size,
                     threshold_bytes=0,
@@ -481,7 +483,7 @@ def load_images_from_paths(
     serial_native_raw = False
     if TAICHI_AOT_AVAILABLE and ta_aot is not None:
         try:
-            serial_native_raw = str(ta_aot.get_engine().arch).strip().lower() in {
+            serial_native_raw = str(_ti_rt.get_engine().arch).strip().lower() in {
                 "opengl",
                 "gles",
             }
@@ -851,13 +853,13 @@ def save_image(
         if apply_tonemapping:
             try:
                 import gc
-                from taichi_vision import taichi_aot
+                from taichi_vision import algorithm as taichi_aot
 
                 is_u8 = image_to_save.dtype == np.uint8
                 if image_to_save.dtype == np.uint16:
-                    img_f32 = taichi_aot.cast(image_to_save, np.float32)
+                    img_f32 = _ti_rt.cast(image_to_save, np.float32)
                 elif image_to_save.dtype == np.uint8:
-                    img_f32 = taichi_aot.cast(image_to_save, np.float32)
+                    img_f32 = _ti_rt.cast(image_to_save, np.float32)
                 else:
                     img_f32 = image_to_save.astype(np.float32, copy=False)
                     max_v = float(np.max(img_f32)) if img_f32.size > 0 else 1.0
@@ -877,14 +879,14 @@ def save_image(
                 gc.collect()
 
                 if is_u8:
-                    image_to_save = taichi_aot.cast(img_tm, np.uint8)
+                    image_to_save = _ti_rt.cast(img_tm, np.uint8)
                 else:
-                    image_to_save = taichi_aot.cast(img_tm, np.uint16)
+                    image_to_save = _ti_rt.cast(img_tm, np.uint16)
                 del img_tm
                 gc.collect()
 
                 try:
-                    engine = taichi_aot.get_engine()
+                    engine = _ti_rt.get_engine()
                     engine.sync()
                     if hasattr(engine, "buffer_pool") and engine.buffer_pool is not None:
                         engine.buffer_pool.clear()
@@ -1114,7 +1116,7 @@ def save_image_streaming(
             if max_value > 1.5:
                 tone_scale = 65535.0 if max_value > 255.0 else 255.0
             try:
-                from taichi_vision import taichi_aot
+                from taichi_vision import algorithm as taichi_aot
 
                 sample_step = max(
                     1,
@@ -1537,8 +1539,8 @@ def prepare_gray(img):
         raise ValueError(f"Invalid image dimensions/channels: {img.shape}")
 
     if gray.dtype != np.uint8:
-        from taichi_vision import taichi_aot
-        return taichi_aot.cast(gray, np.uint8)
+        from taichi_vision import algorithm as taichi_aot
+        return _ti_rt.cast(gray, np.uint8)
     return gray
 
 

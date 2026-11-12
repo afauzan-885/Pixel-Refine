@@ -743,7 +743,7 @@ class TestAlignment(unittest.TestCase):
             _get_aot_mesh_module,
             warp_image_sparse_mesh,
         )
-        from taichi_vision.taichi_aot.engine import engine
+        from taichi.aot_engine import engine
 
         height, width = 48, 64
         yy, xx = np.mgrid[:height, :width]

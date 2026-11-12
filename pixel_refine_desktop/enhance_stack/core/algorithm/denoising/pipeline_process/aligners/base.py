@@ -1,4 +1,4 @@
-"""Resident aligner primitives shared by the dense-flow aligners.
+﻿"""Resident aligner primitives shared by the dense-flow aligners.
 
 The passthrough aligner and the reusable resident-flow buffer mixin live here so
 every flow aligner inherits the same single-destination buffer lifecycle.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from taichi_vision.taichi_aot import TaichiGPUBuffer, get_engine
+from taichi.aot_engine import TaichiGPUBuffer, get_engine
 
 from ..facade import api as _facade
 

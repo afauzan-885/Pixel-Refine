@@ -35,7 +35,7 @@ def load_rgb_linear_image(path: str | Path, is_raw: bool = False) -> np.ndarray:
     if not path.is_file():
         raise FileNotFoundError(f"Image not found: {path}")
 
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     if is_raw or path.suffix.lower() in RAW_EXTENSIONS:
         try:
@@ -106,7 +106,7 @@ def load_rgb_linear_image_bytes(
     if not encoded_bytes:
         raise ValueError(f"Image payload is empty: {path}")
 
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     if is_raw or path.suffix.lower() in RAW_EXTENSIONS:
         try:
@@ -178,7 +178,7 @@ def load_burst_images(paths: Sequence[str | Path]) -> list[np.ndarray]:
     if not paths:
         raise ValueError("Burst is empty.")
 
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     # 1. Load Reference Frame
     ref_linear = load_rgb_linear_image(paths[0])
@@ -249,7 +249,7 @@ def normalize_burst_frames(
     for f in frames:
         f32 = _to_f32(f)
         if f32.shape[:2] != (target_h, target_w):
-            from taichi_vision import taichi_aot
+            from taichi_vision import algorithm as taichi_aot
 
             f32 = taichi_aot.resize(
                 f32,

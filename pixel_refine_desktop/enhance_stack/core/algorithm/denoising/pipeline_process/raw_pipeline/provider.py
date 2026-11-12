@@ -167,7 +167,7 @@ def _analysis_proxy(
     passes no parameters and uses linear reference/support proxies. The CFA
     carrier is never tone-mapped or contrast-enhanced.
     """
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from ..resident_pipeline import _managed_api
     taichi_aot = _managed_api(taichi_aot)
 
@@ -192,7 +192,7 @@ def _analysis_proxy(
 
 def _warp_analysis_proxy(proxy_gpu, transform, *, height: int, width: int):
     """Warp a work-resolution analysis proxy for SpatialFusion weights."""
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from ..resident_pipeline import _managed_api
     taichi_aot = _managed_api(taichi_aot)
 
@@ -244,7 +244,7 @@ def _accumulate_homography_cfa(
     weight_gpu,
 ):
     """Warp CFA planes independently, then accumulate them in reference phase."""
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from ..resident_pipeline import _managed_api
     taichi_aot = _managed_api(taichi_aot)
     from taichi_vision.taichi_algorithm.spatial_fusion import (
@@ -324,7 +324,7 @@ def _preview_from_mosaic(
     return_gpu: bool = False,
 ):
     """Demosaic once after CFA accumulation, solely for the desktop preview."""
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from ..resident_pipeline import _managed_api
     taichi_aot = _managed_api(taichi_aot)
 
@@ -371,7 +371,7 @@ def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None, half_res=Fals
     carrier. No file re-open or CPU demosaic is introduced. ``method``
     permits an explicit Hamilton quality oracle, not a silent backend fallback.
     """
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from ..resident_pipeline import _managed_api
     taichi_aot = _managed_api(taichi_aot)
 
@@ -621,7 +621,7 @@ class RawPipelineProvider:
         support = frame.carrier
         _validate_support(reference, support, frame.metadata.source_id)
 
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         from ..resident_pipeline import _managed_api
 

@@ -1,4 +1,4 @@
-"""RAW CFA accumulation through the shared resident frame loop.
+﻿"""RAW CFA accumulation through the shared resident frame loop.
 
 ``_run_shared_raw_provider_pipeline`` drives analysis, alignment, WeightNet
 inference, and CFA accumulation for RAW Native.  Sibling implementations are
@@ -6,6 +6,7 @@ reached through :func:`pipeline_process.facade.api` so
 ``monkeypatch.setattr`` on the resident facade keeps reaching the live call
 path.
 """
+import taichi.aot_engine as _ti_rt
 
 import os
 import queue
@@ -98,9 +99,10 @@ def _run_shared_raw_provider_pipeline(
         raise ValueError("RAW Native fusion requires at least two DNG frames")
 
     from .raw_pipeline.provider import RawPipelineProvider
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
+    import taichi.aot_engine as _ti_rt
     taichi_aot = _facade()._managed_api(taichi_aot)
-    from taichi_vision.taichi_aot import get_engine
+    from taichi.aot_engine import get_engine
     from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.spatial_core.similarity_taichi import (
         SpatialScratchCache,
         generate_spatial_weights_taichi,
@@ -428,10 +430,10 @@ def _run_shared_raw_provider_pipeline(
                     geometry.weight_shape[1], tile, overlap=overlap_value
                 )
                 spatial_rows_gpu = buffer_session.own(
-                    taichi_aot.upload(np.asarray(spatial_rows, dtype=np.int32))
+                    _ti_rt.upload(np.asarray(spatial_rows, dtype=np.int32))
                 )
                 spatial_cols_gpu = buffer_session.own(
-                    taichi_aot.upload(np.asarray(spatial_cols, dtype=np.int32))
+                    _ti_rt.upload(np.asarray(spatial_cols, dtype=np.int32))
                 )
                 spatial_weight_work_gpu = buffer_session.own(
                     engine.allocate(
@@ -926,7 +928,7 @@ def _run_shared_raw_provider_pipeline(
                         def _raw_deep_candidate_consumer():
                             nonlocal candidate_alpha_total
                             try:
-                                from taichi_vision.taichi_aot.engine import ensure_cuda_context
+                                from taichi.aot_engine import ensure_cuda_context
 
                                 ensure_cuda_context()
                             except Exception:
@@ -1096,7 +1098,7 @@ def _run_shared_raw_provider_pipeline(
                         deep_analysis_accumulated = True
                         backend_details = {}
                         try:
-                            from taichi_vision.taichi_aot import backend_info
+                            from taichi.aot_engine import backend_info
 
                             backend_details = backend_info()
                         except Exception:
@@ -1266,11 +1268,11 @@ def _run_shared_raw_provider_pipeline(
         # Working set once the warm pool, retired queue and native staging
         # caches are drained.  Nothing else in this call still needs them.
         try:
-            from taichi_vision import taichi_aot
+            from taichi_vision import algorithm as taichi_aot
             taichi_aot = _facade()._managed_api(taichi_aot)
 
             if hasattr(taichi_aot, "reclaim_resident_buffers"):
                 engine.sync()
-                taichi_aot.reclaim_resident_buffers("raw_pipeline_burst_complete")
+                _ti_rt.reclaim_resident_buffers("raw_pipeline_burst_complete")
         except Exception as exc:
             print(f"[GPU Pipeline] Post-burst reclaim skipped: {exc}")

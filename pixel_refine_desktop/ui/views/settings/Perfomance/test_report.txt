@@ -1,0 +1,86 @@
+[Taichi Vision] Mesin pemrosesan native aktif.
+[Taichi] version 1.7.4, llvm 20.1.5, commit unknown, win, python 3.12.9
+
+======================================================================
+ TAICHI AOT MASTER COMPREHENSIVE TEST
+======================================================================
+Loaded test image: E:\APP Developer\Eel-Dance\Pixel-Refine\sample/morning_sunshine.jpg
+Using 512x512 resized version for accuracy tests.
+[Taichi Vision] Vulkan Intel memakai mode kompatibilitas untuk menjaga stabilitas.
+[Taichi Vision] Backend siap: VULKAN (Intel(R) UHD Graphics 620)
+[Taichi Vision] Mode kompatibilitas perangkat lama aktif untuk menjaga stabilitas.
+[PASS] Bicubic Resize (RGB 1.33x)          | MAE:   0.000000 | Limit: 0.5
+[PASS] INTER_AREA Resize (RGB 0.25x)       | MAE:   0.000000 | Limit: 0.5
+[PASS] Bilinear Resize (RGB 2x)            | MAE:   0.000000 | Limit: 0.5
+[PASS] Gaussian Blur (RGB, sigma=1.5)      | MAE:   0.000062 | Limit: 0.5
+[PASS] Box Filter (RGB, k=5)               | MAE:   0.000028 | Limit: 0.5
+[PASS] Image Pyramid (3 levels)            | MAE:   0.000000 | Limit: 0.1
+[PASS] NCC Alignment (Zero Shift)          | MAE:   0.000000 | Limit: 0.1
+[PASS] Median Filter (RGB 3x3)             | MAE:   0.001905 | Limit: 0.01
+[PASS] Bilateral Grid (Gray, Med)          | MAE:   0.070922 | Limit: 0.2
+[PASS] Joint Bilateral Filter              | MAE:   0.000000 | Limit: 0.1
+[PASS] Joint Bilateral Upsample            | MAE:   0.000000 | Limit: 0.5
+[PASS] Phase Correlation (Shift 5, -3)     | MAE:   0.000000 | Limit: 0.1
+[PASS] RANSAC Flow Cleanup                 | MAE:   0.000000 | Limit: 1.0
+[PASS] Sobel DX (Gray)                     | MAE:   0.000000 | Limit: 0.5
+[PASS] Laplacian (Gray)                    | MAE:   0.000000 | Limit: 1.0
+
+======================================================================
+ NEW ALGORITHMS (JIT Mode)
+======================================================================
+[SKIP] Taichi not available for JIT tests
+
+======================================================================
+ NEW ALGORITHMS (AOT Mode)
+======================================================================
+[PASS] AOT Color: BGR->YCrCb               | MAE:   0.000001 | Limit: 3.0
+[PASS] AOT Otsu Threshold                  | MAE:   0.000000 | Limit: 5.0
+[PASS] AOT CLAHE (clip=2.0, 4x4)           | MAE:   0.168213 | Limit: 30.0
+[PASS] AOT Canny Edge Detector (IoU=0.953, ratio=0.968) | MAE:   0.047258 | Limit: 0.1
+[PASS] AOT Guided Filter (smoothing)       | MAE:   0.000000 | Limit: 0.5
+[PASS] AOT Hough Lines (synthetic)         | MAE:   0.000000 | Limit: 0.5
+[PASS] AOT Non-Local Means (64x64)         | MAE:   0.000000 | Limit: 0.5
+[PASS] AOT BM3D Public API/CPU Parity      | MAE:   0.000000 | Limit: 0.0005
+[PASS] AOT MLRI-ADMM 5-API CPU Parity      | MAE:   0.000310 | Limit: 0.0005
+[FAIL] AOT Native Dense Flow: farneback_flow() got an unexpected keyword argument 'scratch'
+[PASS] AOT Inpainting (128x128)            | MAE:   0.000000 | Limit: 0.5
+[PASS] AOT Seamless Clone (128x128)        | MAE:   0.000000 | Limit: 0.5
+
+--- End of AOT Algorithm Tests ---
+
+
+======================================================================
+ ONE BIG GRAPH: PIPELINE STRESS TEST
+======================================================================
+Resolution: 8122x2966 (24.1 MP)
+
+[Stage 1] Recording RGB Master Pipeline...
+[Success] Pipeline Recorded successfully.
+[Deep Analysis] 24 MP adaptive replay count: 1 (set AOT_DEEP_ITERS to override)
+
+[Stage 2] Running 1 iterations of Master Pipeline (One Big Graph)...
+
+[Stage 3] Running 1 iterations of Standard Dispatch (Kernel-by-Kernel)...
+
+[Stage 4] Verifying OBG Accuracy vs. Standard Dispatch...
+>>> OBG Accuracy MAE (vs Standard): 0.000000
+
+======================================================================
+ PERFORMANCE COMPARISON
+======================================================================
+Method                    | Latency (ms)    | FPS       
+-------------------------------------------------------
+Master Pipeline (OBG)     | 2522.25         | 0.40      
+Standard Dispatch         | 5393.68         | 0.19      
+-------------------------------------------------------
+
+>>> Speedup using Master Pipeline: 53.24% faster
+>>> Overhead Reduced: 2871.43 ms per frame
+
+======================================================================
+ FINAL VERDICT
+======================================================================
+>>> SOME TESTS FAILED! Please check individual MAE values.
+>>> Results: 27/28 tests passed.
+======================================================================
+[AOTEngine] Intel native VULKAN safe teardown: native context destructor skipped

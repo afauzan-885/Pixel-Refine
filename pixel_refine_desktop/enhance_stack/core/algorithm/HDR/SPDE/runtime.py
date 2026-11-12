@@ -1,4 +1,4 @@
-"""Target-aware dispatch for the packaged SPDE-MR HDR TCM."""
+﻿"""Target-aware dispatch for the packaged SPDE-MR HDR TCM."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import numpy as np
 
 
 def _asset_path(engine) -> Path:
-    from taichi_vision.taichi_aot.artifact_targets import detect_target, resolve_artifact
-    from taichi_vision.llvm20_runtime_paths import (
+    from taichi.artifact_targets import detect_target, resolve_artifact
+    from taichi.runtime_paths import (
         application_assets_root,
         tcm_root,
     )
@@ -65,8 +65,8 @@ def score_patch_maps_aot(
     structure_threshold=0.8,
 ):
     """Run both SPDE-MR graphs from the active target's packaged TCM."""
-    from taichi_vision.taichi_aot.engine import InputArray, OutputArray
-    from taichi_vision.taichi_aot import get_engine
+    from taichi.aot_engine import InputArray, OutputArray
+    from taichi.aot_engine import get_engine
 
     reference = np.ascontiguousarray(reference_gray, dtype=np.float32)
     frame = np.ascontiguousarray(frame_gray, dtype=np.float32)

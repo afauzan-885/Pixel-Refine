@@ -107,7 +107,7 @@ class ReliabilityConfidenceProvider:
 
     # -- helpers ---------------------------------------------------------
     def _ensure_buffers(self, shape: tuple[int, int], session=None):
-        from taichi_vision import taichi_aot
+        import taichi.aot_engine as taichi_aot
         from taichi_vision.taichi_algorithm.spatial_fusion import SpatialScratchCache
         from taichi_vision.taichi_algorithm.spatial_fusion.compute_spatial import (
             _compute_tile_starts,
@@ -172,7 +172,7 @@ class ReliabilityConfidenceProvider:
 
     def prepare_reference(self, reference_rgb: np.ndarray, *, session=None):
         """Upload and cache one reference analysis plane for a whole SR job."""
-        from taichi_vision import taichi_aot
+        import taichi.aot_engine as taichi_aot
 
         session = self._session if session is None else session
         reference = _gray(reference_rgb, "reference_rgb")
@@ -246,7 +246,7 @@ class ReliabilityConfidenceProvider:
         return_device: bool,
         session=None,
     ):
-        from taichi_vision import taichi_aot
+        import taichi.aot_engine as taichi_aot
         from taichi_vision.taichi_algorithm.spatial_fusion import (
             generate_spatial_weights_taichi,
         )

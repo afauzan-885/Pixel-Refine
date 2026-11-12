@@ -5,6 +5,7 @@ execution details (RGB resident, RAW Native, alignment, and WeightNet
 lifecycle) are delegated to ``resident_pipeline`` so MFDenoiser and the UI
 use the same contract as Similarity.
 """
+import taichi.aot_engine as _ti_rt
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_spec
 import gc
@@ -293,12 +294,13 @@ class FusionNetDenoisingAlgorithm:
                 f"dtype={preview.dtype}; DNG carrier retained for save"
             )
             return preview
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
+        import taichi.aot_engine as _ti_rt
 
-        output = taichi_aot.cast(result, np.uint16)
+        output = _ti_rt.cast(result, np.uint16)
         del result
         try:
-            taichi_aot.get_engine().buffer_pool.clear()
+            _ti_rt.get_engine().buffer_pool.clear()
         except Exception:
             pass
         gc.collect()
@@ -400,7 +402,7 @@ class FusionNetDenoisingAlgorithm:
 
         auto_params = None
         if is_raw:
-            from taichi_vision import taichi_aot
+            from taichi_vision import algorithm as taichi_aot
             from taichi_vision.taichi_algorithm.enhancement.auto_enhance import (
                 apply_auto_enhance_np,
             )
@@ -413,7 +415,7 @@ class FusionNetDenoisingAlgorithm:
         else:
             ref_enhanced = ref_linear
 
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         total_supp = len(inputs) - 1
         work_scale = float(work_scale)

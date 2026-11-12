@@ -5,6 +5,7 @@ Loads the resident TCM WeightNet session, computes per-support confidence
 maps through it, and blends one support into the running fusion accumulators.
 Burst frame IO lives in :mod:`.burst_io` (re-exported here for compatibility).
 """
+import taichi.aot_engine as _ti_rt
 
 import os
 import threading
@@ -57,15 +58,16 @@ def load_weightnet_onnx(
     # Normalize runtime: Default and "auto" are 100% full native Taichi AOT (TCM)
     norm_runtime = str(runtime).strip().lower()
     if norm_runtime in ("auto", "default", "", "taichi_aot", "taichi_cuda"):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
+        import taichi.aot_engine as _ti_rt
         from taichi_vision.taichi_algorithm.denoising.resident_weightnet import ResidentWeightNet
         from taichi_vision.taichi_algorithm.denoising.weightnet_artifact_identity import (
             resident_weightnet_load_kwargs,
             selected_weightnet_model_bytes,
         )
-        from taichi_vision.taichi_aot import neural
+        from taichi_vision.taichi_algorithm.neural import neural
 
-        backend = taichi_aot.get_backend_name()
+        backend = _ti_rt.get_backend_name()
         search_dirs = [
             source.parent if source.is_file() else source,
             Path("database/Learning_Model/nanoFlow"),
@@ -171,7 +173,7 @@ def fuse_support_frame_inplace(
     Upsamples single-support weight map to full resolution and blends in-place into sum_img and weight_sum.
     All inputs and outputs are [3, full_h, full_w] float32 arrays.
     """
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
     from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
         taichi_bridge,
     )

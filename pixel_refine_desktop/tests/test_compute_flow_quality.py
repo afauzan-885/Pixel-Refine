@@ -3,6 +3,7 @@
 Run in a fresh process per backend. A candidate may be selected using
 PIXEL_REFINE_AOT_TCM_ROOT before import, exactly as the native resolver does.
 """
+import taichi.aot_engine as _ti_rt
 import numpy as np
 import pytest
 
@@ -39,8 +40,8 @@ def test_partial_tiles_are_finite_and_cover_identity(shape, smooth):
 
 @pytest.mark.parametrize("shape", ((31, 49), (64, 80), (127, 173)))
 def test_hann_blend_matches_numpy_with_half_tile_overlap(shape):
-    from taichi_vision import taichi_aot as aot
-    engine = aot.get_engine()
+    from taichi_vision import algorithm as aot
+    engine = _ti_rt.get_engine()
     h, w = shape
     roots_y, roots_x = (h + 15) // 16, (w + 15) // 16
     rng = np.random.default_rng(148)
@@ -61,12 +62,12 @@ def test_hann_blend_matches_numpy_with_half_tile_overlap(shape):
     engine.write_into(source, grid)
     output = engine.allocate((h, w, 2), dtype=np.float32, is_vector=False)
     try:
-        aot.load_tcm("compute_flow").run("flow_adaptive_hann_stitch",
+        _ti_rt.load_tcm("compute_flow").run("flow_adaptive_hann_stitch",
                                         grid_flow_l0=source, flow_l0_raw=output)
         engine.sync()
         # Shader cos() is approximate on graphics devices. The observed
         # deviation is below 0.0001 px; keep a 0.0002 px absolute gate there.
-        tolerance = 2e-4 if aot.backend_info()["backend"] in {"vulkan", "opengl", "gles"} else 3e-6
+        tolerance = 2e-4 if _ti_rt.backend_info()["backend"] in {"vulkan", "opengl", "gles"} else 3e-6
         np.testing.assert_allclose(output.to_numpy(), expected, atol=tolerance, rtol=1e-5)
     finally:
         engine.sync()

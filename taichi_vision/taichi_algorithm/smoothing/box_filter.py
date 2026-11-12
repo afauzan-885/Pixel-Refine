@@ -165,7 +165,7 @@ def box_filter(
         raise ValueError("kernel_size exceeds the exact float32 radius range")
 
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_algorithm import aot_api as taichi_aot
         return taichi_aot.box_filter(src, kernel_size=kernel_size, return_gpu=True)
 
     if not TAICHI_AVAILABLE:

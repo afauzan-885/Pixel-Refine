@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 import math
 from typing import Any, Sequence
 
-from taichi_vision.taichi_aot.memory import MemoryGovernor, MemorySnapshot
+from taichi.memory import MemoryGovernor, MemorySnapshot
 
 
 _DTYPE_ALIASES = {

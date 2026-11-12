@@ -248,7 +248,7 @@ class ImageLoaderThread(QThread):
                 return None
 
             if image_array.dtype != np.uint8:
-                from taichi_vision import taichi_aot
+                import taichi.aot_engine as taichi_aot
                 image_array = taichi_aot.cast(image_array, np.uint8)
 
             image_array = np.ascontiguousarray(image_array)
@@ -551,7 +551,7 @@ def load_and_display_image(
 
         # Ensure image_array is strictly 8-bit uint8 RGB for QImage Format_RGB888
         if image_array.dtype != np.uint8:
-            from taichi_vision import taichi_aot
+            import taichi.aot_engine as taichi_aot
             image_array = taichi_aot.cast(image_array, np.uint8)
 
         if image_array.ndim == 2:

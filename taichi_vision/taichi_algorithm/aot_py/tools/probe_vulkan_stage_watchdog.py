@@ -53,7 +53,7 @@ def _child_source(operation: str, stage: str) -> str:
 import json, time, traceback\n
 started = time.perf_counter()\n
 try:\n
-    import taichi_vision.taichi_aot as aot\n
+    import taichi.aot_engine as aot\n
     import taichi_vision.taichi_algorithm.aot_api as api\n
     imported_at = time.perf_counter()\n
     result = {{\n

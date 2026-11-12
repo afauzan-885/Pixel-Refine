@@ -11,6 +11,7 @@ Algorithm (per frame):
   4. Accumulate: sum += frame * weight
   5. Finalize: result = sum / weight_sum
 """
+import taichi.aot_engine as _ti_rt
 
 import os
 import gc
@@ -77,7 +78,8 @@ class SpatialFusionProcessor:
         Raises:
             RuntimeError: If GPU AOT engine is not available.
         """
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
+        import taichi.aot_engine as _ti_rt
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
             taichi_bridge,
         )
@@ -87,7 +89,7 @@ class SpatialFusionProcessor:
             accumulate_spatial_merging_taichi,
         )
 
-        engine = taichi_aot.engine
+        engine = _ti_rt.engine
         if str(getattr(engine, "arch", "")).lower() == "cpu":
             raise RuntimeError(
                 "[SpatialFusion] GPU AOT engine is running on CPU fallback. "
@@ -109,7 +111,7 @@ class SpatialFusionProcessor:
         frame_bytes = (
             int(ref_h) * int(ref_w) * max(channels, 1) * np.dtype(np.float32).itemsize
         )
-        block_config = taichi_aot.get_block_config()
+        block_config = _ti_rt.get_block_config()
         cache_budget = int(
             (
                 block_config.get("device_cache_bytes", 0)
@@ -122,7 +124,7 @@ class SpatialFusionProcessor:
             max(frame_bytes // 4, 8 * 1024 * 1024),
             max(cache_budget // 2, 8 * 1024 * 1024),
         )
-        taichi_aot.configure_block_reservation(
+        _ti_rt.configure_block_reservation(
             "spatial_fusion",
             soft_bytes=soft_reservation,
             hard_bytes=max(soft_reservation, min(frame_bytes, cache_budget)),
@@ -192,14 +194,14 @@ class SpatialFusionProcessor:
         spatial_scratch = SpatialScratchCache()
 
         try:
-            _sum_gpu = taichi_aot.upload(final_image_sum_full_res)
-            _weight_sum_full_gpu = taichi_aot.upload(weight_map_sum_full_res)
+            _sum_gpu = _ti_rt.upload(final_image_sum_full_res)
+            _weight_sum_full_gpu = _ti_rt.upload(weight_map_sum_full_res)
             _base_window_gpu = taichi_aot.hanning(
                 (tile_h, tile_w), exclude_boundary=False
             )
-            _rows_gpu = taichi_aot.upload(row_starts)
+            _rows_gpu = _ti_rt.upload(row_starts)
             _rows_gpu.dtype = np.int32
-            _cols_gpu = taichi_aot.upload(col_starts)
+            _cols_gpu = _ti_rt.upload(col_starts)
             _cols_gpu.dtype = np.int32
             _weight_work_gpu = engine.allocate(
                 (work_res_h, work_res_w), dtype=np.float32, host_accessible=True
@@ -220,9 +222,9 @@ class SpatialFusionProcessor:
 
             def cleanup_idle_vram(reason):
                 try:
-                    if hasattr(taichi_aot.engine, "sync"):
-                        taichi_aot.engine.sync()
-                    memory = taichi_aot.get_memory_status(force=True)
+                    if hasattr(_ti_rt.engine, "sync"):
+                        _ti_rt.engine.sync()
+                    memory = _ti_rt.get_memory_status(force=True)
                     if (
                         memory.get("pressure") in ("high", "critical")
                         and hasattr(engine, "buffer_pool")
@@ -349,7 +351,7 @@ class SpatialFusionProcessor:
                     if update_progress:
                         update_progress(95, "Finalizing with mean calculation...")
 
-                    _ref_full_gpu = taichi_aot.upload(reference_image_float)
+                    _ref_full_gpu = _ti_rt.upload(reference_image_float)
                     _final_image_gpu = engine.allocate(
                         _sum_gpu.shape,
                         dtype=_sum_gpu.dtype,
@@ -387,7 +389,7 @@ class SpatialFusionProcessor:
                             pass
                 cleanup_idle_vram("final")
                 if os.environ.get("AOT_CLEAR_AFTER_OP", "0") == "1":
-                    taichi_aot.unload_all_modules()
+                    _ti_rt.unload_all_modules()
                     engine.buffer_pool.clear()
 
         finally:

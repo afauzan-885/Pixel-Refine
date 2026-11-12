@@ -164,8 +164,8 @@ def build_image_pyramid(
 ) -> list:
     """CPU interface: Build image pyramid and return list of NumPy arrays."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_vision.taichi_aot import get_engine
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi.aot_engine import get_engine
+        from taichi.aot_engine import TaichiGPUBuffer
         engine = get_engine()
         is_gpu = isinstance(image, TaichiGPUBuffer)
         img_gpu = image if is_gpu else engine.upload(image)
@@ -217,7 +217,7 @@ def build_image_pyramid_gpu(
         # single-output API.  Optical-flow callers need every resident level,
         # so dispatch the same native pyramid TCM graph while retaining L0,
         # L1, ... as owned GPU buffers.
-        from taichi_vision.taichi_aot import get_engine
+        from taichi.aot_engine import get_engine
         from taichi_vision.taichi_algorithm.aot_api import (
             aot_graph_available,
             _resolve_pyramid_graph_module,
@@ -440,8 +440,8 @@ def upsample_flow(
 ) -> np.ndarray:
     """Upsample flow using NumPy or GPU buffer with zero-allocation pooling."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_vision.taichi_aot import get_engine
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi.aot_engine import get_engine
+        from taichi.aot_engine import TaichiGPUBuffer
         engine = get_engine()
         if session is not None:
             src_gpu, _ = session.upload_if_needed(flow)
@@ -497,7 +497,7 @@ def upsample_flow_gpu(
 ):
     """GPU native interface: Upsample flow from one ti.ndarray to another."""
     if os.environ.get("AOT_MODE", "1") == "1":
-        from taichi_vision import taichi_aot
+        from taichi_vision.taichi_algorithm import aot_api as taichi_aot
         pyramid_mod = taichi_aot._mod("pyramid")
         if isinstance(scale, (tuple, list)):
             sx = scale[0]

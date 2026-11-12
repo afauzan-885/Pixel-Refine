@@ -21,6 +21,7 @@ malformed, or vendor-specific DNG layouts.
 """
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import argparse
 import gc
@@ -105,9 +106,9 @@ def _rss_bytes() -> int:
 
 def _runtime_info() -> dict[str, object]:
     """Return actual runtime identity only after the AOT engine is initialized."""
-    from taichi_vision import taichi_aot
+    from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
-    runtime = taichi_aot.engine
+    runtime = _ti_rt.engine
     return {
         "backend_requested": os.environ.get(
             "BACKEND",

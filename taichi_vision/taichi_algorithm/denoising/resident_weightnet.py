@@ -16,7 +16,7 @@ def _serialized(function):
 
 
 def view(buffer, shape, *, vector=False):
-    from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+    from taichi.aot_engine import TaichiGPUBuffer
     result = TaichiGPUBuffer(buffer.size_bytes, buffer.handle, tuple(shape), buffer.dtype,
                              is_vector=vector, vector_dim=2 if vector else 1,
                              engine=buffer.engine, is_owner=False,
@@ -274,8 +274,8 @@ class ResidentWeightNet(ResidentONNXGraph):
         return self.prepare(source, session=session), self
 
     def prepare(self, source, session=None):
-        from taichi_vision import taichi_aot as aot
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi_vision.taichi_algorithm import aot_api as aot
+        from taichi.aot_engine import TaichiGPUBuffer
         if isinstance(source, TaichiGPUBuffer):
             gray = source if len(source.shape) == 2 else aot.cvtColor(source, aot.COLOR_RGB2GRAY, return_gpu=True, session=session)
         elif len(source.shape) == 2:
@@ -529,7 +529,7 @@ class ResidentWeightNet(ResidentONNXGraph):
             indices.destroy()
 
     def compose_flow(self, rank, full_shape, flow_shape, base_transform=None):
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi.aot_engine import TaichiGPUBuffer
         mode, inverse, owned = 0, self.identity, None
         base = self.dummy_flow
         if isinstance(base_transform, TaichiGPUBuffer):

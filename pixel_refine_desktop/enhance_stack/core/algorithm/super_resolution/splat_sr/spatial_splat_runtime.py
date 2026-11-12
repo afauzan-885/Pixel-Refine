@@ -1,6 +1,7 @@
 """Production wrapper for the backend-specific ``robust_splat`` TCM graph."""
 
 from __future__ import annotations
+import taichi.aot_engine as _ti_rt
 
 import os
 
@@ -11,7 +12,7 @@ class SpatialSplatAOT:
     """Execute sub-pixel splatting on the already selected AOT backend."""
 
     def __init__(self, engine=None, asset_dir: str | None = None, *, tcm_path: str | None = None):
-        from taichi_vision.taichi_aot import get_engine
+        from taichi import get_engine
 
         self.engine = engine or get_engine()
         backend = str(getattr(self.engine, "arch", "cpu")).lower()
@@ -21,8 +22,8 @@ class SpatialSplatAOT:
             raise RuntimeError(f"unsupported spatial splat backend: {backend}")
         self.backend = backend
         if asset_dir is None:
-            from taichi_vision.taichi_aot.artifact_targets import detect_target
-            from taichi_vision.llvm20_runtime_paths import application_assets_root
+            from taichi.artifact_targets import detect_target
+            from taichi.runtime_paths import application_assets_root
 
             target = detect_target(
                 backend=backend,
@@ -439,7 +440,8 @@ class SpatialSplatAOT:
         dispatches only, never another upload.  ``hann_cache`` keeps one window
         per distinct block shape because edge blocks are clipped.
         """
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
+        import taichi.aot_engine as _ti_rt
         from taichi_vision.taichi_algorithm.spatial_fusion import (
             accumulate_tile_hann_taichi,
         )
@@ -556,7 +558,7 @@ class SpatialSplatAOT:
         if scale < 1:
             raise ValueError("scale must be >= 1")
 
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         from taichi_vision.taichi_algorithm.spatial_fusion import (
             clear_f32_2d_taichi,
             clear_f32_3d_taichi,
@@ -578,7 +580,7 @@ class SpatialSplatAOT:
             clear_f32_3d_taichi(acc_num)
             clear_f32_2d_taichi(acc_den)
 
-            source_ref = taichi_aot.upload(
+            source_ref = _ti_rt.upload(
                 np.ascontiguousarray(frames[0], dtype=np.float32)
             )
             try:
@@ -752,7 +754,7 @@ class SpatialSplatAOT:
         if scale < 1:
             raise ValueError("scale must be >= 1")
 
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         from taichi_vision.taichi_algorithm.spatial_fusion import (
             accumulate_tile_hann_taichi,
             clear_f32_2d_taichi,
@@ -791,7 +793,7 @@ class SpatialSplatAOT:
             # HR reference for the uncovered fallback.  The division graph
             # substitutes it wherever the accumulated weight is ~0, so an
             # all-rejected region degrades to the reference instead of a hole.
-            source_ref = taichi_aot.upload(np.ascontiguousarray(frames[0], dtype=np.float32))
+            source_ref = _ti_rt.upload(np.ascontiguousarray(frames[0], dtype=np.float32))
             try:
                 ref_hr_buf = taichi_aot.resize(
                     source_ref,
@@ -897,9 +899,9 @@ class SpatialSplatAOT:
             requested_batch_size = batch_size
             bytes_per_frame = h * w * (channels + 3) * np.dtype(np.float32).itemsize
             try:
-                from taichi_vision import taichi_aot
+                from taichi_vision import algorithm as taichi_aot
 
-                memory = taichi_aot.get_memory_status(force=True)
+                memory = _ti_rt.get_memory_status(force=True)
                 pipeline_limit = int(memory.get("pipeline_resident_limit", 0) or 0)
             except Exception:
                 pipeline_limit = 0
@@ -1052,12 +1054,12 @@ class SplatSRRuntime:
     # -- lifecycle -------------------------------------------------------
     @staticmethod
     def _current_arch() -> str:
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
-        return str(getattr(taichi_aot.engine, "arch", "cpu")).lower()
+        return str(getattr(_ti_rt.engine, "arch", "cpu")).lower()
 
     def _ensure(self):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         arch = self._current_arch()
         if self._arch != arch:
@@ -1072,7 +1074,7 @@ class SplatSRRuntime:
                 _tcm_graph_available,
             )
 
-            self._spatial_tcm = _resolve_spatial_tcm(taichi_aot.engine)
+            self._spatial_tcm = _resolve_spatial_tcm(_ti_rt.engine)
             for graph in (
                 "clear_f32_3d",
                 "clear_f32_2d",
@@ -1084,7 +1086,7 @@ class SplatSRRuntime:
                         f"fused SR route: {self._spatial_tcm}. Recompile the spatial "
                         "TCM for the active backend."
                     )
-            self._spatial_module = taichi_aot.engine.load(self._spatial_tcm)
+            self._spatial_module = _ti_rt.engine.load(self._spatial_tcm)
         return self
 
     def close(self) -> None:
@@ -1118,7 +1120,7 @@ class SplatSRRuntime:
 
     def hann_window(self, shape):
         self._ensure()
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         key = (int(shape[0]), int(shape[1]))
         buffer = self._hann.get(key)
@@ -1131,16 +1133,16 @@ class SplatSRRuntime:
     def accumulators(self, hr_h: int, hr_w: int):
         """Return cleared ``(acc_num, acc_den)`` scratch buffers for this size."""
         self._ensure()
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         key = (int(hr_h), int(hr_w))
         pair = self._accumulators.get(key)
         if pair is None:
-            with _force_host_visible(taichi_aot.engine, self._arch == "vulkan"):
-                acc_num = taichi_aot.engine.allocate(
+            with _force_host_visible(_ti_rt.engine, self._arch == "vulkan"):
+                acc_num = _ti_rt.engine.allocate(
                     (key[0], key[1], 3), dtype=np.float32
                 )
-                acc_den = taichi_aot.engine.allocate(
+                acc_den = _ti_rt.engine.allocate(
                     (key[0], key[1]), dtype=np.float32, host_accessible=True
                 )
             self._count_alloc(2)
@@ -1158,23 +1160,23 @@ class SplatSRRuntime:
         per-tile churn the cache exists to remove.
         """
         self._ensure()
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
-        with _force_host_visible(taichi_aot.engine, self._arch == "vulkan"):
-            buffer = taichi_aot.engine.allocate((hr_h, hr_w, 3), dtype=np.float32)
+        with _force_host_visible(_ti_rt.engine, self._arch == "vulkan"):
+            buffer = _ti_rt.engine.allocate((hr_h, hr_w, 3), dtype=np.float32)
         self._count_alloc(1)
         return buffer
 
     def output(self, hr_h: int, hr_w: int):
         """Return the reusable final-result buffer (read back by the caller)."""
         self._ensure()
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         key = (int(hr_h), int(hr_w))
         buffer = self._output.get(key)
         if buffer is None:
-            with _force_host_visible(taichi_aot.engine, self._arch == "vulkan"):
-                buffer = taichi_aot.engine.allocate(
+            with _force_host_visible(_ti_rt.engine, self._arch == "vulkan"):
+                buffer = _ti_rt.engine.allocate(
                     (key[0], key[1], 3), dtype=np.float32, host_accessible=True
                 )
             self._count_alloc(1)
@@ -1290,7 +1292,7 @@ def run_fused_burst(
     if scale < 1:
         raise ValueError("scale must be >= 1")
 
-    from taichi_vision import taichi_aot
+    from taichi_vision import algorithm as taichi_aot
 
     rt = runtime or get_runtime()
     splat = rt.splat()
@@ -1307,12 +1309,12 @@ def run_fused_burst(
     owned = []
     ref_hr = None
     try:
-        with _force_host_visible(taichi_aot.engine, arch == "vulkan"):
-            frames_gpu = taichi_aot.upload(frames)
-            confidence_gpu = taichi_aot.upload(confidence)
-            flow_y_gpu = taichi_aot.upload(np.ascontiguousarray(flow[..., 1]))
-            flow_x_gpu = taichi_aot.upload(np.ascontiguousarray(flow[..., 0]))
-            reference_lr_gpu = taichi_aot.upload(np.ascontiguousarray(frames[0]))
+        with _force_host_visible(_ti_rt.engine, arch == "vulkan"):
+            frames_gpu = _ti_rt.upload(frames)
+            confidence_gpu = _ti_rt.upload(confidence)
+            flow_y_gpu = _ti_rt.upload(np.ascontiguousarray(flow[..., 1]))
+            flow_x_gpu = _ti_rt.upload(np.ascontiguousarray(flow[..., 0]))
+            reference_lr_gpu = _ti_rt.upload(np.ascontiguousarray(frames[0]))
             rt.counters["upload"] += 5
             ref_hr = taichi_aot.resize(
                 reference_lr_gpu,
@@ -1363,7 +1365,7 @@ def run_fused_burst(
             _safe_destroy(buffer)
         owned = []
 
-        with _force_host_visible(taichi_aot.engine, arch == "vulkan"):
+        with _force_host_visible(_ti_rt.engine, arch == "vulkan"):
             # ``resize`` returns a vector field for 3-channel input; the division
             # graph expects plain 3-D ndarrays, so normalize the view the same way
             # the canonical wrapper does.
@@ -1377,7 +1379,7 @@ def run_fused_burst(
                 w=int(hr_w),
             )
             rt.counters["dispatch"] += 1
-            taichi_aot.engine.sync()
+            _ti_rt.engine.sync()
             result = np.array(out.to_numpy(), dtype=np.float32, copy=True)
             coverage = np.array(acc_den.to_numpy(), dtype=np.float32, copy=True)
         return result, coverage
@@ -1407,18 +1409,18 @@ class SessionHannAccumulator:
         radius: float = 2.0,
         sigma: float = 0.85,
     ):
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
         from taichi_vision.taichi_algorithm.spatial_fusion import (
             clear_f32_2d_taichi,
             clear_f32_3d_taichi,
         )
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi import TaichiGPUBuffer
 
         reference = np.ascontiguousarray(reference_rgb, dtype=np.float32)
         if reference.ndim != 3 or reference.shape[2] != 3:
             raise ValueError("SessionHannAccumulator requires HxWx3 reference RGB")
         self.session = session
-        self.engine = taichi_aot.engine
+        self.engine = _ti_rt.engine
         self.runtime = get_runtime()
         self.splat = self.runtime.splat()
         self.spatial_module = self.runtime.spatial_module()
@@ -1455,7 +1457,7 @@ class SessionHannAccumulator:
                     host_accessible=(self.backend == "vulkan"),
                 )
             )
-            self.reference_lr = session.own(taichi_aot.upload(reference))
+            self.reference_lr = session.own(_ti_rt.upload(reference))
             self.reference_hr = session.track_result(
                 taichi_aot.resize(
                     self.reference_lr,
@@ -1474,7 +1476,7 @@ class SessionHannAccumulator:
         session.own(self, releaser=lambda accumulator: accumulator.close())
 
     def _prepare_hann_windows(self) -> None:
-        from taichi_vision import taichi_aot
+        from taichi_vision import algorithm as taichi_aot
 
         stride = max(1, int(round(self.block_size * (1.0 - self.overlap))))
         for y0 in range(0, self.hr_h, stride):
@@ -1492,7 +1494,7 @@ class SessionHannAccumulator:
 
     @staticmethod
     def _batched_confidence_view(buffer, shape, engine):
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi import TaichiGPUBuffer
 
         if not isinstance(buffer, TaichiGPUBuffer):
             return None
@@ -1527,7 +1529,7 @@ class SessionHannAccumulator:
         return view
 
     def add_frame(self, frame_rgb, flow, confidence) -> int:
-        from taichi_vision.taichi_aot.engine import TaichiGPUBuffer
+        from taichi import TaichiGPUBuffer
         from taichi_vision.taichi_algorithm.spatial_fusion import (
             clear_f32_3d_taichi,
         )

@@ -6,13 +6,13 @@ import unittest
 
 import numpy as np
 
-from taichi_vision.taichi_aot.block import (
+from taichi.block import (
     can_auto_block,
     can_auto_partition_dispatch,
     can_partition_block,
     registered_block_adapters,
 )
-from taichi_vision.taichi_aot.block_adapters import (
+from taichi.block_adapters import (
     PHASE_CORRELATION_ADAPTER_OPERATIONS,
     _phase_peak_reduce,
     register_phase_correlation_block_adapters,
