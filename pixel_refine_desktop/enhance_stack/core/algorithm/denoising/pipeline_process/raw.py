@@ -128,12 +128,12 @@ def _run_shared_raw_provider_pipeline(
             source_descriptor=source_descriptor,
         )
     buffer_session = runtime.ensure_session(engine)
-    engine = buffer_session.managed_api(engine)
-    taichi_aot = buffer_session.managed_api(taichi_aot)
+    engine = buffer_session._managed_api(engine)
+    taichi_aot = buffer_session._managed_api(taichi_aot)
     weightnet_channels = _facade()._resolve_weightnet_input_channels(
         session, weightnet_input_channels
     )
-    provider = buffer_session.own(RawPipelineProvider(image_paths, weight_engine=normalized_engine))
+    provider = RawPipelineProvider(image_paths, weight_engine=normalized_engine)
     pipeline_telemetry = PipelineTelemetry(engine, enabled=telemetry)
     aligner = None
     ref_proxy_full_gpu = None
@@ -220,14 +220,12 @@ def _run_shared_raw_provider_pipeline(
                 proxy_gpu,
                 scaled,
                 (work_w, work_h),
-                return_gpu=True,
             )
         return taichi_aot.remap_with_flow(
             proxy_gpu,
             transform,
             work_h,
             work_w,
-            return_gpu=True,
         )
 
     try:
@@ -257,7 +255,7 @@ def _run_shared_raw_provider_pipeline(
         if normalized_engine == "spatial_fusion" or (
             normalized_engine == "fusionet" and weightnet_channels == 1
         ):
-            weightnet_gray_gpu = buffer_session.own(
+            weightnet_gray_gpu = buffer_session.view(
                 engine.allocate(
                     geometry.weight_shape,
                     dtype=np.float32,
@@ -320,7 +318,7 @@ def _run_shared_raw_provider_pipeline(
                 )
                 if ref_weight_analysis_gpu is ref_proxy_full_gpu:
                     ref_weight_analysis_gpu = taichi_aot.copy(
-                        ref_weight_analysis_gpu, return_gpu=True
+                        ref_weight_analysis_gpu 
                     )
             if analysis_params is not None:
                 print(
@@ -405,9 +403,6 @@ def _run_shared_raw_provider_pipeline(
                         _facade()._destroy_work_item(base_gpu)
             if share_ref_weight_proxy:
                 ref_weight_analysis_gpu = ref_analysis_gpu
-            if ref_proxy_full_gpu is not ref_analysis_gpu:
-                _facade()._destroy_work_item(ref_proxy_full_gpu)
-            ref_proxy_full_gpu = None
 
             ref_spatial_gray_gpu = None
             if normalized_engine == "spatial_fusion":
@@ -429,13 +424,13 @@ def _run_shared_raw_provider_pipeline(
                 spatial_cols = _compute_tile_starts(
                     geometry.weight_shape[1], tile, overlap=overlap_value
                 )
-                spatial_rows_gpu = buffer_session.own(
+                spatial_rows_gpu = buffer_session.view(
                     _ti_rt.upload(np.asarray(spatial_rows, dtype=np.int32))
                 )
-                spatial_cols_gpu = buffer_session.own(
+                spatial_cols_gpu = buffer_session.view(
                     _ti_rt.upload(np.asarray(spatial_cols, dtype=np.int32))
                 )
-                spatial_weight_work_gpu = buffer_session.own(
+                spatial_weight_work_gpu = buffer_session.view(
                     engine.allocate(
                         geometry.weight_shape, dtype=np.float32, host_accessible=False
                     )
@@ -443,11 +438,10 @@ def _run_shared_raw_provider_pipeline(
                 spatial_scratch = _facade()._own_component(SpatialScratchCache(), releaser=lambda cache: cache.clear())
                 spatial_state = (tile, overlap_value, motion, noise_offset, noise_sigma)
             if normalized_engine == "spatial_fusion":
-                ref_spatial_gray_gpu = buffer_session.own(
+                ref_spatial_gray_gpu = buffer_session.view(
                     taichi_aot.cvtColor(
                         ref_weight_analysis_gpu,
                         taichi_aot.COLOR_RGB2GRAY,
-                        return_gpu=True,
                     )
                 )
                 _facade()._destroy_work_item(ref_weight_analysis_gpu)
@@ -463,7 +457,6 @@ def _run_shared_raw_provider_pipeline(
                         ref_weight_analysis_gpu,
                         taichi_aot.COLOR_RGB2GRAY,
                         dst=weightnet_gray_gpu,
-                        return_gpu=True,
                     )
                     ref_weight_input_gpu = weightnet_gray_gpu
                 else:
@@ -496,8 +489,12 @@ def _run_shared_raw_provider_pipeline(
 
             # The aligner has derived its persistent features; weight analysis
             # was prepared from its independent natural/linear proxy above.
-        _facade()._destroy_work_item(ref_analysis_gpu)
-        ref_analysis_gpu = None
+        # Keep the shared reference analysis alive for the whole burst so a
+        # consumer that borrows it cannot observe a retired handle.  Cleanup
+        # releases it in the function-level finally block.
+        if ref_proxy_full_gpu is not None and ref_proxy_full_gpu is not ref_analysis_gpu:
+            _facade()._destroy_work_item(ref_proxy_full_gpu)
+        ref_proxy_full_gpu = None
 
         provider.bind_accumulator(engine, ref_frame)
         pipeline_telemetry.emit("reference_loaded")
@@ -586,7 +583,7 @@ def _run_shared_raw_provider_pipeline(
             try:
                 target_scratch_h = geometry.full_shape[0] // 2 if use_half_res else geometry.full_shape[0]
                 target_scratch_w = geometry.full_shape[1] // 2 if use_half_res else geometry.full_shape[1]
-                _demosaic_scratch = buffer_session.own(
+                _demosaic_scratch = buffer_session.view(
                     engine.allocate((target_scratch_h, target_scratch_w, 3), dtype=np.float32, host_accessible=False)
                 )
             except Exception:
@@ -598,7 +595,7 @@ def _run_shared_raw_provider_pipeline(
                 if (align_h, align_w) == (target_scratch_h, target_scratch_w):
                     _work_scratch = _demosaic_scratch
                 else:
-                    _work_scratch = buffer_session.own(
+                    _work_scratch = buffer_session.view(
                         engine.allocate((align_h, align_w, 3), dtype=np.float32, host_accessible=False)
                     )
             except Exception:
@@ -700,7 +697,7 @@ def _run_shared_raw_provider_pipeline(
                                 _facade()._destroy_work_item(fresh_proxy)
                         if support_weight_analysis is support_linear_full:
                             support_weight_analysis = taichi_aot.copy(
-                                support_weight_analysis, return_gpu=True
+                                support_weight_analysis 
                             )
 
                     # Alignment uses the reference-derived analysis AutoEnhance proxy.
@@ -730,7 +727,6 @@ def _run_shared_raw_provider_pipeline(
                                 primary_for_preview,
                                 analysis_frame_gpu=support_analysis,
                                 stop_event=stop_event,
-                                return_gpu=True,
                                 keep_flow=True,
                             )
                             transform = aligner.take_last_flow()
@@ -739,7 +735,6 @@ def _run_shared_raw_provider_pipeline(
                                 primary_for_preview,
                                 analysis_frame_gpu=support_analysis,
                                 stop_event=stop_event,
-                                return_gpu=True,
                                 return_transform=True,
                             )
                         if normalized_engine not in ("fusionet", "spatial_fusion") and (
@@ -803,7 +798,6 @@ def _run_shared_raw_provider_pipeline(
                         aligned_weight_rgb,
                         taichi_aot.COLOR_RGB2GRAY,
                         dst=weightnet_gray_gpu,
-                        return_gpu=True,
                     )
                     generate_spatial_weights_taichi(
                         current_image=weightnet_gray_gpu,
@@ -1117,7 +1111,6 @@ def _run_shared_raw_provider_pipeline(
                                 aligned_analysis_weight,
                                 taichi_aot.COLOR_RGB2GRAY,
                                 dst=weightnet_gray_gpu,
-                                return_gpu=True,
                             )
                             weightnet_support_gpu = weightnet_gray_gpu
                         else:
@@ -1254,7 +1247,7 @@ def _run_shared_raw_provider_pipeline(
         active_error = sys.exc_info()[1]
         try:
             runtime.stop_workers()
-            buffer_session.release_all_except()
+            buffer_session.release()
             if owns_runtime:
                 runtime.close()
         except Exception as cleanup_error:

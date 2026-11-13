@@ -10,6 +10,20 @@ import os
 import numpy as np
 import taichi as ti
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 @ti.func
 def _catmull_rom_1d_vec2(A, B, C, D, t: ti.f32):
     """1D Catmull-Rom cubic spline interpolation for vector2 coordinates."""
@@ -644,7 +658,7 @@ def warp_image_sparse_mesh(
     enable_adaptive_refine: bool = False,
     err_threshold: float = 0.04,
     max_refine_iters: int = 5,
-    return_gpu: bool = False,
+    
 ):
     """Warp image using sparse mesh acceleration on Taichi GPU or CPU.
 
@@ -662,12 +676,13 @@ def warp_image_sparse_mesh(
         enable_adaptive_refine: Whether to execute the adaptive refine pass on hard regions.
         err_threshold: Photometric error below which early exit is triggered.
         max_refine_iters: Maximum local diamond search iterations for hard regions (default 5).
-        return_gpu: Return the completed native output buffer without a host readback.
+        _resident_output: Return the completed native output buffer without a host readback.
 
     Returns:
-        A native output buffer when ``return_gpu`` is true; otherwise
+        A native output buffer when ``_resident_output`` is true; otherwise
         ``(warped_image, valid_mask)`` as NumPy arrays.
     """
+    _resident_output = _resolve_output(image)
     is_gpu_buf = hasattr(image, "to_numpy") and hasattr(image, "engine")
     img = None if is_gpu_buf else np.asarray(image)
     image_shape = tuple(image.shape) if is_gpu_buf else img.shape
@@ -837,7 +852,7 @@ def warp_image_sparse_mesh(
                     h_src_max=h_src_max,
                 )
 
-            if return_gpu:
+            if _resident_output:
                 # Complete queued work before local source/mesh buffers leave
                 # scope; the returned output then owns an independent result.
                 engine.sync()
@@ -869,7 +884,7 @@ def warp_apap(
     max_refine_iters: int = 5,
     mesh_shape: tuple[int, int] = (33, 33),
     fit_grid_shape: tuple[int, int] | None = None,
-    return_gpu: bool = False,
+    
     global_homography: np.ndarray | None = None,
     sigma: float | tuple[float, float] | None = None,
 ):
@@ -887,15 +902,16 @@ def warp_apap(
         mesh_shape: Sparse grid resolution for mesh warping. Defaults to (33, 33).
         fit_grid_shape: Optional moving-homography grid. ``mesh_shape`` continues
             to control only the image-warp interpolation density.
-        return_gpu: Return the native output buffer without copying it to host memory.
+        _resident_output: Return the native output buffer without copying it to host memory.
         global_homography: Optional source-to-destination control already
             estimated by the caller, reused for local-model quality checks.
         sigma: Optional APAP locality bandwidth, forwarded to the native fit.
 
     Returns:
-        A GPU output buffer when ``return_gpu`` is true; otherwise
+        A GPU output buffer when ``_resident_output`` is true; otherwise
         ``(warped_image, valid_mask)`` as NumPy arrays.
     """
+    _resident_output = _resolve_output(image)
     from .apap import fit_apap
 
     apap_warp = fit_apap(
@@ -915,5 +931,5 @@ def warp_apap(
         enable_adaptive_refine=enable_adaptive_refine,
         err_threshold=err_threshold,
         max_refine_iters=max_refine_iters,
-        return_gpu=return_gpu,
+        _resident_output=_resident_output,
     )

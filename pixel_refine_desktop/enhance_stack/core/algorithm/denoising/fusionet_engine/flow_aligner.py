@@ -13,6 +13,20 @@ from typing import Callable, Optional, Tuple, Union
 
 import numpy as np
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 _MODULE_CACHE = {}
 
 
@@ -34,7 +48,6 @@ class AOTOpticalFlowAligner:
     def __init__(
         self,
         ref_rgb_f32: np.ndarray,
-        *,
         work_scale: float = 0.50,
         full_shape: Optional[Tuple[int, int]] = None,
         tile_size: int = 16,
@@ -51,6 +64,16 @@ class AOTOpticalFlowAligner:
         )
 
         self.engine = get_engine()
+        # The resident pipeline may hand over a reference buffer owned by a
+        # different runtime instance (for example a worker-scoped AOTEngine).
+        # Re-home it once so every later taichi_aot call in this aligner uses
+        # the same runtime as the buffer.
+        if not isinstance(ref_rgb_f32, np.ndarray):
+            owner_engine = getattr(ref_rgb_f32, "engine", None)
+            if owner_engine is not None and owner_engine is not self.engine:
+                ref_rgb_f32 = self.engine.upload(
+                    np.ascontiguousarray(ref_rgb_f32.to_numpy())
+                )
         self.mod = load_compute_flow_module(self.engine)
 
         if full_shape is not None:
@@ -89,6 +112,8 @@ class AOTOpticalFlowAligner:
             else:
                 ref_noise_score = float(noise_score)
                 score_source = "shared-analysis-reference"
+            if ref_noise_score is None:
+                raise ValueError("FlowNet reference noise score is unavailable")
             print(
                 f"[FlowNet] Reference noise score={ref_noise_score:.6f} "
                 f"source={score_source}"
@@ -96,17 +121,20 @@ class AOTOpticalFlowAligner:
             if ref_noise_score >= 0.60:
                 self.prefilter_kernel_size = 5
                 ref_denoised = taichi_aot.box_filter(
-                    ref_rgb_f32, kernel_size=5, return_gpu=True
+                    ref_rgb_f32, kernel_size=5 
                 )
                 ref_for_pyramid = ref_denoised
             elif ref_noise_score >= 0.30:
                 self.prefilter_kernel_size = 3
                 ref_denoised = taichi_aot.box_filter(
-                    ref_rgb_f32, kernel_size=3, return_gpu=True
+                    ref_rgb_f32, kernel_size=3 
                 )
                 ref_for_pyramid = ref_denoised
-        except Exception:
-            pass
+        except Exception as exc:
+            print(
+                f"[FlowNet] Noise prefilter skipped: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
         # Pre-compute Reference Pyramid 100% in GPU Dedicated VRAM
         try:
@@ -331,11 +359,10 @@ class AOTOpticalFlowAligner:
     def align_frame(
         self,
         supp_rgb_f32: Union[np.ndarray, "TaichiGPUBuffer"],
-        *,
         analysis_frame_gpu: Optional[Union[np.ndarray, "TaichiGPUBuffer"]] = None,
         secondary_frame_to_warp: Optional[Union[np.ndarray, "TaichiGPUBuffer"]] = None,
         stop_event: Optional[threading.Event] = None,
-        return_gpu: bool = False,
+        
         stream_primary: bool = False,
         keep_flow: bool = False,
     ):
@@ -345,6 +372,9 @@ class AOTOpticalFlowAligner:
         analysis frame, and then applied to warp `supp_rgb_f32` (RAW linea r) and optionally `secondary_frame_to_warp`.
         If `secondary_frame_to_warp` is given, returns a tuple `(warped_primary, warped_secondary)`.
         """
+        if supp_rgb_f32 is None:
+            supp_rgb_f32 = analysis_frame_gpu
+        _resident_output = _resolve_output(supp_rgb_f32)
         from taichi_vision import algorithm as taichi_aot
         from ..pipeline_process.facade import api as _facade
         from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.alignment_features import (
@@ -376,11 +406,13 @@ class AOTOpticalFlowAligner:
                 src_denoised = taichi_aot.box_filter(
                     src_for_pyramid,
                     kernel_size=self.prefilter_kernel_size,
-                    return_gpu=True,
                 )
                 src_for_pyramid = src_denoised
-            except Exception:
-                pass
+            except Exception as exc:
+                print(
+                    f"[FlowNet] Per-frame prefilter skipped: "
+                    f"{type(exc).__name__}: {exc}"
+                )
 
         # Build comparison pyramid 100% in GPU Dedicated VRAM
         try:
@@ -469,7 +501,6 @@ class AOTOpticalFlowAligner:
                     active_flow_gpu,
                     output_size=(prim_h, prim_w),
                     coordinate_mode="displacement_xy",
-                    return_gpu=return_gpu,
                     session=remap_session,
                 )
 
@@ -485,7 +516,6 @@ class AOTOpticalFlowAligner:
                     active_flow_gpu,
                     output_size=(sec_h, sec_w),
                     coordinate_mode="displacement_xy",
-                    return_gpu=return_gpu,
                     session=remap_session,
                 )
 
@@ -514,7 +544,12 @@ class AOTOpticalFlowAligner:
 
         if secondary_frame_to_warp is not None:
             return warped, warped_secondary
-        if return_gpu:
+        if warped is None:
+            raise RuntimeError(
+                "FlowNet align_frame has no frame to warp: both "
+                "supp_rgb_f32 and analysis_frame_gpu are None"
+            )
+        if _resident_output:
             return warped
         return np.ascontiguousarray(np.clip(warped, 0.0, 1.0), dtype=np.float32)
 

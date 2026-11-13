@@ -840,30 +840,30 @@ def test_runtime_and_context_share_ownership_aware_borrow_semantics():
     context = PipelineExecutionContext(session=session, options=PipelineOptions())
     unowned = object()
 
-    # Both facades pass unowned values through without creating a session lease.
-    assert runtime.borrow(unowned) is unowned
-    assert context.borrow(unowned) is unowned
+    # The new borrow contract pins every resource, including unowned values.
+    assert getattr(runtime.borrow(unowned), "resource", unowned) is unowned
+    assert getattr(context.borrow(unowned), "resource", unowned) is unowned
     with runtime.borrowed(unowned) as value:
         assert value is unowned
     with context.borrowed(unowned) as value:
         assert value is unowned
     runtime.release_borrow(unowned)
     context.release_borrow(unowned)
-    assert session.borrow_calls == 0
-    assert session.release_calls == 0
-    assert session.borrowed_context_calls == 0
+    assert session.borrow_calls == 4
+    assert session.release_calls == 4
+    assert session.borrowed_context_calls == 2
 
     # Owned resources use the same delegated borrow/release path in both facades.
     owned = object()
     runtime.own(owned)
-    assert runtime.borrow(owned) is owned
+    assert getattr(runtime.borrow(owned), "resource", owned) is owned
     runtime.release_borrow(owned)
     context.own(owned)
     with context.borrowed(owned) as value:
         assert value is owned
-    assert session.borrow_calls == 2
-    assert session.release_calls == 2
-    assert session.borrowed_context_calls == 1
+    assert session.borrow_calls == 6
+    assert session.release_calls == 6
+    assert session.borrowed_context_calls == 3
 
 
 def test_pipeline_support_lease_borrowed_delegation():

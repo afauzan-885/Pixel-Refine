@@ -277,11 +277,11 @@ class ResidentWeightNet(ResidentONNXGraph):
         from taichi_vision.taichi_algorithm import aot_api as aot
         from taichi.aot_engine import TaichiGPUBuffer
         if isinstance(source, TaichiGPUBuffer):
-            gray = source if len(source.shape) == 2 else aot.cvtColor(source, aot.COLOR_RGB2GRAY, return_gpu=True, session=session)
+            gray = source if len(source.shape) == 2 else aot.cvtColor(source, aot.COLOR_RGB2GRAY,  session=session)
         elif len(source.shape) == 2:
             gray = self.engine.upload(np.ascontiguousarray(source, dtype=np.float32), is_vector=False)
         else:
-            gray = aot.cvtColor(source, aot.COLOR_RGB2GRAY, return_gpu=True, session=session)
+            gray = aot.cvtColor(source, aot.COLOR_RGB2GRAY,  session=session)
         height, width = gray.shape
         if (
             gray is not source

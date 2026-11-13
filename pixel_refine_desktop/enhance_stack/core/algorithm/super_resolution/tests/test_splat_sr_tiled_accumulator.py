@@ -12,7 +12,7 @@ import pytest
 import tifffile
 
 from taichi_vision import algorithm as taichi_aot
-from taichi_vision.taichi_algorithm.buffer_session import BufferSession
+from taichi.buffer_session import BufferSession
 from taichi import TaichiGPUBuffer
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.splat_sr.spatial_splat_runtime import (
     SessionHannAccumulator,
@@ -32,7 +32,7 @@ class RecordingSession(BufferSession):
         self.device_shapes = []
 
     def own(self, resource, *, releaser=None):
-        if isinstance(resource, TaichiGPUBuffer):
+        if _ti_rt.is_resident(resource):
             self.device_shapes.append(tuple(resource.shape))
         return super().own(resource, releaser=releaser)
 

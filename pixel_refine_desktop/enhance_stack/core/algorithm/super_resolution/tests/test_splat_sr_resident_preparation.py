@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from taichi_vision import algorithm as aot
 from taichi import TaichiGPUBuffer
-from taichi_vision.taichi_algorithm.buffer_session import BufferSession
+from taichi.buffer_session import BufferSession
 
 
 @pytest.mark.parametrize("count", [1, 31, 32, 33, 4096, 4097])

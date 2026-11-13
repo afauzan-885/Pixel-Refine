@@ -29,6 +29,20 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.op
     to_flow_gray_u8,
 )
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 
 DEFAULT_LUCAS_KANADE_CONFIG = {
     "backend": "auto",
@@ -427,10 +441,11 @@ class LucasKanade:
         target_gray,
         config,
         point_executor=None,
-        return_gpu=False,
+        
     ):
         """Run the full-frame Taichi AOT Lucas-Kanade implementation."""
-        if return_gpu:
+        _resident_output = _resolve_output(reference_gray)
+        if _resident_output:
             return self._calculate_flow_gpu_buffer(reference_gray, target_gray, config)
 
         from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
@@ -468,7 +483,6 @@ class LucasKanade:
         from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
 
         flow_kwargs = self._build_lk_params(config)
-        flow_kwargs["return_gpu"] = True
         if reference_pyramid is not None:
             flow_kwargs["reference_pyramid"] = reference_pyramid
         flow = calcOpticalFlowPyrLK(reference_gray, target_gray, **flow_kwargs)
@@ -494,7 +508,7 @@ class LucasKanade:
         flow = calcOpticalFlowPyrLK(
             np.ascontiguousarray(reference_gray, dtype=np.float32),
             np.ascontiguousarray(target_gray, dtype=np.float32),
-            **params, return_gpu=False,
+            **params, 
         )
         if isinstance(flow, tuple):
             flow = flow[0]
@@ -513,7 +527,7 @@ class LucasKanade:
             raise RuntimeError(f"OpenGL native flow returned {flow.shape}, expected {expected}")
         return taichi_aot.remap_with_flow(
             np.ascontiguousarray(target), flow,
-            int(reference.shape[0]), int(reference.shape[1]), return_gpu=False,
+            int(reference.shape[0]), int(reference.shape[1]), 
         )
 
     def align_frame(
@@ -526,9 +540,10 @@ class LucasKanade:
         point_executor=None,
         matching_reference=None,
         matching_target=None,
-        return_gpu=False,
+        
         target_for_warping=None,
     ):
+        _resident_output = _resolve_output(reference)
         config = config or self.load_config()
         if reference is None or target is None:
             return None
@@ -579,7 +594,6 @@ class LucasKanade:
                     stop_requested=stop_requested,
                     matching_reference=matching_reference,
                     matching_target=matching_target,
-                    return_gpu=return_gpu,
                 )
             if bool(config.get("conservative_vram", True)):
                 self._cleanup_tile_buffers(
@@ -658,8 +672,9 @@ class LucasKanade:
         stop_requested=None,
         matching_reference=None,
         matching_target=None,
-        return_gpu=False,
+        
     ):
+        _resident_output = _resolve_output(reference)
         from taichi_vision import algorithm as taichi_aot
 
         t_total = time.perf_counter()
@@ -768,7 +783,7 @@ class LucasKanade:
                     continue
 
                 if single_full_frame_tile:
-                    if return_gpu:
+                    if _resident_output:
                         return warped_gpu
 
                     result = self._download_restore_dtype(
@@ -800,7 +815,7 @@ class LucasKanade:
 
             flush_stitch_batch()
 
-            if return_gpu:
+            if _resident_output:
                 return accumulator
 
             result = self._download_restore_dtype(
@@ -976,7 +991,6 @@ class LucasKanade:
                 roi_h,
                 roi_w,
                 dst=warped_gpu,
-                return_gpu=True,
             )
             if profile is not None:
                 profile["warp"] += time.perf_counter() - t0
@@ -1010,8 +1024,8 @@ class LucasKanade:
             lut_cpu = (1.0 - 0.50) * indices + 0.50 * s_curve
             lut_gpu = _ti_rt.upload(lut_cpu, is_vector=False)
 
-            ref_blur_gpu = taichi_aot.box_filter(ref_gray_gpu, kernel_size=5, return_gpu=True)
-            target_blur_gpu = taichi_aot.box_filter(target_gray_gpu, kernel_size=5, return_gpu=True)
+            ref_blur_gpu = taichi_aot.box_filter(ref_gray_gpu, kernel_size=5 )
+            target_blur_gpu = taichi_aot.box_filter(target_gray_gpu, kernel_size=5 )
 
             ref_gray_enhanced = taichi_aot.enhance_grayscale(
                 ref_gray_gpu,
@@ -1019,7 +1033,6 @@ class LucasKanade:
                 lut_gpu,
                 micro_contrast=0.30,
                 clarity=0.30,
-                return_gpu=True,
             )
             target_gray_enhanced = taichi_aot.enhance_grayscale(
                 target_gray_gpu,
@@ -1027,7 +1040,6 @@ class LucasKanade:
                 lut_gpu,
                 micro_contrast=0.30,
                 clarity=0.30,
-                return_gpu=True,
             )
 
             _ti_rt.engine.sync()
@@ -1045,7 +1057,6 @@ class LucasKanade:
                 flow_gpu,
                 roi_h,
                 roi_w,
-                return_gpu=True,
             )
         finally:
             if flow_gpu is not None and hasattr(flow_gpu, "release"):
@@ -1146,7 +1157,6 @@ class LucasKanade:
                 compact_gpu,
                 (width, height),
                 interpolation=taichi_aot.INTER_NEAREST,
-                return_gpu=False,
             )
         finally:
             compact_gpu.destroy()

@@ -116,12 +116,15 @@ def _track_gpu_result(result):
     runtime = current_pipeline_runtime()
     if runtime is None:
         return result
-    return runtime.ensure_session().track_result(result)
+    return runtime.ensure_session()._track(result)
 
 
 def _own_component(component, *, releaser=None):
     runtime = current_pipeline_runtime()
-    return runtime.own(component, releaser=releaser) if runtime is not None else component
+    if runtime is None:
+        return component
+    runtime.ensure_session().borrow(component)
+    return component
 
 
 def _export_result(result):
@@ -129,7 +132,9 @@ def _export_result(result):
     if runtime is None:
         return result
     session = runtime.ensure_session()
-    return session.detach(runtime.own(result))
+    session.borrow(result)
+    session.release(result, retain=True)
+    return result
 
 
 def _destroy_work_item(item):
@@ -139,7 +144,7 @@ def _destroy_work_item(item):
     runtime = current_pipeline_runtime()
     session = runtime.buffer_session if runtime is not None else None
     if session is not None:
-        session.release_tree(item)
+        session.release(item)
         return
     if isinstance(item, tuple):
         for el in item:
@@ -181,7 +186,7 @@ def _destroy_work_item_except(item, protected):
     runtime = current_pipeline_runtime()
     session = runtime.buffer_session if runtime is not None else None
     if session is not None:
-        session.release_tree(unprotected)
+        session.release(unprotected)
         return
     values = unprotected if isinstance(unprotected, (tuple, list)) else (unprotected,)
     for value in values:

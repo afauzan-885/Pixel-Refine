@@ -841,7 +841,7 @@ def ransac_flow_cleanup(
     """
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi_vision.taichi_algorithm import aot_api as taichi_aot
-        return taichi_aot.ransac_flow_cleanup(flow, threshold=threshold, return_gpu=hasattr(flow, "to_numpy"))
+        return taichi_aot.ransac_flow_cleanup(flow, threshold=threshold )
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")

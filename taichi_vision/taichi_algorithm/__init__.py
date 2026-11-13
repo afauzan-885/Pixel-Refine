@@ -18,7 +18,7 @@ if AOT_MODE == "0":
 # --- Core Imports ---
 from . import common
 from . import aot_wrapper
-from .buffer_session import BufferSession
+from taichi.buffer_session import BufferSession
 
 if AOT_MODE == "1":
     from .aot_wrapper import *
@@ -302,8 +302,9 @@ if AOT_MODE == "1":
         noise_coring=0.0,
         dst=None,
         buffer_provider="pool",
-        return_gpu=False,
+        
     ):
+        _resident_output = _resolve_output(src, dst=dst)
         result = _aot_extended("enhance_image_aot")(
             src,
             blur,
@@ -312,8 +313,8 @@ if AOT_MODE == "1":
             clarity=clarity,
             noise_coring=noise_coring,
         )
-        if return_gpu:
-            # The current leaf is host-returning; accepting return_gpu here
+        if _resident_output:
+            # The current leaf is host-returning; accepting _resident_output here
             # would falsely advertise a GPU buffer, so fail closed.
             raise NotImplementedError(
                 "AOT enhance_image currently exposes a host result only"
@@ -339,7 +340,7 @@ if AOT_MODE == "1":
     # explicit fail-closed placeholders when no equivalent AOT contract
     # exists.  In particular, we never import the JIT implementation here as
     # a silent CPU fallback.
-    def cvtColor_extended(src, code, dst=None, buffer_provider="pool", return_gpu=False):
+    def cvtColor_extended(src, code, dst=None, buffer_provider="pool"):
         """AOT color conversion with the historical ``dst``/pool arguments.
 
         ``buffer_provider`` is retained for source compatibility; native AOT
@@ -347,7 +348,8 @@ if AOT_MODE == "1":
         an arbitrary Python pool object.  Supplying it remains harmless and is
         deliberately not routed to a host implementation.
         """
-        result = _aot_cvtColor_extended(src, code, return_gpu=return_gpu)
+        _resident_output = _resolve_output(src, dst=dst)
+        result = _aot_cvtColor_extended(src, code, _resident_output=_resident_output)
         if dst is not None:
             dst[...] = result.to_numpy() if hasattr(result, "to_numpy") else result
             return dst
@@ -360,8 +362,9 @@ if AOT_MODE == "1":
         max_val=255.0,
         num_bins=0,
         buffer_provider="pool",
-        return_gpu=False,
+        
     ):
+        _resident_output = _resolve_output(src, dst=dst)
         if int(num_bins or 0) not in (0, 256):
             raise NotImplementedError(
                 "AOT Otsu uses the qualified 256-bin histogram; "
@@ -371,7 +374,7 @@ if AOT_MODE == "1":
             src,
             thresh_type=thresh_type,
             max_val=max_val,
-            return_gpu=return_gpu,
+            _resident_output=_resident_output,
         )
         if dst is not None:
             payload = result[1] if isinstance(result, tuple) else result
@@ -386,10 +389,11 @@ if AOT_MODE == "1":
         epsilon=1e-4,
         dst=None,
         buffer_provider="pool",
-        return_gpu=False,
+        
     ):
+        _resident_output = _resolve_output(src, dst=dst)
         result = _aot_guided_filter(
-            guide, src, radius=radius, epsilon=epsilon, return_gpu=return_gpu
+            guide, src, radius=radius, epsilon=epsilon, _resident_output=_resident_output
         )
         if dst is not None:
             dst[...] = result.to_numpy() if hasattr(result, "to_numpy") else result
@@ -403,8 +407,9 @@ if AOT_MODE == "1":
         num_bins=0,
         dst=None,
         buffer_provider="pool",
-        return_gpu=False,
+        
     ):
+        _resident_output = _resolve_output(src, dst=dst)
         if int(num_bins or 0) not in (0, 256):
             raise NotImplementedError(
                 "AOT CLAHE uses the qualified 256-bin histogram; "
@@ -414,7 +419,7 @@ if AOT_MODE == "1":
             src,
             clip_limit=clip_limit,
             tile_grid_size=tile_grid_size,
-            return_gpu=return_gpu,
+            _resident_output=_resident_output,
         )
         if dst is not None:
             dst[...] = result.to_numpy() if hasattr(result, "to_numpy") else result
@@ -428,15 +433,16 @@ if AOT_MODE == "1":
         aperture_size=3,
         dst=None,
         buffer_provider="pool",
-        return_gpu=False,
+        
     ):
+        _resident_output = _resolve_output(src, dst=dst)
         if int(aperture_size) != 3:
             raise NotImplementedError("AOT Canny supports the fixed 3x3 aperture")
         result = _aot_canny(
             src,
             low_threshold=low_threshold,
             high_threshold=high_threshold,
-            return_gpu=return_gpu,
+            _resident_output=_resident_output,
         )
         if dst is not None:
             dst[...] = result.to_numpy() if hasattr(result, "to_numpy") else result
@@ -449,14 +455,15 @@ if AOT_MODE == "1":
         theta_resolution=1.0,
         threshold=80,
         buffer_provider="pool",
-        return_gpu=False,
+        
     ):
+        _resident_output = _resolve_output(edge_image)
         return _aot_hough_lines(
             edge_image,
             rho_resolution=rho_resolution,
             theta_resolution=theta_resolution,
             threshold=threshold,
-            return_gpu=return_gpu,
+            _resident_output=_resident_output,
         )
 
     def hough_lines_with_canny(
@@ -467,9 +474,10 @@ if AOT_MODE == "1":
         theta_resolution=1.0,
         vote_threshold=80,
         buffer_provider="pool",
-        return_gpu=False,
+        
         **kwargs,
     ):
+        _resident_output = _resolve_output(src)
         if kwargs:
             unexpected = ", ".join(sorted(kwargs))
             raise TypeError(f"unexpected hough_lines_with_canny arguments: {unexpected}")
@@ -477,14 +485,14 @@ if AOT_MODE == "1":
             src,
             low_threshold=low_threshold,
             high_threshold=high_threshold,
-            return_gpu=return_gpu,
+            _resident_output=_resident_output,
         )
         lines = _aot_hough_lines(
             edges,
             rho_resolution=rho_resolution,
             theta_resolution=theta_resolution,
             threshold=vote_threshold,
-            return_gpu=return_gpu,
+            _resident_output=_resident_output,
         )
         return lines, edges
 
@@ -496,8 +504,9 @@ if AOT_MODE == "1":
         flags=NORMAL_CLONE,
         max_iterations=200,
         buffer_provider="pool",
-        return_gpu=False,
+        
     ):
+        _resident_output = _resolve_output(src, dst=dst)
         return _aot_seamless_clone(
             src,
             dst,
@@ -505,18 +514,19 @@ if AOT_MODE == "1":
             center=center,
             flags=flags,
             max_iterations=max_iterations,
-            return_gpu=return_gpu,
+            _resident_output=_resident_output,
         )
 
-    def _aot_pyramid_levels(src, levels, *, return_gpu=False):
+    def _aot_pyramid_levels(src, levels):
+        _resident_output = _resolve_output(src)
         levels = builtins.max(1, int(levels))
         current = src
-        if return_gpu and isinstance(src, np.ndarray):
+        if _resident_output and isinstance(src, np.ndarray):
             from .aot_api import upload as _aot_upload
             current = _aot_upload(np.ascontiguousarray(src, dtype=np.float32))
         result = [current]
         for _ in range(levels - 1):
-            next_level = _aot_image_pyramid(current, levels=1, return_gpu=return_gpu)
+            next_level = _aot_image_pyramid(current, levels=1, _resident_output=_resident_output)
             if tuple(next_level.shape[:2]) == tuple(current.shape[:2]):
                 break
             result.append(next_level)
@@ -527,12 +537,12 @@ if AOT_MODE == "1":
         return [
             level.to_numpy() if hasattr(level, "to_numpy") else np.asarray(level)
             for level in _aot_pyramid_levels(
-                src, levels, return_gpu=bool(kwargs.pop("return_gpu", False))
+                src, levels 
             )
         ]
 
     def build_image_pyramid_gpu(src, levels=4, **kwargs):
-        return _aot_pyramid_levels(src, levels, return_gpu=True)
+        return _aot_pyramid_levels(src, levels )
 
     from .common import (
         split as _common_split,
@@ -571,10 +581,11 @@ if AOT_MODE == "1":
         flags=0,
         flow_init=None,
         buffer_provider="pool",
-        return_gpu=False,
+        
         reference_pyramid=None,
         scratch=None,
     ):
+        _resident_output = _resolve_output(ref_gray)
         return _aot_farneback_flow(
             ref_gray,
             comp_gray,
@@ -586,7 +597,7 @@ if AOT_MODE == "1":
             poly_sigma=poly_sigma,
             flags=flags,
             flow_init=flow_init,
-            return_gpu=return_gpu,
+            _resident_output=_resident_output,
             reference_pyramid=reference_pyramid,
             scratch=scratch,
         )
@@ -999,7 +1010,7 @@ if AOT_MODE == "1":
             max_matches=max_matches,
             lambda_3d=lambda_3d,
             cycle_spins=cycle_spins,
-            return_gpu=hasattr(src, "to_numpy"),
+            
         )
 
     def build_dct_matrix(N):
@@ -1417,7 +1428,7 @@ def calcOpticalFlowFarneback(
     return_diagnostics=False,
     reference_pyramid=None,
     scratch=None,
-    return_gpu=False,
+    
     dst=None,
 ):
     """OpenCV-style dense Farneback optical flow backed by taichi_aot."""
@@ -1438,7 +1449,6 @@ def calcOpticalFlowFarneback(
         flow_init=flow,
         reference_pyramid=reference_pyramid,
         scratch=scratch,
-        return_gpu=return_gpu,
         dst=dst,
     )
 
@@ -1461,7 +1471,7 @@ def calcOpticalFlowPyrLK(
     motion_mode="fast",
     dense_mode="smooth",
     max_flow_px=0.0,
-    return_gpu=False,
+    
     dst=None,
     return_diagnostics=False,
     reference_pyramid=None,
@@ -1486,7 +1496,6 @@ def calcOpticalFlowPyrLK(
         motion_mode=motion_mode,
         dense_mode=dense_mode,
         max_flow_px=max_flow_px,
-        return_gpu=return_gpu,
         dst=dst,
         return_diagnostics=return_diagnostics,
         reference_pyramid=reference_pyramid,
@@ -1563,7 +1572,7 @@ if AOT_MODE == "1":
             src,
             dsize,
             interpolation=interpolation,
-            return_gpu=is_gpu,
+            
             dst=native_dst,
         )
         return result if result is dst else (_aot_store_destination(result, dst) if dst is not None else result)
@@ -1573,7 +1582,7 @@ if AOT_MODE == "1":
         if size != 3:
             raise NotImplementedError("AOT median currently supports only a 3x3 kernel")
         is_gpu = hasattr(src, "to_numpy") and not isinstance(src, np.ndarray)
-        result = _aot_median_filter(src, return_gpu=is_gpu, kernel_size=size)
+        result = _aot_median_filter(src,  kernel_size=size)
         return result if result is dst else (_aot_store_destination(result, dst) if dst is not None else result)
 
     def gaussian(src, ksize, sigmaX=0, sigmaY=0, dst=None):
@@ -1589,7 +1598,7 @@ if AOT_MODE == "1":
             src,
             sigma=sigma,
             kernel_size=size,
-            return_gpu=is_gpu,
+            
             dst=native_dst,
         )
         return result if result is dst else (_aot_store_destination(result, dst) if dst is not None else result)
@@ -1605,7 +1614,7 @@ if AOT_MODE == "1":
         result = _aot_box_filter(
             src,
             kernel_size=size,
-            return_gpu=is_gpu,
+            
             dst=native_dst,
         )
         return _aot_store_destination(result, dst) if dst is not None else result
@@ -1614,7 +1623,7 @@ if AOT_MODE == "1":
         if int(ksize) != 3:
             raise NotImplementedError("AOT Sobel currently supports only a 3x3 kernel")
         is_gpu = hasattr(src, "to_numpy") and not isinstance(src, np.ndarray)
-        gx, gy = _aot_sobel(src, return_gpu=is_gpu)
+        gx, gy = _aot_sobel(src )
         if int(dx) >= 1 and int(dy) == 0:
             return gx
         if int(dx) == 0 and int(dy) >= 1:
@@ -1627,7 +1636,7 @@ if AOT_MODE == "1":
         if int(ksize) not in (1, 3):
             raise NotImplementedError("AOT Laplacian supports ksize=1 or ksize=3")
         is_gpu = hasattr(src, "to_numpy") and not isinstance(src, np.ndarray)
-        return _aot_laplacian(src, return_gpu=is_gpu)
+        return _aot_laplacian(src )
 
     def bilateral(src, d, sigmaColor, sigmaSpace):
         # The existing AOT leaf exposes validated presets rather than the
@@ -1636,14 +1645,15 @@ if AOT_MODE == "1":
         strength = builtins.max(float(sigmaColor), float(sigmaSpace), 0.0)
         preset = "heavy" if strength >= 8.0 else ("light" if strength <= 2.0 else "medium")
         is_gpu = hasattr(src, "to_numpy") and not isinstance(src, np.ndarray)
-        return _aot_bilateral_grid_filter(src, preset=preset, return_gpu=is_gpu)
+        return _aot_bilateral_grid_filter(src, preset=preset )
 
     def ransac(flow, threshold=3.0):
-        return _aot_ransac_flow_cleanup(flow, threshold=float(threshold), return_gpu=False)
+        return _aot_ransac_flow_cleanup(flow, threshold=float(threshold) )
 
-    def cvtColor(src, code, dst=None, return_gpu=False, session=None):
-        result = _aot_cvtColor(src, code, dst=dst, return_gpu=return_gpu, session=session)
-        if return_gpu or session is not None or hasattr(result, "handle"):
+    def cvtColor(src, code, dst=None, session=None):
+        _resident_output = _resolve_output(src, dst=dst)
+        result = _aot_cvtColor(src, code, dst=dst, _resident_output=_resident_output, session=session)
+        if _resident_output or session is not None or hasattr(result, "handle"):
             return result
         return _aot_store_destination(result, dst)
 
@@ -1931,3 +1941,16 @@ from .aot_api import (
 
 # Explicit export of the complete algorithm surface (no lazy fallback).
 from .aot_api import *  # noqa: F401,F403,E402
+
+
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)

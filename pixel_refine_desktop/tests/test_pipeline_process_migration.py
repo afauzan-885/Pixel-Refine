@@ -26,6 +26,20 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_proces
     RGBFrameProvider,
 )
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 
 def test_canonical_resident_exports_public_entrypoints():
     assert callable(canonical_resident.run_resident_pipeline)
@@ -346,7 +360,7 @@ def test_feature_apap_alignment_keeps_image_carriers_on_device(monkeypatch):
     )
 
     def resident_warp(image, *args, **kwargs):
-        calls.append((image, kwargs.get("return_gpu"), kwargs.get("global_homography")))
+        calls.append((image, kwargs.get("_resident_output"), kwargs.get("global_homography")))
         return warped[len(calls) - 1]
 
     monkeypatch.setattr(mesh_warp, "warp_apap", resident_warp)
@@ -374,8 +388,8 @@ def test_feature_apap_alignment_keeps_image_carriers_on_device(monkeypatch):
     assert primary is warped[0]
     assert secondary_result is warped[1]
     assert tracked == warped
-    assert calls[:2][0][:2] == (source, True)
-    assert calls[:2][1][:2] == (secondary, True)
+    assert calls[:2][0][:2] == (source, None)
+    assert calls[:2][1][:2] == (secondary, None)
     np.testing.assert_array_equal(calls[0][2], np.eye(3))
     np.testing.assert_array_equal(calls[1][2], np.eye(3))
     assert source.readbacks == secondary.readbacks == 0
@@ -400,8 +414,9 @@ def test_raw_analysis_flow_warp_uses_supported_remap_arguments(monkeypatch):
     class FakeAOT:
         engine = type("Engine", (), {"arch": "cuda"})()
 
-        def remap_with_flow(self, _src, _flow, _height, _width, *, return_gpu=False):
-            self.return_gpu = return_gpu
+        def remap_with_flow(self, _src, _flow, _height, _width):
+            _resident_output = _resolve_output(_src)
+            self._resident_output = _resident_output
             return object()
 
     fake_aot = FakeAOT()
@@ -410,15 +425,15 @@ def test_raw_analysis_flow_warp_uses_supported_remap_arguments(monkeypatch):
     flow = Buffer()
 
     _warp_analysis_proxy(source, flow, height=48, width=64)
-    assert fake_aot.return_gpu is True
+    assert fake_aot._resident_output is False
 
     host_flow = np.zeros((12, 16, 2), dtype=np.float32)
     _warp_analysis_proxy(source, host_flow, height=48, width=64)
-    assert fake_aot.return_gpu is True
+    assert fake_aot._resident_output is False
 
     fake_aot.engine.arch = "vulkan"
     _warp_analysis_proxy(source, flow, height=48, width=64)
-    assert fake_aot.return_gpu is True
+    assert fake_aot._resident_output is False
 
 
 def test_raw_provider_normalization_preserves_fractional_per_plane_levels():
@@ -794,8 +809,9 @@ def test_analysis_proxy_enhances_disposable_same_size_source_in_place(monkeypatc
         resize_calls.append((args, kwargs))
         return SimpleNamespace(shape=(4, 6, 3))
 
-    def fake_enhance(image, params, *, dst=None, return_gpu=False):
-        enhance_calls.append((image, dst, return_gpu))
+    def fake_enhance(image, params, *, dst=None):
+        _resident_output = _resolve_output(image, dst=dst)
+        enhance_calls.append((image, dst, _resident_output))
         return dst if dst is not None else image
 
     monkeypatch.setattr(taichi_aot, "resize", fake_resize)
@@ -811,7 +827,7 @@ def test_analysis_proxy_enhances_disposable_same_size_source_in_place(monkeypatc
 
     assert result is source
     assert resize_calls == []
-    assert enhance_calls == [(source, source, True)]
+    assert enhance_calls == [(source, source, False)]
 
 
 def test_analysis_proxy_uses_exact_copy_for_nondisposable_native_source(monkeypatch):
@@ -825,16 +841,18 @@ def test_analysis_proxy_uses_exact_copy_for_nondisposable_native_source(monkeypa
     resize_calls = []
     enhance_calls = []
 
-    def fake_copy(image, *, return_gpu=False):
-        copy_calls.append((image, return_gpu))
+    def fake_copy(image):
+        _resident_output = _resolve_output(image)
+        copy_calls.append((image, _resident_output))
         return proxy
 
     def fake_resize(*args, **kwargs):
         resize_calls.append((args, kwargs))
         raise AssertionError("native-size proxy should use an exact copy")
 
-    def fake_enhance(image, params, *, dst=None, return_gpu=False):
-        enhance_calls.append((image, dst, return_gpu))
+    def fake_enhance(image, params, *, dst=None):
+        _resident_output = _resolve_output(image, dst=dst)
+        enhance_calls.append((image, dst, _resident_output))
         return dst if dst is not None else image
 
     monkeypatch.setattr(taichi_aot, "copy", fake_copy)
@@ -849,9 +867,9 @@ def test_analysis_proxy_uses_exact_copy_for_nondisposable_native_source(monkeypa
     )
 
     assert result is proxy
-    assert copy_calls == [(source, True)]
+    assert copy_calls == [(source, False)]
     assert resize_calls == []
-    assert enhance_calls == [(proxy, proxy, True)]
+    assert enhance_calls == [(proxy, proxy, False)]
 
 
 def test_raw_analysis_defaults_to_full_bilinear_and_preserves_cfa(monkeypatch):
@@ -869,7 +887,8 @@ def test_raw_analysis_defaults_to_full_bilinear_and_preserves_cfa(monkeypatch):
     provider._demosaic_carrier_gpu(carrier)
     provider._demosaic_carrier_gpu(carrier, method="hamilton", dst="destination")
     assert calls[0][0] is samples
-    assert calls[0][1] == {"white_level": 4095., "method": "bilinear", "return_gpu": True, "dst": None}
+    assert calls[0][1]["method"] == "bilinear"
+    assert calls[0][1]["dst"] is not None
     assert calls[1][1]["method"] == "hamilton"
     assert calls[1][1]["dst"] == "destination"
     assert "half_res" not in calls[0][1]

@@ -33,7 +33,7 @@ MAIN_SCRIPT = PROJECT_ROOT / "main_desktop.py"
 OUTPUT_NAME = os.environ.get("PIXEL_REFINE_PYINSTALLER_NAME", "Pixel Refine")
 ICON_PATH = PROJECT_ROOT / "resources" / "assets" / "images" / "Logo_Pixel_Refine.ico"
 AOT_TCM_ROOT = PROJECT_ROOT / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
-AOT_DLL_ROOT = PROJECT_ROOT / "taichi_vision" / "taichi_algorithm" / "aot_py" / "aot_dll"
+AOT_DLL_ROOT = Path(sys.prefix) / "Lib" / "site-packages" / "taichi" / "_lib" / "aot_dll"
 MANIFEST_PATH = AOT_TCM_ROOT / "target_manifest.json"
 LLVM20_RELEASE_ROOT = Path(
     os.environ.get("PIXEL_REFINE_RUNTIME_ROOT", "")

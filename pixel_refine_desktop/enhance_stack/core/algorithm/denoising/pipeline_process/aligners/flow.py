@@ -16,6 +16,20 @@ from taichi.aot_engine import TaichiGPUBuffer, get_engine
 from ..facade import api as _facade
 from .base import _ResidentFlowBufferMixin
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 __all__ = [
     "BlockMatchingResidentAligner",
     "LucasKanadeResidentAligner",
@@ -52,7 +66,6 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
     def __init__(
         self,
         ref_analysis_gpu: TaichiGPUBuffer,
-        *,
         work_scale: float = 0.50,
         full_shape: Optional[Tuple[int, int]] = None,
         alignment_config: Optional[dict] = None,
@@ -146,13 +159,13 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
     def align_frame(
         self,
         supp_linear_gpu,
-        *,
         analysis_frame_gpu=None,
         secondary_frame_to_warp=None,
         stop_event=None,
-        return_gpu=True,
+        
         return_transform: bool = False,
     ):
+        _resident_output = _resolve_output(supp_linear_gpu)
         from taichi_vision import algorithm as taichi_aot
         taichi_aot = _facade()._managed_api(taichi_aot)
         from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
@@ -182,7 +195,6 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
             source,
             taichi_aot.COLOR_RGB2GRAY,
             dst=supp_gray_scratch if tuple(source.shape[:2]) == (self.work_h, self.work_w) else None,
-            return_gpu=True,
         )
         flow_gpu = None
         try:
@@ -191,7 +203,6 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                     supp_gray_gpu,
                     (self.work_w, self.work_h),
                     interpolation=taichi_aot.INTER_AREA,
-                    return_gpu=True,
                     dst=supp_gray_scratch,
                 )
                 if supp_gray_gpu is not supp_gray_scratch:
@@ -204,7 +215,6 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                 self.ref_gray_gpu,
                 supp_gray_gpu,
                 **self._flow_params(),
-                return_gpu=True,
                 reference_pyramid=self.reference_pyramid,
                 dst=flow_destination,
                 scratch=getattr(self, "_flow_scratch", None),
@@ -218,7 +228,6 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                     flow_gpu,
                     prim_h,
                     prim_w,
-                    return_gpu=True,
                 )
             warped_secondary = None
             if secondary_frame_to_warp is not None:
@@ -228,7 +237,6 @@ class BlockMatchingResidentAligner(_ResidentFlowBufferMixin):
                     flow_gpu,
                     sec_h,
                     sec_w,
-                    return_gpu=True,
                 )
             if return_transform:
                 retained_flow = self._resident_flow_view()
@@ -276,7 +284,6 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
     def __init__(
         self,
         ref_analysis_gpu: TaichiGPUBuffer,
-        *,
         work_scale: float = 0.50,
         full_shape: Optional[Tuple[int, int]] = None,
         alignment_config: Optional[dict] = None,
@@ -365,13 +372,13 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
     def align_frame(
         self,
         supp_linear_gpu,
-        *,
         analysis_frame_gpu=None,
         secondary_frame_to_warp=None,
         stop_event=None,
-        return_gpu=True,
+        
         return_transform: bool = False,
     ):
+        _resident_output = _resolve_output(supp_linear_gpu)
         from taichi_vision import algorithm as taichi_aot
         taichi_aot = _facade()._managed_api(taichi_aot)
         from taichi_vision.taichi_algorithm import calcOpticalFlowPyrLK
@@ -401,7 +408,6 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
             source,
             taichi_aot.COLOR_RGB2GRAY,
             dst=supp_gray_scratch if tuple(source.shape[:2]) == (self.work_h, self.work_w) else None,
-            return_gpu=True,
         )
         flow_gpu = None
         try:
@@ -410,7 +416,6 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                     supp_gray_gpu,
                     (self.work_w, self.work_h),
                     interpolation=taichi_aot.INTER_AREA,
-                    return_gpu=True,
                     dst=supp_gray_scratch,
                 )
                 if supp_gray_gpu is not supp_gray_scratch:
@@ -423,7 +428,6 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                 self.ref_gray_gpu,
                 supp_gray_gpu,
                 **self._flow_params(),
-                return_gpu=True,
                 reference_pyramid=self.reference_pyramid,
                 dst=flow_destination,
                 scratch=getattr(self, "_flow_scratch", None),
@@ -437,7 +441,6 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                     flow_gpu,
                     output_size=(prim_h, prim_w),
                     coordinate_mode="displacement_xy",
-                    return_gpu=True,
                     session=_facade()._buffer_session(),
                 )
             warped_secondary = None
@@ -448,7 +451,6 @@ class LucasKanadeResidentAligner(_ResidentFlowBufferMixin):
                     flow_gpu,
                     output_size=(sec_h, sec_w),
                     coordinate_mode="displacement_xy",
-                    return_gpu=True,
                     session=_facade()._buffer_session(),
                 )
             if return_transform:
@@ -507,7 +509,6 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
     def __init__(
         self,
         ref_analysis_gpu: TaichiGPUBuffer,
-        *,
         full_shape: Optional[Tuple[int, int]] = None,
         alignment_config: Optional[dict] = None,
         **_unused,
@@ -559,13 +560,13 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
     def align_frame(
         self,
         supp_linear_gpu,
-        *,
         analysis_frame_gpu=None,
         secondary_frame_to_warp=None,
         stop_event=None,
-        return_gpu=True,
+        
         return_transform: bool = False,
     ):
+        _resident_output = _resolve_output(supp_linear_gpu)
         from taichi_vision import algorithm as taichi_aot
         taichi_aot = _facade()._managed_api(taichi_aot)
 
@@ -585,7 +586,7 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
             if tuple(supp_gray_gpu.shape[:2]) != (self.work_h, self.work_w):
                 resized = taichi_aot.resize(
                     supp_gray_gpu, (self.work_w, self.work_h),
-                    interpolation=taichi_aot.INTER_AREA, return_gpu=True,
+                    interpolation=taichi_aot.INTER_AREA, 
                 )
                 _facade()._destroy_work_item(supp_gray_gpu)
                 supp_gray_gpu = resized
@@ -601,7 +602,6 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
                 num_iters=max(1, int(self.config.get("iterations", 3))),
                 poly_n=max(5, int(self.config.get("poly_n", 5))),
                 poly_sigma=float(self.config.get("poly_sigma", 1.2)),
-                return_gpu=True,
                 reference_pyramid=self.reference_pyramid,
                 dst=flow_destination,
             )
@@ -623,7 +623,6 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
                     flow_gpu,
                     output_size=(prim_h, prim_w),
                     coordinate_mode="displacement_xy",
-                    return_gpu=True,
                     session=_facade()._buffer_session(),
                 )
             warped_secondary = None
@@ -634,7 +633,6 @@ class FarnebackResidentAligner(_ResidentFlowBufferMixin):
                     flow_gpu,
                     output_size=(sec_h, sec_w),
                     coordinate_mode="displacement_xy",
-                    return_gpu=True,
                     session=_facade()._buffer_session(),
                 )
             if return_transform:

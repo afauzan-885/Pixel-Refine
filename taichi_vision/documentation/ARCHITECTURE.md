@@ -33,7 +33,27 @@ the presence of an artifact is not compatibility evidence.
 3. The engine acquires or allocates buffers through the memory governor.
 4. The graph runs full-frame or block mode when the operation and budget are
    qualified.
-5. The result is synchronized, validated, and returned as an ndarray or buffer.
+5. The result is synchronized and validated; it stays resident when the input
+   or `dst` is resident, otherwise it is materialized as an ndarray.
+
+## Residency and data flow
+
+Runtime values are resident buffers or host ndarrays. Output residency follows
+the input type: ndarray input returns ndarray, resident buffer input returns a
+resident buffer, and `dst=<resident buffer>` forces a resident result. There is
+no per-call residency flag.
+
+`TaichiGPUBuffer`/`GraphBuffer` implements the NumPy array protocol
+(`__array__`, `__array_interface__`, `__array_ufunc__`, `__array_function__`),
+so host conversion happens automatically for NumPy-compatible consumers.
+OpenCV 5 requires `taichi.interop_cv2` because its bindings accept only real
+`numpy.ndarray` objects.
+
+`to_numpy()` is the explicit egress and dominates transfer cost; call it only at
+pipeline boundaries. Readback is cached per buffer and invalidated on `write`,
+`copy_from`, `release`, and every graph execution. `TAICHI_ARRAY_STRICT=1`
+rejects implicit readback, and `array_readback_stats()` reports implicit and
+explicit readback counts.
 
 ## Memory, cache, and block compute
 

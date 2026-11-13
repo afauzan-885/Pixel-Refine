@@ -6,6 +6,20 @@ import os
 import os
 import importlib
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 TAICHI_AVAILABLE = False
 ti = None
 tm = None
@@ -248,7 +262,7 @@ def build_image_pyramid_gpu(
                     if buffer_tag_prefix is not None
                     else None
                 )
-                dst = session.acquire_buffer(
+                dst = session.view(
                     dst_shape,
                     dtype=prev.dtype,
                     is_vector=is_3d,
@@ -434,21 +448,22 @@ def upsample_flow(
     target_w: int,
     scale: float = 2.0,
     buffer_provider="pool",
-    return_gpu: bool = False,
+    
     dst=None,
     session=None,
 ) -> np.ndarray:
     """Upsample flow using NumPy or GPU buffer with zero-allocation pooling."""
+    _resident_output = _resolve_output(flow, dst=dst)
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi.aot_engine import get_engine
         from taichi.aot_engine import TaichiGPUBuffer
         engine = get_engine()
         if session is not None:
-            src_gpu, _ = session.upload_if_needed(flow)
+            src_gpu = session.view(flow)
             if dst is not None and isinstance(dst, TaichiGPUBuffer):
                 dst_gpu = dst
             else:
-                dst_gpu = session.acquire_buffer((target_h, target_w, 2), dtype=np.float32)
+                dst_gpu = session.view((target_h, target_w, 2), dtype=np.float32)
             upsample_flow_gpu(src_gpu, dst_gpu, scale)
             return dst_gpu
         is_gpu = isinstance(flow, TaichiGPUBuffer)
@@ -460,7 +475,7 @@ def upsample_flow(
         upsample_flow_gpu(src_gpu, dst_gpu, scale)
         if not is_gpu:
             src_gpu.release()
-        if return_gpu:
+        if _resident_output:
             return dst_gpu
         else:
             res = dst_gpu.to_numpy()

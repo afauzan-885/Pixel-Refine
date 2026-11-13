@@ -13,14 +13,51 @@ from taichi_vision import taichi_aot as aot
 Select a backend before the first import:
 
 ```powershell
-$env:PIXEL_REFINE_AOT_ARCH = "cpu"       # cpu, cuda, vulkan, opengl, gles
-$env:PIXEL_REFINE_AOT_DEVICE = "0"       # GPU ordinal hint
-$env:PIXEL_REFINE_TARGET_VENDOR = "NVIDIA"  # optional vendor constraint
+$env:AOT_ARCH = "cpu"       # cpu, cuda, vulkan, opengl, gles
+$env:AOT_DEVICE = "0"       # GPU ordinal hint
+$env:TARGET_VENDOR = "NVIDIA"  # optional vendor constraint
 python your_script.py
 ```
 
 The loader validates the native renderer/vendor. A mismatch is an explicit
 error; the application must not silently use another GPU.
+
+## Residency contract (runtime data flow)
+
+There is no legacy residency flag. Output residency follows the input type:
+
+- ndarray input -> ndarray output.
+- resident device buffer input -> resident device buffer output.
+- `dst=<resident buffer>` forces a resident result regardless of the source.
+
+Only `to_numpy()` (or `np.asarray(buffer)`) performs a host readback. Call it at
+pipeline boundaries, never between GPU stages.
+
+```python
+buffer = aot.upload(host)          # resident
+gray = aot.cvtColor(buffer, aot.COLOR_BGR2GRAY)   # still resident
+host_gray = gray.to_numpy()        # one explicit readback
+```
+
+`TaichiGPUBuffer`/`GraphBuffer` implements the NumPy array protocol, so NumPy
+ufuncs, reductions, and attribute access work without an explicit conversion.
+OpenCV 5 bindings reject non-ndarray objects; use the adapter:
+
+```python
+import cv2
+import taichi.interop_cv2 as ti_cv2
+ti_cv2.install()                    # patch cv2 callables in place
+gray = cv2.cvtColor(buffer, cv2.COLOR_BGR2GRAY)
+```
+
+Telemetry and guard rails:
+
+- `taichi.aot_engine.array_readback_stats()` -> `{"implicit": n, "explicit": m}`.
+- `TAICHI_ARRAY_STRICT=1` disables implicit readback; only `.to_numpy()` works.
+- `TAICHI_ARRAY_CACHE=0` disables the host readback cache.
+
+A returned resident buffer is caller-owned unless it came from a session scratch
+slot. Call `.release()` when ownership ends; `to_numpy()` does not release it.
 
 ## Runtime, block, and memory APIs
 
@@ -46,7 +83,7 @@ error; the application must not silently use another GPU.
 |---|---|
 | `upload()` | Upload an ndarray; set `is_vector=True` for flow/vector data. |
 | `copy_field()` | Copy between compatible fields/buffers. |
-| `copy()` | Copy an image or buffer, optionally remaining GPU-resident. |
+| `copy()` | Copy an image or buffer; residency follows the input type. |
 | `extract_channel()` | Extract one grayscale/channel plane. |
 | `split_3ch()` | Split RGB/BGR into three planes. |
 | `merge_3ch()` | Merge three planes into a 3-channel image. |
@@ -109,16 +146,14 @@ error; the application must not silently use another GPU.
 ### Resident image warps
 
 `warp_affine_aot()` and `warp_perspective()` infer the result location from the
-source. NumPy images still return NumPy by default; an existing
-`TaichiGPUBuffer` now returns a device-resident buffer by default. Set
-`return_gpu=False` explicitly to request a NumPy result (and the associated
-readback). Both functions retain caller ownership of the source; release the
-returned buffer when finished. Image pixel loops remain in AOT Taichi; matrix
-inversion/validation remains a small host-side setup operation.
+source. NumPy images return NumPy; a resident `TaichiGPUBuffer` returns a
+device-resident buffer. Both functions retain caller ownership of the source;
+release the returned buffer when finished. Image pixel loops remain in AOT
+Taichi; matrix inversion/validation remains a small host-side setup operation.
 
 ```python
-warped_gpu = warp_affine_aot(image_gpu, affine_2x3, dsize)  # no image readback
-warped_np = warp_affine_aot(image_gpu, affine_2x3, dsize, return_gpu=False)
+warped_gpu = warp_affine_aot(image_gpu, affine_2x3, dsize)  # resident result
+warped_np = warped_gpu.to_numpy()                           # explicit readback
 warped_gpu = warp_perspective(image_gpu, homography_3x3, dsize)
 ```
 
@@ -141,7 +176,6 @@ remap(
     coordinates,           # (H,W,2) float32
     output_size=None,     # defaults to src spatial shape
     coordinate_mode=None,  # inferred; "displacement_xy" or "absolute_xy"
-    return_gpu=None,      # inferred from operands: GPU in -> GPU out
     dst=None,             # optional reusable destination buffer
     session=None,         # defaults to the active/default BufferSession
 )
@@ -152,8 +186,8 @@ Inference rules:
 - `output_size` falls back to `src.shape[:2]`.
 - `coordinate_mode` is `"displacement_xy"` unless the split-map form
   (`remap(src, map_x, map_y)` or `map_x=`/`map_y=`) selects `"absolute_xy"`.
-- `return_gpu` follows the operands: any GPU buffer means the result stays on
-  the device; host arrays return NumPy.
+- Output residency follows the operands: any resident buffer means the result
+  stays on the device; host arrays return NumPy.
 - `session` resolves to the innermost `with BufferSession(...)` block on the
   current thread, otherwise a lazily created process default.
 - `absolute_xy` needs host coordinates and raises `NotImplementedError` for
@@ -161,33 +195,41 @@ Inference rules:
 
 ### Efficient resident usage
 
+The session exposes three core operations:
+
 ```python
-from taichi_vision.taichi_algorithm.buffer_session import BufferSession
+from taichi import BufferSession
 
 with BufferSession(engine=aot.engine) as session:
-    src_gpu, _ = session.upload_if_needed(src, is_vector=True)
-    flow_gpu, _ = session.upload_if_needed(flow)
-    dst_gpu = session.acquire_buffer((h, w, 3), dtype=np.float32,
-                                     is_vector=True, tag="remap_dst")
-    for frame_flow in flow_frames:
-        out_gpu = remap(src_gpu, frame_flow, dst=dst_gpu)
-    session.sync()
-    result_np = dst_gpu.to_numpy()   # the only host transfer
+    # zero-copy: alias, upload-once, or pooled scratch
+    src_gpu = session.view(src, is_vector=True)
+    flow_gpu = session.view(flow)
+    dst_gpu = session.view((h, w, 3), dtype="float32",
+                           is_vector=True, tag="remap_dst")
+
+    # pin while another stage owns the resource
+    with session.borrow(src_gpu) as pinned:
+        out_gpu = remap(pinned, flow_gpu, dst=dst_gpu)
+
+    # release, transfer, retain, or end a phase
+    session.release(dst_gpu)
+    session.release(keep=(src_gpu,))
 ```
 
-Guidelines:
+Contract:
 
-- Pass GPU buffers for `src` and `coordinates`; `upload_if_needed` caches by
-  array identity, so repeated calls do not re-upload.
-- Reuse one `dst` for a frame loop. With `return_gpu` results and no `dst`, the
-  returned buffer is caller-owned and must be released by the caller; a
-  session scratch slot would be recycled underneath you.
+- `borrow(resource)` returns a `Lease`. It adopts an unowned resource; otherwise
+  it pins without taking ownership. Use `with` or `lease.release()`.
+- `view(source)` never copies a resident buffer. Host arrays are uploaded once
+  and identity-cached; a shape tuple returns pooled scratch; `host=True`
+  returns a pooled NumPy scratch.
+- `release(resource)` releases one resource (or a tuple/list). Use
+  `release(resource, to=other_session)` to transfer, `retain=True` to detach,
+  and `release(keep=(...))` to end a phase while preserving named resources.
+- Call `to_numpy()` only at the pipeline boundary. Never bounce through NumPy
+  between GPU stages just to pass data along.
 - Keep `dst` distinct from `src`: bilinear sampling reads neighbouring taps, so
   an in-place remap would read already-written pixels.
-- Call `to_numpy()` only at the pipeline boundary. It dominates the cost
-  (roughly 50-65 ms for an 11 MB 720p float32 frame on an Intel UHD 620 Vulkan
-  device, versus about 6.5 ms of kernel compute).
-- Never bounce through NumPy between GPU stages just to pass data along.
 
 Measured on Vulkan (Intel UHD Graphics 620), source/output float32 720x1280x3,
 flow float32 720x1280x2: resident GPU-to-GPU median about 8.1 ms versus about
@@ -263,9 +305,10 @@ preview = aot.demosaic(raw, method="dcb", half_res=True)
 hipotesis empat titik dan skor konsensus berjalan di AOT; shortlist maksimal
 8 kandidat per putaran direfine di host menggunakan normalized SVD float64,
 geometric least squares, dan iterasi mask inlier. Input GPU memerlukan readback
-korespondensi untuk tahap host ini. `return_gpu=True` meng-upload mask final
-int32 `(N,)`; keluaran host tetap uint8 `(N,1)`. Error perangkat diteruskan,
-bukan dialihkan ke estimator CPU/OpenCV. Signature dan seed tetap kompatibel.
+korespondensi untuk tahap host ini. Mask final mengikuti residensi input: int32
+`(N,)` untuk input perangkat, uint8 `(N,1)` untuk input host. Error perangkat
+diteruskan, bukan dialihkan ke estimator CPU/OpenCV. Signature dan seed tetap
+kompatibel.
 Nama `method="MAGSAC++"` historis tetap diterima, tetapi kernel menggunakan
 soft Tukey scoring, bukan implementasi penuh MAGSAC++.
 
@@ -336,30 +379,44 @@ These entry points are exported for focused experiments and are marked
 
 ```python
 # Burst denoise: keep stages resident to avoid repeated transfers.
-frames = [aot.InputArray(frame.astype("float32")) for frame in burst]
-smoothed = [aot.gaussian_blur(frame, sigma=1.0, return_gpu=True) for frame in frames]
+frames = [aot.upload(frame.astype("float32")) for frame in burst]
+smoothed = [aot.gaussian_blur(frame, sigma=1.0) for frame in frames]
 
 # Alignment followed by warp (canonical packed-coordinate form).
-flow = aot.farneback_flow(smoothed[0], smoothed[1], return_gpu=True)
+flow = aot.farneback_flow(smoothed[0], smoothed[1])
 aligned = aot.remap(
     smoothed[1],
     flow,
     output_size=smoothed[0].shape[:2],
     coordinate_mode="displacement_xy",
-    return_gpu=True,
 )
-# remap_with_flow(smoothed[1], flow, *smoothed[0].shape[:2], return_gpu=True)
-# is the equivalent compatibility adapter.
+# remap_with_flow(smoothed[1], flow, *smoothed[0].shape[:2]) is the
+# equivalent compatibility adapter.
+
+host_aligned = aligned.to_numpy()   # only at the pipeline boundary
 
 # Edge and feature preview.
 edges = aot.canny_aot(aot.rgb2gray(image), low_threshold=40, high_threshold=120)
 matches = aot.ofb(reference, image, max_kps=1500)
 ```
 
-`return_gpu=True` returns a `TaichiGPUBuffer`; call `release()` when ownership
-ends. Adaptive planning may choose full-frame for small, global, or unqualified
-operations. A block failure recovers through the same-backend full-frame path;
-there is no silent GPU-to-CPU substitution.
+Resident results are caller-owned; call `release()` when ownership ends. Call
+`to_numpy()`/`np.asarray(...)` only at host boundaries. Adaptive planning may
+choose full-frame for small, global, or unqualified operations. A block failure
+recovers through the same-backend full-frame path; there is no silent
+GPU-to-CPU substitution.
+
+### Migrating from the legacy flag
+
+- Remove the resident-output request: pass a resident buffer (or `dst=`) instead.
+- Remove the host-output request: pass a host ndarray, or call `.to_numpy()` on
+  the resident result.
+- Replace `isinstance(x, TaichiGPUBuffer)` and `hasattr(x, "to_numpy")` with
+  `taichi.aot_engine.is_resident(x)`.
+- For OpenCV 5, install `taichi.interop_cv2` or call `np.asarray(...)` at the
+  boundary.
+- Use `array_readback_stats()` to verify that a pipeline has no unintended host
+  transfers.
 
 The source signature in `taichi_algorithm/aot_api/__init__.py` and the relevant
 research module is always authoritative for defaults and accepted parameters.

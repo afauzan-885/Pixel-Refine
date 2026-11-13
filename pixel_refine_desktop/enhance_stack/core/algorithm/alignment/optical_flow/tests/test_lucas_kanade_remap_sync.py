@@ -17,6 +17,10 @@ class _Buffer:
         self.handle = object()
         self.nbytes = int(np.prod(shape)) * np.dtype(np.float32).itemsize
         self.released = False
+        self._rust_buf = self
+
+    def write_from_buffer(self, _array):
+        return None
 
     def release(self):
         self.released = True
@@ -34,6 +38,9 @@ def test_tiled_remap_is_queue_ordered_and_retires_flow_after_dispatch(
     class _Engine:
         arch = backend
 
+        def _live(self):
+            return self
+
         @staticmethod
         def sync():
             sync_calls.append("sync")
@@ -49,15 +56,8 @@ def test_tiled_remap_is_queue_ordered_and_retires_flow_after_dispatch(
         return warped_gpu
 
     fake_aot.remap_with_flow = remap_with_flow
-    monkeypatch.setattr(taichi_vision, "taichi_aot", fake_aot)
-
-    class _Lib:
-        @staticmethod
-        def write_to_gpu_buffer(*_args):
-            return None
-
-    monkeypatch.setattr(engine_module, "_LIB", _Lib())
-    monkeypatch.setattr(engine_module, "_RUNTIME", object())
+    monkeypatch.setattr(taichi_vision, "algorithm", fake_aot)
+    monkeypatch.setattr(engine_module, "engine", fake_aot.engine)
 
     worker = LucasKanade.__new__(LucasKanade)
     target_gpu = _Buffer((4, 5, 3))
@@ -94,7 +94,6 @@ def test_tiled_remap_is_queue_ordered_and_retires_flow_after_dispatch(
     )
 
     assert result is warped_gpu
-    assert captured["return_gpu"] is True
     assert "synchronize" not in captured
     assert flow_gpu.released
     # These fences protect the upload and completed-flow input before remap;
@@ -107,15 +106,25 @@ def test_standalone_remap_is_queue_ordered_and_retires_flow_after_dispatch(
     monkeypatch, backend
 ):
     import taichi_vision
+    engine_module = importlib.import_module("taichi.aot_engine")
 
     sync_calls = []
 
     class _Engine:
         arch = backend
 
+        def _live(self):
+            return self
+
         @staticmethod
         def sync():
             sync_calls.append("sync")
+
+        @staticmethod
+        def upload(data, **_kwargs):
+            buffer = _Buffer(np.asarray(data).shape)
+            released.append(buffer)
+            return buffer
 
     captured = {}
     released = []
@@ -141,7 +150,8 @@ def test_standalone_remap_is_queue_ordered_and_retires_flow_after_dispatch(
     fake_aot.box_filter = make_gpu_result
     fake_aot.enhance_grayscale = make_gpu_result
     fake_aot.remap_with_flow = remap_with_flow
-    monkeypatch.setattr(taichi_vision, "taichi_aot", fake_aot)
+    monkeypatch.setattr(taichi_vision, "algorithm", fake_aot)
+    monkeypatch.setattr(engine_module, "engine", fake_aot.engine)
 
     worker = LucasKanade.__new__(LucasKanade)
     flow_gpu = _Buffer((4, 5, 2))
@@ -153,7 +163,6 @@ def test_standalone_remap_is_queue_ordered_and_retires_flow_after_dispatch(
     )
 
     assert result is warped_gpu
-    assert captured["return_gpu"] is True
     assert "synchronize" not in captured
     assert flow_gpu.released
     assert sync_calls == ["sync", "sync"]

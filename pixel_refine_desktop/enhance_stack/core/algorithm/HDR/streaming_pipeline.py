@@ -67,7 +67,7 @@ def _load_rgb(path: str | os.PathLike) -> np.ndarray:
         from taichi_vision import algorithm as taichi_aot
 
         decoded_gpu = taichi_aot.demosaic(
-            str(path), method="hamilton", return_gpu=True
+            str(path), method="hamilton" 
         )
         try:
             decoded = np.asarray(decoded_gpu.to_numpy())

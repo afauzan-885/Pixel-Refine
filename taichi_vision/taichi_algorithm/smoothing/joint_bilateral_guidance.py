@@ -321,7 +321,7 @@ def joint_bilateral_filter(src, guide, preset="medium", radius=2, buffer_provide
     """
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi_vision.taichi_algorithm import aot_api as taichi_aot
-        return taichi_aot.joint_bilateral_filter(src, guide, preset=preset, radius=radius, return_gpu=hasattr(src, "to_numpy"))
+        return taichi_aot.joint_bilateral_filter(src, guide, preset=preset, radius=radius )
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
@@ -362,7 +362,7 @@ def joint_bilateral_upsample(src_low, guide_hi, preset="medium", buffer_provider
     """
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi_vision.taichi_algorithm import aot_api as taichi_aot
-        return taichi_aot.joint_bilateral_upsample(src_low, guide_hi, preset=preset, return_gpu=hasattr(src_low, "to_numpy"))
+        return taichi_aot.joint_bilateral_upsample(src_low, guide_hi, preset=preset )
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")

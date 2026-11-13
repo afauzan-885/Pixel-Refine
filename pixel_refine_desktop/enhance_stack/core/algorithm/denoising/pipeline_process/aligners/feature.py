@@ -13,6 +13,20 @@ from taichi.aot_engine import TaichiGPUBuffer, get_engine
 from ..contracts import scale_homography
 from ..facade import api as _facade
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 __all__ = ["FeatureMatchingGPUAligner"]
 
 
@@ -25,7 +39,6 @@ class FeatureMatchingGPUAligner:
         src_points,
         dst_points,
         inlier_mask,
-        *,
         width: int,
         height: int,
         reproj_threshold: float = 5.0,
@@ -141,7 +154,6 @@ class FeatureMatchingGPUAligner:
     def __init__(
         self,
         ref_analysis_gpu: TaichiGPUBuffer,
-        *,
         feature_type: str = "orb",
         work_scale: float = 0.50,
         full_shape: Optional[Tuple[int, int]] = None,
@@ -187,7 +199,6 @@ class FeatureMatchingGPUAligner:
                 ref_gray_gpu,
                 (self.work_w, self.work_h),
                 interpolation=taichi_aot.INTER_AREA,
-                return_gpu=True,
             )
             _facade()._destroy_work_item(ref_gray_gpu)
             ref_gray_gpu = ref_gray_work
@@ -269,13 +280,13 @@ class FeatureMatchingGPUAligner:
     def align_frame(
         self,
         supp_linear_gpu,
-        *,
         analysis_frame_gpu=None,
         secondary_frame_to_warp=None,
         stop_event=None,
-        return_gpu=True,
+        
         return_transform: bool = False,
     ):
+        _resident_output = _resolve_output(supp_linear_gpu)
         from taichi_vision import algorithm as taichi_aot
         taichi_aot = _facade()._managed_api(taichi_aot)
 
@@ -294,7 +305,6 @@ class FeatureMatchingGPUAligner:
                 supp_gray_gpu,
                 (self.work_w, self.work_h),
                 interpolation=taichi_aot.INTER_AREA,
-                return_gpu=True,
             )
             _facade()._destroy_work_item(supp_gray_gpu)
             supp_gray_gpu = supp_gray_work
@@ -380,7 +390,6 @@ class FeatureMatchingGPUAligner:
                             ransacReprojThreshold=reproj_threshold,
                             n_hypotheses=ransac_hypotheses,
                             max_iters=ransac_iters,
-                            return_gpu=True,
                         )
                     if H_candidate is not None:
                         if self.feature_type == "ofb":
@@ -474,7 +483,6 @@ class FeatureMatchingGPUAligner:
                         ransacReprojThreshold=reproj_threshold,
                         n_hypotheses=ransac_hypotheses,
                         max_iters=ransac_iters,
-                        return_gpu=False,
                     )
                     # AKAZE's binary matches are more vulnerable to repeated
                     # texture producing a plausible-looking but wrong H.
@@ -534,14 +542,12 @@ class FeatureMatchingGPUAligner:
                             warped_primary = taichi_aot.remap_with_flow(
                                 supp_linear_gpu, flow_gpu,
                                 int(supp_linear_gpu.shape[0]), int(supp_linear_gpu.shape[1]),
-                                return_gpu=True,
                             )
                         if secondary_frame_to_warp is not None:
                             warped_secondary = taichi_aot.remap_with_flow(
                                 secondary_frame_to_warp, flow_gpu,
                                 int(secondary_frame_to_warp.shape[0]),
                                 int(secondary_frame_to_warp.shape[1]),
-                                return_gpu=True,
                             )
                     except BaseException:
                         for buffer in (warped_primary, warped_secondary, flow_gpu):
@@ -570,7 +576,6 @@ class FeatureMatchingGPUAligner:
                             dsize=(self.target_w, self.target_h),
                             global_homography=apap_global_h,
                             fit_grid_shape=(self.apap_fit_grid_size,) * 2,
-                            return_gpu=True,
                         )
                     )
             elif supp_linear_gpu is None:
@@ -610,7 +615,6 @@ class FeatureMatchingGPUAligner:
                     supp_linear_gpu,
                     H_prim,
                     (prim_w, prim_h),
-                    return_gpu=True,
                 )
             warped_secondary = None
             if secondary_frame_to_warp is not None:
@@ -636,7 +640,6 @@ class FeatureMatchingGPUAligner:
                             global_homography=np.linalg.inv(
                                 np.asarray(H_work, dtype=np.float64)
                             ),
-                            return_gpu=True,
                         )
                     )
                 elif self.feature_type == "ofb":
@@ -654,7 +657,6 @@ class FeatureMatchingGPUAligner:
                         secondary_frame_to_warp,
                         H_work,
                         (self.work_w, self.work_h),
-                        return_gpu=True,
                     )
             if return_transform:
                 return warped_primary, warped_secondary, np.ascontiguousarray(

@@ -135,7 +135,6 @@ class AKAZEAlgorithm:
                 ransacReprojThreshold=float(config.get("ransac_threshold", 5.0)),
                 n_hypotheses=max(64, int(config.get("ransac_hypotheses", 1024))),
                 max_iters=max(1, int(config.get("ransac_iters", 1))),
-                return_gpu=False,
             )
             if H is None:
                 return None, None, None, None
@@ -183,7 +182,6 @@ class AKAZEAlgorithm:
             np.ascontiguousarray(img_to_warp, dtype=np.float32),
             H,
             (w, h),
-            return_gpu=False,
         )
         if np.issubdtype(np.asarray(img_to_warp).dtype, np.integer):
             info = np.iinfo(np.asarray(img_to_warp).dtype)

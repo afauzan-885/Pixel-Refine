@@ -108,13 +108,13 @@ def test_buffer_allocation_and_upload_values():
 
 
 def test_buffer_session_ownership_parity():
-    import taichi_vision.taichi_algorithm.buffer_session as tv_bs
+    import taichi.buffer_session as tv_bs
     import taichi as ti
     
     # Test Scoped Session Context Manager
     with tv_bs.BufferSession(tag="test_tv") as sess_tv, ti.BufferSession(tag="test_ti") as sess_ti:
         arr = np.zeros((16, 16), dtype=np.float32)
-        buf_tv = sess_tv.own(tv_bs.default_engine.upload(arr))
+        buf_tv = sess_tv.own(ti.upload(arr))
         buf_ti = sess_ti.own(ti.upload(arr))
         
         owned_tv = sess_tv.owned_count() if callable(sess_tv.owned_count) else sess_tv.owned_count
@@ -149,15 +149,17 @@ class _SessionEngine:
 def test_native_session_repeated_borrow_matches_reference():
     """Exercise the PyO3 class directly without a device or Python facade."""
     from taichi.taichi_python import RustBufferSession
-    from taichi_vision.taichi_algorithm.buffer_session import BufferSession
+    from taichi.buffer_session import BufferSession
 
     def exercise(session_type):
         released = []
         resource = object()
         with session_type(engine=_SessionEngine(), sync_on_exit=False) as owner:
             owner.own(resource, releaser=lambda value: released.append(value))
-            assert owner.borrow(resource) is resource
-            assert owner.borrow(resource) is resource
+            first = owner.borrow(resource)
+            second = owner.borrow(resource)
+            assert getattr(first, "resource", first) is resource
+            assert getattr(second, "resource", second) is resource
             counts = [owner.borrowed_count]
             owner.release_borrow(resource)
             counts.append(owner.borrowed_count)
@@ -170,7 +172,7 @@ def test_native_session_repeated_borrow_matches_reference():
 
 def test_native_session_tag_matches_reference():
     from taichi.taichi_python import RustBufferSession
-    from taichi_vision.taichi_algorithm.buffer_session import BufferSession
+    from taichi.buffer_session import BufferSession
 
     for cls in (BufferSession, RustBufferSession):
         with cls(engine=_SessionEngine(), sync_on_exit=False, tag="audit") as session:

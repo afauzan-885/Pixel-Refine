@@ -33,6 +33,20 @@ from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_align
     load_farneback_config,
 )
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 
 
 
@@ -219,17 +233,26 @@ class FarnebackFlow:
         target_gray,
         config=None,
         reference_pyramid=None,
-        return_gpu=False,
+        
     ):
         """Run Taichi Vision Farneback optical flow."""
+        _resident_output = _resolve_output(reference_gray)
         config = config or self.load_config()
         mode = str(config.get("mode", "fast")).strip().lower()
         preset = self.PRESETS.get(mode, self.PRESETS["fast"])
 
         from taichi_vision.taichi_algorithm import calcOpticalFlowFarneback
 
-        ref_f32 = np.ascontiguousarray(reference_gray, dtype=np.float32)
-        tgt_f32 = np.ascontiguousarray(target_gray, dtype=np.float32)
+        ref_f32 = (
+            reference_gray
+            if _resident_output
+            else np.ascontiguousarray(reference_gray, dtype=np.float32)
+        )
+        tgt_f32 = (
+            target_gray
+            if _resident_output
+            else np.ascontiguousarray(target_gray, dtype=np.float32)
+        )
 
         flow = calcOpticalFlowFarneback(
             ref_f32,
@@ -243,12 +266,11 @@ class FarnebackFlow:
             poly_sigma=float(preset["poly_sigma"]),
             flags=0,
             reference_pyramid=reference_pyramid,
-            return_gpu=bool(return_gpu),
         )
         smooth = _parse_bool((config or {}).get("smooth", True), default=True)
         if not smooth:
             step = max(2, int(preset.get("grid_step", 16)))
-            if return_gpu:
+            if _resident_output:
                 flow_cpu = flow.to_numpy()
                 flow_quant = self._quantize_to_blocks(flow_cpu, step)
                 from taichi_vision import algorithm as taichi_aot
@@ -264,7 +286,7 @@ class FarnebackFlow:
                 flow_arr = np.asarray(flow[0] if isinstance(flow, tuple) else flow, dtype=np.float32)
                 return self._quantize_to_blocks(flow_arr, step)
 
-        if return_gpu:
+        if _resident_output:
             return flow
         if isinstance(flow, tuple):
             flow = flow[0]
@@ -316,7 +338,6 @@ class FarnebackFlow:
             tgt_gray,
             config,
             reference_pyramid=reference_pyramid,
-            return_gpu=True,
         )
 
         from taichi_vision import algorithm as taichi_aot
@@ -326,7 +347,6 @@ class FarnebackFlow:
                 flow_gpu,
                 int(reference.shape[0]),
                 int(reference.shape[1]),
-                return_gpu=False,
             )
         finally:
             try:

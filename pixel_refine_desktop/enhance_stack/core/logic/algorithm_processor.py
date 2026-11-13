@@ -353,6 +353,9 @@ class AlgorithmProcessorThread(QThread):
                 else:
                     err = result.get("error", "Unknown error during processing.")
                     print(f"[AlgorithmProcessorThread] Worker error: {err}")
+                    tb = result.get("traceback")
+                    if tb:
+                        print(f"[AlgorithmProcessorThread] Worker traceback:\n{tb}")
                     self.error_occurred.emit(str(err))
 
         except Exception as e:

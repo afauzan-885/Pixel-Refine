@@ -160,7 +160,7 @@ class DemosaicBufferSet:
     def detach(self, name: str) -> Any:
         """Transfer ownership of a buffer to the caller.
 
-        This is used for ``return_gpu=True`` results.  The buffer remains
+        This is used for ``resident output=True`` results.  The buffer remains
         registered for lookup, but the context will no longer release it.
         """
 

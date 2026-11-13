@@ -210,7 +210,7 @@ def seamless_clone(src, dst, mask, center=(0, 0), flags=NORMAL_CLONE,
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi_vision.taichi_algorithm import aot_api as taichi_aot
         return taichi_aot.seamless_clone(src, dst, mask, center=center,
-                                          flags=flags, return_gpu=not isinstance(dst, np.ndarray))
+                                          flags=flags )
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")

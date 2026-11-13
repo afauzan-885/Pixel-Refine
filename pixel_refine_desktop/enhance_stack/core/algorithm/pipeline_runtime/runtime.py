@@ -195,12 +195,10 @@ class PipelineSupportLease:
     def borrowed(self):
         """Borrow the leased support value in the active session for safe zero-copy execution."""
         session = self._session
-        if session is not None and hasattr(session, "borrowed") and self.value is not None:
-            owned = getattr(session, "_owned_resources", None)
-            if owned is not None and id(self.value) in owned:
-                with session.borrowed(self.value) as val:
-                    yield val
-                return
+        if session is not None and hasattr(session, "borrow") and self.value is not None:
+            with session.borrow(self.value) as val:
+                yield val
+            return
         yield self.value
 
     def release(self) -> None:
@@ -401,6 +399,7 @@ class PipelineRuntime(_BufferSessionFacade):
         self._in_processing_tokens: set[object] = set()
         self.stop_event = stop_event
         self.progress_callback = progress_callback
+        self._active_source_borrows = {}
         self._session = session
         self._owns_session = session is None
         self._session_factory = session_factory
@@ -533,12 +532,14 @@ class PipelineRuntime(_BufferSessionFacade):
             raise RuntimeError("PipelineRuntime is closed")
         session = self._session
         release = disposer
-        if session is not None and hasattr(session, "own"):
+        if session is not None and hasattr(session, "view"):
             def load_owned(index):
                 value = loader(index)
-                return session.own(value, releaser=disposer)
+                if getattr(value, "handle", None) is not None:
+                    session.view(value)
+                return value
             stream_loader = load_owned
-            release = session.release_buffer
+            release = session.release
         else:
             stream_loader = loader
         with self._lock:
@@ -561,7 +562,20 @@ class PipelineRuntime(_BufferSessionFacade):
                 try:
                     yield index, value
                 finally:
-                    _dispose(value, release)
+                    session = self._session
+                    borrowed = id(value) in self._active_source_borrows
+                    if borrowed and session is not None and hasattr(
+                        session, "release"
+                    ):
+                        # The prefetch consumer may still be decoding this
+                        # payload. Mark ownership ended; release_borrow()
+                        # performs the physical release after the last lease.
+                        try:
+                            session.release(value)
+                        except Exception:
+                            pass
+                    else:
+                        _dispose(value, release)
         finally:
             stream.close()
             with self._lock:
@@ -614,9 +628,13 @@ class PipelineRuntime(_BufferSessionFacade):
 
         def own_prepared(value):
             session = self._session
-            if session is not None and hasattr(session, "own"):
-                session.own(value, releaser=prepared_disposer)
-                return value, session.release_buffer
+            if (
+                session is not None
+                and hasattr(session, "view")
+                and getattr(value, "handle", None) is not None
+            ):
+                session.view(value)
+                return value, session.release
             return value, prepared_disposer
 
         if self.in_processing_depth <= 1:
@@ -1113,8 +1131,8 @@ class PipelineRuntime(_BufferSessionFacade):
             )
             context.check_cancelled()
             reference = source.load_reference()
-            if own_reference and reference is not None and hasattr(session, "own"):
-                session.own(reference)
+            if own_reference and reference is not None:
+                self.view(reference) if getattr(reference, "handle", None) is not None else None
             with self.borrowed(reference):
                 reference_state = recipe.prepare_reference(reference, context)
                 with self.borrowed(reference_state):

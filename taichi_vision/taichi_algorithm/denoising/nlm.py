@@ -798,7 +798,7 @@ def non_local_means(
             h_param=h_param,
             search_window=search_r,
             patch_size=patch_r,
-            return_gpu=not is_numpy,
+            
         )
 
     if not TAICHI_AVAILABLE:

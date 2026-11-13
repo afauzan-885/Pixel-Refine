@@ -21,6 +21,20 @@ import numpy as np
 
 from taichi.aot_engine import TaichiGPUBuffer, get_engine
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 
 def _as_gpu_work_gray(
     engine,
@@ -57,7 +71,7 @@ def _as_gpu_work_gray(
         if gray_gpu.shape[:2] != (work_h, work_w):
             resized = taichi_aot.resize(
                 gray_gpu, (work_w, work_h),
-                interpolation=taichi_aot.INTER_LINEAR, return_gpu=True,
+                interpolation=taichi_aot.INTER_LINEAR, 
             )
             if gray_gpu is not frame:
                 gray_gpu.destroy()
@@ -95,7 +109,6 @@ def _as_gpu_full_hwc(
 def spatial_merging(
     frames: Sequence[Union[np.ndarray, TaichiGPUBuffer]],
     reference: Optional[Union[np.ndarray, TaichiGPUBuffer]] = None,
-    *,
     mode: str = "weights",
     work_scale: float = 1.0,
     tile_size: int = 16,
@@ -107,7 +120,7 @@ def spatial_merging(
     equalize_brightness: bool = False,
     search_radius: int = 3,
     early_exit_threshold: float = 0.05,
-    return_gpu: bool = False,
+    
     stop_event: Optional[object] = None,
     progress: Optional[Callable[[int, str], None]] = None,
     scratch_cache=None,
@@ -129,7 +142,7 @@ def spatial_merging(
         equalize_brightness: Pre-equalize brightness between frames.
         search_radius: Similarity search radius (ghost-rejection neighborhood).
         early_exit_threshold: Skip tiles below this confidence.
-        return_gpu: Return GPU buffers instead of numpy (mode-dependent).
+        _resident_output: Return GPU buffers instead of numpy (mode-dependent).
         stop_event: Cancellation event (callable ``is_set()``).
         progress:   Progress callback ``(percent, message)``.
         scratch_cache: Reusable :class:`SpatialScratchCache` for batched use.
@@ -149,6 +162,7 @@ def spatial_merging(
 
     from taichi_vision.taichi_algorithm import aot_api as taichi_aot
 
+    _resident_output = _resolve_output(reference)
     mode = str(mode).strip().lower()
     if mode not in ("weights", "fuse"):
         raise ValueError(f"mode must be 'weights' or 'fuse', got {mode!r}")
@@ -247,7 +261,7 @@ def spatial_merging(
                 )
 
         if mode == "weights":
-            if return_gpu:
+            if _resident_output:
                 return weight_maps
             try:
                 return [w.to_numpy() for w in weight_maps]
@@ -266,7 +280,7 @@ def spatial_merging(
 
         # Full-res accumulators (HWC float32).  Reference seeds the sum.
         ref_full_gpu = _as_gpu_full_hwc(engine, ref_frame)
-        sum_img_gpu = taichi_aot.copy(ref_full_gpu, return_gpu=True)
+        sum_img_gpu = taichi_aot.copy(ref_full_gpu)
 
         try:
             # Use 2D accumulation for the classic luma-only batch path.
@@ -303,7 +317,7 @@ def spatial_merging(
             if progress:
                 progress(97, "Spatial fusion complete.")
 
-            if return_gpu:
+            if _resident_output:
                 return result_gpu
             try:
                 return np.ascontiguousarray(

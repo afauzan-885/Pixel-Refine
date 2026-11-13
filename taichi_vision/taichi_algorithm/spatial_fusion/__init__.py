@@ -34,7 +34,6 @@ from .compute_spatial import (
     remap_accumulate_cfa_weighted_taichi,
     remap_accumulate_tile_taichi,
     clear_f32_2d_kernel,
-    compile_spatial_tcm,
     equalize_brightness_kernel,
     generate_spatial_weights_taichi,
     mean_division_vec3_weight_taichi,
@@ -88,7 +87,6 @@ __all__ = [
     "mean_division_vec3_weight_taichi",
     "mean_division_vec3_scalar_weight_kernel",
     "postprocess_spatial_weight_taichi",
-    "compile_spatial_tcm",
     # thresholds
     "estimate_noise_sigma",
     "auto_motion_sensitivity",

@@ -172,7 +172,7 @@ def bilateral_grid_filter(img, dst=None, s_s=16, s_r=16, sigma_s=1.0, sigma_r=1.
         preset = "medium"
         if s_s <= 8: preset = "heavy"
         elif s_s >= 32: preset = "light"
-        res_gpu = taichi_aot.bilateral_grid_filter(img, preset=preset, return_gpu=hasattr(img, "to_numpy"))
+        res_gpu = taichi_aot.bilateral_grid_filter(img, preset=preset )
         if dst is not None:
             if isinstance(dst, np.ndarray) and not isinstance(res_gpu, np.ndarray):
                 dst[:] = res_gpu.to_numpy()

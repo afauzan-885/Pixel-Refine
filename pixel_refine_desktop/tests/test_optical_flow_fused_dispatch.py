@@ -94,7 +94,7 @@ def test_quantized_resident_flow_does_not_replace_aot_destination():
             self.dtype = "float32"
             self.is_vector = is_vector
             self.vector_dim = 2 if is_vector else 1
-            self.handle = object()
+            self.handle = 0x1000
             self.is_owner = True
             self.host_accessible = True
             self.size_bytes = 24 * 32 * 2 * 4

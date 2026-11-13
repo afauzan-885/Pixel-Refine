@@ -38,7 +38,7 @@ def arrays():
 
 
 def _values(value):
-    return np.asarray(value.to_numpy() if hasattr(value, "to_numpy") else value)
+    return np.asarray(value)
 
 
 def test_the_facade_and_algorithm_layer_share_one_runtime():

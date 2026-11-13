@@ -535,7 +535,6 @@ class SplatSRAlgorithm:
                 lk_flow,
                 h,
                 w,
-                return_gpu=False,
             )
         except Exception as exc:
             active_arch = str(getattr(_ti_rt.engine, "arch", "")).lower()
@@ -658,7 +657,6 @@ class SplatSRAlgorithm:
             num_iters=max(1, int(config.get("iterations", 3))),
             poly_n=max(5, int(config.get("poly_n", 5))),
             poly_sigma=float(config.get("poly_sigma", 1.2)),
-            return_gpu=False,
         )
         if isinstance(flow, tuple):
             flow = flow[0]

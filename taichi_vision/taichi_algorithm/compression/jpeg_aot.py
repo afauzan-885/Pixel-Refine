@@ -235,7 +235,7 @@ def _quantize_plane(plane, quality, chroma=False, resident=False):
             outputs={"dst": ((hb, wb * 64), np.float32)},
             scalars={"h_blocks": hb, "w_blocks": wb},
             plain_ndarray=False,
-            return_gpu=bool(resident),
+            
         )
     raw = _dispatch(
         "compression_image",
@@ -244,7 +244,7 @@ def _quantize_plane(plane, quality, chroma=False, resident=False):
         outputs={"dst": ((hb, wb * 64), np.float32)},
         scalars={"h_blocks": hb, "w_blocks": wb},
         plain_ndarray=False,
-        return_gpu=bool(resident),
+        
     )
     try:
         ordered = _dispatch(
@@ -254,7 +254,7 @@ def _quantize_plane(plane, quality, chroma=False, resident=False):
             outputs={"dst": ((hb, wb * 64), np.float32)},
             scalars={"h_blocks": hb, "w_blocks": wb},
             plain_ndarray=False,
-            return_gpu=bool(resident),
+            
         )
     except Exception:
         if hasattr(raw, "destroy"):
@@ -270,7 +270,7 @@ def _quantize_plane_gpu_chained(plane, quality, chroma=False):
     """GPU-resident JPEG pipeline: DCT+quant+zigzag → tokens → histogram.
 
     This function chains multiple GPU dispatches while keeping intermediate
-    results on GPU (using return_gpu=True), minimizing GPU↔CPU round-trips.
+    results on GPU (using resident output=True), minimizing GPU↔CPU round-trips.
     Returns (dc_diff, symbols, categories, amplitudes, token_count,
     dc_histogram, ac_histogram) ready for host-side Huffman coding.
 
@@ -291,7 +291,6 @@ def _quantize_plane_gpu_chained(plane, quality, chroma=False):
         outputs={"dst": ((hb, wb * 64), np.float32)},
         scalars={"h_blocks": hb, "w_blocks": wb},
         plain_ndarray=False,
-        return_gpu=True,
     )
 
     # Stage 2: Token preparation (GPU resident)
@@ -308,7 +307,6 @@ def _quantize_plane_gpu_chained(plane, quality, chroma=False):
         },
         scalars={"h_blocks": hb, "w_blocks": wb},
         plain_ndarray=False,
-        return_gpu=True,
     )
 
     # Stage 3: Histogram (GPU resident)
@@ -326,7 +324,6 @@ def _quantize_plane_gpu_chained(plane, quality, chroma=False):
         },
         scalars={"h_blocks": hb, "w_blocks": wb},
         plain_ndarray=False,
-        return_gpu=True,
     )
 
     # Read back results from GPU to CPU (only once at the end)
@@ -412,7 +409,6 @@ def _prepare_fused_plane_resident(
         },
         scalars={"h_blocks": hb, "w_blocks": wb},
         plain_ndarray=False,
-        return_gpu=True,
     )
     try:
         dc_values = np.asarray(state["dc_values"].to_numpy(), dtype=np.float32).reshape(hb, wb)
@@ -480,7 +476,6 @@ def _pack_fused_plane_resident(state, dc_table, ac_table):
         },
         scalars={"h_blocks": hb, "w_blocks": wb, "max_output_bytes": max_output_bytes},
         plain_ndarray=False,
-        return_gpu=True,
     )
     try:
         counts = np.asarray(packed["output_count"].to_numpy(), dtype=np.int32).reshape(-1)

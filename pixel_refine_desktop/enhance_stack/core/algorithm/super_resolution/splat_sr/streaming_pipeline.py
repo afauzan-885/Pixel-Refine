@@ -322,7 +322,7 @@ class SplatSRRecipe:
             refinement = _RefinementBacking(
                 len(self.paths), height, width
             )
-            context.session.own(
+            context.session._adopt(
                 refinement, releaser=lambda backing: backing.close()
             )
             refinement.frames[0] = reference_carrier_gray
@@ -410,8 +410,8 @@ class SplatSRRecipe:
         # The support is owned by PipelineRuntime for this callback, so its
         # linear RGB carrier can be adjusted in-place without a burst copy.
         height, width = support.shape[:2]
-        raw_gray = context.session.acquire_host(
-            (height, width), dtype=np.float32, tag="splat_sr.raw_gray"
+        raw_gray = context.session.view(
+            (height, width), dtype=np.float32, host=True, tag="splat_sr.raw_gray"
         )
         cv2.cvtColor(support, cv2.COLOR_RGB2GRAY, dst=raw_gray)
         pre_gain = np.float32(1.0)
@@ -428,8 +428,8 @@ class SplatSRRecipe:
                 support, params=state.analysis_params
             )
         analysis_rgb = np.ascontiguousarray(analysis_rgb, dtype=np.float32)
-        analysis_gray = context.session.acquire_host(
-            (height, width), dtype=np.float32, tag="splat_sr.analysis_gray"
+        analysis_gray = context.session.view(
+            (height, width), dtype=np.float32, host=True, tag="splat_sr.analysis_gray"
         )
         cv2.cvtColor(analysis_rgb, cv2.COLOR_RGB2GRAY, dst=analysis_gray)
         with self.compute_gate:
@@ -454,14 +454,14 @@ class SplatSRRecipe:
                 f"alignment flow shape {alignment_flow.shape} != {*support.shape[:2], 2}"
             )
 
-        map_x = context.session.acquire_host(
-            (height, width), dtype=np.float32, tag="splat_sr.warp_map_x"
+        map_x = context.session.view(
+            (height, width), dtype=np.float32, host=True, tag="splat_sr.warp_map_x"
         )
-        map_y = context.session.acquire_host(
-            (height, width), dtype=np.float32, tag="splat_sr.warp_map_y"
+        map_y = context.session.view(
+            (height, width), dtype=np.float32, host=True, tag="splat_sr.warp_map_y"
         )
-        aligned_gray = context.session.acquire_host(
-            (height, width), dtype=np.float32, tag="splat_sr.aligned_gray"
+        aligned_gray = context.session.view(
+            (height, width), dtype=np.float32, host=True, tag="splat_sr.aligned_gray"
         )
         np.add(
             alignment_flow[..., 0],

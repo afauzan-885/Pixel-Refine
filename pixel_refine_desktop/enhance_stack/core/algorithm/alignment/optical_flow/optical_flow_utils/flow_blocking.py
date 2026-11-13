@@ -246,7 +246,6 @@ def warp_tile_with_flow(target_tile, flow):
         np.ascontiguousarray(flow, dtype=np.float32),
         height,
         width,
-        return_gpu=False,
     )
 
 

@@ -253,7 +253,7 @@ def inpaint(src, mask, inpaint_radius=3, flags=INPAINT_TELEA,
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi_vision.taichi_algorithm import aot_api as taichi_aot
         return taichi_aot.inpaint(src, mask, inpaint_radius=inpaint_radius,
-                                   flags=flags, return_gpu=not isinstance(src, np.ndarray))
+                                   flags=flags )
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")

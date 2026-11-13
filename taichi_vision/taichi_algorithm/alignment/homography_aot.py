@@ -8,8 +8,23 @@ import numpy as np
 
 from .quality import _consensus_errors, _normalize_points, _refine_consensus
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
 
-def find_homography_hybrid(pts1, pts2, threshold, n_hypotheses, max_iters, return_gpu, seed):
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
+
+def find_homography_hybrid(pts1, pts2, threshold, n_hypotheses, max_iters, seed):
+    _resident_output = _resolve_output(pts1)
     from .. import aot_api as api
 
     if pts1 is None or pts2 is None:
@@ -84,7 +99,7 @@ def find_homography_hybrid(pts1, pts2, threshold, n_hypotheses, max_iters, retur
             return None, None
         # Classify with the returned float64 matrix, not a rounded f32 copy.
         mask = _consensus_errors(source, target, best) <= threshold * threshold
-        if return_gpu:
+        if _resident_output:
             return best, api.upload(mask.astype(np.int32))
         return best, mask.astype(np.uint8).reshape(-1, 1)
     finally:

@@ -670,7 +670,6 @@ def sparse_to_dense_warp(
                 flow,
                 output_size=(height, width),
                 coordinate_mode="displacement_xy",
-                return_gpu=False,
             )
         else:
             coordinates = np.stack((safe_x, safe_y), axis=-1)
@@ -678,7 +677,6 @@ def sparse_to_dense_warp(
                 src,
                 coordinates,
                 coordinate_mode="absolute_xy",
-                return_gpu=False,
             )
     except (FileNotFoundError, ImportError, KeyError, OSError, RuntimeError) as exc:
         raise NotImplementedError(
@@ -754,7 +752,7 @@ def _warp_with_existing_aot(
     try:
         from .. import aot_api
 
-        result = aot_api.warp_perspective(image, transform, dsize, return_gpu=False)
+        result = aot_api.warp_perspective(image, transform, dsize )
         warped, valid = _warp_numpy(
             np.ones_like(image, dtype=np.float32), transform, dsize
         )

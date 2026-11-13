@@ -17,6 +17,20 @@ from taichi_vision.taichi_algorithm.neural.device_invocation import (
     Access, DeviceView, DeviceViewDescriptor, SerialDeviceInvocations, checked_sum, checked_product,
 )
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 
 class UnsupportedONNXOperatorError(ValueError):
     """The graph requires semantics not implemented by this executor."""
@@ -1555,7 +1569,7 @@ class NativeGraph:
         for value in self.scratch.values():
             accesses.append(Access(self.device_view(value).descriptor, write=True))
         return self._invocations.submit(inputs, accesses, (self,),
-            lambda: self._run_impl(values, return_gpu=True, borrowed_outputs=True),
+            lambda: self._run_impl(values,  borrowed_outputs=True),
             lambda name, value: self.device_view(value, shape=self.shapes[name]), slot=slot)
 
     def configure_invocation_slots(self, count=1, *, max_requested_bytes, mode="serial"):
@@ -3333,7 +3347,7 @@ class NativeGraph:
         ), default=0)
         scratch_bytes = scratch_elements * 4
         dummy_buffer_bytes = 4
-        return_gpu_copy_bytes = sum(
+        resident_copy_bytes = sum(
             max(1, math.prod(self.shapes[name])) * 4 for name in self.outputs
         )
         before_bytes = (constant_bytes + scratch_bytes + dummy_buffer_bytes
@@ -3347,7 +3361,7 @@ class NativeGraph:
             "constant_bytes": constant_bytes,
             "scratch_bytes": scratch_bytes,
             "dummy_buffer_bytes": dummy_buffer_bytes,
-            "return_gpu_copy_bytes_per_call": return_gpu_copy_bytes,
+            "resident_copy_bytes_per_call": resident_copy_bytes,
             "estimated_tensor_bytes_before": before_bytes,
             "estimated_tensor_bytes_after": after_bytes,
             "estimated_tensor_bytes_saved": before_bytes - after_bytes,
@@ -3406,15 +3420,16 @@ class NativeGraph:
             self.dummy = dummy
             self._allocated = True
 
-    def run(self, inputs, return_gpu=False, borrowed_outputs=False):
+    def run(self, inputs, borrowed_outputs=False):
+        _resident_output = _resolve_output(inputs)
         with self._invocations.lock:
             self._invocations.legacy_idle()
-            return self._run_impl(inputs, return_gpu=return_gpu, borrowed_outputs=borrowed_outputs)
+            return self._run_impl(inputs, _resident_output=_resident_output, borrowed_outputs=borrowed_outputs)
 
-    def _run_impl(self, inputs, return_gpu=False, borrowed_outputs=False):
+    def _run_impl(self, inputs, borrowed_outputs=False):
         """Execute the graph.
 
-        ``return_gpu=True`` returns caller-owned output copies queued on the
+        ``_resident_output=True`` returns caller-owned output copies queued on the
         active Taichi device stream. Taichi consumers can enqueue dependent
         work on that stream without a device-wide wait; synchronize before
         reading the result from the CPU or handing it to an external runtime.
@@ -3427,10 +3442,11 @@ class NativeGraph:
         kernels use flat buffers internally. Multidimensional device inputs are
         rejected in this mode. The caller must keep each input alive until
         submitted Taichi work has completed. Borrowed outputs require
-        ``return_gpu=True``.
+        ``_resident_output=True``.
         """
-        if borrowed_outputs and not return_gpu:
-            raise ValueError("borrowed_outputs requires return_gpu=True")
+        _resident_output = _resolve_output(inputs)
+        if borrowed_outputs and not _resident_output:
+            raise ValueError("borrowed_outputs requires _resident_output=True")
         with self._lock:
             self.allocate()
             if set(inputs) != set(self.inputs):
@@ -3468,7 +3484,7 @@ class NativeGraph:
                     self.buffers[name].from_numpy(np.ascontiguousarray(arr).reshape(-1))
                 for step in self.steps:
                     self._dispatch(step)
-                if return_gpu:
+                if _resident_output:
                     if borrowed_outputs:
                         # No allocation or device copy: these are borrowed
                         # graph buffers and are invalidated by the next run.

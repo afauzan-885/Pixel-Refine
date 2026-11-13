@@ -145,7 +145,6 @@ def capture_universal_session(
         session.run(
             output_names=None,
             input_feed=dict(input_feed),
-            return_gpu=True,
             borrowed_outputs=True,
             step_callback=lambda index, _node: current_step.__setitem__(0, index),
         )
@@ -401,154 +400,10 @@ def compile_static_graph_from_capture(
     return module
 
 
-def write_static_profile(
-    capture: Dict[str, Any],
-    model_bytes: bytes,
-    backend: str,
-    profile_dir: Path,
-    graph_name: str,
-    kernel_overrides: Optional[Mapping[str, Any]] = None,
-    *, specialize_scalars: bool = False, fast_math: Optional[bool] = None,
-) -> Dict[str, Any]:
-    """Compile and write a separate model TCM plus identity sidecar manifest."""
-    import taichi as ti
-
-    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
-
-    profile_dir = Path(profile_dir).resolve()
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    tcm_path = profile_dir / "weightnet_static.tcm"
-    constants_path = profile_dir / "constants.npz"
-    manifest_path = profile_dir / "profile.json"
-    module = compile_static_graph_from_capture(
-        capture, backend, graph_name, kernel_overrides=kernel_overrides,
-        specialize_scalars=specialize_scalars, fast_math=fast_math,
+def write_static_profile(*args, **kwargs):
+    raise RuntimeError(
+        "taichi_vision is load-only; build static profiles with the Taichi venv toolchain."
     )
-    archive_module(module, tcm_path)
-    np.savez_compressed(constants_path, **capture["constant_arrays"])
-
-    import onnx
-
-    model = onnx.load_model_from_string(model_bytes)
-    plan = capture["plan"]
-    input_name_to_arg = {
-        name: capture["input_arg_by_id"][
-            next(
-                buffer_id for buffer_id, item in capture["uploads"].items()
-                if item["name"] == name
-            )
-        ]
-        for name in plan.input_names
-    }
-    output_name_to_arg = {}
-    for name in plan.output_names:
-        buffer_id = capture["output_buffer_ids"].get(name)
-        if buffer_id is None:
-            raise ValueError(f"static graph output {name!r} has no captured buffer")
-        output_name_to_arg[name] = capture["graph_buffer_args"][buffer_id]
-
-    output_shapes = {value.name: _graph_value_shape(value) for value in model.graph.output}
-    slots = [
-        {
-            "name": f"slot_{slot.index}",
-            "dtype": slot.dtype,
-            "elements": slot.elements,
-            "members": slot.members,
-        }
-        for slot in capture["liveness"].slots
-    ]
-    slot_bytes = sum(
-        slot["elements"] * np.dtype(_numpy_dtype(slot["dtype"])).itemsize
-        for slot in slots
-    )
-    constants_name_map = {
-        arg_name: next(
-            item["name"]
-            for buffer_id, arg_name_value in capture["constant_arg_by_id"].items()
-            if arg_name_value == arg_name
-            for item in (capture["uploads"][buffer_id],)
-        )
-        for arg_name in capture["constant_arrays"]
-        if arg_name != "constant_dummy"
-    }
-    import taichi_vision
-
-    try:
-        llvm_version = str(ti._lib.core.get_version_info().get("llvm", "unknown"))
-    except Exception:  # noqa: BLE001
-        llvm_version = "unknown"
-    manifest = {
-        "schema_version": 1,
-        "profile": profile_dir.parent.name,
-        "graph_name": graph_name,
-        "profile_status": "experimental_not_promoted" if kernel_overrides else "optional_static_graph",
-        "kernel_overrides": {
-            source: target.__name__
-            for source, target in (kernel_overrides or {}).items()
-        },
-        "backend": backend,
-        "target_identity": _target_identity(backend, capture.get("device_name")),
-        "runtime_abi": _configured_runtime_abi(),
-        "kernel_sources_sha256": _kernel_source_fingerprint(),
-        "taichi": ".".join(str(part) for part in ti.__version__),
-        "llvm": llvm_version,
-        "model_sha256": hashlib.sha256(model_bytes).hexdigest(),
-        "model_input_shapes": {
-            name: capture["input_shapes"][name]
-            for name in plan.input_names
-        },
-        "model_input_dtypes": {
-            name: plan.dtypes[name] for name in plan.input_names
-        },
-        "input_args": input_name_to_arg,
-        "constant_args": constants_name_map,
-        "dummy_arg": "constant_dummy",
-        "scalar_values": {} if specialize_scalars else capture["scalar_values"],
-        "slots": slots,
-        "slot_bytes": slot_bytes,
-        "outputs": {
-            name: {
-                "arg": output_name_to_arg[name],
-                "shape": list(output_shapes[name]),
-                "dtype": plan.dtypes[name],
-            }
-            for name in plan.output_names
-        },
-        "dispatches": len(capture["events"]),
-        "dispatch_graph_counts": dict(Counter(event["graph"] for event in capture["events"])),
-        "tcm": tcm_path.name,
-        "tcm_sha256": _sha256_file(tcm_path),
-        "constants": constants_path.name,
-        "constants_sha256": _sha256_file(constants_path),
-    }
-    if specialize_scalars or fast_math is not None or capture.get("binary_chains_enabled") or capture.get("pointwise_ssa_enabled"):
-        from .scalar_specialization import POLICY, compiler_fingerprint
-        mode = ("pointwise_ssa_" if capture.get("pointwise_ssa_enabled") else "") + ("binary_chain_" if capture.get("binary_chains_enabled") else "") + (
-            "scalar_specialized" if specialize_scalars else "runtime_scalars"
-        )
-        manifest["schema_version"] = 2
-        manifest["compiler_schema_version"] = 2
-        manifest["compiler_mode"] = mode
-        manifest["profile_variant"] = profile_dir.name
-        manifest["compiler_policy"] = {
-            "schema_version": 2,
-            "mode": mode,
-            "scalar_specialization": POLICY if specialize_scalars else None,
-            "fast_math": fast_math,
-            "source_sha256": compiler_fingerprint(),
-            "original_scalar_values": capture["scalar_values"],
-            "specialization_keys": capture.get("specialization_keys", []),
-            "binary_chains": "adjacent_binary_ssa_f32_v1" if capture.get("binary_chains_enabled") else None,
-            "pointwise_ssa": "bounded_multi_output_pointwise_ssa_v1" if capture.get("pointwise_ssa_enabled") else None,
-        }
-        manifest["profile_status"] = "experimental_not_promoted"
-    manifest["binary_regions"] = capture.get("binary_regions", [])
-    manifest["pointwise_regions"] = capture.get("pointwise_regions", [])
-    if capture.get("pointwise_ssa_enabled"):
-        manifest["logical_shapes"] = capture["logical_shapes"]
-    manifest["original_dispatch_count"] = capture.get("original_dispatch_count", len(capture["events"]))
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return manifest
 
 
 def load_static_profile(profile_dir: Path) -> Dict[str, Any]:

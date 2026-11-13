@@ -18,6 +18,20 @@ import zipfile
 
 import numpy as np
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 
 DEFAULT_AOT_NEURAL_DIR = Path("pixel_refine_desktop/ui/data/aot_assets/neural")
 
@@ -42,7 +56,6 @@ def _resolve_backend_from_providers(providers: Optional[Sequence[str]], fallback
 def find_prebaked_tcm(
     stem: str,
     backend: str,
-    *,
     search_dir: Path = DEFAULT_AOT_NEURAL_DIR,
 ) -> Optional[Path]:
     """Search for a matching pre-baked .tcm model in the neural assets directory."""
@@ -69,7 +82,6 @@ def find_prebaked_tcm(
 
 def resolve_or_compile_tcm(
     model_path_or_bytes: Union[str, Path, bytes],
-    *,
     backend: str = "auto",
     model_name: Optional[str] = None,
     output_dir: Optional[Union[str, Path]] = DEFAULT_AOT_NEURAL_DIR,
@@ -115,23 +127,11 @@ def resolve_or_compile_tcm(
     if canonical_path.is_file():
         return canonical_path
 
-    # 3. Compile into target_dir (developer environment only)
-    try:
-        from taichi_vision.taichi_algorithm.denoising.onnx_resident_aot import compile_resident_onnx
-    except ImportError as exc:
-        raise RuntimeError(
-            f"Pre-baked TCM model not found at {canonical_path} and AOT compiler toolchain "
-            "is not available in this production environment."
-        ) from exc
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    compile_resident_onnx(
-        model_bytes,
-        canonical_path,
-        backend=resolved_backend,
-        patch_tools=patch_tools,
+    raise RuntimeError(
+        f"Pre-baked TCM model not found at {canonical_path}. "
+        "taichi_vision is load-only; compile the artifact with the Taichi venv "
+        "toolchain before starting the application."
     )
-    return canonical_path
 
 
 class InferenceSession:
@@ -146,7 +146,6 @@ class InferenceSession:
     def __init__(
         self,
         model_path_or_bytes: Union[str, Path, bytes],
-        *,
         backend: str = "auto",
         providers: Optional[Sequence[str]] = None,
         model_name: Optional[str] = None,
@@ -225,15 +224,15 @@ class InferenceSession:
         self,
         output_names: Optional[Sequence[str]] = None,
         input_feed: Optional[Dict[str, Any]] = None,
-        return_gpu: bool = False,
+        
         borrowed_outputs: bool = False,
         **kwargs: Any,
     ) -> List[Any]:
         """Executes model with drop-in signature compatible with onnxruntime."""
+        _resident_output = _resolve_output(input_feed)
         return self._graph.run(
             output_names=output_names,
             input_feed=input_feed,
-            return_gpu=return_gpu,
             borrowed_outputs=borrowed_outputs,
         )
 

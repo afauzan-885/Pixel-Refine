@@ -137,7 +137,7 @@ def sobel(src, dst_dx=None, dst_dy=None, buffer_provider="pool", enable_tiling=T
     """
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi_vision.taichi_algorithm import aot_api as taichi_aot
-        dx, dy = taichi_aot.sobel(src, return_gpu=True)
+        dx, dy = taichi_aot.sobel(src )
         # Handle copying if user passed specific dst_dx/dy or needs numpy (fallback logic)
         # To keep it safe, if dst_dx is None we return GPU buffer
         if dst_dx is None and dst_dy is None:
@@ -203,7 +203,7 @@ def laplacian(src, dst=None, buffer_provider="pool", enable_tiling=True):
     """
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi_vision.taichi_algorithm import aot_api as taichi_aot
-        res = taichi_aot.laplacian(src, return_gpu=True)
+        res = taichi_aot.laplacian(src )
         if dst is None:
             return res
         return res.to_numpy()

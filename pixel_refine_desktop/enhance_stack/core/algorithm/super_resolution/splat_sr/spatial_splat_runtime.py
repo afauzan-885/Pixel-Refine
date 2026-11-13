@@ -481,12 +481,12 @@ class SpatialSplatAOT:
                         )
                     else:
                         scratch_tag = f"splat_sr.hann_tile.{th}x{tw}"
-                        result_buf = session.acquire_buffer(
+                        result_buf = session.view(
                             tile_shape,
                             dtype=np.float32,
                             tag=f"{scratch_tag}.result",
                         )
-                        coverage_buf = session.acquire_buffer(
+                        coverage_buf = session.view(
                             tile_shape,
                             dtype=np.float32,
                             tag=f"{scratch_tag}.coverage",
@@ -588,7 +588,6 @@ class SpatialSplatAOT:
                     source_ref,
                     (hr_w, hr_h),
                     interpolation=taichi_aot.INTER_CUBIC,
-                    return_gpu=True,
                 )
             finally:
                 source_ref.destroy()
@@ -799,7 +798,6 @@ class SpatialSplatAOT:
                     source_ref,
                     (hr_w, hr_h),
                     interpolation=taichi_aot.INTER_CUBIC,
-                    return_gpu=True,
                 )
             finally:
                 source_ref.destroy()
@@ -1320,7 +1318,6 @@ def run_fused_burst(
                 reference_lr_gpu,
                 (hr_w, hr_h),
                 interpolation=taichi_aot.INTER_CUBIC,
-                return_gpu=True,
             )
         rt.counters["dispatch"] += 1
         owned = [frames_gpu, confidence_gpu, flow_y_gpu, flow_x_gpu, reference_lr_gpu]
@@ -1445,25 +1442,24 @@ class SessionHannAccumulator:
         self._tiles_processed = 0
 
         with _force_host_visible(self.engine, self.backend == "vulkan"):
-            self.acc_num = session.own(
+            self.acc_num = session._adopt(
                 self.engine.allocate(
                     (self.hr_h, self.hr_w, 3), dtype=np.float32
                 )
             )
-            self.acc_den = session.own(
+            self.acc_den = session._adopt(
                 self.engine.allocate(
                     (self.hr_h, self.hr_w),
                     dtype=np.float32,
                     host_accessible=(self.backend == "vulkan"),
                 )
             )
-            self.reference_lr = session.own(_ti_rt.upload(reference))
-            self.reference_hr = session.track_result(
+            self.reference_lr = session._adopt(_ti_rt.upload(reference))
+            self.reference_hr = session._track(
                 taichi_aot.resize(
                     self.reference_lr,
                     (self.hr_w, self.hr_h),
                     interpolation=taichi_aot.INTER_CUBIC,
-                    return_gpu=True,
                 )
             )
             clear_f32_3d_taichi(self.acc_num)
@@ -1473,7 +1469,7 @@ class SessionHannAccumulator:
         # The session releases this coordinator before its buffers. On an
         # exception/cancel it synchronizes queued work and restores Vulkan's
         # host-visible allocation override before retiring those buffers.
-        session.own(self, releaser=lambda accumulator: accumulator.close())
+        session._adopt(self, releaser=lambda accumulator: accumulator.close())
 
     def _prepare_hann_windows(self) -> None:
         from taichi_vision import algorithm as taichi_aot
@@ -1486,7 +1482,7 @@ class SessionHannAccumulator:
                     min(self.block_size, self.hr_w - x0),
                 )
                 if shape not in self._hann_cache:
-                    self._hann_cache[shape] = self.session.track_result(
+                    self._hann_cache[shape] = self.session._track(
                         taichi_aot.generate_hanning_window_2d(
                             shape, exclude_boundary=True
                         )
@@ -1569,33 +1565,33 @@ class SessionHannAccumulator:
                         ),
                         dtype=np.float32,
                     )
-                    confidence_view = self.session.own(
+                    confidence_view = self.session._adopt(
                         self.engine.upload(confidence_array[None, ...])
                     )
                     uploaded.append(confidence_view)
                 if flow is None:
-                    flow_y = self.session.own(
+                    flow_y = self.session._adopt(
                         self.engine.allocate((1, self.lr_h, self.lr_w), dtype=np.float32)
                     )
-                    flow_x = self.session.own(
+                    flow_x = self.session._adopt(
                         self.engine.allocate((1, self.lr_h, self.lr_w), dtype=np.float32)
                     )
                     clear_f32_3d_taichi(flow_y)
                     clear_f32_3d_taichi(flow_x)
                 else:
-                    flow_y = self.session.own(
+                    flow_y = self.session._adopt(
                         self.engine.upload(
                             np.ascontiguousarray(flow[..., 1][None, ...])
                         )
                     )
-                    flow_x = self.session.own(
+                    flow_x = self.session._adopt(
                         self.engine.upload(
                             np.ascontiguousarray(flow[..., 0][None, ...])
                         )
                     )
                 uploaded.extend((flow_y, flow_x))
                 frame_buffers = [
-                    self.session.own(
+                    self.session._adopt(
                         self.engine.upload(
                             np.ascontiguousarray(frame[..., channel][None, ...])
                         )
@@ -1625,11 +1621,11 @@ class SessionHannAccumulator:
         finally:
             for buffer in uploaded:
                 try:
-                    self.session.release_buffer(buffer)
+                    self.session.release(buffer)
                 except Exception:
                     pass
             if borrowed_confidence:
-                self.session.release_borrow(confidence)
+                self.session._release_borrow(confidence)
         return self._tiles_processed
 
     def finalize(self) -> np.ndarray:
@@ -1647,11 +1643,11 @@ class SessionHannAccumulator:
                 sum_weight=self.acc_den,
                 ref_img=self.reference_hr,
             )
-            output = self.session.track_result(output)
+            output = self.session._track(output)
             self.engine.sync()
             # The host result outlives this job session. Transfer ownership
             # explicitly, read it once, then retire the native allocation.
-            output = self.session.detach(output)
+            self.session.release(output, retain=True)
             try:
                 result = np.asarray(output.to_numpy(), dtype=np.float32)
             finally:

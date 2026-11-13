@@ -506,7 +506,7 @@ fusionnet_module = importlib.import_module(
 FusionNetDenoisingAlgorithm = fusionnet_module.FusionNetDenoisingAlgorithm
 
 class FakeWeightNetSession:
-    runtime = "cpu"
+    runtime = "taichi_aot"
     run_count = 0
     def get_inputs(self):
         return [SimpleNamespace(shape=[1, 1, 32, 32])]

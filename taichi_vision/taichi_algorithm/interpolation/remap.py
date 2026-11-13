@@ -502,7 +502,7 @@ def remap(src, map_x, map_y, dst=None, buffer_provider="pool"):
                 src,
                 coordinates,
                 coordinate_mode="absolute_xy",
-                return_gpu=is_taichi,
+                
                 dst=dst,
             )
             if dst is not None:
@@ -603,7 +603,7 @@ def remap_with_flow(src, flow, full_h, full_w, dst=None, buffer_provider="pool")
                 flow,
                 output_size=(full_h, full_w),
                 coordinate_mode="displacement_xy",
-                return_gpu=is_taichi,
+                
                 dst=dst,
             )
             return res_buf
@@ -713,7 +713,7 @@ def warp_perspective(src, M, dsize, dst=None, buffer_provider="pool"):
         aot = _get_aot()
         if aot and hasattr(aot, "warp_perspective"):
             is_taichi = hasattr(src, "to_numpy") or hasattr(M, "to_numpy")
-            res_buf = aot.warp_perspective(src, M, dsize, return_gpu=is_taichi, dst=dst)
+            res_buf = aot.warp_perspective(src, M, dsize,  dst=dst)
             return res_buf
 
     if not TAICHI_AVAILABLE:

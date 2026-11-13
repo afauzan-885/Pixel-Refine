@@ -44,6 +44,17 @@ def _get_aot():
                 pass
     return _AOT_ENGINE
 
+
+def _is_resident(value):
+    """True for native graph/device buffers, false for host arrays."""
+    try:
+        from taichi.aot_engine import is_resident
+
+        return is_resident(value)
+    except Exception:
+        return hasattr(value, "to_numpy") and hasattr(value, "shape")
+
+
 if TAICHI_AVAILABLE:
 
     # --- Interpolation Utilities ---
@@ -898,7 +909,7 @@ def split(img):
         raise ImportError("Taichi not available")
 
     # Detect input type
-    is_taichi_input = hasattr(img, "to_numpy")
+    is_taichi_input = _is_resident(img)
 
     # Get shape
     if is_taichi_input:
@@ -988,7 +999,7 @@ def merge(channels):
 
     # Detect input type from first channel
     first_ch = channels[0]
-    is_taichi_input = hasattr(first_ch, "to_numpy")
+    is_taichi_input = _is_resident(first_ch)
 
     # Get shape
     shape_2d = first_ch.shape[:2]
@@ -1045,7 +1056,7 @@ def extract_channel(img, ch):
         raise ImportError("Taichi not available")
 
     # Detect input type
-    is_taichi_input = hasattr(img, "to_numpy")
+    is_taichi_input = _is_resident(img)
 
     shape = img.shape
     h, w = shape[:2]
@@ -1104,8 +1115,8 @@ def insert_channel(src, dst, ch):
         raise ImportError("Taichi not available")
 
     # Detect input types
-    is_src_taichi = hasattr(src, "to_numpy")
-    is_dst_taichi = hasattr(dst, "to_numpy")
+    is_src_taichi = _is_resident(src)
+    is_dst_taichi = _is_resident(dst)
 
     shape_dst = dst.shape
     c_dst = shape_dst[2] if len(shape_dst) == 3 else 1
@@ -1150,13 +1161,13 @@ def copy(img):
         if aot:
             from taichi.aot_engine import TaichiGPUBuffer
             is_gpu = isinstance(img, TaichiGPUBuffer)
-            return aot.copy(img, return_gpu=is_gpu)
+            return aot.copy(img )
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
     # Detect input type
-    is_taichi_input = hasattr(img, "to_numpy")
+    is_taichi_input = _is_resident(img)
 
     if is_taichi_input:
         # GPU workflow
@@ -1176,21 +1187,21 @@ COLOR_GRAY2RGB = 8  # Gray to BGR/RGB is identical for grayscale
 
 
 @ti_thread
-def cvtColor(src, code, dst=None, return_gpu=False, session=None):
+def cvtColor(src, code, dst=None, session=None):
     """
     Convert image color space.
     AOT-Aware: Dispatches to AOT module if AOT_MODE=1.
-    Supports GPU residency chaining when return_gpu=True or session is provided.
+    Residency follows the input buffer, the destination, or the active session.
     """
     if AOT_MODE:
         aot = _get_aot()
         if aot and hasattr(aot, "cvtColor"):
-            return aot.cvtColor(src, code, dst=dst, return_gpu=return_gpu, session=session)
+            return aot.cvtColor(src, code, dst=dst, session=session)
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
-    is_taichi_input = hasattr(src, "to_numpy")
+    is_taichi_input = _is_resident(src)
 
     # The color kernels index ``src[i, j][channel]`` and therefore require a
     # 2-D vector ndarray, while a regular NumPy image is represented as a
@@ -1293,7 +1304,7 @@ def absdiff(src1, src2, dst=None):
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
-    is_taichi_input = hasattr(src1, "to_numpy")
+    is_taichi_input = _is_resident(src1)
     src1_gpu, s1_temp = ensure_taichi_field(src1, dtype=ti.f32)
     src2_gpu, s2_temp = ensure_taichi_field(src2, dtype=ti.f32)
 
@@ -1353,7 +1364,7 @@ def mean_division(sum_img, sum_weight, ref_img, dst=None):
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")
 
-    is_taichi_input = hasattr(sum_img, "to_numpy")
+    is_taichi_input = _is_resident(sum_img)
 
     sum_img_gpu, s_temp = ensure_taichi_field(sum_img, dtype=ti.f32)
     sum_weight_gpu, sw_temp = ensure_taichi_field(sum_weight, dtype=ti.f32)
@@ -1387,6 +1398,20 @@ def mean_division(sum_img, sum_weight, ref_img, dst=None):
 # NumPy-like aliases for JIT/AOT consistency
 hanning = generate_hanning_window_2d
 divide = mean_division
+
+
+
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
 
 
 import math

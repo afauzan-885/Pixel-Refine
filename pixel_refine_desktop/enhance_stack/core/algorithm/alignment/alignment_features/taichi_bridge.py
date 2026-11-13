@@ -194,7 +194,6 @@ def _natural_tonemap_analysis_gpu(image, *, input_dtype=None):
 
     mapped = taichi_aot.naturalTonemapping(
         source,
-        return_gpu=False,
         **CALCULATION_TONE_MAPPING_PARAMS,
     )
     mapped = np.ascontiguousarray(np.clip(np.asarray(mapped, dtype=np.float32), 0.0, 1.0))
@@ -265,7 +264,6 @@ def prepare_reference_for_alignment(
             c10,
             c11,
             method="hamilton-1channel",
-            return_gpu=True,
         )
         if ref_gpu is not ref_final:
             ref_gpu.release()
@@ -302,7 +300,6 @@ def prepare_reference_for_alignment(
             ref_gray,
             (work_res_w, work_res_h),
             interpolation=taichi_aot.INTER_LINEAR,
-            return_gpu=True,
         )
         if ref_gray is not final_res_gray and ref_gray is not reference_image_float:
             ref_gray.release()
@@ -364,7 +361,6 @@ def prepare_comparison_for_alignment(
             c10,
             c11,
             method="hamilton-1channel",
-            return_gpu=True,
         )
         if comp_gpu is not comp_final:
             comp_gpu.release()
@@ -404,7 +400,6 @@ def prepare_comparison_for_alignment(
             comp_gray,
             (work_res_w, work_res_h),
             interpolation=taichi_aot.INTER_LINEAR,
-            return_gpu=True,
         )
         if comp_gray is not final_res_gray and comp_gray is not comp_image:
             comp_gray.release()
@@ -437,7 +432,6 @@ def prepare_reference_aot(
             ref_gray,
             (work_res_w, work_res_h),
             interpolation=taichi_aot.INTER_LINEAR,
-            return_gpu=True,
         )
         if ref_gray is not final_res_gray:
             ref_gray.destroy()
@@ -496,7 +490,6 @@ def prepare_frame_aot(
             curr_full_gpu,
             (ref_image_w, ref_image_h),
             interpolation=taichi_aot.INTER_LINEAR,
-            return_gpu=True,
         )
         if curr_full_gpu is not curr_final:
             curr_full_gpu.release()
@@ -514,7 +507,6 @@ def prepare_frame_aot(
             curr_gray,
             (work_res_w, work_res_h),
             interpolation=taichi_aot.INTER_LINEAR,
-            return_gpu=True,
         )
         if curr_gray is not curr_work_gray_gpu:
             curr_gray.release()

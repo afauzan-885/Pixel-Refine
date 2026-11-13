@@ -15,6 +15,20 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 TAICHI_AVAILABLE = False
 ti = None
 tm = None
@@ -505,12 +519,13 @@ def apply_auto_enhance_gpu(
     src_gpu: Any,
     params: Dict[str, Any],
     dst: Any = None,
-    return_gpu: bool = True,
+    
 ) -> Any:
     """
     Executes AutoEnhance directly inside GPU VRAM via Taichi AOT / TCM module.
     Zero PCIe transfer, pure GPU shader performance.
     """
+    _resident_output = _resolve_output(src_gpu, dst=dst)
     from taichi.aot_engine import get_engine, TaichiGPUBuffer
     from taichi_vision.taichi_algorithm.aot_api import _mod
 
@@ -550,7 +565,7 @@ def apply_auto_enhance_gpu(
     }
     mod.run("auto_enhance", **args)
 
-    if not return_gpu:
+    if not _resident_output:
         res_np = dst_buf.to_numpy()
         if dst is None:
             dst_buf.destroy()
@@ -567,7 +582,7 @@ def AutoEnhance(
     src: Any,
     params: Optional[Dict[str, Any]] = None,
     return_params: bool = False,
-    return_gpu: bool = False,
+    
     dst: Any = None,
     **kwargs,
 ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, Any]], Any]:
@@ -575,9 +590,10 @@ def AutoEnhance(
     High-level AutoEnhance API.
     - If `params` is None, analyzes histogram on `src` first.
     - If `params` is provided, applies tone mapping directly using pre-computed parameters.
-    - If `src` is in VRAM (TaichiGPUBuffer) or `return_gpu=True` or GPU backend is active,
+    - If `src` is in VRAM (TaichiGPUBuffer) or `_resident_output=True` or GPU backend is active,
       executes directly on GPU TCM.
     """
+    _resident_output = _resolve_output(src, dst=dst)
     if params is None:
         computed_params = analyze_auto_enhance_params(src)
     else:
@@ -588,7 +604,7 @@ def AutoEnhance(
 
     is_gpu_in = hasattr(src, "to_numpy")
 
-    use_gpu = is_gpu_in or return_gpu
+    use_gpu = is_gpu_in or _resident_output
     if not use_gpu:
         try:
             from taichi.aot_engine import get_engine
@@ -610,7 +626,7 @@ def AutoEnhance(
                 src_gpu,
                 computed_params,
                 dst=dst,
-                return_gpu=return_gpu,
+                _resident_output=_resident_output,
             )
         finally:
             if not is_gpu_in and hasattr(src_gpu, "destroy"):

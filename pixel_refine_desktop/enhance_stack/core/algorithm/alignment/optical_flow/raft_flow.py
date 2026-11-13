@@ -304,7 +304,6 @@ class RAFTFlow(LucasKanade):
                     flow,
                     full_h,
                     full_w,
-                    return_gpu=False,
                 )
             return self._restore_output_dtype(warped, target.dtype)
         except Exception as exc:

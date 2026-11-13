@@ -35,7 +35,7 @@ def arm_demosaic(
         bayer, float(wb_r), float(wb_g1), float(wb_b), float(wb_g2),
         cmatrix, float(black_level), float(white_level),
         int(c00), int(c01), int(c10), int(c11),
-        return_gpu=is_taichi,
+        
         dst=dst
     )
     return res_buf

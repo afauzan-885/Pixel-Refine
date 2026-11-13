@@ -544,7 +544,7 @@ def raw_optical_flow_dng(
     Tiled flow operates on normalized half-resolution green guides.  It never
     demosaics or interpolates RGB, but the resulting displacement still must
     pass :func:`phase_safe_integer_warp` before it is applied to RAW samples.
-    ``return_gpu=True`` is intentionally rejected for the tiled contract
+    ``resident output=True`` is intentionally rejected for the tiled contract
     because stitching requires a validated host-visible flow tile; callers
     wanting a GPU-resident result should use the established full-frame API.
     """
@@ -556,11 +556,6 @@ def raw_optical_flow_dng(
     mode = str(flow_mode).strip().lower()
     if mode not in {"auto", "full_frame", "force"}:
         raise ValueError("flow_mode must be 'auto', 'full_frame', or 'force'")
-    if bool(kwargs.get("return_gpu", False)) and mode == "force":
-        raise ValueError(
-            "RAW tiled optical flow requires host-visible flow tiles; "
-            "use flow_mode='full_frame' for return_gpu=True"
-        )
     if mode == "force" and flow_contract is None and flow_runner is None:
         raise ValueError(
             "flow_mode='force' requires an explicit RawFlowTileContract; "
@@ -625,7 +620,6 @@ def raw_flow_tile_parity_report(
     if contract is None:
         raise ValueError("flow_contract must be an explicit RawFlowTileContract")
     call_kwargs = dict(kwargs)
-    call_kwargs.pop("return_gpu", None)
     full = np.asarray(
         raw_optical_flow_dng(
             reference,
@@ -779,10 +773,6 @@ def _run_raw_flow_guide_tiled(
     current = np.ascontiguousarray(current_guide, dtype=np.float32)
     if previous.ndim != 2 or current.shape != previous.shape:
         raise ValueError("RAW green guides must be matching 2D arrays")
-    if bool(kwargs.get("return_gpu", False)):
-        raise ValueError(
-            "RAW tiled optical flow requires return_gpu=False for validated stitching"
-        )
     if isinstance(block_size, int):
         sensor_h = sensor_w = int(block_size)
     else:

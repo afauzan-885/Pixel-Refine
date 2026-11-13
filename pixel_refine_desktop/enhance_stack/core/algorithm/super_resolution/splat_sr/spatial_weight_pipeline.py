@@ -124,7 +124,7 @@ class SpatialWeightMapGenerator:
                 analysis = _numpy_remap_with_flow(current, flow)
             else:
                 analysis = self._aot.remap_with_flow(
-                    current, flow, self._shape[0], self._shape[1], return_gpu=False
+                    current, flow, self._shape[0], self._shape[1] 
                 )
                 analysis = np.asarray(analysis, dtype=np.float32)
                 if analysis.ndim != 2:

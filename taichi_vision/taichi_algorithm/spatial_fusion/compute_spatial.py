@@ -69,6 +69,45 @@ else:
     ti = DummyTi()
 
 
+class SpatialScratchCache:
+    """Reusable per-batch GPU scratch buffers for spatial analysis."""
+
+    def __init__(self):
+        self._slots = {}
+        self.reference_token = None
+        self.hits = 0
+        self.misses = 0
+
+    def acquire(self, engine, name, shape, dtype=np.float32, **kwargs):
+        shape = tuple(int(v) for v in shape)
+        buf = self._slots.get(name)
+        if (
+            buf is not None
+            and tuple(buf.shape) == shape
+            and np.dtype(getattr(buf, "dtype", dtype)) == np.dtype(dtype)
+        ):
+            self.hits += 1
+            return buf
+        self.misses += 1
+        if buf is not None:
+            try:
+                buf.destroy()
+            except Exception:
+                pass
+        buf = engine.allocate(shape, dtype=dtype, **kwargs)
+        self._slots[name] = buf
+        return buf
+
+    def clear(self):
+        for buf in self._slots.values():
+            try:
+                buf.destroy()
+            except Exception:
+                pass
+        self._slots.clear()
+        self.reference_token = None
+
+
 @ti.kernel
 def precompute_gradients_kernel(
     img: ti.types.ndarray(),
@@ -4392,155 +4431,10 @@ def _resolve_backend_arch():
     return mapping[arch_str]
 
 
-def compile_spatial_tcm(arch=None, suffix=None, out_dir=None, save_path=None):
-    """Compile and package the spatial-merging AOT TCM.
-
-    Backend is controlled by ``engine.py`` at runtime and by the canonical
-    ``PIXEL_REFINE_AOT_ARCH``/``TARGET_BACKEND``/``AOT_ARCH`` markers when
-    invoked from the backend suite, so the process is automatic per backend.
-
-    Args:
-        arch:      Optional explicit Taichi arch.  None → engine/env resolved.
-        suffix:    Artifact suffix (``vulkan``/``cuda``/``opengl``/``cpu``/``gles``).
-                   Auto-derived from ``arch`` when None.
-        out_dir:   Optional output directory for ``spatial_{suffix}.tcm``.
-        save_path: Optional exact output path (backend-suite ``path``
-                   convention).  Overrides ``out_dir``/suffix naming.
-    """
-    if not TAICHI_AVAILABLE:
-        raise ImportError("Taichi is not available")
-
-    if arch is None:
-        arch, auto_suffix = _resolve_backend_arch()
-    else:
-        auto_suffix = {
-            ti.cuda: "cuda",
-            ti.vulkan: "vulkan",
-            ti.opengl: "opengl",
-            ti.gles: "gles",
-            ti.x64: "cpu",
-            ti.cpu: "cpu",
-        }.get(arch)
-    if suffix is None:
-        suffix = auto_suffix or "vulkan"
-
-    print(f"\n>>> Compiling SPATIAL MERGING AOT for: {arch}")
-    ti.init(arch=arch, offline_cache=False)
-
-    # Fail-closed against silent backend fallback.  Taichi's adaptive arch
-    # selection can fall back to CPU (e.g. when an OpenGL context cannot be
-    # created in the current environment).  Writing a CPU payload under a
-    # GPU artifact name would mix ABI/backends and is never acceptable —
-    # matching the backend suite's ``_require_backend_artifact`` gate.
-    actual_arch = getattr(ti.lang.impl.current_cfg(), "arch", None)
-    if actual_arch is not None and int(actual_arch) != int(arch):
-        raise RuntimeError(
-            f"Taichi fell back to {actual_arch} while compiling for {arch}; "
-            "refusing to emit a cross-backend artifact. Compile on an "
-            "environment that supports the requested backend."
-        )
-
-    module = ti.aot.Module(arch)
-    _compile_graphs(module)
-
-    # Save through the canonical archiver.  The old hand-written ZIP path
-    # omitted ``aot_metadata.tcb`` for graphics backends, which made otherwise
-    # valid Vulkan/OpenGL artifacts fail the LLVM20 compatibility preflight.
-    try:
-        from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
-    except (ImportError, RuntimeError) as import_error:
-        # A compiler must be able to emit a graphics artifact before a runtime
-        # embedding context exists.  Importing through the package initializer
-        # would construct AOTEngine and reject OpenGL without capability JSON;
-        # load this stdlib-only archiver directly instead.  Runtime admission
-        # remains fail-closed and still requires real capability evidence.
-        artifact_path = os.path.abspath(
-            os.path.join(
-                os.path.dirname(__file__),
-                "../../../aot_py/aot_artifact.py",
-            )
-        )
-        spec = importlib.util.spec_from_file_location(
-            "pixel_refine_aot_artifact_standalone", artifact_path
-        )
-        if spec is None or spec.loader is None:
-            raise import_error
-        artifact_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(artifact_module)
-        archive_module = artifact_module.archive_module
-
-    if save_path is not None:
-        tcm_path = os.path.abspath(save_path)
-        os.makedirs(os.path.dirname(tcm_path), exist_ok=True)
-    else:
-        # Test/build automation can redirect the packaged artifact without
-        # touching the checked-in application assets.  Normal callers retain
-        # the historical output location.
-        output_override = os.environ.get("PIXEL_REFINE_SPATIAL_TCM_OUTPUT_DIR")
-        if out_dir is not None:
-            target_dir = os.path.abspath(out_dir)
-        elif output_override:
-            target_dir = os.path.abspath(output_override)
-        else:
-            target_dir = _find_app_assets_dir()
-        tcm_path = os.path.join(target_dir, f"spatial_{suffix}.tcm")
-        os.makedirs(target_dir, exist_ok=True)
-
-    archive_module(module, tcm_path)
-    try:
-        ti.reset()
-    except Exception:
-        pass
-    print(f"Spatial AOT packaged successfully to: {tcm_path}")
-    return tcm_path
-
-
-# -------------------------------------------------------------------------
-# AOT Runtime Wrappers
-# -------------------------------------------------------------------------
-class SpatialScratchCache:
-    """Reusable per-batch GPU scratch buffers for spatial analysis.
-
-    The spatial algorithm is sequential per frame, so a scratch slot can be
-    safely overwritten after the previous dispatch has completed.  Slots are
-    keyed by purpose and shape; a resolution change transparently replaces
-    only the incompatible slot.
-    """
-
-    def __init__(self):
-        self._slots = {}
-        self.reference_token = None
-
-    def acquire(self, engine, name, shape, dtype=np.float32, **kwargs):
-        shape = tuple(int(v) for v in shape)
-        buf = self._slots.get(name)
-        # Shape alone is insufficient for safe reuse: callers may switch
-        # analysis precision between batches while keeping the same
-        # resolution.  Reusing a mismatched buffer would either force an
-        # implicit conversion in the bridge or corrupt the next dispatch.
-        if (
-            buf is not None
-            and tuple(buf.shape) == shape
-            and np.dtype(getattr(buf, "dtype", dtype)) == np.dtype(dtype)
-        ):
-            return buf
-        if buf is not None:
-            try:
-                buf.destroy()
-            except Exception:
-                pass
-        buf = engine.allocate(shape, dtype=dtype, **kwargs)
-        self._slots[name] = buf
-        return buf
-
-    def clear(self):
-        for buf in self._slots.values():
-            try:
-                buf.destroy()
-            except Exception:
-                pass
-        self._slots.clear()
-        self.reference_token = None
+def compile_spatial_tcm(*args, **kwargs):
+    raise RuntimeError(
+        "taichi_vision is load-only; compile spatial artifacts with the Taichi venv toolchain."
+    )
 
 
 def _resolve_spatial_tcm(engine):
@@ -4837,7 +4731,6 @@ def generate_spatial_weights_taichi(
         curr_l0,
         (w // 2, h // 2),
         interpolation=taichi_aot.INTER_LINEAR,
-        return_gpu=True,
         dst=curr_l1,
     )
 
@@ -4850,7 +4743,6 @@ def generate_spatial_weights_taichi(
             ref_l0,
             (w // 2, h // 2),
             interpolation=taichi_aot.INTER_LINEAR,
-            return_gpu=True,
             dst=ref_l1,
         )
 
@@ -4969,7 +4861,6 @@ def generate_spatial_weights_taichi(
             level_conf_gpu,
             (w, h),
             interpolation=taichi_aot.INTER_CUBIC,
-            return_gpu=True,
             dst=_alloc("guidance_full", (h, w)),
         )
 

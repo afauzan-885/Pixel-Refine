@@ -153,9 +153,9 @@ def test_block_flow_accepts_lazy_block_iterator(monkeypatch):
 
     fake_aot = SimpleNamespace(
         get_block_config=lambda: _Config(),
-        remap_with_flow=lambda target, flow, h, w, return_gpu=False: target,
+        remap_with_flow=lambda target, flow, h, w: target,
     )
-    fake_package = SimpleNamespace(taichi_aot=fake_aot)
+    fake_package = SimpleNamespace(algorithm=fake_aot, taichi_aot=fake_aot)
     monkeypatch.setitem(sys.modules, "taichi_vision", fake_package)
     monkeypatch.setattr(
         "pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow"
@@ -198,12 +198,12 @@ def test_block_flow_counts_rectangular_runtime_blocks(monkeypatch):
 
     fake_aot = SimpleNamespace(
         get_block_config=lambda: _Config(),
-        remap_with_flow=lambda target, flow, h, w, return_gpu=False: target,
+        remap_with_flow=lambda target, flow, h, w: target,
     )
     monkeypatch.setitem(
         sys.modules,
         "taichi_vision",
-        SimpleNamespace(taichi_aot=fake_aot),
+        SimpleNamespace(algorithm=fake_aot, taichi_aot=fake_aot),
     )
     monkeypatch.setattr(
         "pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow"

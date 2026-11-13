@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from taichi_vision import algorithm as taichi_aot
 from taichi import TaichiGPUBuffer
-from taichi_vision.taichi_algorithm.buffer_session import BufferSession
+from taichi.buffer_session import BufferSession
 from pixel_refine_desktop.enhance_stack.core.algorithm.super_resolution.splat_sr.tiled_accumulator import (
     NativeAccumulatorBacking, RamAccumulatorBacking, TiledHannAccumulator,
 )

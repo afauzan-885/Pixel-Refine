@@ -31,6 +31,20 @@ from .errors import UnsupportedONNXOperatorError, UnsupportedStepError
 from .plan import GraphNode, Plan
 from .dtypes import F32, I32, I64, NUMPY_DTYPE, broadcast_strides, normalize_axis, pad_to, product
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 Shape = Tuple[int, ...]
 _MAX_RANGE_ELEMENTS = np.iinfo(np.int32).max
 DEFAULT_POOL_DIR = Path("pixel_refine_desktop/ui/data/aot_assets/neural")
@@ -1913,7 +1927,6 @@ class UniversalInferenceSession:
     def __init__(
         self,
         model_path_or_bytes: Union[str, Path, bytes],
-        *,
         backend: str = "auto",
         providers: Optional[Sequence[str]] = None,
         model_name: Optional[str] = None,
@@ -2078,7 +2091,7 @@ class UniversalInferenceSession:
         self,
         output_names: Optional[Sequence[str]] = None,
         input_feed: Optional[Dict[str, Any]] = None,
-        return_gpu: bool = False,
+        
         borrowed_outputs: bool = False,
         step_limit: Optional[int] = None,
         step_callback: Optional[Any] = None,
@@ -2086,7 +2099,7 @@ class UniversalInferenceSession:
         """Execute the model.
 
         The signature matches the archived universal runtime so existing callers
-        keep working: ``output_names``, ``input_feed``, ``return_gpu``,
+        keep working: ``output_names``, ``input_feed``, ``_resident_output``,
         ``borrowed_outputs``, ``step_limit`` and ``step_callback``.
 
         ``borrowed_outputs`` returns device buffers that stay valid until the
@@ -2094,6 +2107,7 @@ class UniversalInferenceSession:
         ``step_callback`` is invoked as ``callback(step_index, step)``.
         """
         plan = self.plan
+        _resident_output = _resolve_output(input_feed)
         input_feed = dict(input_feed or {})
         if set(input_feed) != set(plan.input_names):
             alt = [f"input_{i}" for i in range(len(plan.input_names))]
@@ -2447,7 +2461,7 @@ class UniversalInferenceSession:
             if name in ctx.host:
                 results.append(ctx.host[name])
             elif name in ctx.buffers:
-                if return_gpu or borrowed_outputs:
+                if _resident_output or borrowed_outputs:
                     results.append(ctx.buffers[name])
                     continue
                 shape = ctx.shapes[name]

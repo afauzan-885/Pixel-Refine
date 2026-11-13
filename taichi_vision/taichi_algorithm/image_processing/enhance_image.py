@@ -91,7 +91,7 @@ def enhance_grayscale(src, blur, lut, micro_contrast=2.93, clarity=0.0, noise_co
         if aot and hasattr(aot, "enhance_grayscale"):
             is_taichi = hasattr(src, "to_numpy") or hasattr(blur, "to_numpy") or hasattr(lut, "to_numpy")
             # Fallback to passing available parameters to AOT
-            res_buf = aot.enhance_grayscale(src, blur, lut, float(micro_contrast), float(clarity), return_gpu=is_taichi)
+            res_buf = aot.enhance_grayscale(src, blur, lut, float(micro_contrast), float(clarity) )
             if dst is not None:
                 if is_taichi:
                     from ..common import copy_field

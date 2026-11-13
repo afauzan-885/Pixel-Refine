@@ -90,9 +90,9 @@ def test_real_dataset_alignment():
     ref_gray_gpu = taichi_aot.rgb2gray(ref_gpu)
     
     # 1024x1024 for Phase Correlation (no FFT padding)
-    ref_gray_pc_gpu = taichi_aot.resize(ref_gray_gpu, (1024, 1024), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+    ref_gray_pc_gpu = taichi_aot.resize(ref_gray_gpu, (1024, 1024), interpolation=taichi_aot.INTER_LINEAR )
     # Aspect-preserving work resolution for Compute Flow
-    ref_gray_work_gpu = taichi_aot.resize(ref_gray_gpu, (w_work, h_work), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+    ref_gray_work_gpu = taichi_aot.resize(ref_gray_gpu, (w_work, h_work), interpolation=taichi_aot.INTER_LINEAR )
     
     # Synchronize GPU to ensure all resize kernels have finished reading ref_gray_gpu
     engine.sync()
@@ -120,7 +120,7 @@ def test_real_dataset_alignment():
         # 1. Grayscale + Resize comp using Taichi AOT
         comp_gpu = _ti_rt.upload(img_comp_rgb, force_8bit=False)
         comp_gray_gpu = taichi_aot.rgb2gray(comp_gpu)
-        comp_gray_pc_gpu = taichi_aot.resize(comp_gray_gpu, (1024, 1024), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        comp_gray_pc_gpu = taichi_aot.resize(comp_gray_gpu, (1024, 1024), interpolation=taichi_aot.INTER_LINEAR )
         # Synchronize GPU to ensure resize kernel has completed writing to comp_gray_pc_gpu
         engine.sync()
 
@@ -148,12 +148,12 @@ def test_real_dataset_alignment():
             [0.0, 1.0, pc_dy_full],
             [0.0, 0.0, 1.0]
         ], dtype=np.float32)
-        comp_pre_warped_rgb = taichi_aot.warp_perspective(img_comp_rgb, H_translation, return_gpu=False)
+        comp_pre_warped_rgb = taichi_aot.warp_perspective(img_comp_rgb, H_translation )
 
         # Grayscale + Resize pre-warped comp to work resolution using Taichi AOT
         comp_pw_gpu = _ti_rt.upload(comp_pre_warped_rgb, force_8bit=False)
         comp_pw_gray_gpu = taichi_aot.rgb2gray(comp_pw_gpu)
-        comp_pw_gray_work_gpu = taichi_aot.resize(comp_pw_gray_gpu, (w_work, h_work), interpolation=taichi_aot.INTER_LINEAR, return_gpu=True)
+        comp_pw_gray_work_gpu = taichi_aot.resize(comp_pw_gray_gpu, (w_work, h_work), interpolation=taichi_aot.INTER_LINEAR )
         
         # Synchronize GPU to ensure resize kernel has completed writing to comp_pw_gray_work_gpu
         engine.sync()

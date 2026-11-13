@@ -232,8 +232,8 @@ def run_gpu_resident_pipeline(
 
     engine = _facade()._managed_api(get_engine())
     buffer_session = runtime.ensure_session(engine)
-    engine = buffer_session.managed_api(engine)
-    taichi_aot = buffer_session.managed_api(taichi_aot)
+    engine = buffer_session._managed_api(engine)
+    taichi_aot = buffer_session._managed_api(taichi_aot)
     pipeline_telemetry = PipelineTelemetry(engine, enabled=telemetry)
     pipeline_telemetry.emit("start")
     # Keep Taichi's idle allocation pool below a predictable ceiling.  The
@@ -290,8 +290,8 @@ def run_gpu_resident_pipeline(
 
     from ..rgb_pipeline.provider import RGBFrameProvider
 
-    rgb_provider = buffer_session.own(RGBFrameProvider(image_paths))
-    ref_gpu = buffer_session.own(rgb_provider.load_reference_gpu())
+    rgb_provider = buffer_session._adopt(RGBFrameProvider(image_paths))
+    ref_gpu = buffer_session._adopt(rgb_provider.load_reference_gpu())
     target_h, target_w = ref_gpu.shape[:2]
 
     print(
@@ -568,7 +568,6 @@ def run_gpu_resident_pipeline(
                 reference_gray_source_gpu,
                 taichi_aot.COLOR_RGB2GRAY,
                 dst=weightnet_gray_gpu,
-                return_gpu=True,
             )
             reference_weight_input_gpu = weightnet_gray_gpu
         else:
@@ -639,8 +638,9 @@ def run_gpu_resident_pipeline(
         weight_shape = (target_h, target_w, 3)
     # The weight accumulator lives as long as the run but must be released with
     # it, so it is owned by BufferSession instead of ad-hoc engine.upload().
-    weight_sum_gpu, _weight_seeded = buffer_session.upload_if_needed(
-        np.ones(weight_shape, dtype=np.float32), refresh=True
+    weight_sum_gpu = buffer_session.view(
+        np.ones(weight_shape, dtype=np.float32),
+        tag="average-weight-sum",
     )
     if weight_engine == "average":
         # Uniform weights are invariant across support frames. Keep one
@@ -718,7 +718,6 @@ def run_gpu_resident_pipeline(
                 flow_gpu,
                 int(geometry.full_shape[0]),
                 int(geometry.full_shape[1]),
-                return_gpu=True,
             )
             telemetry.record("carrier_rank_remap", started)
             return result
@@ -836,7 +835,8 @@ def run_gpu_resident_pipeline(
     def _take_spatial_weight_slot():
         while not _workers_stopped() and pipeline_error is None:
             try:
-                return buffer_session.borrow(spatial_weight_slots.get(timeout=0.05))
+                lease = buffer_session.borrow(spatial_weight_slots.get(timeout=0.05))
+                return None if lease is None else lease.resource
             except queue.Empty:
                 continue
         return None
@@ -852,7 +852,7 @@ def run_gpu_resident_pipeline(
         ):
             return
         try:
-            buffer_session.release_borrow(buf)
+            buffer_session._release_borrow(buf)
         except ValueError:
             # Duplicate return: do not add the same writable slot twice.
             return
@@ -933,7 +933,6 @@ def run_gpu_resident_pipeline(
                             supp_linear_gpu,
                             (target_w, target_h),
                             interpolation=taichi_aot.INTER_LINEAR,
-                            return_gpu=True,
                         )
                         _facade()._destroy_work_item(supp_linear_gpu)
                         supp_linear_gpu = resized_gpu
@@ -976,7 +975,6 @@ def run_gpu_resident_pipeline(
                                 supp_linear_gpu,
                                 (weight_work_w, weight_work_h),
                                 interpolation=taichi_aot.INTER_AREA,
-                                return_gpu=True,
                             )
                         else:
                             supp_analysis_sec_gpu = supp_linear_gpu
@@ -1073,7 +1071,6 @@ def run_gpu_resident_pipeline(
                                 analysis_frame_gpu=supp_analysis_flow_gpu,
                                 secondary_frame_to_warp=supp_analysis_sec_gpu,
                                 stop_event=stop_event,
-                                return_gpu=True,
                             )
                         )
                     if supp_aligned_linear_gpu is not supp_linear_gpu:
@@ -1116,7 +1113,6 @@ def run_gpu_resident_pipeline(
                                 supp_aligned_sec_gpu,
                                 taichi_aot.COLOR_RGB2GRAY,
                                 dst=weightnet_gray_gpu,
-                                return_gpu=True,
                             )
                             weightnet_input_gpu = weightnet_gray_gpu
                         if readback_workspace is not None:
@@ -1347,7 +1343,6 @@ def run_gpu_resident_pipeline(
                                 supp_work_rgb_gpu,
                                 taichi_aot.COLOR_RGB2GRAY,
                                 dst=weightnet_gray_gpu,
-                                return_gpu=True,
                             )
                             generate_spatial_weights_taichi(
                                 current_image=weightnet_gray_gpu,
@@ -1504,7 +1499,6 @@ def run_gpu_resident_pipeline(
                         supp_linear_gpu,
                         (target_w, target_h),
                         interpolation=taichi_aot.INTER_LINEAR,
-                        return_gpu=True,
                     )
                     _facade()._destroy_work_item(supp_linear_gpu)
                     supp_linear_gpu = resized_gpu
@@ -1542,7 +1536,6 @@ def run_gpu_resident_pipeline(
                             supp_linear_gpu,
                             (weight_work_w, weight_work_h),
                             interpolation=taichi_aot.INTER_AREA,
-                            return_gpu=True,
                         )
                     else:
                         supp_analysis_sec_gpu = supp_linear_gpu
@@ -1560,7 +1553,6 @@ def run_gpu_resident_pipeline(
                             analysis_frame_gpu=supp_analysis_flow_gpu,
                             secondary_frame_to_warp=supp_analysis_sec_gpu,
                             stop_event=stop_event,
-                            return_gpu=True,
                         )
                     )
                 if supp_aligned_linear_gpu is not supp_linear_gpu:
@@ -1694,7 +1686,6 @@ def run_gpu_resident_pipeline(
                         supp_aligned_sec_gpu,
                         taichi_aot.COLOR_RGB2GRAY,
                         dst=weightnet_gray_gpu,
-                        return_gpu=True,
                     )
 
                     weight_work_2d_gpu = spatial_weight_post_a_gpu
@@ -1745,7 +1736,6 @@ def run_gpu_resident_pipeline(
                             supp_aligned_sec_gpu,
                             taichi_aot.COLOR_RGB2GRAY,
                             dst=weightnet_gray_gpu,
-                            return_gpu=True,
                         )
                         weightnet_input_gpu = weightnet_gray_gpu
                     supp_work_rgb_np = _facade().prepare_weightnet_support_input(
@@ -1859,7 +1849,7 @@ def run_gpu_resident_pipeline(
             runtime.stop_workers()
             _release_all_in_processing_slots()
             ref_out = ref_gpu.to_numpy()
-            buffer_session.release_all_except()
+            buffer_session.release()
             return _facade()._export_result(ref_out), 1.0
 
         processed_count = 0
@@ -2065,9 +2055,9 @@ def run_gpu_resident_pipeline(
                 try:
                     if pipeline_error is None:
                         # Cancellation retains the partial accumulator for output.
-                        buffer_session.release_all_except(ref_gpu, sum_img_gpu, weight_sum_gpu)
+                        buffer_session.release(keep=(ref_gpu, sum_img_gpu, weight_sum_gpu))
                     else:
-                        buffer_session.release_all_except()
+                        buffer_session.release()
                     if session is not None and hasattr(session, "clear_cache"):
                         session.clear_cache()
                 except Exception:
@@ -2110,7 +2100,7 @@ def run_gpu_resident_pipeline(
     # The phase boundary has three live GPU resources: carrier/accumulator
     # (aliased), scalar/vector weights, and reference. No per-engine cleanup list.
     try:
-        buffer_session.release_all_except(ref_gpu, sum_img_gpu, weight_sum_gpu)
+        buffer_session.release(keep=(ref_gpu, sum_img_gpu, weight_sum_gpu))
         if session is not None and hasattr(session, "clear_cache"):
             session.clear_cache()
     except Exception:

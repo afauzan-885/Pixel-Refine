@@ -60,7 +60,7 @@ def hamilton(
         int(c01),
         int(c10),
         int(c11),
-        return_gpu=is_taichi,
+        
         dst=dst,
     )
     return res_buf

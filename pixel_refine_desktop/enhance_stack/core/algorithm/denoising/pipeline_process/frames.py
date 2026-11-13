@@ -65,7 +65,6 @@ def load_frame_to_gpu(
         rgb_gpu = taichi_aot.demosaic(
             str(path),
             method="hamilton",
-            return_gpu=True,
         )
         if rgb_gpu.dtype in (np.uint8, np.uint16):
             # Keep the conversion in the Taichi Vision/native cast boundary.

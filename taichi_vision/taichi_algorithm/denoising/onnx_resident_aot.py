@@ -26,322 +26,28 @@ from taichi_vision.taichi_algorithm.neural.device_invocation import (
     Access, DeviceView, DeviceViewDescriptor, SerialDeviceInvocations,
 )
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 
 GRAPH_NAME = "deno_onnx_resident_f32_v1"
 
 
-def compile_resident_onnx(model_bytes, output_path, backend="cuda", *, patch_tools=False):
-    """Compile an admitted static FP32 model, without changing engine.py."""
-    import onnx
-    import taichi as ti
-    from taichi_vision.taichi_algorithm.neural.onnx_native_graph import NativeGraph
-    from taichi_vision.taichi_algorithm.aot_py.aot_artifact import archive_module
-
-    model = onnx.load_model_from_string(model_bytes)
-    plan = NativeGraph(
-        model.graph,
-        model.opset_import,
-        enable_conv_gelu_fusion=True,
-        enable_concat_gather=True,
-        enable_weightnet_gate_fusion=True,
-        enable_mul_clip_fusion=True,
-        enable_weightnet_sigmoid_product_clip_fusion=True,
-        enable_weightnet_pow2_sub_clip_sqrt_fusion=True,
-        enable_weightnet_stats_tanh_fusion=True,
-        enable_weightnet_stats_tanh_algebraic_simplification=True,
-        enable_constant_pow2_mul_lowering=True,
-        enable_weightnet_pow2_reduce_mean_fusion=(backend == "cuda"),
-        enable_weightnet_full_range_slice_alias=True,
-        enable_weightnet_concat_conv_gelu_fusion=True,
-        enable_weightnet_conv_transpose_mul_clip_fusion=True,
-        enable_weightnet_abs_conv_fusion=True,
-        enable_weightnet_pool_abs_concat_fusion=True,
-        enable_weightnet_fused_heads_and_gate_fusion=True,
-        enable_weightnet_phase_gate_concat23_fusion=True,
-        enable_weightnet_fused_tile_statistics=True,
+def compile_resident_onnx(*args, **kwargs):
+    raise RuntimeError(
+        "taichi_vision is load-only; compile ONNX artifacts with the Taichi venv toolchain."
     )
-    io_names = set(plan.inputs) | set(plan.outputs)
-    declared_io = {}
-    for value_info in (*model.graph.input, *model.graph.output):
-        if value_info.name not in io_names:
-            continue
-        tensor_type = value_info.type.tensor_type
-        if tensor_type.elem_type != onnx.TensorProto.FLOAT:
-            raise ValueError(
-                f"Resident ONNX supports float32 IO only: {value_info.name}"
-            )
-        dimensions = []
-        for dimension in tensor_type.shape.dim:
-            if not dimension.HasField("dim_value") or int(dimension.dim_value) <= 0:
-                raise ValueError(
-                    f"Resident ONNX requires positive static IO dimensions: {value_info.name}"
-                )
-            dimensions.append(int(dimension.dim_value))
-        declared_io[value_info.name] = tuple(dimensions)
-    if io_names - declared_io.keys():
-        raise ValueError("Resident ONNX model is missing declared input/output metadata")
-    for name in io_names:
-        if tuple(plan.shapes.get(name, ())) != declared_io[name]:
-            raise ValueError(f"Resident ONNX planned IO shape mismatch: {name}")
-    opsets = {}
-    for item in model.opset_import:
-        domain = item.domain or "ai.onnx"
-        version = int(item.version)
-        if not domain.strip() or version <= 0 or domain in opsets:
-            raise ValueError("Resident ONNX model has invalid or duplicate opset metadata")
-        opsets[domain] = version
-    arch = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan,
-            "opengl": ti.opengl}[backend]
-    if backend == "cpu":
-        import multiprocessing
-        ti.init(arch=ti.cpu, cpu_max_num_threads=multiprocessing.cpu_count(),
-                fast_math=True, advanced_optimization=True, offline_cache=False)
-    else:
-        ti.init(arch=arch, offline_cache=False)
-    if ti.lang.impl.current_cfg().arch != arch:
-        raise RuntimeError(f"Compiler did not initialize requested backend {backend}")
-    from taichi.artifact_targets import detect_target
-    from taichi.tcm_contract import RUNTIME_ABI_VERSION
-    from taichi_vision.taichi_algorithm.denoising.resident_manifest import (
-        archive_member_hashes,
-        configured_runtime_abi,
-    )
-    from taichi_vision.taichi_algorithm.denoising.resident_capabilities import (
-        capability_identity,
-    )
-
-    target_identity = detect_target(backend=backend).as_dict()
-    runtime_abi = configured_runtime_abi(RUNTIME_ABI_VERSION)
-    plan.backend = backend
-    bindings, sizes, symbols = {}, {}, {}
-
-    def buffer(name, elements):
-        if name not in symbols:
-            symbols[name] = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1)
-            sizes[name] = max(1, int(elements))
-        return symbols[name]
-
-    constants = {}
-    # Inputs have independent bindings: liveness slots must never overwrite
-    # the caller's borrowed input image/patch allocations.
-    for index, name in enumerate(plan.inputs):
-        bindings[name] = f"input_{index}"
-        buffer(bindings[name], math.prod(plan.shapes[name]))
-    for index, name in enumerate(sorted(plan.runtime_constant_names)):
-        bindings[name] = f"constant_{index}"
-        constants[bindings[name]] = np.ascontiguousarray(
-            plan.constants[name], dtype=np.float32
-        ).reshape(-1)
-        buffer(bindings[name], constants[bindings[name]].size)
-    for name in plan.shapes:
-        if name in plan.aliases or name in bindings or name in plan.constants:
-            continue
-        if name not in plan.buffer_plan:
-            continue
-        bindings[name] = f"slot_{plan.buffer_plan[name]}"
-        buffer(bindings[name], math.prod(plan.shapes[name]))
-    for name in plan.shapes:
-        if name in plan.aliases:
-            root = plan.alias_roots.get(name, name)
-            if root in bindings:
-                bindings[name] = bindings[root]
-    plan.buffers = {name: symbols[binding] for name, binding in bindings.items() if binding in symbols}
-    plan.dummy = buffer("dummy", 1)
-    plan.scratch = {}
-    for step in plan.steps:
-        if (step["op"] == "ReduceMean"
-                and len(step.get("axes", [])) == len(plan.shapes[step["inputs"][0]])):
-            elements = math.prod(plan.shapes[step["inputs"][0]])
-            key = f"scratch_{(elements + 255) // 256}"
-            plan.scratch[step["output"]] = buffer(key, (elements + 255) // 256)
-
-    sources, calls, used = [], [], set()
-    symbol_names = {id(value): name for name, value in symbols.items()}
-
-    def record(kernel, *values):
-        if kernel in (ti.tensor.add, ti.tensor.subtract, ti.tensor.multiply, ti.tensor.divide):
-            op_code = {ti.tensor.add: 0, ti.tensor.subtract: 1, ti.tensor.multiply: 2, ti.tensor.divide: 3}[kernel]
-            from taichi_vision.taichi_algorithm.neural.onnx_native_graph import _binary_flat
-            kernel = _binary_flat
-            values = (values[0], values[1], values[2], op_code)
-        target = getattr(kernel, "_primal", None)
-        target_func = getattr(target, "func", kernel)
-        tree = ast.parse(textwrap.dedent(inspect.getsource(target_func)))
-        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
-        substitutions = {}
-        kept_args, graph_args = [], []
-        for arg, value in zip(function.args.args, values):
-            symbol = symbol_names.get(id(value))
-            if symbol is not None:
-                if arg.annotation is None:
-                    arg.annotation = ast.parse("ti.types.ndarray(ti.f32, 1)", mode="eval").body
-                kept_args.append(arg)
-                graph_args.append(value)
-                used.add(symbol)
-            else:
-                substitutions[arg.arg] = ast.parse(repr(value), mode="eval").body
-
-        class Specialize(ast.NodeTransformer):
-            def visit_Name(self, node):
-                if isinstance(node.ctx, ast.Load) and node.id in substitutions:
-                    return ast.copy_location(copy.deepcopy(substitutions[node.id]), node)
-                return node
-
-        function.name = f"node_{len(sources)}"
-        function.args.args = kept_args
-        function.args.defaults = []
-        function.body = [Specialize().visit(node) for node in function.body]
-        function.decorator_list = [ast.Attribute(ast.Name("ti", ast.Load()), "kernel", ast.Load())]
-        ast.fix_missing_locations(tree)
-        sources.append(ast.unparse(tree))
-        calls.append((function.name, graph_args))
-
-    for step in plan.steps:
-        plan._dispatch(step, emit=record)
-    module = ti.aot.Module(arch)
-    graph = ti.graph.GraphBuilder()
-    output_path = Path(output_path).resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="resident_onnx_compile_") as folder:
-        source = Path(folder) / "specialized_graph.py"
-        source.write_text(
-            "import taichi as ti\nfrom math import inf, nan\n"
-            "from taichi_vision.taichi_algorithm.neural.onnx_native_graph import _activation\n"
-            "from taichi_vision.taichi_algorithm.neural.weightnet_gate_fusions import _stable_softplus\n"
-            "from taichi_vision.taichi_algorithm.neural.onnx_native_graph import _weightnet_fused_tile_statistics\n"
-            + "\n\n".join(sources), encoding="utf-8"
-        )
-        spec = importlib.util.spec_from_file_location("_resident_specialized_graph", source)
-        generated = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(generated)
-        for name, args in calls:
-            graph.dispatch(getattr(generated, name), *args)
-        module.add_graph(GRAPH_NAME, graph.compile())
-        tile_step_graph_name = None
-        tile_step_cached_graph_name = None
-        if patch_tools:
-            from .resident_patch_kernels import extract, extract_with_ref_cache, stitch, register_graphs
-            register_graphs(module)
-            if {"ref_img", "support_img", "weight_map", "alpha"} <= set(bindings):
-                tile_step_graph_name = "deno_resident_tile_step_v1"
-                tile_step_cached_graph_name = "deno_resident_tile_step_cached_v1"
-                ref_tile_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, bindings["ref_img"], ti.f32, ndim=1)
-                supp_tile_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, bindings["support_img"], ti.f32, ndim=1)
-                weight_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, bindings["weight_map"], ti.f32, ndim=1)
-                alpha_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, bindings["alpha"], ti.f32, ndim=1)
-                patch_ref_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_reference", ti.f32, ndim=1)
-                patch_ref_cache_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_ref_cache", ti.f32, ndim=1)
-                patch_supp_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_support", ti.f32, ndim=1)
-                patch_win_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_window", ti.f32, ndim=1)
-                patch_num_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_numerator", ti.f32, ndim=2)
-                patch_den_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_denominator", ti.f32, ndim=2)
-                patch_asum_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "patch_alpha_sum", ti.f32, ndim=1)
-                patch_h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_height", ti.i32)
-                patch_w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_width", ti.i32)
-                patch_sz_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_size", ti.i32)
-                patch_tile_idx_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_tile_idx", ti.i32)
-                patch_cur_h_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_cur_h", ti.i32)
-                patch_cur_w_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_cur_w", ti.i32)
-                patch_y0_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_y0", ti.i32)
-                patch_x0_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "patch_x0", ti.i32)
-
-                tile_graph = ti.graph.GraphBuilder()
-                tile_graph.dispatch(
-                    extract,
-                    patch_ref_arg,
-                    patch_supp_arg,
-                    ref_tile_arg,
-                    supp_tile_arg,
-                    patch_h_arg,
-                    patch_w_arg,
-                    patch_sz_arg,
-                    patch_y0_arg,
-                    patch_x0_arg,
-                )
-                for name, args in calls:
-                    tile_graph.dispatch(getattr(generated, name), *args)
-                tile_graph.dispatch(
-                    stitch,
-                    weight_arg,
-                    patch_win_arg,
-                    patch_num_arg,
-                    patch_den_arg,
-                    alpha_arg,
-                    patch_asum_arg,
-                    patch_sz_arg,
-                    patch_cur_h_arg,
-                    patch_cur_w_arg,
-                    patch_y0_arg,
-                    patch_x0_arg,
-                )
-                module.add_graph(tile_step_graph_name, tile_graph.compile())
-
-                cached_graph = ti.graph.GraphBuilder()
-                cached_graph.dispatch(
-                    extract_with_ref_cache,
-                    patch_ref_cache_arg,
-                    patch_supp_arg,
-                    ref_tile_arg,
-                    supp_tile_arg,
-                    patch_h_arg,
-                    patch_w_arg,
-                    patch_sz_arg,
-                    patch_tile_idx_arg,
-                    patch_y0_arg,
-                    patch_x0_arg,
-                )
-                for name, args in calls:
-                    cached_graph.dispatch(getattr(generated, name), *args)
-                cached_graph.dispatch(
-                    stitch,
-                    weight_arg,
-                    patch_win_arg,
-                    patch_num_arg,
-                    patch_den_arg,
-                    alpha_arg,
-                    patch_asum_arg,
-                    patch_sz_arg,
-                    patch_cur_h_arg,
-                    patch_cur_w_arg,
-                    patch_y0_arg,
-                    patch_x0_arg,
-                )
-                module.add_graph(tile_step_cached_graph_name, cached_graph.compile())
-        archive_module(module, output_path)
-    weights = io.BytesIO()
-    np.savez(weights, **constants)
-    artifact_members_sha256 = archive_member_hashes(
-        output_path, excluded={"resident_onnx.json", "resident_weights.npz"}
-    )
-    io_schema = {
-        name: {
-            "shape": list(plan.shapes[name]),
-            "dtype": "float32",
-            "layout": "flat-contiguous",
-        }
-        for name in (*plan.inputs, *plan.outputs)
-    }
-    metadata = {
-        "format": 2, "backend": backend, "graph": GRAPH_NAME, "patch_tools": patch_tools,
-        "tile_step_graph": tile_step_graph_name,
-        "tile_step_cached_graph": tile_step_cached_graph_name,
-        "model_sha256": hashlib.sha256(model_bytes).hexdigest(),
-        "target_identity": target_identity,
-        "device_capabilities": capability_identity(backend),
-        "runtime_abi": runtime_abi,
-        "taichi_version": str(ti.__version__),
-        "weights_sha256": hashlib.sha256(weights.getvalue()).hexdigest(),
-        "opsets": opsets,
-        "io_schema": io_schema,
-        "artifact_members_sha256": artifact_members_sha256,
-        "bindings": bindings, "sizes": sizes, "arguments": sorted(used),
-        "constants": sorted(constants), "inputs": plan.inputs,
-        "outputs": plan.outputs, "shapes": {k: list(v) for k, v in plan.shapes.items()},
-    }
-    with zipfile.ZipFile(output_path, "a", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("resident_onnx.json", json.dumps(metadata))
-        archive.writestr("resident_weights.npz", weights.getvalue())
-    return str(output_path)
 
 
 class ResidentONNXGraph:
@@ -593,13 +299,15 @@ class ResidentONNXGraph:
             self.module.run(self.metadata["graph"], **self._static_args)
             return self._static_outputs
 
-    def run(self, output_names=None, input_feed=None, return_gpu=False, borrowed_outputs=False):
+    def run(self, output_names=None, input_feed=None, borrowed_outputs=False):
+        _resident_output = _resolve_output(input_feed)
         with self._invocations.lock:
             self._invocations.legacy_idle()
-            return self._run_impl(output_names, input_feed, return_gpu, borrowed_outputs)
+            return self._run_impl(output_names, input_feed, _resident_output, borrowed_outputs)
 
-    def _run_impl(self, output_names=None, input_feed=None, return_gpu=False, borrowed_outputs=False):
+    def _run_impl(self, output_names=None, input_feed=None, borrowed_outputs=False):
         """Execute model with support for NumPy, PyTorch, and TaichiGPUBuffer inputs."""
+        _resident_output = _resolve_output(input_feed)
         from taichi.aot_engine import TaichiGPUBuffer
         if input_feed is None:
             input_feed = {}
@@ -637,7 +345,7 @@ class ResidentONNXGraph:
                     device_inputs[name] = buf
             try:
                 res_device = self.run_device(device_inputs)
-                if return_gpu:
+                if _resident_output:
                     results = res_device
                 else:
                     results = {}

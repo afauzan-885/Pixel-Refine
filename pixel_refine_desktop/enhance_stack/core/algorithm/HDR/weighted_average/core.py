@@ -45,13 +45,11 @@ def estimate_noise_taichi(gray: np.ndarray, session) -> float:
     if min(gray.shape[:2]) < 8:
         return 1e-3
 
-    gray_gpu = session.own(
-        taichi_aot.upload(np.ascontiguousarray(gray, dtype=np.float32))
-    )
+    gray_gpu = session.view(np.ascontiguousarray(gray, dtype=np.float32))
     try:
         _, raw_sigma = estimate_noise(gray_gpu, session=session)
     finally:
-        session.release_buffer(gray_gpu)
+        session.release(gray_gpu)
     return max(float(raw_sigma), 1e-3)
 
 

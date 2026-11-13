@@ -344,19 +344,21 @@ class TiledHannAccumulator:
         self.hann_cache = {}
         self.tiles_processed = 0
         self.readbacks = 0
-        self.backing = session.own(backing_factory((self.hr_h, self.hr_w, 3)))
+        self.backing = session._adopt(backing_factory((self.hr_h, self.hr_w, 3)))
 
         height = min(self.block_size, self.hr_h)
         width = min(self.block_size, self.hr_w)
         self.output_shape = (height, width)
         with _force_host_visible(self.engine, self.backend == "vulkan"):
-            self.accumulation_tile = session.acquire_buffer(
+            self.accumulation_tile = session.view(
                 (height, width, 4), tag="splat_sr.tiled.packed_accumulation"
             )
-        self.host_packed = session.acquire_host(
-            (height * width * 4,), tag="splat_sr.tiled.read_packed_accumulation"
+        self.host_packed = session.view(
+            (height * width * 4,),
+            host=True,
+            tag="splat_sr.tiled.read_packed_accumulation",
         )
-        session.own(self, releaser=lambda accumulator: accumulator.close())
+        session._adopt(self, releaser=lambda accumulator: accumulator.close())
         print(
             f"[splattingSR] tiled reconstruction: HR tile={self.block_size} "
             f"overlap={self.overlap:.2f} stride={self.stride} RGB+coverage=packed "
@@ -377,7 +379,7 @@ class TiledHannAccumulator:
         from taichi import TaichiGPUBuffer
 
         if isinstance(confidence, TaichiGPUBuffer):
-            with self.session.borrowed(confidence):
+            with self.session._borrowed(confidence):
                 return self._add_frame(frame_rgb, flow, confidence)
         return self._add_frame(frame_rgb, flow, confidence)
 
@@ -430,9 +432,9 @@ class TiledHannAccumulator:
                     else:
                         local = np.ones((sh, sw), dtype=np.float32) if confidence is None else confidence[sy0:sy1, sx0:sx1]
                         local = np.clip(np.nan_to_num(local, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
-                        local_conf = self.session.own(self.engine.upload(local))
+                        local_conf = self.session._adopt(self.engine.upload(local))
                         uploaded.append(local_conf)
-                    local_frame = self.session.own(self.engine.upload(
+                    local_frame = self.session._adopt(self.engine.upload(
                         np.ascontiguousarray(frame[sy0:sy1, sx0:sx1])
                     ))
                     uploaded.append(local_frame)
@@ -441,11 +443,11 @@ class TiledHannAccumulator:
                         if flow is None
                         else np.ascontiguousarray(flow[sy0:sy1, sx0:sx1])
                     )
-                    local_flow = self.session.own(self.engine.upload(flow_tile))
+                    local_flow = self.session._adopt(self.engine.upload(flow_tile))
                     uploaded.append(local_flow)
                     window = self.hann_cache.get((th, tw))
                     if window is None:
-                        window = self.session.track_result(
+                        window = self.session._track(
                             taichi_aot.generate_hanning_window_2d((th, tw), exclude_boundary=True)
                         )
                         self.hann_cache[(th, tw)] = window
@@ -472,7 +474,7 @@ class TiledHannAccumulator:
                 if graph_dispatched and not device_complete:
                     self.engine.sync()
                 for buffer in reversed(uploaded):
-                    self.session.release_buffer(buffer)
+                    self.session.release(buffer)
         self.tiles_processed += tiles
         return tiles
 
@@ -510,7 +512,7 @@ class TiledHannAccumulator:
         result_type = DiskBackedRGB if self.backing.storage == "disk" else TiledRGBResult
         result = result_type(self.backing)
         # The writer owns the backing after the job/session has closed.
-        self.session.detach(self.backing)
+        self.session.release(self.backing, retain=True)
         self.finalized = True
         return result
 

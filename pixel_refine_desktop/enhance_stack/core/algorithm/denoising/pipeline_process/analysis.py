@@ -197,7 +197,7 @@ def apply_auto_enhance_on_gpu(
     )
 
     return _facade()._track_gpu_result(
-        apply_auto_enhance_gpu(src_gpu, params, dst=dst, return_gpu=True)
+        apply_auto_enhance_gpu(src_gpu, params, dst=dst )
     )
 
 
@@ -233,7 +233,6 @@ def prepare_analysis_proxy_gpu(
             source_gpu,
             (work_w, work_h),
             interpolation=taichi_aot.INTER_AREA,
-            return_gpu=True,
             dst=dst,
         )
     else:
@@ -252,7 +251,7 @@ def prepare_analysis_proxy_gpu(
                 # requested analysis geometry happens to match its dimensions.
                 # A same-size resize does extra filtering work; an exact device
                 # copy is sufficient to create the disposable in-place proxy.
-                proxy = taichi_aot.copy(source_gpu, return_gpu=True)
+                proxy = taichi_aot.copy(source_gpu )
     if analysis_params is None:
         return proxy
     enhanced = apply_auto_enhance_on_gpu(
@@ -463,7 +462,6 @@ def prepare_weightnet_reference_input(
             analysis_gpu,
             (work_w, work_h),
             interpolation=taichi_aot.INTER_AREA,
-            return_gpu=True,
         )
     else:
         work_gpu = analysis_gpu

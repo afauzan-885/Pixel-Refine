@@ -7,6 +7,20 @@ import json
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 DEFAULT_BLOCK_MATCHING_CONFIG = {
     "mode": "fast",
 }
@@ -91,7 +105,7 @@ class BlockMatching(LucasKanade):
         flow = calcOpticalFlowBlockMatching(
             np.ascontiguousarray(reference_gray, dtype=np.float32),
             np.ascontiguousarray(target_gray, dtype=np.float32),
-            **self._build_opengl_safe_params(reference_gray, config), return_gpu=False,
+            **self._build_opengl_safe_params(reference_gray, config), 
         )
         if isinstance(flow, tuple):
             flow = flow[0]
@@ -103,7 +117,6 @@ class BlockMatching(LucasKanade):
         from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
 
         flow_kwargs = self._build_lk_params(config)
-        flow_kwargs["return_gpu"] = True
         if reference_pyramid is not None:
             flow_kwargs["reference_pyramid"] = reference_pyramid
         flow = calcOpticalFlowBlockMatching(reference_gray, target_gray, **flow_kwargs)
@@ -154,9 +167,10 @@ class BlockMatching(LucasKanade):
         point_executor=None,
         matching_reference=None,
         matching_target=None,
-        return_gpu=False,
+        
         target_for_warping=None,
     ):
+        _resident_output = _resolve_output(reference)
         cfg = self._resolve_mode_config(dict(config or self.load_config()))
         cfg.setdefault("cache_reference_pyramid", True)
         cfg.setdefault("retain_native_pool", True)
@@ -180,7 +194,6 @@ class BlockMatching(LucasKanade):
             point_executor=point_executor,
             matching_reference=matching_reference,
             matching_target=matching_target,
-            return_gpu=return_gpu,
             target_for_warping=target_for_warping,
         )
 
@@ -257,13 +270,14 @@ class BlockMatching(LucasKanade):
         target_gray,
         config,
         point_executor=None,
-        return_gpu=False,
+        
     ):
+        _resident_output = _resolve_output(reference_gray)
         from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
 
         lk_params = self._build_lk_params(config)
-        if return_gpu:
-            lk_params["return_gpu"] = True
+        if _resident_output:
+            lk_params["_resident_output"] = True
 
         try:
             flow = calcOpticalFlowBlockMatching(
@@ -274,7 +288,7 @@ class BlockMatching(LucasKanade):
             if isinstance(flow, tuple):
                 flow = flow[0]
             if flow is not None:
-                if return_gpu:
+                if _resident_output:
                     return flow
                 return np.ascontiguousarray(flow, dtype=np.float32)
         except Exception as exc:

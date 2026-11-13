@@ -19,6 +19,20 @@ import zipfile
 import numpy as np
 import taichi as ti
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 # ==============================================================================
 # 1. SPECIALIZED & FUSED TAICHI COMPUTE KERNELS
 # ==============================================================================
@@ -408,7 +422,7 @@ class NeuralModel:
         image_or_tensor: Any,
         is_bgr: bool = False,
         normalize: bool = True,
-        return_gpu: bool = False,
+        
         borrowed_outputs: bool = False,
     ) -> Any:
         """Friendly callable execution.
@@ -417,15 +431,16 @@ class NeuralModel:
             image_or_tensor: NumPy ndarray, ti.ndarray, torch.Tensor, or TaichiGPUBuffer.
             is_bgr: True if 3-channel input is BGR (OpenCV standard), False if RGB.
             normalize: Auto-normalize uint8 [0..255] to float32 [0.0..1.0].
-            return_gpu: If True, returns caller-owned device ti.ndarray without
+            _resident_output: If True, returns caller-owned device ti.ndarray without
                 downloading to host RAM; the model will not recycle returned buffers.
             borrowed_outputs: Return device views without copies. Graph-buffer views
                 are valid until the next model execution; Identity-like outputs may
-                alias the supplied input. Requires return_gpu. Host inputs are
+                alias the supplied input. Requires _resident_output. Host inputs are
                 synchronized before return so temporary input storage stays valid.
         """
-        if borrowed_outputs and not return_gpu:
-            raise ValueError("borrowed_outputs requires return_gpu=True")
+        _resident_output = _resolve_output(image_or_tensor)
+        if borrowed_outputs and not _resident_output:
+            raise ValueError("borrowed_outputs requires _resident_output=True")
         if borrowed_outputs and self._native_graph is None:
             raise ValueError("borrowed_outputs is supported only by the native ONNX graph")
         input_handle = image_or_tensor.handle if hasattr(image_or_tensor, "handle") \
@@ -455,7 +470,7 @@ class NeuralModel:
             if arr.dtype != np.float32:
                 arr = arr.astype(np.float32)
             inputs = {primary_input_name: np.ascontiguousarray(arr)}
-            results = self.execute(inputs, return_gpu=return_gpu, borrowed_outputs=borrowed_outputs)
+            results = self.execute(inputs, _resident_output=_resident_output, borrowed_outputs=borrowed_outputs)
             primary_output_name = self.output_names[0] if self.output_names else "output"
             return results.get(primary_output_name, results)
 
@@ -467,8 +482,8 @@ class NeuralModel:
         primary_input_name = self.input_names[0] if self.input_names else "input"
         inputs = {primary_input_name: adapted_dev}
 
-        results = self.execute(inputs, return_gpu=return_gpu, borrowed_outputs=borrowed_outputs)
-        if not caller_device_input and (borrowed_outputs or not return_gpu):
+        results = self.execute(inputs, _resident_output=_resident_output, borrowed_outputs=borrowed_outputs)
+        if not caller_device_input and (borrowed_outputs or not _resident_output):
             if borrowed_outputs:
                 # Preserve the completion guarantee before returning a
                 # temporary borrowed-input allocation to the pool.
@@ -484,11 +499,12 @@ class NeuralModel:
         self,
         output_names: Optional[Sequence[str]] = None,
         input_feed: Optional[Dict[str, Any]] = None,
-        return_gpu: bool = False,
+        
         borrowed_outputs: bool = False,
         **kwargs: Any,
     ) -> List[Any]:
         """Drop-in inference runner compatible with session.run(output_names, input_feed)."""
+        _resident_output = _resolve_output(input_feed)
         if input_feed is None:
             input_feed = {}
         if self._native_graph is not None:
@@ -516,7 +532,7 @@ class NeuralModel:
                 name: self._validate_and_bind_input(data, input_name=name, flatten_device=borrowed_outputs)
                 for name, data in input_feed.items()
             }
-        results = self.execute(validated_inputs, return_gpu=return_gpu, borrowed_outputs=borrowed_outputs)
+        results = self.execute(validated_inputs, _resident_output=_resident_output, borrowed_outputs=borrowed_outputs)
         if output_names is None:
             return list(results.values())
         return [results.get(name) for name in output_names]
@@ -671,23 +687,25 @@ class NeuralModel:
     def execute(
         self,
         inputs: Dict[str, Any],
-        return_gpu: bool = False,
+        
         borrowed_outputs: bool = False,
     ) -> Dict[str, Any]:
         """Executes the fused graph with 100% VRAM device residency."""
+        _resident_output = _resolve_output(inputs)
         if self._native_graph is not None:
             return self._native_graph.run(
-                inputs, return_gpu=return_gpu, borrowed_outputs=borrowed_outputs
+                inputs, _resident_output=_resident_output, borrowed_outputs=borrowed_outputs
             )
         if borrowed_outputs:
             raise ValueError("borrowed_outputs is supported only by the native ONNX graph")
         with self._execution_lock:
-            return self._execute_legacy_graph(inputs, return_gpu)
+            return self._execute_legacy_graph(inputs, _resident_output)
 
     def _execute_legacy_graph(
-        self, inputs: Dict[str, Any], return_gpu: bool = False
+        self, inputs: Dict[str, Any]
     ) -> Dict[str, Any]:
         # Dispatch general ONNX graphs (attention, pooling, resizing) to high-speed general runner
+        _resident_output = _resolve_output(inputs)
         is_general_graph = any(
             step.get("op") in (
                 "AveragePool", "Resize", "ConvTranspose", "Gelu", "Softplus",
@@ -890,7 +908,7 @@ class NeuralModel:
         results = {}
         for name in self.output_names:
             out_buf = device_tensors[name]
-            if return_gpu:
+            if _resident_output:
                 results[name] = out_buf
             else:
                 results[name] = out_buf.to_numpy()
@@ -898,7 +916,7 @@ class NeuralModel:
         # 4. Recycle intermediates, but transfer returned GPU outputs out of
         #    the pool so a later invocation cannot overwrite caller-owned data.
         returned_buffer_ids = (
-            {id(output) for output in results.values()} if return_gpu else set()
+            {id(output) for output in results.values()} if _resident_output else set()
         )
         for buf in allocated_buffers:
             if id(buf) not in returned_buffer_ids:
@@ -906,11 +924,12 @@ class NeuralModel:
 
         return results
 
-    def _execute_general_graph(self, inputs: Dict[str, Any], return_gpu: bool = False) -> Dict[str, Any]:
+    def _execute_general_graph(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """Compatibility entry point for the validated native executor."""
+        _resident_output = _resolve_output(inputs)
         if self._native_graph is None:
             raise RuntimeError("Reload the ONNX graph to construct a validated native plan")
-        return self._native_graph.run(inputs, return_gpu=return_gpu)
+        return self._native_graph.run(inputs, _resident_output=_resident_output)
 
     def save_tcm(self, output_path: Union[str, Path]):
         """Exports the model to a standalone Ahead-of-Time (.tcm) archive.

@@ -132,8 +132,8 @@ def _gpu_noise_scratch(engine, shape, *, session=None):
     expected = tuple(int(v) for v in shape)
     if session is not None:
         return (
-            session.acquire_buffer(expected, dtype=np.float32, tag="noise_block_mad"),
-            session.acquire_host(expected, dtype=np.float32, tag="noise_block_mad_host"),
+            session.view(expected, dtype=np.float32, tag="noise_block_mad"),
+            session.view(expected, dtype=np.float32, host=True, tag="noise_block_mad_host"),
         )
     buf = getattr(engine, "_estimate_noise_block_mad", None)
     if buf is not None and tuple(getattr(buf, "shape", ())) == expected:

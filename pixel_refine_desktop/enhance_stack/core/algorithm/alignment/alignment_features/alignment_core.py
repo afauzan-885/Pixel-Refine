@@ -780,7 +780,7 @@ def _perform_alignment_flow_net(
             flow_full,
             full_h,
             full_w,
-            return_gpu=(return_format == "ti_ndarray"),
+            
         )
         # Free the source frame's GPU residency now that the aligned result
         # lives in ``aligned``; this keeps VRAM flat across the burst instead
@@ -1647,11 +1647,10 @@ def perform_alignment_gpu(
                                 smooth_flow_buf,
                                 full_h_ref,
                                 full_w_ref,
-                                return_gpu=False,
                             )
                         else:
                             aligned_np = taichi_aot.remap(
-                                full_res_img, map_x_gpu, map_y_gpu, return_gpu=False
+                                full_res_img, map_x_gpu, map_y_gpu 
                             )
 
                         write_queue.put(
@@ -1688,14 +1687,12 @@ def perform_alignment_gpu(
                                 smooth_flow_buf,
                                 full_h_ref,
                                 full_w_ref,
-                                return_gpu=True,
                             )
                         else:
                             aligned_gpu = taichi_aot.remap(
                                 full_res_img,
                                 map_x_gpu,
                                 map_y_gpu,
-                                return_gpu=True,
                             )
                         if save_align_image:
                             save_img = aligned_gpu.to_numpy()
@@ -1722,11 +1719,10 @@ def perform_alignment_gpu(
                                 smooth_flow_buf,
                                 full_h_ref,
                                 full_w_ref,
-                                return_gpu=False,
                             )
                         else:
                             images[i] = taichi_aot.remap(
-                                full_res_img, map_x_gpu, map_y_gpu, return_gpu=False
+                                full_res_img, map_x_gpu, map_y_gpu 
                             )
                         if save_align_image:
                             save_aligned_image(

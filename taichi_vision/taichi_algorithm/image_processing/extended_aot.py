@@ -10,6 +10,20 @@ import numpy as np
 
 from taichi_vision.taichi_algorithm.aot_api.research import _as_f32, _dispatch
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 
 def _structure(kernel, ksize):
     if kernel is None:
@@ -164,13 +178,14 @@ def ssim_aot(img1, img2, window_size=11, data_range=None, k1=0.01, k2=0.03):
     return score / channels
 
 
-def warp_affine_aot(src, matrix, dsize, return_gpu=None, dst=None):
-    """Affine warp; GPU inputs stay resident unless ``return_gpu=False``.
+def warp_affine_aot(src, matrix, dsize, dst=None):
+    """Affine warp; GPU inputs stay resident unless ``_resident_output=False``.
 
     Host arrays retain the historical NumPy result by default. Matrix inversion
     is a small host-side setup step; image pixels are not read back unless the
     caller explicitly requests a host result.
     """
+    _resident_output = _resolve_output(src, dst=dst)
     from taichi.aot_engine import TaichiGPUBuffer
 
     is_gpu = isinstance(src, TaichiGPUBuffer)
@@ -186,8 +201,8 @@ def warp_affine_aot(src, matrix, dsize, return_gpu=None, dst=None):
     else:
         data = _as_f32(src)
         data_shape = data.shape
-    if return_gpu is None:
-        return_gpu = is_gpu
+    if _resident_output is None:
+        _resident_output = is_gpu
     matrix = np.asarray(matrix, dtype=np.float32)
     if matrix.shape != (2, 3):
         raise ValueError("matrix must have shape (2, 3)")
@@ -210,7 +225,7 @@ def warp_affine_aot(src, matrix, dsize, return_gpu=None, dst=None):
         raise ValueError("warp_affine input must be 2D or 3D")
     outputs = {"dst": dst if dst is not None else (shape, np.float32)}
     return _dispatch("warp_affine", graph, inputs={"src": data, "matrix": inverse},
-                     outputs=outputs, scalars=scalars, return_gpu=bool(return_gpu))
+                     outputs=outputs, scalars=scalars, _resident_output=bool(_resident_output))
 
 
 def _filter2d_dispatch(data, padded, kh, kw):

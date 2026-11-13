@@ -342,7 +342,7 @@ def bicubic_resize(
     """
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi_vision.taichi_algorithm import aot_api as taichi_aot
-        return taichi_aot.resize(src, (target_w, target_h), interpolation=taichi_aot.INTER_CUBIC, return_gpu=hasattr(src, "to_numpy"), dst=dst)
+        return taichi_aot.resize(src, (target_w, target_h), interpolation=taichi_aot.INTER_CUBIC,  dst=dst)
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")

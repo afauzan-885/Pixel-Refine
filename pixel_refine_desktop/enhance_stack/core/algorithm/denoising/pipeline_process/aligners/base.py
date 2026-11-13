@@ -12,6 +12,20 @@ from taichi.aot_engine import TaichiGPUBuffer, get_engine
 
 from ..facade import api as _facade
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 __all__ = ["NoAlignmentGPUAligner", "_ResidentFlowBufferMixin"]
 
 
@@ -28,9 +42,10 @@ class NoAlignmentGPUAligner:
         analysis_frame_gpu=None,
         secondary_frame_to_warp=None,
         stop_event=None,
-        return_gpu=True,
+        
         return_transform: bool = False,
     ):
+        _resident_output = _resolve_output(supp_linear_gpu)
         if stop_event is not None:
             if hasattr(stop_event, "is_set") and stop_event.is_set():
                 raise RuntimeError("Alignment cancelled.")

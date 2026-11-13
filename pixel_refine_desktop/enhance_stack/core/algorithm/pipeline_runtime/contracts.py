@@ -47,53 +47,49 @@ class _BufferSessionFacade:
 
     @contextmanager
     def borrowed(self, resource: Any, *, from_session: Any = None):
-        """Scope a borrow lease only when this session owns the resource."""
+        """Scope a borrow lease while the resource is pinned."""
         session = self._buffer_session()
-        owned = getattr(session, "_owned_resources", None)
-        if (
-            session is not None
-            and hasattr(session, "borrowed")
-            and resource is not None
-            and owned is not None
-            and id(resource) in owned
-        ):
-            with session.borrowed(resource, from_session=from_session) as value:
+        if session is not None and hasattr(session, "borrow") and resource is not None:
+            with session.borrow(resource, from_session=from_session) as value:
                 yield value
             return
         yield resource
 
     def borrow(self, resource: Any, *, from_session: Any = None) -> Any:
-        """Pin a resource only when the underlying session owns it."""
+        """Pin a resource and return its lease."""
         session = self._buffer_session()
-        owned = getattr(session, "_owned_resources", None)
-        if (
-            session is not None
-            and hasattr(session, "borrow")
-            and resource is not None
-            and owned is not None
-            and id(resource) in owned
-        ):
-            return session.borrow(resource, from_session=from_session)
+        if session is not None and hasattr(session, "borrow") and resource is not None:
+            lease = session.borrow(resource, from_session=from_session)
+            active = getattr(self, "_active_source_borrows", None)
+            if active is not None and lease is not None:
+                active[id(resource)] = lease
+            return lease
         return resource
 
     def release_borrow(self, resource: Any) -> None:
         """Release a borrow lease recorded by the underlying session."""
+        active = getattr(self, "_active_source_borrows", None)
+        lease = None
+        if active is not None and resource is not None:
+            lease = active.pop(id(resource), None)
+        if lease is not None and hasattr(lease, "release"):
+            lease.release()
+            return
         session = self._buffer_session()
-        borrowed = getattr(session, "_borrowed_resources", None)
-        if (
-            session is not None
-            and hasattr(session, "release_borrow")
-            and resource is not None
-            and borrowed is not None
-            and id(resource) in borrowed
-        ):
-            session.release_borrow(resource)
+        if session is not None and hasattr(session, "borrow") and resource is not None:
+            with session.borrow(resource):
+                pass
 
     def own(self, resource: Any, releaser: Any = None) -> Any:
-        """Register ownership of a resource with the underlying session."""
+        """Return a resident resource through the three-API session surface."""
         session = self._buffer_session()
-        if session is not None and hasattr(session, "own") and resource is not None:
-            return session.own(resource, releaser=releaser)
+        if (
+            session is not None
+            and hasattr(session, "view")
+            and resource is not None
+            and hasattr(resource, "handle")
+        ):
+            return session.view(resource)
         return resource
 
     def acquire_buffer(
@@ -107,7 +103,7 @@ class _BufferSessionFacade:
         session = self._buffer_session()
         if session is not None and hasattr(session, "acquire_buffer"):
             kwargs = {"dtype": dtype} if dtype is not None else {}
-            return session.acquire_buffer(
+            return session.view(
                 shape, is_vector=is_vector, vector_dim=vector_dim, **kwargs
             )
         raise RuntimeError("Current pipeline session does not provide a buffer allocator")
@@ -136,15 +132,23 @@ class _BufferSessionFacade:
         """Upload a host array or view an existing GPU buffer via the session."""
         session = self._buffer_session()
         if session is not None and hasattr(session, "upload_if_needed"):
-            return session.upload_if_needed(array, is_vector=is_vector, vector_dim=vector_dim)
+            buffer = session.view(array, is_vector=is_vector, vector_dim=vector_dim)
+            return buffer, False
         return array, False
 
-    def get_or_create_grayscale(self, frame: Any, is_vector: bool = False) -> Any:
-        """Get or compute a cached grayscale representation in the session."""
+    def view(self, source: Any = None, **kwargs: Any) -> Any:
+        """Get a resident handle without copying an existing buffer."""
         session = self._buffer_session()
-        if session is not None and hasattr(session, "get_or_create_grayscale"):
-            return session.get_or_create_grayscale(frame, is_vector=is_vector)
-        return frame
+        if session is not None and hasattr(session, "view"):
+            return session.view(source, **kwargs)
+        return source
+
+    def release(self, resource: Any = None, **kwargs: Any) -> Any:
+        """Release or transfer ownership through the underlying session."""
+        session = self._buffer_session()
+        if session is not None and hasattr(session, "release"):
+            return session.release(resource, **kwargs)
+        return resource
 
     @property
     def managed_api(self) -> Any:

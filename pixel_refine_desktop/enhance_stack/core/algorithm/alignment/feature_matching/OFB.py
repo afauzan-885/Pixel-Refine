@@ -80,7 +80,6 @@ class OFBAlgorithm:
             ransacReprojThreshold=float(threshold),
             n_hypotheses=max(64, int(hypotheses)),
             max_iters=max(1, int(refinements)),
-            return_gpu=False,
         )
 
     @staticmethod
@@ -92,7 +91,6 @@ class OFBAlgorithm:
             np.ascontiguousarray(image, dtype=np.float32),
             np.ascontiguousarray(homography, dtype=np.float32),
             (int(dsize[0]), int(dsize[1])),
-            return_gpu=False,
         )
 
     @staticmethod
@@ -160,7 +158,6 @@ class OFBAlgorithm:
                 ransacReprojThreshold=float(config.get("ransac_threshold", 5.0)),
                 n_hypotheses=max(64, int(config.get("ransac_hypotheses", 1024))),
                 max_iters=max(1, int(config.get("ransac_iters", 1))),
-                return_gpu=False,
             )
             if H is None:
                 return None, None, None, None

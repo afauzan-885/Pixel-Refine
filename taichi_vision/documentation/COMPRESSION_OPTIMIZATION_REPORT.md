@@ -39,7 +39,7 @@
 ### Optimizations Implemented
 
 1. **GPU-resident buffer chaining** (`_quantize_plane_gpu_chained`)
-   - Chains DCT→tokens→histogram with `return_gpu=True`
+   - Chains DCT→tokens→histogram with resident outputs
    - Keeps intermediate results on GPU
    - Single GPU→CPU readback at the end
 

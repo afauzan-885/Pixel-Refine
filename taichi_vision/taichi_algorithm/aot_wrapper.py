@@ -35,6 +35,20 @@ TM_CCOEFF_NORMED = 5
 # ── Environment setup ──────────────────────────────────────────────────
 from taichi_vision.taichi_algorithm.config import AOT_MODE
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 # ── Lazy module loading ────────────────────────────────────────────────
 _modules = {}
 _OPENGL_FLOW_FAMILY = None
@@ -223,11 +237,9 @@ def _get_engine():
 
 
 def _is_gpu_buffer(value):
-    return (
-        hasattr(value, "to_numpy")
-        and hasattr(value, "handle")
-        and hasattr(value, "shape")
-    )
+    from taichi.aot_engine import is_resident
+
+    return is_resident(value)
 
 
 def _dense_flow_spec(
@@ -290,7 +302,6 @@ def _run_fused_flow_level(
     track_args,
     dense_mode,
     dense_args,
-    *,
     zero_init=None,
     use_fused=True,
     force_direct=False,
@@ -352,7 +363,6 @@ def _run_fused_block_matching_level(
     track_args,
     dense_mode,
     dense_args,
-    *,
     win_radius,
 ):
     """Use a static-radius BM graph for supported presets when present.
@@ -461,10 +471,10 @@ def _vulkan_flow_host_accessible(function):
         # Resident callers already consume a device buffer.  Forcing every
         # temporary allocation to be host-accessible only helps NumPy-returning
         # calls and can increase Vulkan memory pressure on the resident path.
-        return_gpu = kwargs.get("return_gpu", False)
+        _resident_output = kwargs.get("_resident_output", False)
         if len(args) > 18:
-            return_gpu = args[18]
-        if return_gpu:
+            _resident_output = args[18]
+        if _resident_output:
             return function(*args, **kwargs)
         previous = getattr(engine, "_force_host_accessible", None)
         engine.set_force_host_accessible(True)
@@ -891,7 +901,7 @@ def cvtColor(src, code):
 
 def Sobel(src, dx, dy, ksize=3):
     from taichi_vision.taichi_algorithm import aot_api as taichi_aot
-    gx, gy = taichi_aot.sobel(src, return_gpu=_is_gpu_buffer(src))
+    gx, gy = taichi_aot.sobel(src )
     return gx if dx >= 1 and dy == 0 else gy
 
     """Apply Sobel operator (same as cv2.Sobel).
@@ -921,7 +931,7 @@ def Sobel(src, dx, dy, ksize=3):
 
 def Laplacian(src, ksize=1):
     from taichi_vision.taichi_algorithm import aot_api as taichi_aot
-    return taichi_aot.laplacian(src, return_gpu=_is_gpu_buffer(src))
+    return taichi_aot.laplacian(src )
 
     """Apply Laplacian operator (same as cv2.Laplacian)."""
     mod = _get_module("gradients")
@@ -1425,7 +1435,6 @@ def CLAHE(src, clipLimit=2.0, tileGridSize=(8, 8)):
         source,
         clip_limit=float(clipLimit),
         tile_grid_size=(int(tileGridSize[0]), int(tileGridSize[1])),
-        return_gpu=False,
     )
 
 
@@ -1778,7 +1787,7 @@ def calcOpticalFlowPyrLK(
     dense_mode="smooth",
     max_flow_px=0.0,
     decoupled_scale=0,
-    return_gpu=False,
+    
     return_diagnostics=False,
     reference_pyramid=None,
     dst=None,
@@ -1792,22 +1801,25 @@ def calcOpticalFlowPyrLK(
     _prepare_opengl_flow_family("lucas_kanade")
     # Intel OpenGL cannot safely expose the transient SSBO produced by the
     # dense graph. Compute natively using the validated host-output path,
+    _resident_output = _resolve_output(prev, dst=dst)
     # then upload the completed result as a stable public GPU buffer.
-    if return_gpu:
+    if _resident_output:
         try:
             if (
                 str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}
                 and not _opengl_native_flow_output_supported()
             ):
+                prev_host = prev.to_numpy() if hasattr(prev, "to_numpy") else prev
+                next_host = next.to_numpy() if hasattr(next, "to_numpy") else next
                 host_result = calcOpticalFlowPyrLK(
-                    prev, next, prevPts=prevPts, nextPts=nextPts,
+                    prev_host, next_host, prevPts=prevPts, nextPts=nextPts,
                     winSize=winSize, maxLevel=maxLevel, criteria=criteria,
                     flags=flags, minEigThreshold=minEigThreshold,
                     grid_step=grid_step, border_margin=border_margin,
                     overlap=overlap, adaptive=adaptive,
                     adaptive_threshold=adaptive_threshold,
                     motion_mode=motion_mode, dense_mode=dense_mode,
-                    max_flow_px=max_flow_px, return_gpu=False,
+                    max_flow_px=max_flow_px,
                     return_diagnostics=return_diagnostics,
                 )
                 if return_diagnostics:
@@ -1888,7 +1900,6 @@ def calcOpticalFlowPyrLK(
                 dense_mode=dense_mode,
                 max_flow_px=max_flow_px,
                 decoupled_scale=1,
-                return_gpu=True,
                 return_diagnostics=False,
                 reference_pyramid=(cached_levels[1:] if cached_levels is not None else None),
             )
@@ -1896,7 +1907,7 @@ def calcOpticalFlowPyrLK(
             flow_full_owned = dst is None
             pyramid_mod.run("upsample_flow_f32", src=flow_half, dst=flow_full, scale=2.0)
 
-            if return_gpu:
+            if _resident_output:
                 # The caller owns the returned output buffer.  Keep it out of
                 # the temporary-buffer cleanup below; destroying it here
                 # would make a successful GPU return point at freed storage.
@@ -2210,7 +2221,7 @@ def calcOpticalFlowPyrLK(
                 motion_mode="fast",
                 dense_mode=dense_mode,
                 max_flow_px=max_flow_px,
-                return_gpu=return_gpu,
+                dst=dst,
                 return_diagnostics=False,
             )
             if return_diagnostics:
@@ -2220,7 +2231,7 @@ def calcOpticalFlowPyrLK(
                 return refined, diagnostics
             return refined
 
-        if return_gpu:
+        if _resident_output:
             if return_diagnostics:
                 if diagnostics is None:
                     diagnostics = {
@@ -2509,7 +2520,7 @@ def calcOpticalFlowBlockMatching(
     dense_mode="smooth",
     max_flow_px=0.0,
     decoupled_scale=0,
-    return_gpu=False,
+    
     return_diagnostics=False,
     reference_pyramid=None,
     dst=None,
@@ -2517,21 +2528,24 @@ def calcOpticalFlowBlockMatching(
 ):
     """Dense block matching with parabolic fit sub-pixel estimation."""
     _prepare_opengl_flow_family("block_matching")
-    if return_gpu:
+    _resident_output = _resolve_output(prev, dst=dst)
+    if _resident_output:
         try:
             if (
                 str(getattr(_get_engine(), "arch", "")).lower() in {"opengl", "gles"}
                 and not _opengl_native_flow_output_supported()
             ):
+                prev_host = prev.to_numpy() if hasattr(prev, "to_numpy") else prev
+                next_host = next.to_numpy() if hasattr(next, "to_numpy") else next
                 host_result = calcOpticalFlowBlockMatching(
-                    prev, next, prevPts=prevPts, nextPts=nextPts,
+                    prev_host, next_host, prevPts=prevPts, nextPts=nextPts,
                     winSize=winSize, maxLevel=maxLevel, criteria=criteria,
                     flags=flags, minEigThreshold=minEigThreshold,
                     grid_step=grid_step, border_margin=border_margin,
                     overlap=overlap, adaptive=adaptive,
                     adaptive_threshold=adaptive_threshold,
                     motion_mode=motion_mode, dense_mode=dense_mode,
-                    max_flow_px=max_flow_px, return_gpu=False,
+                    max_flow_px=max_flow_px,
                     reference_pyramid=reference_pyramid,
                     return_diagnostics=return_diagnostics,
                 )
@@ -2646,7 +2660,6 @@ def calcOpticalFlowBlockMatching(
                     dense_mode=dense_mode,
                     max_flow_px=max_flow_px,
                     decoupled_scale=1,
-                    return_gpu=True,
                     return_diagnostics=False,
                     reference_pyramid=(
                         cached_levels[decouple_levels:]
@@ -2669,7 +2682,7 @@ def calcOpticalFlowBlockMatching(
                     "decoupled": True,
                     "decoupled_scale": decouple_factor,
                 }
-                if return_gpu:
+                if _resident_output:
                     result = flow_full
                     flow_full = None
                     if return_diagnostics:
@@ -2717,7 +2730,7 @@ def calcOpticalFlowBlockMatching(
         epsilon = float(criteria[2])
 
     # Every temporary produced by the dense block path is owned by this call.
-    # Keep an explicit ledger so the public ``return_gpu`` result is the only
+    # Keep an explicit ledger so the public ``_resident_output`` result is the only
     # allocation that survives the call.  Previously pyramid levels, grid
     # metadata, and coarse flow buffers were left in the engine's retired
     # queue on every support frame.
@@ -2900,7 +2913,7 @@ def calcOpticalFlowBlockMatching(
                 elif not (adaptive and level == 0):
                     mod.run("flow_lk_grid_track", **track_args)
 
-        if return_gpu:
+        if _resident_output:
             returned_buffer = current_flow
             _cleanup_owned(keep=returned_buffer)
             if return_diagnostics:
@@ -3320,7 +3333,7 @@ def warp_apap(
     err_threshold=0.04,
     max_refine_iters=5,
     mesh_shape=(33, 33),
-    return_gpu=False,
+    
 ):
     """As-Projective-As-Possible (APAP) image warping with GPU Catmull-Rom and Adaptive Refine.
 
@@ -3334,14 +3347,15 @@ def warp_apap(
         err_threshold: Pixel difference early-exit threshold on easy regions.
         max_refine_iters: Maximum diamond refinement iterations (1 to 5).
         mesh_shape: Sparse grid resolution for mesh warping. Defaults to (33, 33).
-        return_gpu: Return the native GPU output buffer without a host readback.
+        _resident_output: Return the native GPU output buffer without a host readback.
 
     Returns:
-        A GPU output buffer when ``return_gpu`` is true; otherwise a tuple of
+        A GPU output buffer when ``_resident_output`` is true; otherwise a tuple of
         ``(warped_image, valid_mask)`` NumPy arrays.
     """
     from .alignment.mesh_warp import warp_apap as _impl
 
+    _resident_output = _resolve_output(image)
     return _impl(
         image=image,
         src_points=src_points,
@@ -3352,7 +3366,6 @@ def warp_apap(
         err_threshold=err_threshold,
         max_refine_iters=max_refine_iters,
         mesh_shape=mesh_shape,
-        return_gpu=return_gpu,
     )
 
 

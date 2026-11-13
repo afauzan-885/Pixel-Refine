@@ -382,7 +382,6 @@ def _prepare_image_array_from_raw(
             gray_full = ta_aot.demosaic(
                 bayer,
                 method="hamilton-1channel",
-                return_gpu=False,
                 **demosaic_kwargs,
             )
             return gray_full
@@ -391,7 +390,6 @@ def _prepare_image_array_from_raw(
         bgr = ta_aot.demosaic(
             bayer,
             method="hamilton",
-            return_gpu=False,
             output_bgr_u16=True,
             **demosaic_kwargs,
         )

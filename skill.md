@@ -60,7 +60,7 @@ before first import. `PIXEL_REFINE_AOT_DEVICE` is an ordinal hint;
 `PIXEL_REFINE_TARGET_VENDOR` may constrain vendor selection. The native
 renderer is validated and a mismatch is an error.
 
-Use `InputArray`/`upload` for host-to-runtime transfer and `return_gpu=True`
+Use `InputArray`/`upload` for host-to-runtime transfer and `resident output=True`
 for resident results. Release `TaichiGPUBuffer` objects after use and never
 reuse them after `release`, `destroy`, `reinit`, or shutdown.
 

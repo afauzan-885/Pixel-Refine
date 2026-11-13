@@ -26,6 +26,20 @@ from ..contracts import (
     scale_homography,
 )
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 _NO_ALIGNMENT = {"", "none", "no alignment", "no_alignment", "off"}
 
 def _release(buffer) -> None:
@@ -38,7 +52,7 @@ def _release(buffer) -> None:
     from ....pipeline_runtime import current_pipeline_runtime
     runtime = current_pipeline_runtime()
     if runtime is not None and runtime.buffer_session is not None:
-        runtime.buffer_session.release_tree(buffer)
+        runtime.buffer_session.release(buffer)
         return
     for method_name in ("release", "destroy"):
         method = getattr(buffer, method_name, None)
@@ -153,7 +167,6 @@ def _plane_homography(matrix: np.ndarray, frame, index: int) -> np.ndarray:
 
 def _analysis_proxy(
     path: str | Path,
-    *,
     width: int,
     height: int,
     scale: float,
@@ -176,7 +189,7 @@ def _analysis_proxy(
     proxy = source_gpu
     owns_proxy = proxy is None
     if proxy is None:
-        proxy = taichi_aot.demosaic(str(path), method="hamilton", return_gpu=True)
+        proxy = taichi_aot.demosaic(str(path), method="hamilton" )
     work_h = max(32, int(height * scale))
     work_w = max(32, int(width * scale))
     work = prepare_analysis_proxy_gpu(
@@ -201,14 +214,12 @@ def _warp_analysis_proxy(proxy_gpu, transform, *, height: int, width: int):
             proxy_gpu,
             transform,
             (int(width), int(height)),
-            return_gpu=True,
         )
     return taichi_aot.remap_with_flow(
         proxy_gpu,
         transform,
         int(height),
         int(width),
-        return_gpu=True,
     )
 
 def _analysis_transform(transform, *, full_shape, proxy_shape):
@@ -236,7 +247,6 @@ def _analysis_transform(transform, *, full_shape, proxy_shape):
 def _accumulate_homography_cfa(
     source_planes,
     homography,
-    *,
     frame,
     zero_flow_gpu,
     weight_map_gpu,
@@ -283,7 +293,6 @@ def _accumulate_homography_cfa(
                     source_plane,
                     _plane_homography(homography, frame, index),
                     (w_plane, h_plane),
-                    return_gpu=True,
                 )
             )
         remap_accumulate_cfa_weighted_taichi(
@@ -320,8 +329,7 @@ def _preview_from_mosaic(
     mosaic,
     frame,
     reference_path: str | Path,
-    *,
-    return_gpu: bool = False,
+    
 ):
     """Demosaic once after CFA accumulation, solely for the desktop preview."""
     from taichi_vision import algorithm as taichi_aot
@@ -358,7 +366,6 @@ def _preview_from_mosaic(
         source,
         **params,
         method="hamilton",
-        return_gpu=bool(return_gpu),
     )
 
 def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None, half_res=False):
@@ -372,6 +379,7 @@ def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None, half_res=Fals
     permits an explicit Hamilton quality oracle, not a silent backend fallback.
     """
     from taichi_vision import algorithm as taichi_aot
+    from taichi_vision.taichi_algorithm.aot_api import OutputArray as _raw_output_array
     from ..resident_pipeline import _managed_api
     taichi_aot = _managed_api(taichi_aot)
 
@@ -379,11 +387,14 @@ def _demosaic_carrier_gpu(carrier, *, method="bilinear", dst=None, half_res=Fals
 
     params = carrier_demosaic_parameters(carrier)
     extra_kwargs = {"half_res": True} if half_res else {}
+    if dst is None:
+        h, w = np.asarray(carrier.samples).shape[:2]
+        out_h, out_w = (h // 2, w // 2) if half_res else (h, w)
+        dst = _raw_output_array((out_h, out_w, 3), dtype=np.float32)
     return taichi_aot.demosaic(
         np.ascontiguousarray(carrier.samples),
         **params,
         method=method,
-        return_gpu=True,
         dst=dst,
         **extra_kwargs,
     )
@@ -591,7 +602,7 @@ class RawPipelineProvider:
             )
             for index, shape in enumerate(shapes):
                 if buffer_session is not None:
-                    buffer = buffer_session.acquire_buffer(
+                    buffer = buffer_session.view(
                         shape,
                         dtype=np.float32,
                         is_vector=False,
@@ -693,7 +704,6 @@ class RawPipelineProvider:
                 self._sum_gpu,
                 reference,
                 self.image_paths[0],
-                return_gpu=True,
             )
             mosaic = np.empty(self._sum_gpu.shape, dtype=np.float32)
             self._sum_gpu.to_numpy(out=mosaic)

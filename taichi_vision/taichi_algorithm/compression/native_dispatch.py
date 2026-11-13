@@ -285,15 +285,9 @@ def _native_repo_root() -> Path:
 def _native_library_path(backend: str, device_id: int = 0) -> tuple[Path, list[Any]]:
     """Resolve and load no-Python-dependency bridge prerequisites."""
 
-    root = _native_repo_root() / "taichi_vision" / "taichi_algorithm" / "aot_py" / "aot_dll"
     extension = ".dll" if os.name == "nt" else ".dylib" if sys.platform == "darwin" else ".so"
     explicit = os.environ.get("AOT_ENGINE_DLL", "").strip()
-    backend_dir = root / backend
     target_variant = os.environ.get("PIXEL_REFINE_TARGET_VARIANT", "").strip()
-    target_dir = root / target_variant if target_variant else None
-    candidates = []
-    if explicit:
-        candidates.append(Path(explicit))
     staged_bundle = None
     try:
         from taichi.runtime_paths import bundle_root as staged_bundle_root
@@ -302,18 +296,13 @@ def _native_library_path(backend: str, device_id: int = 0) -> tuple[Path, list[A
         staged_bundle = staged_bundle_root(staged_target)
     except (ImportError, OSError, ValueError):
         staged_bundle = None
+    candidates = [Path(explicit)] if explicit else []
     if staged_bundle is not None:
         candidates.append(staged_bundle / f"taichi_aot_engine{extension}")
-    if target_dir is not None:
-        candidates.append(target_dir / f"taichi_aot_engine{extension}")
-    # Legacy repository bridges are opt-in once an LLVM20 release exists;
-    # silently mixing them with an LLVM20 runtime is an ABI violation.
-    if staged_bundle is None or os.environ.get("PIXEL_REFINE_AOT_ALLOW_LEGACY_ARTIFACTS") == "1":
-        candidates.extend(
-            (
-                backend_dir / f"taichi_aot_engine{extension}",
-                root / f"taichi_aot_engine{extension}",
-            )
+    if not candidates:
+        raise NativeDispatchUnavailable(
+            "Taichi venv runtime bundle is unavailable; refusing to load a "
+            "taichi_vision-local native bridge."
         )
     library = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
     if library is None:
@@ -324,7 +313,7 @@ def _native_library_path(backend: str, device_id: int = 0) -> tuple[Path, list[A
 
     dll_dirs: list[Any] = []
     if os.name == "nt" and hasattr(os, "add_dll_directory"):
-        directories = [backend_dir, target_dir, root]
+        directories = []
         if staged_bundle is not None:
             directories.extend(
                 (
@@ -334,21 +323,16 @@ def _native_library_path(backend: str, device_id: int = 0) -> tuple[Path, list[A
                 )
             )
         for directory in directories:
-            if directory is not None and directory.is_dir():
+            if directory.is_dir():
                 try:
                     dll_dirs.append(os.add_dll_directory(str(directory)))
                 except OSError:
                     pass
-        # Taichi's C API is a native runtime dependency, not a Python codec
-        # dependency.  Discover its directory without importing Taichi.
         try:
             spec = importlib.util.find_spec("taichi")
             if spec is not None and spec.origin:
                 taichi_root = Path(spec.origin).resolve().parent
-                for directory in (
-                    taichi_root / "_lib" / "c_api" / "bin",
-                    taichi_root / "_lib" / "runtime",
-                ):
+                for directory in (taichi_root / "_lib" / "c_api" / "bin", taichi_root / "_lib" / "runtime"):
                     if directory.is_dir():
                         dll_dirs.append(os.add_dll_directory(str(directory)))
                 runtime = taichi_root / "_lib" / "runtime"
@@ -381,15 +365,11 @@ def _default_native_tcm(module_name: str, backend: str, device_id: int) -> Path:
     else:
         try:
             from taichi.runtime_paths import tcm_root as staged_tcm_root
-
-            staged_root = staged_tcm_root(target)
-        except (ImportError, OSError, ValueError):
-            staged_root = None
-        root = (
-            Path(staged_root).resolve()
-            if staged_root is not None
-            else _native_repo_root() / "taichi_vision" / "taichi_algorithm" / "aot_tcm"
-        )
+            root = Path(staged_tcm_root(target)).resolve()
+        except (ImportError, OSError, ValueError) as exc:
+            raise NativeDispatchUnavailable(
+                "Taichi venv TCM bundle is unavailable; refusing to search taichi_vision."
+            ) from exc
     candidates = (
         root / target / f"{module_name}_{target}.tcm",
         root / target / f"{module_name}.tcm",

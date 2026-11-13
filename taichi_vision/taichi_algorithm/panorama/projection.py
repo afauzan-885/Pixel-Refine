@@ -341,7 +341,6 @@ def _project_aot(
             np.ascontiguousarray(src, dtype=np.float32),
             coordinates,
             coordinate_mode="absolute_xy",
-            return_gpu=False,
         )
     except (FileNotFoundError, ImportError, KeyError, OSError, RuntimeError) as exc:
         raise NotImplementedError(

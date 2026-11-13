@@ -638,7 +638,7 @@ def hfcd_denoise(src, sigma, block_size=8, search_radius=15,
             src, sigma=sigma, block_size=N,
             search_radius=search_radius, max_matches=K,
             lambda_3d=lambda_3d, cycle_spins=cycle_spins,
-            return_gpu=not is_numpy
+            
         )
 
     # --- JIT path (development) ---

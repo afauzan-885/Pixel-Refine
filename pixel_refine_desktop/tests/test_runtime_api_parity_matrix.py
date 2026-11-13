@@ -146,7 +146,7 @@ def test_cast_values_match_and_return_type_is_documented():
 
 
 def test_session_ownership_parity():
-    import taichi_vision.taichi_algorithm.buffer_session as tv_bs
+    import taichi.buffer_session as tv_bs
 
     class _Engine:
         def allocate(self, *a, **k):
@@ -166,8 +166,10 @@ def test_session_ownership_parity():
         keep_alive.append(resource)
         with session_cls(engine=_Engine(), sync_on_exit=False, tag="parity") as session:
             session.own(resource, releaser=lambda value: released.append(value))
-            assert session.borrow(resource) is resource
-            assert session.borrow(resource) is resource
+            first_lease = session.borrow(resource)
+            second_lease = session.borrow(resource)
+            assert getattr(first_lease, "resource", first_lease) is resource
+            assert getattr(second_lease, "resource", second_lease) is resource
             counts = [session.owned_count, session.borrowed_count]
             session.release_borrow(resource)
             counts.append(session.borrowed_count)

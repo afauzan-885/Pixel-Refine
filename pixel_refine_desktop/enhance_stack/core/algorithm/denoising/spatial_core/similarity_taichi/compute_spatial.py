@@ -1573,7 +1573,6 @@ def _coarse_texture_boost_into(src, dst, texture_amount, radius, blur_buf, tmp_b
     taichi_aot.gaussian_blur(
         src,
         sigma=float(radius),
-        return_gpu=True,
         dst=blur_buf,
         tmp=tmp_buf,
         sync=False,
@@ -1585,7 +1584,6 @@ def _coarse_texture_boost_into(src, dst, texture_amount, radius, blur_buf, tmp_b
         micro_contrast=float(texture_amount),
         clarity=0.0,
         noise_coring=0.0,
-        return_gpu=True,
         dst=dst,
     )
 
@@ -1797,7 +1795,6 @@ def generate_spatial_weights_taichi(
         curr_l0,
         (w // 2, h // 2),
         interpolation=taichi_aot.INTER_LINEAR,
-        return_gpu=True,
         dst=curr_l1,
     )
 
@@ -1810,7 +1807,6 @@ def generate_spatial_weights_taichi(
             ref_l0,
             (w // 2, h // 2),
             interpolation=taichi_aot.INTER_LINEAR,
-            return_gpu=True,
             dst=ref_l1,
         )
 
@@ -1914,7 +1910,6 @@ def generate_spatial_weights_taichi(
             level_conf_gpu,
             (w, h),
             interpolation=taichi_aot.INTER_CUBIC,
-            return_gpu=True,
             dst=(
                 boost_scratch
                 if streaming_gradients and boost_scratch is not None

@@ -123,7 +123,7 @@ def zncc(image, template):
     if os.environ.get("AOT_MODE", "1") == "1":
         try:
             from taichi_vision.taichi_algorithm import aot_api as taichi_aot
-            res = taichi_aot.zncc(image, template, return_gpu=True)
+            res = taichi_aot.zncc(image, template )
             if res is not None:
                 return res
         except Exception:

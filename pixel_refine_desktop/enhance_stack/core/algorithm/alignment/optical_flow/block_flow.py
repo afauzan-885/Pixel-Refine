@@ -37,6 +37,20 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.alignment.optical_flow.op
     to_flow_gray_u8,
 )
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 
 DEFAULT_BLOCK_FLOW_CONFIG = {
     "backend": "auto",
@@ -124,17 +138,16 @@ class BlockFlow(LucasKanade):
         target_gray,
         config,
         point_executor=None,
-        return_gpu=False,
+        
     ):
         """Calculate dense block flow using Taichi AOT TCM block matching."""
+        _resident_output = _resolve_output(reference_gray)
         ref_u8 = to_flow_gray_u8(reference_gray)
         tgt_u8 = to_flow_gray_u8(target_gray)
 
         from taichi_vision.taichi_algorithm import calcOpticalFlowBlockMatching
 
         lk_params = self._build_lk_params(config)
-        if return_gpu:
-            lk_params["return_gpu"] = True
 
         try:
             flow = calcOpticalFlowBlockMatching(
@@ -145,9 +158,7 @@ class BlockFlow(LucasKanade):
             if isinstance(flow, tuple):
                 flow = flow[0]
             if flow is not None:
-                if return_gpu:
-                    return flow
-                return np.ascontiguousarray(flow, dtype=np.float32)
+                return flow
         except Exception as exc:
             if bool(config.get("strict", False)):
                 raise RuntimeError("Block Flow AOT failed") from exc
@@ -165,7 +176,7 @@ class BlockFlow(LucasKanade):
         matching_reference=None,
         matching_target=None,
         target_for_warping=None,
-        return_gpu=False,
+        
     ):
         """Align a frame using memory-bounded Block Flow."""
         active_config = self.load_config() if config is None else dict(config)
@@ -185,7 +196,6 @@ class BlockFlow(LucasKanade):
                     stop_requested=stop_requested,
                     matching_reference=matching_reference,
                     matching_target=matching_target,
-                    return_gpu=return_gpu,
                 )
             except Exception:
                 pass
@@ -197,7 +207,6 @@ class BlockFlow(LucasKanade):
                 t_gray,
                 active_config,
                 point_executor=point_executor,
-                return_gpu=False,
             )
 
         halo = int(active_config.get("win_size", 17)) + int(

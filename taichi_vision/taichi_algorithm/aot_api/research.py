@@ -25,6 +25,20 @@ from taichi.aot_engine import (
 )
 from . import _mod
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 
 _BUFFER_TYPES = (TaichiGPUBuffer, TaichiPlaceholder)
 
@@ -102,7 +116,7 @@ def _dispatch(
     outputs: Mapping[str, object] | None = None,
     scalars: Mapping[str, object] | None = None,
     plain_ndarray: bool = True,
-    return_gpu: bool = False,
+    
 ):
     """Dispatch one graph and manage temporary host-created buffers.
 
@@ -111,6 +125,7 @@ def _dispatch(
     specifications.  A single output is returned directly; multiple outputs
     are returned as a dictionary keyed by graph argument name.
     """
+    _resident_output = _resolve_output(inputs)
 
     owned_inputs = []
     owned_outputs = []
@@ -138,7 +153,7 @@ def _dispatch(
             arguments.update(scalars)
         _mod(module_name).run(graph_name, **arguments)
 
-        if return_gpu:
+        if _resident_output:
             _destroy_owned(owned_inputs)
             if len(output_buffers) == 1:
                 return next(iter(output_buffers.values()))
@@ -206,8 +221,9 @@ class ResearchAOTModule:
         inputs: Mapping[str, object],
         outputs: Mapping[str, object] | None = None,
         scalars: Mapping[str, object] | None = None,
-        return_gpu: bool = False,
+        
     ):
+        _resident_output = _resolve_output(inputs)
         if graph not in self.graphs:
             raise ValueError(f"graph {graph!r} is not registered in module {self.name!r}")
         return _dispatch(
@@ -216,7 +232,7 @@ class ResearchAOTModule:
             inputs=inputs,
             outputs=outputs,
             scalars=scalars,
-            return_gpu=return_gpu,
+            _resident_output=_resident_output,
         )
 
 
@@ -241,8 +257,9 @@ def hdr_weight_aot(
     exposure_power=1.0,
     detail_power=1.0,
     saturation_power=1.0,
-    return_gpu=False,
+    
 ):
+    _resident_output = _resolve_output(img_rgb)
     image = _as_f32(img_rgb, ndim=3)
     lap = _as_f32(lap_gray, ndim=2)
     if image.shape[:2] != lap.shape:
@@ -263,7 +280,7 @@ def hdr_weight_aot(
             "detail_power": float(detail_power),
             "saturation_power": float(saturation_power),
         },
-        return_gpu=return_gpu,
+        _resident_output=_resident_output,
     )
 
 
@@ -292,7 +309,8 @@ def tone_luminance_aot(img):
     )
 
 
-def tone_reinhard_aot(img, *, key=0.18, lum_white=1.0, epsilon=1e-6, return_gpu=False):
+def tone_reinhard_aot(img, *, key=0.18, lum_white=1.0, epsilon=1e-6):
+    _resident_output = _resolve_output(img)
     image = _as_f32(img, ndim=3)
     h, w = image.shape[:2]
     lum = tone_luminance_aot(image)
@@ -308,11 +326,12 @@ def tone_reinhard_aot(img, *, key=0.18, lum_white=1.0, epsilon=1e-6, return_gpu=
             "lum_white": float(lum_white),
             "epsilon": float(epsilon),
         },
-        return_gpu=return_gpu,
+        _resident_output=_resident_output,
     )
 
 
-def tone_srgb_aot(img, *, gamma=2.2, use_srgb_curve=True, return_gpu=False):
+def tone_srgb_aot(img, *, gamma=2.2, use_srgb_curve=True):
+    _resident_output = _resolve_output(img)
     image = _as_f32(img, ndim=3)
     h, w = image.shape[:2]
     graph = "tone_srgb_f32" if use_srgb_curve else "tone_srgb_simple_f32"
@@ -322,11 +341,12 @@ def tone_srgb_aot(img, *, gamma=2.2, use_srgb_curve=True, return_gpu=False):
         inputs={"img": image},
         outputs={"dst": ((h, w, 3), np.float32)},
         scalars={"h": int(h), "w": int(w), "gamma": float(gamma)},
-        return_gpu=return_gpu,
+        _resident_output=_resident_output,
     )
 
 
-def tone_simulate_exposure_aot(img, *, gain=2.0, return_gpu=False):
+def tone_simulate_exposure_aot(img, *, gain=2.0):
+    _resident_output = _resolve_output(img)
     image = _as_f32(img, ndim=3)
     h, w = image.shape[:2]
     return _dispatch(
@@ -335,7 +355,7 @@ def tone_simulate_exposure_aot(img, *, gain=2.0, return_gpu=False):
         inputs={"img": image},
         outputs={"bright": ((h, w, 3), np.float32)},
         scalars={"h": int(h), "w": int(w), "gain": float(gain)},
-        return_gpu=return_gpu,
+        _resident_output=_resident_output,
     )
 
 
@@ -356,7 +376,8 @@ def tone_blend_weight_aot(lum, *, target_lum=0.5, sigma=0.3):
     )
 
 
-def tone_weighted_blend_aot(img_dark, img_bright, w_dark, w_bright, *, return_gpu=False):
+def tone_weighted_blend_aot(img_dark, img_bright, w_dark, w_bright):
+    _resident_output = _resolve_output(img_dark)
     dark = _as_f32(img_dark, ndim=3)
     bright = _as_f32(img_bright, ndim=3)
     wd = _as_f32(w_dark, ndim=2)
@@ -370,11 +391,12 @@ def tone_weighted_blend_aot(img_dark, img_bright, w_dark, w_bright, *, return_gp
         inputs={"img_dark": dark, "img_bright": bright, "w_dark": wd, "w_bright": wb},
         outputs={"dst": ((h, w, 3), np.float32)},
         scalars={"h": int(h), "w": int(w)},
-        return_gpu=return_gpu,
+        _resident_output=_resident_output,
     )
 
 
-def tone_contrast_aot(img, *, contrast=1.0, brightness=0.0, return_gpu=False):
+def tone_contrast_aot(img, *, contrast=1.0, brightness=0.0):
+    _resident_output = _resolve_output(img)
     image = _as_f32(img, ndim=3)
     h, w = image.shape[:2]
     return _dispatch(
@@ -388,7 +410,7 @@ def tone_contrast_aot(img, *, contrast=1.0, brightness=0.0, return_gpu=False):
             "contrast": float(contrast),
             "brightness": float(brightness),
         },
-        return_gpu=return_gpu,
+        _resident_output=_resident_output,
     )
 
 
@@ -555,7 +577,6 @@ def hdr_spde_mr_score_maps_aot(
             "exposure_sigma": float(exposure_sigma),
             "structure_threshold": float(structure_threshold),
         },
-        return_gpu=True,
     )
     try:
         maps = _dispatch(
@@ -754,8 +775,9 @@ def camera_yuv420_aot(
     v_row_stride=None,
     v_pixel_stride=1,
     bilinear_chroma=True,
-    return_gpu=False,
+    
 ):
+    _resident_output = _resolve_output(y_plane)
     h, w = int(height), int(width)
     y = _as_f32(y_plane).ravel()
     u = _as_f32(u_plane).ravel()
@@ -778,11 +800,12 @@ def camera_yuv420_aot(
             "v_row_stride": vr,
             "v_pixel_stride": int(v_pixel_stride),
         },
-        return_gpu=return_gpu,
+        _resident_output=_resident_output,
     )
 
 
-def _semi_planar_aot(data, height, width, graph, *, return_gpu=False):
+def _semi_planar_aot(data, height, width, graph):
+    _resident_output = _resolve_output(data)
     h, w = int(height), int(width)
     raw = _as_f32(data).ravel()
     y_size = h * w
@@ -794,16 +817,18 @@ def _semi_planar_aot(data, height, width, graph, *, return_gpu=False):
         inputs={"y_plane": raw[:y_size], "vu" if graph.endswith("nv21_f32") else "uv": raw[y_size:]},
         outputs={"dst": ((h, w, 3), np.float32)},
         scalars={"h": h, "w": w},
-        return_gpu=return_gpu,
+        _resident_output=_resident_output,
     )
 
 
-def camera_nv21_aot(data, height, width, *, return_gpu=False):
-    return _semi_planar_aot(data, height, width, "camera_nv21_f32", return_gpu=return_gpu)
+def camera_nv21_aot(data, height, width):
+    _resident_output = _resolve_output(data)
+    return _semi_planar_aot(data, height, width, "camera_nv21_f32", _resident_output=_resident_output)
 
 
-def camera_nv12_aot(data, height, width, *, return_gpu=False):
-    return _semi_planar_aot(data, height, width, "camera_nv12_f32", return_gpu=return_gpu)
+def camera_nv12_aot(data, height, width):
+    _resident_output = _resolve_output(data)
+    return _semi_planar_aot(data, height, width, "camera_nv12_f32", _resident_output=_resident_output)
 
 
 def camera_y_to_gray_aot(
@@ -830,7 +855,8 @@ def camera_y_to_gray_aot(
     )
 
 
-def camera_unsharp_aot(src, blurred, *, amount=0.5, return_gpu=False):
+def camera_unsharp_aot(src, blurred, *, amount=0.5):
+    _resident_output = _resolve_output(src)
     image = _as_f32(src, ndim=3)
     blur = _as_f32(blurred, ndim=3)
     if image.shape != blur.shape:
@@ -842,7 +868,7 @@ def camera_unsharp_aot(src, blurred, *, amount=0.5, return_gpu=False):
         inputs={"src": image, "blurred": blur},
         outputs={"dst": ((h, w, 3), np.float32)},
         scalars={"amount": float(amount), "h": int(h), "w": int(w)},
-        return_gpu=return_gpu,
+        _resident_output=_resident_output,
     )
 
 
@@ -1694,7 +1720,7 @@ def graph_cut_unary_aot(
     *,
     color_weight=1.0,
     gradient_weight=0.5,
-    return_gpu=False,
+    
 ):
     """Build exact graph-cut unary maps through the panorama AOT leaf.
 
@@ -1705,6 +1731,7 @@ def graph_cut_unary_aot(
     Keeping the split explicit prevents an AOT call from silently changing
     the solved energy or claiming that the dynamic solver itself is native.
     """
+    _resident_output = _resolve_output(left_gray)
 
     left = _as_f32(left_gray, ndim=2)
     right = _as_f32(right_gray, ndim=2)
@@ -1730,7 +1757,7 @@ def graph_cut_unary_aot(
             "gradient_weight": float(gradient_weight),
             "color_weight": float(color_weight),
         },
-       return_gpu=return_gpu,
+       _resident_output=_resident_output,
    )
 
 

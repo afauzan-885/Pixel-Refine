@@ -42,7 +42,6 @@ def load_rgb_linear_image(path: str | Path, is_raw: bool = False) -> np.ndarray:
             demosaiced = taichi_aot.demosaic(
                 str(path),
                 method="hamilton",
-                return_gpu=False,
             )
             img_np = np.asarray(demosaiced, dtype=np.float32)
         except Exception as exc:
@@ -116,7 +115,6 @@ def load_rgb_linear_image_bytes(
                 demosaiced = taichi_aot.demosaic(
                     raw,
                     method="hamilton",
-                    return_gpu=False,
                 )
             img_np = np.asarray(demosaiced, dtype=np.float32)
         except Exception:

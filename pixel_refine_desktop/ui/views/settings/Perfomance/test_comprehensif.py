@@ -134,7 +134,6 @@ def run_fast_hardware_test():
                 gray_gpu,
                 (512, 512),
                 interpolation=taichi_aot.INTER_CUBIC,
-                return_gpu=True,
             ),
             lambda value: getattr(value, "shape", None) == (512, 512),
         )
@@ -142,14 +141,14 @@ def run_fast_hardware_test():
         blurred = run_repeated(
             "Gaussian native graph",
             lambda: taichi_aot.gaussian_blur(
-                gray_gpu, sigma=1.5, return_gpu=True
+                gray_gpu, sigma=1.5 
             ),
             lambda value: getattr(value, "shape", None) == gray.shape,
         )
 
         gradients = run_repeated(
             "Gradient multi-output lifecycle",
-            lambda: taichi_aot.sobel(gray_gpu, return_gpu=True),
+            lambda: taichi_aot.sobel(gray_gpu ),
             lambda value: (
                 isinstance(value, tuple)
                 and len(value) == 2
@@ -164,7 +163,6 @@ def run_fast_hardware_test():
                 gray_gpu,
                 low_threshold=50.0,
                 high_threshold=150.0,
-                return_gpu=True,
             ),
             lambda value: getattr(value, "shape", None) == gray.shape,
         )
@@ -176,7 +174,6 @@ def run_fast_hardware_test():
                 flow_gpu,
                 benchmark_height,
                 benchmark_width,
-                return_gpu=True,
             ),
             lambda value: getattr(value, "shape", None)
             == (benchmark_height, benchmark_width),
@@ -772,8 +769,8 @@ def run_aot_algorithm_tests(img_rgb, img_gray, h, w, results):
 
         # OpenGL additionally validates the stable GPU-buffer return path.
         if str(getattr(_ti_rt.engine, "arch", "")).lower() in {"opengl", "gles"}:
-            gpu_flow = calcOpticalFlowPyrLK(flow_a, flow_b, return_gpu=True)
-            gpu_ok = hasattr(gpu_flow, "to_numpy") and gpu_flow.to_numpy().shape == (
+            gpu_flow = calcOpticalFlowPyrLK(flow_a, flow_b )
+            gpu_ok = _ti_rt.is_resident(gpu_flow) and np.asarray(gpu_flow).shape == (
                 sh,
                 sw,
                 2,
@@ -1112,26 +1109,24 @@ def run_pipeline_stress_test(engine, img_full):
                 pipeline_input,
                 (w_f // 2, h_f // 2),
                 interpolation=taichi_aot.INTER_CUBIC,
-                return_gpu=True,
             )
             # B. Gaussian Blur
-            blur = taichi_aot.gaussian_blur(res_down, sigma=1.5, return_gpu=True)
+            blur = taichi_aot.gaussian_blur(res_down, sigma=1.5 )
             # C. Median Filter
-            med = taichi_aot.median_filter(blur, return_gpu=True)
+            med = taichi_aot.median_filter(blur )
             # D. Bilateral Grid FILTER (Denoise) - Returns filtered image
             denoised = taichi_aot.bilateral_grid_filter(
-                med, preset="medium", return_gpu=True
+                med, preset="medium" 
             )
             # E. Convert to Grayscale for Gradients
             gray_for_grad = taichi_aot.cvtColor(denoised, taichi_aot.COLOR_RGB2GRAY)
             # F. Sobel (Gradients)
-            dx, dy = taichi_aot.sobel(gray_for_grad, return_gpu=True)
+            dx, dy = taichi_aot.sobel(gray_for_grad )
             # F. Upscale back (Bicubic) - Using Bicubic as it's proven to use Scalar 3D signature
             res_up = taichi_aot.resize(
                 denoised,
                 (w_f, h_f),
                 interpolation=taichi_aot.INTER_CUBIC,
-                return_gpu=True,
             )
 
         print("[Success] Pipeline Recorded successfully.")
@@ -1219,25 +1214,23 @@ def run_pipeline_stress_test(engine, img_full):
             img_gpu,
             (w_f // 2, h_f // 2),
             interpolation=taichi_aot.INTER_CUBIC,
-            return_gpu=True,
         )
         engine.sync()
 
         start_time_std = time.perf_counter()
         for i in range(n_iters):
-            # Chain the same operations manually (using return_gpu=True to stay on VRAM)
+            # Chain the same operations manually (using resident output=True to stay on VRAM)
             r1 = taichi_aot.resize(
                 img_gpu,
                 (w_f // 2, h_f // 2),
                 interpolation=taichi_aot.INTER_CUBIC,
-                return_gpu=True,
             )
-            r2 = taichi_aot.gaussian_blur(r1, sigma=1.5, return_gpu=True)
-            r3 = taichi_aot.median_filter(r2, return_gpu=True)
-            r4 = taichi_aot.bilateral_grid_filter(r3, preset="medium", return_gpu=True)
-            _dx, _dy = taichi_aot.sobel(r4, return_gpu=True)
+            r2 = taichi_aot.gaussian_blur(r1, sigma=1.5 )
+            r3 = taichi_aot.median_filter(r2 )
+            r4 = taichi_aot.bilateral_grid_filter(r3, preset="medium" )
+            _dx, _dy = taichi_aot.sobel(r4 )
             _r6 = taichi_aot.resize(
-                r4, (w_f, h_f), interpolation=taichi_aot.INTER_CUBIC, return_gpu=True
+                r4, (w_f, h_f), interpolation=taichi_aot.INTER_CUBIC 
             )
 
             # Explicitly release intermediate VRAM buffers to prevent massive memory leakage/spikes

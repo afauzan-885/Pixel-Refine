@@ -18,6 +18,20 @@ from .static_graph import (
     load_static_profile,
 )
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 DEFAULT_STATIC_MODEL_DIR = DEFAULT_POOL_DIR / "universal" / "models"
 
 
@@ -277,11 +291,12 @@ class StaticGraphSession:
         self,
         output_names: Optional[Sequence[str]] = None,
         input_feed: Optional[Dict[str, Any]] = None,
-        return_gpu: bool = False,
+        
         borrowed_outputs: bool = False,
         step_limit: Optional[int] = None,
         step_callback: Optional[Any] = None,
     ):
+        _resident_output = _resolve_output(input_feed)
         if self._closed:
             raise RuntimeError("static graph session is closed")
         requested = list(output_names) if output_names else list(self.plan.output_names)
@@ -311,7 +326,7 @@ class StaticGraphSession:
             self.last_fallback_reason = "; ".join(reasons)
             self.last_run_used_fast_path = False
             return self.generic.run(
-                output_names, feed, return_gpu, borrowed_outputs,
+                output_names, feed, _resident_output, borrowed_outputs,
                 step_limit, step_callback,
             )
 
@@ -326,7 +341,7 @@ class StaticGraphSession:
         }
         self.last_run_used_fast_path = True
         self.last_fallback_reason = None
-        if return_gpu or borrowed_outputs:
+        if _resident_output or borrowed_outputs:
             self._run_needs_sync = True
             return [self._static_buffers[self.profile["outputs"][name]["arg"]]
                     for name in requested]

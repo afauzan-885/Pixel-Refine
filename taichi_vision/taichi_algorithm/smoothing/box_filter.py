@@ -166,7 +166,7 @@ def box_filter(
 
     if os.environ.get("AOT_MODE", "1") == "1":
         from taichi_vision.taichi_algorithm import aot_api as taichi_aot
-        return taichi_aot.box_filter(src, kernel_size=kernel_size, return_gpu=True)
+        return taichi_aot.box_filter(src, kernel_size=kernel_size )
 
     if not TAICHI_AVAILABLE:
         raise ImportError("Taichi not available")

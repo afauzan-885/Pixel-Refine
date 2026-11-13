@@ -5,6 +5,20 @@ import builtins
 import numpy as np
 import taichi as ti
 
+def _resolve_output(source, dst=None):
+    """True when the result should stay resident (device-owned)."""
+    from taichi.aot_engine import is_resident
+
+    if dst is not None and is_resident(dst):
+        return True
+    if isinstance(source, dict):
+        return any(is_resident(value) for value in source.values())
+    if isinstance(source, (list, tuple)):
+        return any(is_resident(value) for value in source)
+    return is_resident(source)
+
+
+
 def demosaic(
     raw_input,
     wb_r=1.0,
@@ -19,7 +33,7 @@ def demosaic(
     c10=1,
     c11=2,
     method="hamilton",
-    return_gpu=False,
+    
     dst=None,
     output_bgr_u16=False,
     preserve_headroom=False,
@@ -27,6 +41,7 @@ def demosaic(
     **kwargs,
 ):
     """Universal demosaicing dispatcher supporting RAW Bayer arrays, files, and GPU buffers."""
+    _resident_output = _resolve_output(raw_input, dst=dst)
     import builtins
     import cv2
     _max = builtins.max
@@ -92,7 +107,7 @@ def demosaic(
                 np.copyto(dst, res)
                 return dst
 
-            if return_gpu and hasattr(ti, "engine"):
+            if _resident_output and hasattr(ti, "engine"):
                 return ti.engine.upload(res)
             return res
         except Exception:
@@ -197,12 +212,13 @@ def demosaic(
         np.copyto(dst, res)
         return dst
 
-    if return_gpu and hasattr(ti, "engine"):
+    if _resident_output and hasattr(ti, "engine"):
         return ti.engine.upload(res)
     return res
 
 
-def _compat_resize(src, dsize=None, fx=0, fy=0, interpolation=None, return_gpu=False, dst=None, **kwargs):
+def _compat_resize(src, dsize=None, fx=0, fy=0, interpolation=None, dst=None, **kwargs):
+    _resident_output = _resolve_output(src, dst=dst)
     import cv2
     arr = src.to_numpy() if hasattr(src, "to_numpy") else np.asarray(src)
     if isinstance(dsize, (int, float)):
@@ -216,12 +232,13 @@ def _compat_resize(src, dsize=None, fx=0, fy=0, interpolation=None, return_gpu=F
             return dst
         np.copyto(dst, res)
         return dst
-    if return_gpu and hasattr(ti, "engine"):
+    if _resident_output and hasattr(ti, "engine"):
         return ti.engine.upload(res)
     return res
 
 
-def _compat_box_filter(src, kernel_size=(3, 3), return_gpu=False, dst=None, **kwargs):
+def _compat_box_filter(src, kernel_size=(3, 3), dst=None, **kwargs):
+    _resident_output = _resolve_output(src, dst=dst)
     import cv2
     arr = src.to_numpy() if hasattr(src, "to_numpy") else np.asarray(src)
     ksize = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
@@ -237,12 +254,13 @@ def _compat_box_filter(src, kernel_size=(3, 3), return_gpu=False, dst=None, **kw
             return dst
         np.copyto(dst, res)
         return dst
-    if return_gpu and hasattr(ti, "upload"):
+    if _resident_output and hasattr(ti, "upload"):
         return ti.upload(res)
     return res
 
 
-def _compat_gaussian_blur(src, ksize=(5, 5), sigmaX=1.0, sigmaY=0, return_gpu=False, dst=None, **kwargs):
+def _compat_gaussian_blur(src, ksize=(5, 5), sigmaX=1.0, sigmaY=0, dst=None, **kwargs):
+    _resident_output = _resolve_output(src, dst=dst)
     import cv2
     arr = src.to_numpy() if hasattr(src, "to_numpy") else np.asarray(src)
     ks = ksize if isinstance(ksize, tuple) else (ksize, ksize)
@@ -253,12 +271,13 @@ def _compat_gaussian_blur(src, ksize=(5, 5), sigmaX=1.0, sigmaY=0, return_gpu=Fa
             return dst
         np.copyto(dst, res)
         return dst
-    if return_gpu and hasattr(ti, "engine"):
+    if _resident_output and hasattr(ti, "engine"):
         return ti.engine.upload(res)
     return res
 
 
-def _compat_remap(src, coordinates=None, map_x=None, map_y=None, output_size=None, coordinate_mode=None, return_gpu=None, dst=None, **kwargs):
+def _compat_remap(src, coordinates=None, map_x=None, map_y=None, output_size=None, coordinate_mode=None, dst=None, **kwargs):
+    _resident_output = _resolve_output(src, dst=dst)
     import cv2
     arr = src.to_numpy() if hasattr(src, "to_numpy") else np.asarray(src)
     is_gpu_src = hasattr(src, "to_numpy")
@@ -289,20 +308,21 @@ def _compat_remap(src, coordinates=None, map_x=None, map_y=None, output_size=Non
         np.copyto(dst, res)
         return dst
 
-    want_gpu = is_gpu_src if return_gpu is None else bool(return_gpu)
+    want_gpu = is_gpu_src if _resident_output is None else bool(_resident_output)
     if want_gpu and hasattr(ti, "engine"):
         return ti.engine.upload(res)
     return res
 
 
-def _compat_remap_with_flow(src, flow, full_h=None, full_w=None, return_gpu=None, dst=None, **kwargs):
+def _compat_remap_with_flow(src, flow, full_h=None, full_w=None, dst=None, **kwargs):
     dsize = None
     if full_h is not None and full_w is not None:
         dsize = (full_w, full_h)
-    return _compat_remap(src, coordinates=flow, coordinate_mode="displacement_xy", dsize=dsize, return_gpu=return_gpu, dst=dst, **kwargs)
+    return _compat_remap(src, coordinates=flow, coordinate_mode="displacement_xy", output_size=dsize, dst=dst, **kwargs)
 
 
-def _compat_warp_affine(src, M, dsize=None, return_gpu=None, dst=None, **kwargs):
+def _compat_warp_affine(src, M, dsize=None, dst=None, **kwargs):
+    _resident_output = _resolve_output(src, dst=dst)
     import cv2
     arr = src.to_numpy() if hasattr(src, "to_numpy") else np.asarray(src)
     is_gpu = hasattr(src, "to_numpy")
@@ -315,13 +335,14 @@ def _compat_warp_affine(src, M, dsize=None, return_gpu=None, dst=None, **kwargs)
             return dst
         np.copyto(dst, res)
         return dst
-    want_gpu = is_gpu if return_gpu is None else bool(return_gpu)
+    want_gpu = is_gpu if _resident_output is None else bool(_resident_output)
     if want_gpu and hasattr(ti, "engine"):
         return ti.engine.upload(res)
     return res
 
 
-def _compat_warp_perspective(src, M, dsize=None, return_gpu=None, dst=None, **kwargs):
+def _compat_warp_perspective(src, M, dsize=None, dst=None, **kwargs):
+    _resident_output = _resolve_output(src, dst=dst)
     import cv2
     arr = src.to_numpy() if hasattr(src, "to_numpy") else np.asarray(src)
     is_gpu = hasattr(src, "to_numpy")
@@ -334,13 +355,14 @@ def _compat_warp_perspective(src, M, dsize=None, return_gpu=None, dst=None, **kw
             return dst
         np.copyto(dst, res)
         return dst
-    want_gpu = is_gpu if return_gpu is None else bool(return_gpu)
+    want_gpu = is_gpu if _resident_output is None else bool(_resident_output)
     if want_gpu and hasattr(ti, "engine"):
         return ti.engine.upload(res)
     return res
 
 
-def _compat_farneback_flow(prev, curr, flow=None, pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0, return_gpu=False, dst=None, **kwargs):
+def _compat_farneback_flow(prev, curr, flow=None, pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0, dst=None, **kwargs):
+    _resident_output = _resolve_output(flow, dst=dst)
     import cv2
     p = prev.to_numpy() if hasattr(prev, "to_numpy") else np.asarray(prev)
     c = curr.to_numpy() if hasattr(curr, "to_numpy") else np.asarray(curr)
@@ -360,12 +382,13 @@ def _compat_farneback_flow(prev, curr, flow=None, pyr_scale=0.5, levels=3, winsi
             return dst
         np.copyto(dst, res)
         return dst
-    if return_gpu and hasattr(ti, "engine"):
+    if _resident_output and hasattr(ti, "engine"):
         return ti.engine.upload(res, is_vector=True)
     return res
 
 
-def _compat_phase_correlation(src1, src2, window=None, return_gpu=False, **kwargs):
+def _compat_phase_correlation(src1, src2, window=None, **kwargs):
+    _resident_output = _resolve_output(src1)
     import cv2
     a = src1.to_numpy() if hasattr(src1, "to_numpy") else np.asarray(src1)
     b = src2.to_numpy() if hasattr(src2, "to_numpy") else np.asarray(src2)
@@ -385,7 +408,8 @@ def _compat_upload(arr, is_vector=False, host_accessible=True, **kwargs):
     return arr
 
 
-def _compat_copy(src, dst=None, return_gpu=None, **kwargs):
+def _compat_copy(src, dst=None, **kwargs):
+    _resident_output = _resolve_output(src, dst=dst)
     if dst is not None:
         if hasattr(dst, "from_numpy"):
             dst.from_numpy(src.to_numpy() if hasattr(src, "to_numpy") else np.asarray(src))
@@ -394,17 +418,18 @@ def _compat_copy(src, dst=None, return_gpu=None, **kwargs):
         return dst
     if hasattr(src, "to_numpy"):
         arr = src.to_numpy()
-        want_gpu = True if return_gpu is None else bool(return_gpu)
+        want_gpu = True if _resident_output is None else bool(_resident_output)
         if want_gpu and hasattr(ti, "engine"):
             return ti.engine.upload(arr)
         return arr.copy()
     arr = np.asarray(src)
-    if return_gpu and hasattr(ti, "engine"):
+    if _resident_output and hasattr(ti, "engine"):
         return ti.engine.upload(arr)
     return arr.copy()
 
 
-def _compat_rgb2gray(src, dst=None, return_gpu=None, **kwargs):
+def _compat_rgb2gray(src, dst=None, **kwargs):
+    _resident_output = _resolve_output(src, dst=dst)
     import cv2
     is_gpu = hasattr(src, "to_numpy")
     arr = src.to_numpy() if is_gpu else np.asarray(src)
@@ -418,8 +443,8 @@ def _compat_rgb2gray(src, dst=None, return_gpu=None, **kwargs):
             return dst
         np.copyto(dst, res)
         return dst
-    should_return_gpu = return_gpu if return_gpu is not None else is_gpu
-    if should_return_gpu and hasattr(ti, "upload"):
+    should_stay_resident = _resident_output if _resident_output is not None else is_gpu
+    if should_stay_resident and hasattr(ti, "upload"):
         return ti.upload(res)
     return res
 
@@ -473,7 +498,8 @@ def accumulate_weighted_frame(
         weight_map_sum_full += val_w
 
 
-def _compat_bgr2gray(src, dst=None, return_gpu=None, **kwargs):
+def _compat_bgr2gray(src, dst=None, **kwargs):
+    _resident_output = _resolve_output(src, dst=dst)
     import cv2
     is_gpu = hasattr(src, "to_numpy")
     arr = src.to_numpy() if is_gpu else np.asarray(src)
@@ -487,16 +513,16 @@ def _compat_bgr2gray(src, dst=None, return_gpu=None, **kwargs):
             return dst
         np.copyto(dst, res)
         return dst
-    should_return_gpu = return_gpu if return_gpu is not None else is_gpu
-    if should_return_gpu and hasattr(ti, "upload"):
+    should_stay_resident = _resident_output if _resident_output is not None else is_gpu
+    if should_stay_resident and hasattr(ti, "upload"):
         return ti.upload(res)
     return res
 
 
-def cvtColor(src, code, dst=None, return_gpu=False, session=None, **kwargs):
+def cvtColor(src, code, dst=None, session=None, **kwargs):
     """OpenCV-compatible color conversion for numpy and GPU buffer objects."""
     import cv2
     from taichi_vision.taichi_algorithm import common
-    return common.cvtColor(src, code, dst=dst, return_gpu=return_gpu, session=session, **kwargs)
+    return common.cvtColor(src, code, dst=dst, session=session, **kwargs)
 
 

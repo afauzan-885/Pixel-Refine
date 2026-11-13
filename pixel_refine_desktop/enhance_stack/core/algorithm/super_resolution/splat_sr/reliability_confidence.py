@@ -135,12 +135,12 @@ class ReliabilityConfidenceProvider:
             self._rows_gpu = taichi_aot.upload(self._rows)
             self._cols_gpu = taichi_aot.upload(self._cols)
         else:
-            self._out = session.acquire_buffer(
+            self._out = session.view(
                 (h, w), dtype=np.float32, tag="splat_sr.reliability.output"
             )
-            self._rows_gpu, _ = session.upload_if_needed(self._rows)
-            self._cols_gpu, _ = session.upload_if_needed(self._cols)
-            session.own(self._scratch, releaser=lambda scratch: scratch.clear())
+            self._rows_gpu = session.view(self._rows)
+            self._cols_gpu = session.view(self._cols)
+            session._adopt(self._scratch, releaser=lambda scratch: scratch.clear())
         self._shape = shape
 
     def _release(self):
@@ -190,7 +190,7 @@ class ReliabilityConfidenceProvider:
         if session is None:
             self._reference = taichi_aot.upload(reference)
         else:
-            self._reference, _ = session.upload_if_needed(reference)
+            self._reference = session.view(reference)
         return self._reference
 
     # -- public API ------------------------------------------------------
@@ -273,7 +273,8 @@ class ReliabilityConfidenceProvider:
                 current_gpu = taichi_aot.upload(current)
                 owns_current = True
             else:
-                current_gpu, owns_current = session.upload_if_needed(current)
+                current_gpu = session.view(current)
+                owns_current = True
             generate_spatial_weights_taichi(
                 current_image=current_gpu,
                 reference_image=reference_gpu,
@@ -310,7 +311,7 @@ class ReliabilityConfidenceProvider:
                     ),
                 )
                 if session is not None and result_buffer is not self._out:
-                    self._postprocess_out = session.own(result_buffer)
+                    self._postprocess_out = session._adopt(result_buffer)
                 elif session is None:
                     self._postprocess_out = None
             # Keep both graphs ordered on the same runtime stream. BufferSession
@@ -324,7 +325,7 @@ class ReliabilityConfidenceProvider:
             if current_gpu is not None:
                 if session is not None:
                     if owns_current:
-                        session.release_upload(current)
+                        session.release(current)
                 else:
                     try:
                         current_gpu.destroy()
