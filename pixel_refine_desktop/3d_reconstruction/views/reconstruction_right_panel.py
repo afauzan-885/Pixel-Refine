@@ -9,7 +9,7 @@ dengan enhance_stack tetapi konten spesifik 3D.
 from PySide6.QtWidgets import QVBoxLayout, QLabel
 from PySide6.QtCore import Signal
 
-from UILibrary import (
+from resources.GenericUILibrary import (
     ListGroup,
     Button,
     FormGroup,
@@ -134,8 +134,9 @@ class ReconstructionRightPanel(WorkspaceRightPanel):
         self.current_item_id = project_id
 
         if self.store:
-            self.set_scope(str(project_id))
-            self.on_store_changed(None, self.get_data())
+            sync = getattr(self, "sync", None)
+            if callable(sync):
+                sync(scope=str(project_id))
 
     def _on_settings_changed(self):
         """Emit current settings dan save ke store."""

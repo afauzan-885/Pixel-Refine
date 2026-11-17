@@ -1,14 +1,15 @@
-"""Focused coverage for 16-bit lossless RAW Native DNG output."""
+"""Focused coverage for source-depth lossless RAW Native DNG output."""
 
 from __future__ import annotations
 
 import numpy as np
 import rawpy
+import taichi
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_process.raw_pipeline.result import (
     RawPipelineResult,
 )
-from taichi_vision.taichi_algorithm.compression import RawMosaicFrame, read_dng_aot
+from taichi_vision.taichi_algorithm.compression import RawMosaicFrame
 
 
 def test_raw_native_dng_is_16_bit_lossless_and_auto_compressed(tmp_path):
@@ -30,14 +31,15 @@ def test_raw_native_dng_is_16_bit_lossless_and_auto_compressed(tmp_path):
 
     path = tmp_path / "derived.dng"
     result.save_dng(path)
-    decoded = read_dng_aot(path)
+    decoded = taichi.read_dng(path)
+    decoded_samples = np.asarray(decoded["data"])
 
-    assert decoded.bits_per_sample == 16
-    assert decoded.compression == 1
+    assert decoded["bits_per_sample"] == 10
+    assert decoded["compression"] == 1
     np.testing.assert_array_equal(
-        decoded.samples(), result.quantized_mosaic(bits_per_sample=16)
+        decoded_samples, result.quantized_mosaic(bits_per_sample=10)
     )
     with rawpy.imread(str(path)) as external:
         np.testing.assert_array_equal(
-            external.raw_image.copy(), result.quantized_mosaic(bits_per_sample=16)
+            external.raw_image.copy(), result.quantized_mosaic(bits_per_sample=10)
         )

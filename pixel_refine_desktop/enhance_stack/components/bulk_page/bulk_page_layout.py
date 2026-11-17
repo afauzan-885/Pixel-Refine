@@ -54,12 +54,13 @@ from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_thumb
 from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
     ThumbnailPolicy,
     thumbnail_creation_enabled,
+    thumbnail_generation_suspended,
 )
 from pixel_refine_desktop.enhance_stack.components.bulk_page.services.bulk_result_service import (
     move_result,
 )
 
-from UILibrary import ScrollContainer, live_update
+from resources.GenericUILibrary import ScrollContainer, live_update
 
 
 def _move_file_with_verified_copy_fallback(source_path, destination_path):
@@ -737,6 +738,8 @@ class BulkPageLayout(QWidget):
         bar = self.main_scroll_area.verticalScrollBar()
         if not thumbnail_creation_enabled(self.thumbnail_policy):
             return
+        if thumbnail_generation_suspended():
+            return
         row_pitch = BulkBatchDelegate.HEIGHT + BulkBatchDelegate.ROW_GAP
         row_offset = 0
         first = max(0, (bar.value() - row_offset) // row_pitch - 1)
@@ -1168,7 +1171,7 @@ class BulkPageLayout(QWidget):
 
         title, message = language_config.BATCH_DELETE_LABEL
         message = message.format(batch_id)
-        from UILibrary import modal_confirm
+        from resources.GenericUILibrary import modal_confirm
 
         reply = modal_confirm.question(self, message)
 
@@ -1208,7 +1211,7 @@ class BulkPageLayout(QWidget):
         message = language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(
             batch_defined_count
         )
-        from UILibrary import modal_confirm
+        from resources.GenericUILibrary import modal_confirm
 
         reply = modal_confirm.question(self, message)
 

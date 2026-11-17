@@ -9,20 +9,21 @@ A comprehensive library of reusable UI components inspired by Bootstrap 5, desig
 - **Signal-based**: All components use Qt signals for clean event handling
 - **Stylesheet Compatible**: Works seamlessly with existing QSS stylesheets
 - **Comprehensive**: 40+ components covering all common UI needs
+- **Store-bound**: `RealtimeMixin`/`SyncMixin` expose a 3-API data binding surface (`bind`, `sync`, `on_sync`)
 
 ## Installation
 
 The library is already included in your project at:
 ```
-pixel_refine_desktop/ui/resources/GenericUILibrary/
+resources/GenericUILibrary/
 ```
 
 ## Quick Start
 
 ```python
 from PySide6.QtWidgets import QApplication, QMainWindow
-from pixel_refine_desktop.ui.resources.GenericUILibrary import Button, Card, Container
-from pixel_refine_desktop.ui.resources.styles.stylesheet import stylesheet_global_page
+from resources.GenericUILibrary import Button, Card, Container
+from resources.styles.stylesheet import stylesheet_global_page
 
 class MyApp(QMainWindow):
     def __init__(self):
@@ -124,11 +125,19 @@ app.exec()
 - `Sidebar` - Vertical sidebar
 - `SidebarItem` - Sidebar item
 
+### 11. Store & Bindings (`store.py`, `mixins.py`)
+- `DataStore` - JSON-backed store (dotted keys, bulk update, transaction, file watcher)
+- `RealtimeMixin` - Binding store untuk satu key / broadcast
+- `SyncMixin` - Binding store untuk panel yang mengikuti satu scope
+- `AdaptiveSizingMixin` - Helper ukuran/font adaptif
+
+Lihat bagian **Store Binding API** di bawah untuk tiga API utamanya.
+
 ## Usage Examples
 
 ### Button Variants
 ```python
-from GenericUILibrary import Button
+from resources.GenericUILibrary import Button
 
 btn_primary = Button("Save", variant="primary")
 btn_danger = Button("Delete", variant="danger")
@@ -138,7 +147,7 @@ btn_info = Button("Import", variant="info")
 
 ### Form with Validation
 ```python
-from GenericUILibrary import FormGroup, Button, Card
+from resources.GenericUILibrary import FormGroup, Button, Card
 
 card = Card(title="User Registration")
 
@@ -157,7 +166,7 @@ card.add_footer_widget(submit)
 
 ### List with Selection
 ```python
-from GenericUILibrary import ListGroup
+from resources.GenericUILibrary import ListGroup
 
 list_group = ListGroup(title="Projects", selection_mode="single", show_actions=True)
 list_group.add_item("proj_1", "Project Alpha")
@@ -168,7 +177,7 @@ list_group.item_selected.connect(lambda id, label: print(f"Selected: {label}"))
 
 ### Modal Dialog
 ```python
-from GenericUILibrary import Modal, Button
+from resources.GenericUILibrary import Modal, Button
 
 def show_confirmation():
     modal = Modal(title="Confirm Delete", parent=self)
@@ -183,7 +192,7 @@ btn.clicked.connect(show_confirmation)
 
 ### Grid Gallery
 ```python
-from GenericUILibrary import Gallery
+from resources.GenericUILibrary import Gallery
 
 gallery = Gallery(title="Images", columns=5)
 gallery.add_item("img1", "Photo 1.jpg")
@@ -195,7 +204,7 @@ gallery.item_clicked.connect(lambda id, label: print(f"Clicked: {label}"))
 
 ### Tabs
 ```python
-from GenericUILibrary import TabContainer, TabPane
+from resources.GenericUILibrary import TabContainer, TabPane
 
 tabs = TabContainer()
 
@@ -247,6 +256,96 @@ item.clicked.connect(lambda id: ...)
 item.double_clicked.connect(lambda id: ...)
 ```
 
+## Store Binding API (`RealtimeMixin` / `SyncMixin`)
+
+`mixins.py` menyediakan **tiga API utama** untuk menghubungkan widget/panel ke `DataStore`.
+Kebutuhan khusus memakai keyword lanjutan, bukan method tambahan.
+
+### 1. `bind(store, *, key=None, scope=None, bindings=None, fallback=None, apply=True, follow=True)`
+
+- `key="language"` → mode **single-key** (widget form/settings).
+- `scope="625"` → mode **panel berscope** (mis. id batch/project).
+- `bindings={...}` → `{rel_key: widget | (widget, prop) | (widget, prop, fallback)}`.
+  Boleh dipanggil ulang untuk menambah binding setelah widget lain dibangun.
+- `fallback` → nilai default untuk binding yang tidak menyebut fallback sendiri.
+- `apply=False` → tunda sinkronisasi awal; `follow=False` → tidak berlangganan `store.changed`.
+- `key` dan `scope` saling eksklusif; `bindings` tidak boleh digabung dengan `key`.
+
+### 2. `sync(*, scope=None, key=None, keys=None, values=None, notify=True, persist=False, peek=False)`
+
+Satu method untuk tarik, pindah konteks, tulis, dan baca tanpa menerapkan:
+
+- `sync()` → terapkan ulang konteks aktif.
+- `sync(scope="625")` → pindah scope lalu terapkan.
+- `sync(values={...})` → tulis relatif terhadap scope, lalu terapkan (nilai `None` dilewati).
+- `sync(values={...}, notify=False)` → tulis tanpa memancarkan `changed`.
+- `sync(values={...}, persist=True)` → tulis lalu `save_to_file()` sinkron.
+- `sync(peek=True)` → kembalikan payload **tanpa** menyentuh widget.
+- Return: mapping scope, skalar (mode single-key), atau `None`.
+- Kombinasi ilegal (`values`+`peek`, `values`+`keys`, `scope`+`key`, `notify=False`/`persist=True`
+  tanpa `values`) memunculkan `ValueError`.
+
+### 3. `on_sync(payload, *, key=None, origin=None)`
+
+Satu-satunya hook reaktif; dipanggil **setelah** binding diterapkan oleh `sync`.
+
+- `payload` → snapshot mapping scope, `{bound_key: value}` (single-key), atau `None`
+  (invalidasi global). Ini salinan, bukan referensi hidup `DataStore._data`.
+- `key` → key relatif yang memicu, atau `None` untuk update scope-wide/bulk.
+- `origin` → `"store"` atau `"self"` (komponen ini sendiri yang menulis).
+  Pakai `origin="self"` untuk melewati pekerjaan yang tidak perlu saat menulis sendiri.
+
+### Contoh: widget single-key
+
+```python
+from resources.GenericUILibrary import Checkbox
+
+cb = Checkbox("Buat thumbnail", auto_sync=True)
+cb.bind(store, key="create_thumbnail")   # nilai awal langsung diterapkan
+
+# Widget sudah mengimplementasikan on_sync; tidak perlu override bila memakai Checkbox/FormGroup.
+```
+
+### Contoh: panel berscope
+
+```python
+from resources.GenericUILibrary.mixins import SyncMixin
+
+class AlgorithmPanel(QWidget, SyncMixin):
+    def _build(self):
+        self._specs = {
+            "alignment_algo": (self.align_form, "value", "No Alignment"),
+            "denoising_algo": (self.denoise_card, "value", "No Denoising"),
+        }
+
+    def attach(self, store):
+        self.bind(store, bindings=self._specs)
+        self.sync(scope="625")                 # ikuti batch 625
+
+    def on_sync(self, payload, *, key=None, origin=None):
+        if origin == "self" or not payload:
+            return
+        self._refresh_derived_controls(payload)
+```
+
+### Migrasi dari API lama
+
+| Lama | Baru |
+|---|---|
+| `bind_store(store)` | `bind(store)` |
+| `bind_store(store, key)` | `bind(store, key=...)` |
+| `add_binding(k, w, prop, fallback)` | `bind(bindings={k: (w, prop, fallback)})` |
+| `set_scope(prefix)` | `sync(scope=...)` |
+| `sync_from_store()` | `sync()` |
+| `get_data(key)` | `sync(peek=True, key=...)` |
+| `set_data(v, key, notify)` | `sync(values={key: v}, notify=...)` |
+| `signal_blocker()` | `sync(values={...}, notify=False)` |
+| `on_store_changed(k, v)` | `on_sync(payload, key=..., origin=...)` |
+
+Nama lama **sudah dihapus**; tidak ada alias. Kontrak signature dijaga oleh
+`tests/golden_signatures.json` + `tests/test_api_signature_parity.py`, dan perilaku
+API ini diuji di `tests/test_sync_mixin.py`.
+
 ## Best Practices
 
 1. **Use Variants**: Leverage button variants for consistent styling
@@ -261,7 +360,7 @@ See `examples.py` for a complete working example demonstrating all components.
 
 Run the example:
 ```bash
-python pixel_refine_desktop/ui/resources/GenericUILibrary/examples.py
+python resources/GenericUILibrary/examples.py
 ```
 
 ## Migration from Old Components

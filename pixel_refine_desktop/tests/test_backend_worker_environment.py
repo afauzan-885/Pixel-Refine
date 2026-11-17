@@ -50,3 +50,22 @@ def test_worker_spawn_overrides_inherited_backend_and_device(monkeypatch, arch, 
         assert captured["PIXEL_REFINE_AOT_ALLOW_CPU_FALLBACK"] == "0"
     finally:
         manager.shutdown()
+
+
+def test_worker_engine_binding_uses_selected_backend_and_device(monkeypatch):
+    monkeypatch.setenv("AOT_ARCH", "vulkan")
+    monkeypatch.setenv("AOT_DEVICE", "1")
+    monkeypatch.setenv("TARGET_VENDOR", "nvidia")
+
+    from pixel_refine_desktop.enhance_stack.core.logic.backend_worker_process import (
+        WorkerRunner,
+    )
+    import taichi.aot_engine as ta_aot
+    from taichi_vision.taichi_algorithm import aot_api
+
+    engine = WorkerRunner._initialize_engine()
+
+    assert engine.arch == "vulkan"
+    assert engine.device_id == 1
+    assert ta_aot.engine._target is engine
+    assert aot_api._module_loader.engine is engine

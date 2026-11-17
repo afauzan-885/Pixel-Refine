@@ -98,7 +98,7 @@ class ProductionOpticalSRIntegrationTest(unittest.TestCase):
         )
 
     def test_dml_weightnet_matches_cpu_confidence(self):
-        import onnxruntime as ort
+        import taichi_vision.neural as ort
 
         if "DmlExecutionProvider" not in ort.get_available_providers():
             self.skipTest("DmlExecutionProvider is unavailable")

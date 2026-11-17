@@ -6,7 +6,7 @@ import numpy as np
 from PIL import Image
 
 import pytest
-from PySide6.QtWidgets import QApplication, QAbstractItemView
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QMessageBox
 from PySide6.QtCore import Qt, QThreadPool, QPoint
 from PySide6.QtGui import QColor, QPixmap
 
@@ -171,7 +171,7 @@ def test_external_import_sync_to_batch_mode(qapp):
         assert display_panel.grid_content_stack.currentWidget() == display_panel.grid_container
 
         # Ensure NO rogue ImageCard top-level windows were launched!
-        from UILibrary import ImageCard
+        from resources.GenericUILibrary import ImageCard
         card_windows = [w for w in qapp.topLevelWidgets() if isinstance(w, ImageCard)]
         assert len(card_windows) == 0
 
@@ -377,3 +377,99 @@ def test_bulk_return_reloads_imported_images_in_batch_page(qapp):
         assert display_panel.total_image_count == len(image_paths)
         assert len(display_panel.all_cards) == len(image_paths)
         assert all(card.has_thumbnail() for card in display_panel.all_cards.values())
+
+
+def test_batch_switch_applies_saved_algorithm_to_ad_controls(qapp, monkeypatch):
+    """Switching batches must refresh the cards and A/D controls from the store.
+
+    A batch edited from Process All Batch keeps its saved algorithm in JSON.
+    Selecting that batch has to show the matching parameter controls without
+    the user toggling the denoising algorithm to force a refresh.
+    """
+    import json
+
+    from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
+    from pixel_refine_desktop.enhance_stack.components.bulk_page.controllers.bulk_process_controller import (
+        MassAlgorithmEditDialog,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="test_ad_switch_") as temp_dir:
+        params_path = os.path.join(temp_dir, "ProjectParameters.json")
+        base = {
+            "alignment_algo": "Block Flow",
+            "checkbox_align_images": True,
+            "super_resolution_algo": "No Super Resolution",
+            "checkbox_super_resolution": False,
+            "hdr_algo": "No HDR",
+            "checkbox_hdr": False,
+        }
+        with open(params_path, "w", encoding="utf-8") as stream:
+            json.dump(
+                {
+                    "1": {**base, "denoising_algo": "FusionNet", "checkbox_denoising": True},
+                    "2": {**base, "denoising_algo": "FusionNet", "checkbox_denoising": True},
+                },
+                stream,
+            )
+        monkeypatch.setattr(batch_parameter_manager, "PROJECT_PARAMETERS_PATH", params_path)
+        monkeypatch.setattr(batch_parameter_manager, "BATCH_PARAMETER_PATH", params_path)
+
+        db_path = os.path.join(temp_dir, "session.sqlite")
+        database = DatabaseManager(db_path)
+        database.create_database()
+        batch_ids = []
+        for name in ("batch1", "batch2"):
+            batch_id = database.create_new_batch(name)
+            image_paths = [os.path.join(temp_dir, f"{name}_{index}.jpg") for index in range(2)]
+            for image_path in image_paths:
+                Image.fromarray(np.full((40, 40, 3), 120, dtype=np.uint8)).save(image_path)
+            database.batch_process_save_image_path(batch_id, image_paths)
+            batch_ids.append(batch_id)
+
+        view = SinglePageView(db_path=db_path)
+        view.resize(1000, 700)
+        view.show()
+        qapp.processEvents()
+
+        right_panel = view.batch_panel
+        parameter_panel = view.workspace_panel.display_panel.param_panel
+        store = right_panel._store
+
+        right_panel.select_batch_sync(batch_ids[0])
+        for _ in range(10):
+            qapp.processEvents()
+        assert right_panel.denoise_card.get_value() == "FusionNet"
+        assert parameter_panel.current_denoising_algo == "FusionNet"
+        assert parameter_panel.btn_denoise_tab.isVisible()
+
+        QMessageBox.information = staticmethod(lambda *args, **kwargs: None)
+        dialog = MassAlgorithmEditDialog(
+            [
+                SimpleNamespace(batch_id=batch_ids[0], sequential_batch_number=1),
+                SimpleNamespace(batch_id=batch_ids[1], sequential_batch_number=2),
+            ],
+            store=store,
+        )
+        dialog.from_spinbox.setValue(2)
+        dialog.to_spinbox.setValue(2)
+        dialog.denoise_checkbox.setChecked(True)
+        dialog.denoise_combo.setCurrentText("Average")
+        dialog.apply_changes()
+
+        right_panel.select_batch_sync(batch_ids[1])
+        for _ in range(10):
+            qapp.processEvents()
+        assert store.get(f"{batch_ids[1]}.denoising_algo") == "Average"
+        assert right_panel.denoise_card.get_value() == "Average"
+        assert parameter_panel.current_denoising_algo == "Average"
+        assert not parameter_panel.btn_denoise_tab.isVisible()
+
+        right_panel.select_batch_sync(batch_ids[0])
+        for _ in range(10):
+            qapp.processEvents()
+        assert store.get(f"{batch_ids[0]}.denoising_algo") == "FusionNet"
+        assert right_panel.denoise_card.get_value() == "FusionNet"
+        assert parameter_panel.current_denoising_algo == "FusionNet"
+        assert parameter_panel.btn_denoise_tab.isVisible()
+
+        QThreadPool.globalInstance().waitForDone(10000)

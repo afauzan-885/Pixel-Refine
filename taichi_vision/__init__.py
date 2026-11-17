@@ -10,4 +10,10 @@ __all__ = []
 #   alg.akaze(...) / alg.AKAZE(...)
 from . import taichi_algorithm as algorithm
 
-__all__ = ["algorithm"]
+# Public neural inference entry point (ONNX plug and play).
+# Usage:
+#   import taichi_vision.neural as neural
+#   session = neural.InferenceSession("model.onnx")
+from . import neural
+
+__all__ = ["algorithm", "neural"]

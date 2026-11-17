@@ -4,6 +4,26 @@ This is the complete quick-reference for the public entry points exported by
 `taichi_vision.taichi_algorithm.aot_api`, including research and compatibility
 wrappers. Function signatures in source remain authoritative.
 
+## Neural inference (ONNX plug and play)
+
+```python
+import taichi_vision.neural as neural      # instead of `import onnxruntime as ort`
+
+session = neural.InferenceSession("model.onnx")
+session.run(None, {"input": array})
+```
+
+The facade mirrors `onnxruntime`: `InferenceSession`, `SessionOptions`,
+`GraphOptimizationLevel`, `ExecutionMode`, `NodeArg`, `get_available_providers`,
+`get_inputs/get_outputs/get_providers/run/close`, and a context manager.
+The execution strategy (universal kernel pool, resident TCM, or native graph) is
+resolved automatically; use `neural.describe(session)` and
+`neural.capabilities()` to see the decision and any missing runtime features.
+
+Model availability, blocked operators, and the exact components still required
+for full coverage are tracked in
+[`NEURAL_ONNX_BLOCKERS.md`](NEURAL_ONNX_BLOCKERS.md).
+
 ## Canonical import and backend selection
 
 ```python

@@ -46,8 +46,6 @@ def expected_output_names(stages, image_paths, settings):
     if any(raw_flags) and not all(raw_flags):
         return None
     is_raw_input = bool(raw_flags and all(raw_flags))
-    if is_raw_input and any(extension != ".dng" for extension in extensions):
-        return None
     extension = ".dng" if is_raw_input else ".tif"
     names = []
     for spec in stages:
@@ -55,11 +53,9 @@ def expected_output_names(stages, image_paths, settings):
         if spec.category == "denoising" and "output_suffix" in kwargs:
             names.append(f"{safe_name or 'stack'}_{kwargs['output_suffix']}{extension}")
         elif spec.category == "super_resolution" and spec.key == "splatting_sr":
-            # Keep SplatSR's existing optional DNG writer policy independent
-            # from denoising's input-type-based RAW/RGB routing.
-            sr_extension = ".dng" if settings.get("enable_linear_mode", False) and extensions[0] in (
-                ".dng", ".cr2", ".cr3", ".nef", ".arw"
-            ) else ".tif"
+            # SplatSR keeps its optional linear-DNG policy; RAW inputs always
+            # use the DNG container, regardless of the vendor extension.
+            sr_extension = ".dng" if settings.get("enable_linear_mode", False) and is_raw_input else ".tif"
             names.append(f"{safe_name or 'sr_result'}_splattingSR{sr_extension}")
         else:
             return None

@@ -25,7 +25,7 @@ from PySide6.QtCore import (
 )
 
 # Generic UI Library
-from UILibrary.store import (
+from resources.GenericUILibrary.store import (
     get_store,
     DataStore,
 )
@@ -413,7 +413,7 @@ class BatchPageV2Layout(QWidget):
             QMessageBox.information(self, title, message)
             return
 
-        from UILibrary import modal_confirm
+        from resources.GenericUILibrary import modal_confirm
 
         confirmed = modal_confirm.question(
             self,

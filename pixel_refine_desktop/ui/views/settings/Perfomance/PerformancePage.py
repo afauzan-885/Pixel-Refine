@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from UILibrary import (
+from resources.GenericUILibrary import (
     Button,
     Checkbox,
     Container,
@@ -28,7 +28,7 @@ from pixel_refine_desktop.ui.views.settings.General.GeneralSetting import (
     GeneralSettingsPage,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from UILibrary.modals import modal_confirm
+from resources.GenericUILibrary.modals import modal_confirm
 from pixel_refine_desktop.ui.views.settings.General.helpers import restart_application
 from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
     IN_PROCESSING_MAX,
@@ -107,7 +107,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             self.device_group.input.currentIndexChanged.connect(
                 self._on_device_selection_changed
             )
-        self.device_group.bind_store(self.store, "device_backend")
+        self.device_group.bind(self.store, key="device_backend")
         self._restore_saved_backend_selection(hardware_backends)
         self._add_backend_info_action()
         left_form.add_row(self.device_group)
@@ -145,7 +145,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         )
         self.auto_fallback_cb = Checkbox(auto_fb_label, auto_sync=True)
         self.auto_fallback_cb.checkbox.setToolTip(auto_fb_tip)
-        self.auto_fallback_cb.bind_store(self.store, "auto_fallback")
+        self.auto_fallback_cb.bind(self.store, key="auto_fallback")
         self.auto_fallback_cb.checkbox.toggled.connect(self._on_auto_fallback_toggled)
         left_form.add_row(self.auto_fallback_cb)
 
@@ -158,8 +158,8 @@ class PerformanceSettingsPage(GeneralSettingsPage):
         self.compute_block_threshold_group.input.setRange(0.1, 1000.0)
         self.compute_block_threshold_group.input.setSingleStep(0.5)
         self.compute_block_threshold_group.input.setDecimals(1)
-        self.compute_block_threshold_group.bind_store(
-            self.store, "compute_block_threshold_mp"
+        self.compute_block_threshold_group.bind(
+            self.store, key="compute_block_threshold_mp"
         )
         self.compute_block_mode_group = FormGroup(
             label="Block Processing", input_type="select", auto_sync=False
@@ -182,7 +182,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             label="Block Size", input_type="select", auto_sync=True
         )
         self.compute_block_size_group.input.addItems(["512", "768", "1024", "2048"])
-        self.compute_block_size_group.bind_store(self.store, "compute_block_size")
+        self.compute_block_size_group.bind(self.store, key="compute_block_size")
         self.compute_block_size_group.setVisible(False)
 
         prefetch_label = getattr(
@@ -1004,7 +1004,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
             return
         self._manual_gpu_retry = False
         try:
-            from UILibrary import Toast
+            from resources.GenericUILibrary import Toast
 
             Toast(
                 getattr(
@@ -1022,7 +1022,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
     def _on_worker_backend_switch_finished(self, switched, config):
         """Report the worker move and offer the restart the main runtime needs."""
         try:
-            from UILibrary import Toast
+            from resources.GenericUILibrary import Toast
 
             if switched:
                 Toast(
@@ -1053,7 +1053,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
     def _offer_restart_for_gpu(self, config):
         """Ask before restarting: never restart the application automatically."""
         try:
-            from UILibrary.modals import modal_confirm
+            from resources.GenericUILibrary.modals import modal_confirm
 
             dialog = modal_confirm(
                 getattr(
@@ -1337,7 +1337,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
     def update_theme(self):
         """Update button styles, checkbox styles, and form elements dynamically on theme change."""
         super().update_theme()
-        from UILibrary.theme import get_theme, create_checkbox_style, apply_style
+        from resources.GenericUILibrary.theme import get_theme, create_checkbox_style, apply_style
 
         theme = get_theme()
         if hasattr(self, "auto_fallback_cb") and hasattr(
@@ -1399,7 +1399,7 @@ class PerformanceSettingsPage(GeneralSettingsPage):
                 f"[PerformanceSettingsPage] Realtime worker backend switch error: {exc}"
             )
 
-        from UILibrary import Toast, trigger_live_update
+        from resources.GenericUILibrary import Toast, trigger_live_update
 
         trigger_live_update()
         self._initial_device_backend = selected_backend_text

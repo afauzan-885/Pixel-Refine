@@ -216,18 +216,6 @@ def extract_demosaic_parameters(path: str | Path, cfa_pattern, *, frame=None) ->
     camera_wb = np.empty(0, dtype=np.float32)
     daylight_wb = np.empty(0, dtype=np.float32)
     cmatrix = None
-    try:
-        import rawpy
-        with rawpy.imread(str(path)) as raw:
-            camera_wb = np.asarray(raw.camera_whitebalance, dtype=np.float32).reshape(-1)
-            daylight_wb = np.asarray(getattr(raw, "daylight_whitebalance", ()), dtype=np.float32).reshape(-1)
-            candidate = np.ascontiguousarray(raw.color_matrix[:, :3], dtype=np.float32)
-            if candidate.shape == (3, 3) and np.isfinite(candidate).all():
-                cmatrix = candidate
-    except Exception:
-        # A valid DNG may be outside LibRaw's decode support.  Its own DNG
-        # tags are still enough to produce a colour-managed preview.
-        pass
 
     def valid_wb(values):
         return values.size == 4 and np.isfinite(values).all() and np.all(values > 0.01)

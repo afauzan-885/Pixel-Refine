@@ -32,6 +32,7 @@ from taichi.aot_engine import (
     get_backend_name,
     backend_info,
     engine,
+    get_engine as get_live_engine,
 )
 from taichi import (
     BackendConfig,
@@ -294,7 +295,7 @@ _tcm_dir = os.path.abspath(
 )
 _module_cache = {}  # name -> AOTModuleWrapper (loaded on demand)
 _module_loader = AOTModuleLoader(
-    engine,
+    get_live_engine(),
     tcm_dir=_tcm_dir,
     cache=_module_cache,
 )
@@ -450,11 +451,13 @@ def configure_block_reservation(operation, soft_bytes=0, hard_bytes=None, weight
 
 def _mod(name: str):
     """Lazy-load and cache a TCM module by name."""
+    _module_loader.engine = get_live_engine()
     return _module_loader.load(name)
 
 
 def _warmup_modules(names):
     """Batch-resolve and serially load modules for background warm-up."""
+    _module_loader.engine = get_live_engine()
     return _module_loader.warmup(names)
 
 
@@ -9089,19 +9092,17 @@ def demosaic(
     Smart Metadata Auto-Extraction:
     -------------------------------
     To make integration extremely simple and prevent intimidating signatures, you can pass a
-    `rawpy` object or a file path string directly as the first argument. All sensor metadata
-    (Bayer array, WB gains, color matrix, black/white levels, layout indices) will be extracted
-    automatically under the hood!
+    native RAW path, bytes, or a file path string directly as the first argument. All sensor
+    metadata (Bayer array, WB gains, color matrix, black/white levels, layout indices) is
+    extracted automatically under the hood.
 
     Usage Examples:
     ---------------
-    1. Pass rawpy object directly (Recommended):
-       >>> rgb = ta_aot.demosaic(raw, method="hamilton")
-
-    2. Pass DNG filepath directly:
+    1. Pass a native RAW path or bytes directly:
        >>> rgb = ta_aot.demosaic("path/to/image.dng", method="hamilton")
+       >>> rgb = ta_aot.demosaic(dng_bytes, method="hamilton")
 
-    3. Pass parameters manually (For advanced JIT/AOT parity checks):
+    2. Pass parameters manually (For advanced JIT/AOT parity checks):
        >>> rgb = ta_aot.demosaic(bayer_np, wb_r, wb_g1, wb_b, wb_g2, cmatrix, ...)
 
     Supported Methods:
@@ -9118,99 +9119,69 @@ def demosaic(
 
     Parameters:
     -----------
-    raw_input : rawpy.RawPy, str, or np.ndarray
-        Either a loaded rawpy object, a file path to a DNG/RAW image, or a raw Bayer NumPy array.
+    raw_input : str, bytes, or np.ndarray
+        A native RAW path/bytes, or a raw Bayer NumPy array.
     """
     _resident_output = _resolve_output(raw_input, dst=dst)
     bayer = raw_input
     flip = 0
 
-    # Check if raw_input is a filepath string or rawpy object
-    is_rawpy_obj = hasattr(raw_input, "raw_image")
-    is_filepath = isinstance(raw_input, str) and os.path.exists(raw_input)
+    # Native container reader: no rawpy in the production path.
+    is_path_like = isinstance(raw_input, (str, bytes, os.PathLike))
 
-    if is_rawpy_obj or is_filepath:
-        import rawpy
+    if hasattr(raw_input, "raw_image"):
+        raise TypeError(
+            "demosaic no longer accepts rawpy objects; pass a native RAW path or bytes"
+        )
 
-        def _extract_from_raw(raw):
-            # Keep the sensor mosaic compact through the upload boundary.
-            # Hamilton has a u16-specialized graph that promotes samples to
-            # f32 at the same arithmetic sites as the established f32 graph;
-            # retaining u16 here avoids a temporary 48 MiB host expansion on
-            # a 12 MP Bayer frame. Non-Hamilton variants convert at their
-            # dispatch boundary when their TCM only exposes f32 input.
-            raw_image = np.asarray(raw.raw_image)
-            if raw_image.dtype in (np.dtype(np.uint8), np.dtype(np.uint16)):
-                b_np = np.array(raw_image, copy=True)
-            else:
-                b_np = raw_image.astype(np.float32)
-            bl = float(raw.black_level_per_channel[0])
-            wl = float(raw.white_level)
+    if is_path_like:
+        import taichi as _ti
 
-            wb_np = np.array(raw.camera_whitebalance, dtype=np.float32)
-            if len(wb_np) == 4:
-                if wb_np[3] <= 0.01:
-                    wb_np[3] = wb_np[1]
-                g_gain = (wb_np[1] + wb_np[3]) / 2.0
-                wb_np /= g_gain
-            else:
-                wb_np = np.array([1.5, 1.0, 2.0, 1.0], dtype=np.float32)
-
-            c_00 = int(raw.raw_colors[0, 0])
-            c_01 = int(raw.raw_colors[0, 1])
-            c_10 = int(raw.raw_colors[1, 0])
-            c_11 = int(raw.raw_colors[1, 1])
-            cm = raw.color_matrix[:, :3].astype(np.float32)
-            return (
-                b_np,
-                wb_np[0],
-                wb_np[1],
-                wb_np[2],
-                wb_np[3],
-                cm,
-                bl,
-                wl,
-                c_00,
-                c_01,
-                c_10,
-                c_11,
+        native = _ti.imread(raw_input, compute_hash=False)
+        if not isinstance(native, dict) or "data" not in native:
+            raise TypeError(
+                "demosaic expects a RAW container; standard images are not CFA input"
             )
 
-        if is_rawpy_obj:
-            flip = getattr(raw_input.sizes, "flip", 0)
-            (
-                bayer,
-                wb_r,
-                wb_g1,
-                wb_b,
-                wb_g2,
-                cmatrix,
-                black_level,
-                white_level,
-                c00,
-                c01,
-                c10,
-                c11,
-            ) = _extract_from_raw(raw_input)
-        else:
-            with rawpy.imread(raw_input) as raw:
-                flip = getattr(raw.sizes, "flip", 0)
-                (
-                    bayer,
-                    wb_r,
-                    wb_g1,
-                    wb_b,
-                    wb_g2,
-                    cmatrix,
-                    black_level,
-                    white_level,
-                    c00,
-                    c01,
-                    c10,
-                    c11,
-                ) = _extract_from_raw(raw)
+        bayer = np.asarray(native["data"])
+        if bayer.dtype not in (np.dtype(np.uint8), np.dtype(np.uint16), np.dtype(np.float32)):
+            bayer = bayer.astype(np.float32)
 
-        # Store active cmatrix in engine singleton for downstream gamma proxy color space alignment transformations
+        def _first_level(value, default):
+            if value is None:
+                return float(default)
+            values = np.asarray(value, dtype=np.float32).reshape(-1)
+            return float(values[0]) if values.size else float(default)
+
+        bits = int(native.get("bits_per_sample", 16) or 16)
+        black_level = _first_level(native.get("black_level"), 0.0)
+        white_level = _first_level(native.get("white_level"), (1 << bits) - 1)
+
+        neutral = np.asarray(
+            native.get("as_shot_neutral", [1.0, 1.0, 1.0]), dtype=np.float32
+        ).reshape(-1)
+        if neutral.size >= 3 and np.all(neutral[:3] > 0):
+            gains = 1.0 / neutral[:3]
+            gains /= max(float(gains[1]), 1e-6)
+            wb_r, wb_g1, wb_b = (float(value) for value in gains)
+        else:
+            wb_r = wb_g1 = wb_b = 1.0
+        wb_g2 = wb_g1
+
+        matrix = np.asarray(native.get("color_matrix", []), dtype=np.float32)
+        if matrix.ndim == 2 and matrix.shape[0] >= 3 and matrix.shape[1] >= 3:
+            cmatrix = matrix[:3, :3]
+        else:
+            cmatrix = np.eye(3, dtype=np.float32)
+
+        pattern = list(native.get("cfa_pattern") or [0, 1, 1, 2])[:4]
+        pattern = [
+            0 if int(value) == 0 else (1 if int(value) in (1, 3) else 2)
+            for value in pattern
+        ]
+        c00, c01, c10, c11 = pattern
+        flip = 0
+
         engine.active_cmatrix = cmatrix
         engine.active_wb_r = wb_r
         engine.active_wb_g1 = wb_g1
@@ -15505,19 +15476,12 @@ def jpeg_encode_aot(*args, **kwargs):
 # first execution and never route a missing artifact to another backend.
 from taichi_vision.taichi_algorithm.compression.raw_frame import (  # noqa: E402,F401
     RawMosaicFrame,
-    raw_frame_from_dng,
-)
-from taichi_vision.taichi_algorithm.compression.dng_aot import (  # noqa: E402,F401
-    DNGCapabilityError,
-    DNGCapabilityReport,
-    dng_capability_report,
 )
 from taichi_vision.taichi_algorithm.compression.raw_pipeline import (  # noqa: E402,F401
     RawFusionReport,
     RawFlowTileContract,
     raw_flow_tile_contract,
     raw_alignment_guide,
-    raw_alignment_guide_dng,
     raw_alignment_guide_native,
     raw_normalize_headroom_native,
     raw_weight_map,
@@ -15525,10 +15489,8 @@ from taichi_vision.taichi_algorithm.compression.raw_pipeline import (  # noqa: E
     fuse_raw_pair_native,
     fuse_raw_accumulate_native,
     fuse_raw_frames_blockwise,
-    fuse_dng_frames_blockwise,
     phase_safe_integer_warp,
     raw_optical_flow,
-    raw_optical_flow_dng,
 )
 
 

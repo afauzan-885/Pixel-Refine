@@ -117,14 +117,22 @@ class RawMosaicFrame:
         array = np.asarray(self.samples)
         if array.ndim != 2:
             raise ValueError("RAW mosaic samples must be a 2D array")
-        if array.dtype not in (np.dtype(np.uint8), np.dtype(np.uint16)):
-            raise TypeError("RAW mosaic samples must use uint8 or uint16")
+        if array.dtype not in (
+            np.dtype(np.uint8),
+            np.dtype(np.uint16),
+            np.dtype(np.uint32),
+            np.dtype(np.float16),
+            np.dtype(np.float32),
+        ):
+            raise TypeError(
+                "RAW mosaic samples must use uint8, uint16, uint32, float16, or float32"
+            )
         if not array.flags.c_contiguous:
             array = np.ascontiguousarray(array)
         if array.size == 0:
             raise ValueError("RAW mosaic samples must not be empty")
         bits = int(self.bits_per_sample)
-        native_bits = 8 if array.dtype == np.uint8 else 16
+        native_bits = int(np.dtype(array.dtype).itemsize * 8)
         if not 1 <= bits <= native_bits:
             raise ValueError(f"bits_per_sample must be between 1 and {native_bits}")
         object.__setattr__(self, "samples", array)
@@ -177,10 +185,26 @@ class RawMosaicFrame:
         metadata: Optional[Mapping[str, Any]] = None,
     ) -> "RawMosaicFrame":
         array = np.asarray(samples)
-        if array.dtype not in (np.dtype(np.uint8), np.dtype(np.uint16)):
-            raise TypeError("RAW mosaic samples must use uint8 or uint16")
-        bits = int(bits_per_sample or (8 if array.dtype == np.uint8 else 16))
-        default_white = (float((1 << bits) - 1),) * 4
+        if array.dtype not in (
+            np.dtype(np.uint8),
+            np.dtype(np.uint16),
+            np.dtype(np.uint32),
+            np.dtype(np.float16),
+            np.dtype(np.float32),
+        ):
+            raise TypeError(
+                "RAW mosaic samples must use uint8, uint16, uint32, float16, or float32"
+            )
+        bits = int(
+            bits_per_sample
+            if bits_per_sample is not None
+            else array.dtype.itemsize * 8
+        )
+        default_white = (
+            (1.0,) * 4
+            if array.dtype.kind == "f"
+            else (float((1 << bits) - 1),) * 4
+        )
         return cls(
             array,
             bits,
@@ -198,118 +222,102 @@ class RawMosaicFrame:
         )
 
     @classmethod
-    def from_dng(cls, frame: Any, *, source_id: str = "", source_version: str = "") -> "RawMosaicFrame":
-        """Adapt a parsed :class:`DNGFrame` without demosaicing or float conversion."""
-        tags = dict(getattr(frame, "tags", {}) or {})
-        samples = frame.samples()
-        bits = int(getattr(frame, "bits_per_sample", tags.get(258, 16)))
-        cfa = tags.get(33422, _DEFAULT_CFA)
-        if isinstance(cfa, (bytes, bytearray)):
-            cfa = tuple(int(item) for item in cfa[:4])
-        else:
-            cfa = tuple(int(item) for item in cfa)
-        black = _rational_sequence(tags.get(50714, 0.0))
-        white = _rational_sequence(tags.get(50717, (1 << bits) - 1))
-        wb = _rational_sequence(tags.get(50728, (1.0, 1.0, 1.0, 1.0)))
-        area = tags.get(50829)
-        metadata = {
-            "dng_tags": tags,
-            "compression": int(getattr(frame, "compression", tags.get(259, 1))),
-            "endian": str(getattr(frame, "endian", "II")),
-        }
-        if 50706 in tags:
-            metadata["dng_version"] = tags[50706]
-        return cls.from_samples(
-            samples,
-            bits_per_sample=bits,
-            cfa_pattern=cfa if len(cfa) == 4 else _DEFAULT_CFA,
-            black_level=black or 0.0,
-            white_level=white or ((1 << bits) - 1,),
-            active_area=area,
-            white_balance=wb if len(wb) == 4 else (1.0, 1.0, 1.0, 1.0),
-            orientation=int(tags.get(274, 1)),
-            source_id=source_id,
-            source_version=source_version,
-            metadata=metadata,
-        )
-
-    @classmethod
-    def from_dng_region(
+    def from_raw_image(
         cls,
-        frame: Any,
-        y0: int,
-        y1: int,
-        x0: int,
-        x1: int,
+        image: Mapping[str, Any],
         *,
         source_id: str = "",
         source_version: str = "",
     ) -> "RawMosaicFrame":
-        """Adapt one DNG sensor tile without materializing the full frame.
+        """Adapt the unified native reader dictionary without re-decoding."""
+        samples = np.asarray(image.get("data", image.get("samples")))
+        bits = int(image.get("bits_per_sample", 16))
+        cfa_source = (
+            image.get("cfa_pattern_list")
+            or image.get("cfa_pattern")
+            or _DEFAULT_CFA
+        )
+        if isinstance(cfa_source, (bytes, bytearray)):
+            cfa_source = tuple(cfa_source[:4])
+        cfa = tuple(int(item) for item in cfa_source)
+        black = image.get("black_levels") or image.get("black_level", 0.0)
+        white = image.get("white_levels") or image.get("white_level")
+        orientation = int(image.get("orientation", 1))
+        active_area = image.get("active_area")
 
-        The tile's ``phase_origin`` is shifted by its absolute origin.  That
-        detail is essential for odd-aligned block grids: normalization and
-        green-guide extraction must see the same CFA plane as the full-frame
-        path.  No RGB conversion or float staging occurs here.
-        """
-        y0, y1, x0, x1 = (int(y0), int(y1), int(x0), int(x1))
-        if not (0 <= y0 <= y1 <= int(frame.height) and 0 <= x0 <= x1 <= int(frame.width)):
-            raise ValueError("DNG RAW region is outside the frame")
-        tags = dict(getattr(frame, "tags", {}) or {})
-        samples = frame.sample_region(y0, y1, x0, x1)
-        bits = int(getattr(frame, "bits_per_sample", tags.get(258, 16)))
-        cfa = tags.get(33422, _DEFAULT_CFA)
-        if isinstance(cfa, (bytes, bytearray)):
-            cfa = tuple(int(item) for item in cfa[:4])
-        else:
-            cfa = tuple(int(item) for item in cfa)
-        black = _rational_sequence(tags.get(50714, 0.0))
-        white = _rational_sequence(tags.get(50717, (1 << bits) - 1))
-        wb = _rational_sequence(tags.get(50728, (1.0, 1.0, 1.0, 1.0)))
-        base_phase = tuple(int(item) & 1 for item in tags.get("phase_origin", (0, 0)))
-        full_area = _parse_active_area(
-            tags.get(50829), int(frame.height), int(frame.width)
-        )
-        intersection_top = max(y0, full_area[0])
-        intersection_left = max(x0, full_area[1])
-        intersection_bottom = max(intersection_top, min(y1, full_area[2]))
-        intersection_right = max(intersection_left, min(x1, full_area[3]))
-        tile_area = (
-            intersection_top - y0,
-            intersection_left - x0,
-            intersection_bottom - y0,
-            intersection_right - x0,
-        )
-        # A tile outside the DNG active area remains valid sensor storage but
-        # has no active samples; represent that explicitly rather than
-        # silently treating the whole tile as active.
-        tile_area = tuple(
-            min(max(int(value), 0), limit)
-            for value, limit in zip(
-                tile_area,
-                (int(y1 - y0), int(x1 - x0), int(y1 - y0), int(x1 - x0)),
-            )
-        )
+        from fractions import Fraction
+
+        def rational_pairs(values) -> tuple[tuple[int, int], ...]:
+            pairs = []
+            for value in values or ():
+                if isinstance(value, (tuple, list)) and len(value) == 2:
+                    pairs.append((int(value[0]), int(value[1])))
+                    continue
+                fraction = Fraction(float(value)).limit_denominator(1_000_000)
+                pairs.append((int(fraction.numerator), int(fraction.denominator)))
+            return tuple(pairs)
+
+        tags: dict[int, Any] = {
+            33421: tuple(
+                int(value) for value in image.get("cfa_repeat_pattern_dim", (2, 2))
+            ),
+            33422: tuple(int(value) for value in cfa),
+            274: orientation,
+        }
+        if active_area and tuple(int(value) for value in active_area) != (0, 0, 0, 0):
+            tags[50829] = tuple(int(value) for value in active_area)
+        if image.get("black_levels"):
+            tags[50714] = tuple(float(value) for value in image["black_levels"])
+        if image.get("white_levels"):
+            tags[50717] = tuple(float(value) for value in image["white_levels"])
+        neutral = image.get("as_shot_neutral") or ()
+        if len(neutral) >= 3:
+            tags[50728] = rational_pairs(neutral[:3])
+        colour = image.get("color_matrix") or ()
+        if len(colour) == 9:
+            tags[50721] = rational_pairs(colour)
+        version = image.get("dng_version") or ()
+        if version:
+            tags[50706] = bytes(int(value) for value in version)
+        backward = image.get("dng_backward_version") or ()
+        if backward:
+            tags[50707] = bytes(int(value) for value in backward)
+        for tag, key in (
+            (271, "make"),
+            (272, "model"),
+            (50708, "unique_camera_model"),
+        ):
+            value = image.get(key)
+            if value:
+                tags[tag] = str(value)
+
         metadata = {
             "dng_tags": tags,
-            "compression": int(getattr(frame, "compression", tags.get(259, 1))),
-            "endian": str(getattr(frame, "endian", "II")),
-            "region_origin": (y0, x0),
-            "full_shape": (int(frame.height), int(frame.width)),
+            "compression": int(image.get("compression", 1)),
+            "endian": "II",
+            "calibration": image.get("calibration"),
+            "decoder": "taichi.imread",
+            "source_bits_per_sample": bits,
+            "source_dtype": str(samples.dtype),
+            "sample_format": int(image.get("sample_format", 1)),
+            "predictor": int(image.get("predictor", 1)),
         }
-        if 50706 in tags:
+        if version:
             metadata["dng_version"] = tags[50706]
+
         return cls.from_samples(
             samples,
             bits_per_sample=bits,
             cfa_pattern=cfa if len(cfa) == 4 else _DEFAULT_CFA,
-            # Keep absolute CFA phase when this tile is normalized locally.
-            phase_origin=((base_phase[0] + y0) & 1, (base_phase[1] + x0) & 1),
-            black_level=black or 0.0,
+            black_level=black,
             white_level=white or ((1 << bits) - 1,),
-            active_area=tile_area,
-            white_balance=wb if len(wb) == 4 else (1.0, 1.0, 1.0, 1.0),
-            orientation=int(tags.get(274, 1)),
+            active_area=(
+                tuple(int(value) for value in active_area)
+                if active_area
+                else None
+            ),
+            white_balance=(1.0, 1.0, 1.0, 1.0),
+            orientation=orientation,
             source_id=source_id,
             source_version=source_version,
             metadata=metadata,
@@ -370,6 +378,51 @@ class RawMosaicFrame:
         row_phase = (row_phase - self.phase_origin[0]) & 1
         col_phase = (col_phase - self.phase_origin[1]) & 1
         return self.samples[row_phase::2, col_phase::2]
+
+    def processing_samples(self, precision: str = "uint16") -> np.ndarray:
+        """Convert the calibrated mosaic to a Taichi-friendly precision."""
+        normalized = self.normalized_headroom()
+        key = str(precision).strip().lower()
+        if key in ("float32", "f32"):
+            return np.ascontiguousarray(normalized, dtype=np.float32)
+        if key in ("float16", "f16"):
+            return np.ascontiguousarray(normalized, dtype=np.float16)
+        if key in ("uint8", "u8"):
+            return np.clip(np.rint(normalized * 255.0), 0.0, 255.0).astype(np.uint8)
+        if key in ("uint16", "u16"):
+            return np.clip(np.rint(normalized * 65535.0), 0.0, 65535.0).astype(np.uint16)
+        raise ValueError(f"unsupported RAW processing precision: {precision}")
+
+    def as_processing_frame(self, precision: str = "uint16") -> "RawMosaicFrame":
+        """Return a frame whose samples use one supported processing dtype."""
+        samples = self.processing_samples(precision)
+        if samples.dtype == np.uint8:
+            bits, white = 8, 255.0
+        elif samples.dtype == np.uint16:
+            bits, white = 16, 65535.0
+        elif samples.dtype == np.float16:
+            bits, white = 16, 1.0
+        else:
+            bits, white = 32, 1.0
+        metadata = dict(self.metadata)
+        metadata.setdefault("source_bits_per_sample", self.bits_per_sample)
+        metadata.setdefault("source_dtype", str(self.samples.dtype))
+        metadata["processing_dtype"] = str(samples.dtype)
+        return RawMosaicFrame.from_samples(
+            samples,
+            bits_per_sample=bits,
+            cfa_pattern=self.cfa_pattern,
+            phase_origin=self.phase_origin,
+            black_level=0.0,
+            white_level=white,
+            active_area=self.active_area,
+            white_balance=self.white_balance,
+            exposure_scale=self.exposure_scale,
+            orientation=self.orientation,
+            source_id=self.source_id,
+            source_version=self.source_version,
+            metadata=metadata,
+        )
 
     def normalized_headroom(self, *, apply_white_balance: bool = False) -> np.ndarray:
         """Return float32 black-normalized values without upper clamping."""
@@ -446,9 +499,4 @@ class RawMosaicFrame:
         return ((planes[0][:height, :width] + planes[1][:height, :width]) * 0.5).astype(np.float32, copy=False)
 
 
-def raw_frame_from_dng(frame: Any, *, source_id: str = "", source_version: str = "") -> RawMosaicFrame:
-    """Compatibility helper for callers that already own a ``DNGFrame``."""
-    return RawMosaicFrame.from_dng(frame, source_id=source_id, source_version=source_version)
-
-
-__all__ = ["RawMosaicFrame", "raw_frame_from_dng"]
+__all__ = ["RawMosaicFrame"]

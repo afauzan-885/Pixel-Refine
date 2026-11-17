@@ -132,13 +132,19 @@ class ResidentONNXGraph:
         engine._assert_native_context_owner("resident leased invocation")
 
     def _view_sync(self):
+        from taichi import native_bridge
         from taichi.aot_engine import _raise_native_engine_error
         with self.engine._lock:
             self._view_guard()
             self.engine.sync()
-            # Use the owner's existing read/consume/raise policy. Never clear
-            # before sync: a fresh completion failure must keep the slot held.
-            _raise_native_engine_error(self.engine.runtime, "Resident invocation completion")
+            # `_raise_native_engine_error` always raises. Gate it on an actual
+            # native message: a completed sync with an empty error slot is a
+            # success, and raising there produced a phantom "unknown native
+            # failure" fault after output had already been written.
+            if native_bridge.last_error(self.engine.runtime):
+                _raise_native_engine_error(
+                    self.engine.runtime, "Resident invocation completion"
+                )
 
     def device_view(self, buffer, *, shape=None, offset_bytes=0, strides_bytes=()):
         from taichi.aot_engine import TaichiGPUBuffer

@@ -38,8 +38,8 @@ def validate_image_paths(image_paths):
 
     The importer accepts only files selected by the user that still exist,
     resolve to regular files, use a supported extension, and can be opened by
-    Pillow for standard image formats. RAW formats are validated by rawpy when
-    they are decoded by the thumbnail/processing pipeline.
+    Pillow for standard image formats. RAW formats are validated by the native
+    taichi reader when they are decoded by the thumbnail/processing pipeline.
     """
     accepted = []
     rejected = []

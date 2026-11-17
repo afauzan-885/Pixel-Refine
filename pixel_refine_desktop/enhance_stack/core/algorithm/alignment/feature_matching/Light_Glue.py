@@ -12,7 +12,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import onnxruntime as ort
+import taichi_vision.neural as ort
 
 from config import ALGORITHM_PARAMETER_SETTINGS_FILE
 
@@ -208,36 +208,22 @@ class LightGlueAlgorithm:
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
-        providers = ["CPUExecutionProvider"]
-        if use_gpu:
-            providers = [
-                (
-                    "CUDAExecutionProvider",
-                    {
-                        "device_id": 0,
-                        "gpu_mem_limit": 1024 * 1024 * 1024,
-                        "arena_extend_strategy": "kNextPowerOfTwo",
-                    },
-                ),
-                "CPUExecutionProvider",
-            ]
-
+        # Runtime Taichi memilih backend-nya sendiri; provider GPU/CPU hanya
+        # preferensi. Tidak ada fallback diam-diam: capability yang absen
+        # dilaporkan sebagai CapabilityMissingError yang menyebut op penyebab.
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_gpu else [
+            "CPUExecutionProvider"
+        ]
         try:
             self.sess = ort.InferenceSession(
                 self.PIPELINE_ONNX,
                 sess_options=sess_options,
                 providers=providers,
             )
-        except Exception as exc:
-            if use_gpu:
-                print(f"[LightGlueAlgorithm] GPU session failed, falling back to CPU: {exc}")
-                self.sess = ort.InferenceSession(
-                    self.PIPELINE_ONNX,
-                    sess_options=sess_options,
-                    providers=["CPUExecutionProvider"],
-                )
-            else:
-                raise
+        except ort.CapabilityMissingError as exc:
+            print(f"[LightGlueAlgorithm] runtime Taichi belum menutup graf ini: {exc}")
+            self.sess = None
+            raise
 
     def _cleanup_gpu(self):
         try:

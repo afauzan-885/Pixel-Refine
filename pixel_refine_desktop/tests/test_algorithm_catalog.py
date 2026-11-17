@@ -283,7 +283,7 @@ def test_start_flushes_active_batch_warp_settings_before_runtime_snapshot(
         RightPanel,
     )
     from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
-    from UILibrary import DataStore
+    from resources.GenericUILibrary import DataStore
 
     parameter_path = tmp_path / "batch_parameter.json"
     store = DataStore()
@@ -516,7 +516,7 @@ def test_alignment_page_uses_homography_for_legacy_apap_batches(
         RightPanel,
     )
     from pixel_refine_desktop.enhance_stack.core.logic import batch_parameter_manager
-    from UILibrary import DataStore
+    from resources.GenericUILibrary import DataStore
 
     parameter_path = tmp_path / "batch_parameter.json"
     monkeypatch.setattr(batch_parameter_manager, "BATCH_PARAMETER_PATH", str(parameter_path))
@@ -578,6 +578,19 @@ def test_alignment_page_uses_homography_for_legacy_apap_batches(
         _save_batch_settings = RightPanel._save_batch_settings
         select_batch_sync = RightPanel.select_batch_sync
         _on_process_all_clicked = RightPanel._on_process_all_clicked
+
+        def sync(self, *, values=None, persist=False, **_kwargs):
+            """Minimal scoped-write stand-in for the 3-API store binding."""
+            if values:
+                updates = {
+                    f"{self.current_batch_id}.{key}": value
+                    for key, value in values.items()
+                    if value is not None
+                }
+                store.update_bulk(updates, save=False)
+            if persist:
+                store.save_to_file()
+            return values
 
         def __init__(self):
             super().__init__()

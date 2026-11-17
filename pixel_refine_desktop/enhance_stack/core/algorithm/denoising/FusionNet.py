@@ -38,15 +38,15 @@ class FusionNetDenoisingAlgorithm:
         "fusionnet_denoising_mode": "standard",
         "fusionnet_work_pixel_fraction": 0.50,
         "work_scale": math.sqrt(0.50),  # Per-dimension scale derived from pixel area
-        "tile_size": 512,  # WeightNet model block (256, 512, 1024)
+        "tile_size": 1024,  # WeightNet bundle ships 1024x1024 only
         "fusionnet_max_neighbor_candidates": 4,
         "fusionnet_patch_search_radius": 5,
         "input_channels": 1,
+        "weightnet_variant": "v3",
+        "motion_sensitivity": 1.0,
+        "ghost_sensitivity": 0.3,
         "tile_overlap": 0.20,  # Tile overlap ratio (20% optimal for speed & seamless blend)
         "analysis_auto_enhance_mode": "natural",
-        "ghost_penalty": 3.50,
-        "ghost_penalty_min": 1.0,
-        "max_safety": 1.30,
     }
 
     def _load_inputs(self, ctx, frames):
@@ -179,8 +179,60 @@ class FusionNetDenoisingAlgorithm:
         ).strip().lower().replace(" ", "_")
         if denoising_mode not in ("standard", "deep_analysis"):
             denoising_mode = self.DEFAULT_CONFIG["fusionnet_denoising_mode"]
+        weightnet_variant = str(
+            params.get(
+                "fusionnet_weightnet_variant",
+                params.get(
+                    "weightnet_variant",
+                    self.DEFAULT_CONFIG.get("weightnet_variant", "v3"),
+                ),
+            )
+        ).strip().lower()
+        if weightnet_variant not in ("v3", "v3.1"):
+            weightnet_variant = "v3"
+        try:
+            motion_sensitivity = max(
+                1.0,
+                min(
+                    3.0,
+                    float(
+                        params.get(
+                            "fusionnet_motion_sensitivity",
+                            params.get(
+                                "motion_sensitivity",
+                                self.DEFAULT_CONFIG.get("motion_sensitivity", 1.0),
+                            ),
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            motion_sensitivity = 1.0
+        try:
+            ghost_sensitivity = max(
+                0.0,
+                min(
+                    5.0,
+                    float(
+                        params.get(
+                            "fusionnet_ghost_sensitivity",
+                            params.get(
+                                "ghost_sensitivity",
+                                self.DEFAULT_CONFIG.get("ghost_sensitivity", 0.3),
+                            ),
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            ghost_sensitivity = 0.3
+        # Both WeightNet bundles ship a single 1024x1024 profile; the block is locked.
+        tile_size = 1024
         return {
             "denoising_mode": denoising_mode,
+            "weightnet_variant": weightnet_variant,
+            "motion_sensitivity": motion_sensitivity,
+            "ghost_sensitivity": ghost_sensitivity,
             "max_neighbor_candidates": max(
                 1,
                 min(
@@ -203,24 +255,11 @@ class FusionNetDenoisingAlgorithm:
             "input_channels": 1,
             "analysis_auto_enhance_mode": analysis_auto_enhance_mode,
             "overlap": max(0.0, min(0.95, overlap)),
-            "ghost_penalty": float(
-                params.get(
-                    "fusionnet_ghost_penalty",
-                    params.get("ghost_penalty", self.DEFAULT_CONFIG["ghost_penalty"]),
-                )
-            ),
-            "ghost_penalty_min": float(
-                params.get(
-                    "ghost_penalty_min",
-                    self.DEFAULT_CONFIG["ghost_penalty_min"],
-                )
-            ),
-            "max_safety": float(
-                params.get(
-                    "fusionnet_max_safety",
-                    params.get("max_safety", self.DEFAULT_CONFIG["max_safety"]),
-                )
-            ),
+            # Internal only: the ONNX WeightNet path ignores these; kept for the
+            # resident pipeline signature / TCM fallback.
+            "ghost_penalty": 1.0,
+            "ghost_penalty_min": 1.0,
+            "max_safety": 1.30,
             "chroma_sensitivity": float(params.get("chroma_sensitivity", 1.0)),
             "alignment_plan": getattr(ctx, "alignment_selection_name", None)
             or params.get("alignment_plan", "No Alignment"),
@@ -251,7 +290,13 @@ class FusionNetDenoisingAlgorithm:
             patch_size=config["tile_size"],
             input_channels=config["input_channels"],
             max_safety=config.get("max_safety", 1.30),
+            variant=config.get("weightnet_variant", "v3"),
         )
+        variant = config.get("weightnet_variant", "v3")
+        if variant == "v3.1" and hasattr(session, "motion_sensitivity"):
+            session.motion_sensitivity = float(config.get("motion_sensitivity", 1.0))
+        elif variant == "v3" and hasattr(session, "ghost_sensitivity"):
+            session.ghost_sensitivity = float(config.get("ghost_sensitivity", 0.3))
         config["alignment_config"].setdefault("work_scale", config["work_scale"])
         result, mean_alpha = run_resident_pipeline(
             inputs,
@@ -449,11 +494,17 @@ class FusionNetDenoisingAlgorithm:
 
             session = load_weightnet_onnx(
                 DEFAULT_WEIGHTNET_ONNX,
-                runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "dml"),
+                runtime=os.environ.get("PIXEL_REFINE_WEIGHTNET_RUNTIME", "taichi_aot"),
                 patch_size=tile_size,
                 input_channels=config["input_channels"],
                 max_safety=config.get("max_safety", 1.30),
+                variant=config.get("weightnet_variant", "v3"),
             )
+            _variant = config.get("weightnet_variant", "v3")
+            if _variant == "v3.1" and hasattr(session, "motion_sensitivity"):
+                session.motion_sensitivity = float(config.get("motion_sensitivity", 1.0))
+            elif _variant == "v3" and hasattr(session, "ghost_sensitivity"):
+                session.ghost_sensitivity = float(config.get("ghost_sensitivity", 0.3))
 
             with AOTOpticalFlowAligner(
                 ref_enhanced,

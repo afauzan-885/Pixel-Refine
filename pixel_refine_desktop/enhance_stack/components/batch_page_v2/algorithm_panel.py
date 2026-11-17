@@ -17,12 +17,12 @@ from PySide6.QtCore import QThread, Qt, Signal, QTimer
 import config
 
 # Generic UI Library
-from UILibrary import (
+from resources.GenericUILibrary import (
     FormGroup,
     Button,
     ProgressBar as ModernProgressBar,
 )
-from UILibrary.mixins import SyncMixin
+from resources.GenericUILibrary.mixins import SyncMixin
 
 # Algorithm logic
 from pixel_refine_desktop.enhance_stack.core.logic.algorithm_logic import AlgorithmLogic
@@ -43,7 +43,7 @@ from pixel_refine_desktop.enhance_stack.core.logic.algorithm_processor import (
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 
 
-from UILibrary import live_update
+from resources.GenericUILibrary import live_update
 
 
 @live_update
@@ -95,7 +95,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
 
         # Real-time state binding
         if store:
-            self.bind_store(store)
+            self.bind(store)
 
         self._setup_ui()
 
@@ -217,7 +217,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
         )
         self.process_btn.setFixedWidth(180)  # Make it smaller and elegant
         
-        from UILibrary.theme import get_theme, create_button_style, apply_style
+        from resources.GenericUILibrary.theme import get_theme, create_button_style, apply_style
         theme = get_theme()
         apply_style(self.process_btn, create_button_style(self.process_btn.variant, theme).with_overrides(padding="6px 12px", font_size="10pt"))
 
@@ -290,6 +290,11 @@ class AlgorithmPanel(QWidget, SyncMixin):
 
         # 2. Start Processing
         self.show_progress(0)
+        display_panel = getattr(self, "display_panel", None)
+        if display_panel is not None and hasattr(
+            display_panel, "set_thumbnail_suspension"
+        ):
+            display_panel.set_thumbnail_suspension(True)
         self.processor_thread = AlgorithmProcessorThread(
             self.current_batch_id, settings, self
         )
@@ -328,7 +333,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self, enabled=None, text=None, variant=None, bg=None, hover=None
     ):
         """Helper to sync all process button instances."""
-        from UILibrary.theme import get_theme
+        from resources.GenericUILibrary.theme import get_theme
         theme = get_theme()
         for btn in self._all_process_buttons:
             try:
@@ -340,7 +345,7 @@ class AlgorithmPanel(QWidget, SyncMixin):
                     btn.variant = variant
                     # Update objectName to match the correct QSS selector for dynamic styling
                     btn.setObjectName("deleteButton" if variant == "danger" else "processButton")
-                    from UILibrary.theme import get_theme, create_button_style, apply_style
+                    from resources.GenericUILibrary.theme import get_theme, create_button_style, apply_style
                     theme = get_theme()
                     is_display_start = hasattr(self, "display_panel") and self.display_panel and btn == self.display_panel.start_btn_ref
                     padding_val = "5px" if is_display_start else "6px 12px"
@@ -383,6 +388,12 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self._is_processing = False
         self._cancel_delay_timer.stop()
 
+        display_panel = getattr(self, "display_panel", None)
+        if display_panel is not None and hasattr(
+            display_panel, "set_thumbnail_suspension"
+        ):
+            display_panel.set_thumbnail_suspension(False)
+
         self._update_all_buttons(enabled=True, text="▶ Start", variant="primary")
 
         self.hide_progress()
@@ -418,78 +429,63 @@ class AlgorithmPanel(QWidget, SyncMixin):
         self._update_timer.stop()
         self._pending_settings = None
 
-        # Set scope for SyncMixin
-        self.set_scope(str(batch_id))
-
-        # Initial sync is handled automatically by SyncMixin when scope changes?
-        # No, we need to trigger it manually after scope change if we want immediate effect
-        self.on_store_changed(None, self.get_data())
+        # Switch scope; ``sync`` applies and invokes ``on_sync`` immediately.
+        self.sync(scope=str(batch_id))
 
     def get_settings(self):
         return self.logic.get_settings()
 
     def _setup_bindings(self):
         """Setup declarative bindings for the algorithm panel."""
-        # Note: AlgorithmPanel doesn't have direct input widgets to bind TO,
-        # but it has logic that needs to be triggered.
-        # We'll use virtual properties or just keep the simplified on_store_changed.
-        # Actually, for AlgorithmPanel, it's easier to just fix on_store_changed.
+        # Note: AlgorithmPanel has no input widgets to bind TO; it reacts through
+        # ``on_sync`` and derives the adaptive UI from the scope payload.
         pass
 
-    def on_store_changed(self, key, value):
-        """React to store changes with fallback support."""
+    def on_sync(self, payload, *, key=None, origin=None):
+        """React to store changes with the normalized scope payload."""
         if not self.current_batch_id:
             return
 
-        str_id = str(self.current_batch_id)
+        all_settings = payload if isinstance(payload, dict) else {}
+        if not all_settings:
+            all_settings = self.sync(peek=True) or {}
 
-        # 1. Handle scope-specific updates
-        if (
-            key is None
-            or key == str_id
-            or (isinstance(key, str) and key.startswith(f"{str_id}."))
-        ):
-            # Get data with fallbacks manually if not using add_binding
-            all_settings = self.get_data(str_id)
-            if not all_settings or not isinstance(all_settings, dict):
-                all_settings = {}
-
-            ui_settings = {
-                config.KEY_ALIGNMENT: (
-                    all_settings.get(config.KEY_ALIGNMENT_ALGO, "No Alignment")
-                    if all_settings.get(config.KEY_CHECKBOX_ALIGN, False)
-                    else "No Alignment"
-                ),
-                config.KEY_SUPER_RESOLUTION: (
-                    all_settings.get(config.KEY_SUPER_RESOLUTION_ALGO, "No Super Resolution")
-                    if all_settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
-                    else "No Super Resolution"
-                ),
-                config.KEY_DENOISING: (
-                    all_settings.get(config.KEY_DENOISING_ALGO, "No Denoising")
-                    if all_settings.get(config.KEY_CHECKBOX_DENOISING, False)
-                    else "No Denoising"
-                ),
-                config.KEY_HDR: (
-                    all_settings.get(config.KEY_HDR_ALGO, "No HDR")
-                    if all_settings.get(config.KEY_CHECKBOX_HDR, False)
-                    else "No HDR"
-                ),
-                config.KEY_CHECKBOX_ALIGN: bool(
-                    all_settings.get(config.KEY_CHECKBOX_ALIGN, False)
-                ),
-                config.KEY_CHECKBOX_SUPER_RES: bool(
-                    all_settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
-                ),
-                config.KEY_CHECKBOX_DENOISING: bool(
-                    all_settings.get(config.KEY_CHECKBOX_DENOISING, False)
-                ),
-                config.KEY_CHECKBOX_HDR: bool(
-                    all_settings.get(config.KEY_CHECKBOX_HDR, False)
-                ),
-            }
-            # Update the UI
-            self.update_settings(ui_settings)
+        ui_settings = {
+            config.KEY_ALIGNMENT: (
+                all_settings.get(config.KEY_ALIGNMENT_ALGO, "No Alignment")
+                if all_settings.get(config.KEY_CHECKBOX_ALIGN, False)
+                else "No Alignment"
+            ),
+            config.KEY_SUPER_RESOLUTION: (
+                all_settings.get(config.KEY_SUPER_RESOLUTION_ALGO, "No Super Resolution")
+                if all_settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
+                else "No Super Resolution"
+            ),
+            config.KEY_DENOISING: (
+                all_settings.get(config.KEY_DENOISING_ALGO, "No Denoising")
+                if all_settings.get(config.KEY_CHECKBOX_DENOISING, False)
+                else "No Denoising"
+            ),
+            config.KEY_HDR: (
+                all_settings.get(config.KEY_HDR_ALGO, "No HDR")
+                if all_settings.get(config.KEY_CHECKBOX_HDR, False)
+                else "No HDR"
+            ),
+            config.KEY_CHECKBOX_ALIGN: bool(
+                all_settings.get(config.KEY_CHECKBOX_ALIGN, False)
+            ),
+            config.KEY_CHECKBOX_SUPER_RES: bool(
+                all_settings.get(config.KEY_CHECKBOX_SUPER_RES, False)
+            ),
+            config.KEY_CHECKBOX_DENOISING: bool(
+                all_settings.get(config.KEY_CHECKBOX_DENOISING, False)
+            ),
+            config.KEY_CHECKBOX_HDR: bool(
+                all_settings.get(config.KEY_CHECKBOX_HDR, False)
+            ),
+        }
+        # Update the UI
+        self.update_settings(ui_settings)
 
     def update_settings(self, settings):
         """Receive updated settings and trigger adaptive UI with debounce."""

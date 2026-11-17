@@ -66,7 +66,9 @@ from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets.bulk_thumbn
     show_thumbnail,
 )
 from pixel_refine_desktop.enhance_stack.core.logic.batch_parameter_manager import (
+    get_json_path,
     load_json_state,
+    save_json_state,
 )
 from pixel_refine_desktop.enhance_stack.core.logic.workflow_process import (
     ImageViewer,
@@ -77,12 +79,6 @@ from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
     ThumbnailPolicy,
     thumbnail_creation_enabled,
 )
-
-
-def save_json_state(path, state):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(state, f, indent=4)
 
 
 class ClickableLabel(QLabel):
@@ -172,8 +168,7 @@ class CombinedPanel(QWidget):
         _initial_state_passed = initial_state if initial_state is not None else {}
 
         if self.batch_id is not None and initial_state is None:
-            json_path_val = os.path.join("database", "align", "batch_parameter.json")
-            all_saved_states = load_json_state(json_path_val)
+            all_saved_states = load_json_state(get_json_path())
             self.initial_state = all_saved_states.get(str(self.batch_id), {})
 
         else:
@@ -874,7 +869,7 @@ class CombinedPanel(QWidget):
 
     def process_and_preview(self):
         """Jalankan semua algoritma batch secara asynchronous (background thread) dengan ProgressModal, lalu tampilkan preview gambar."""
-        from UILibrary import ProgressModal, AlertModal
+        from resources.GenericUILibrary import ProgressModal, AlertModal
         from pixel_refine_desktop.enhance_stack.core.logic.algorithm_processor import (
             AlgorithmProcessorThread,
         )
@@ -925,7 +920,7 @@ class CombinedPanel(QWidget):
 
     def handle_preview_button(self):
         """Menampilkan gambar terbaru setelah batch diproses."""
-        from UILibrary import AlertModal
+        from resources.GenericUILibrary import AlertModal
 
         latest_image_path = get_last_image("database/stack")
         if latest_image_path and latest_image_path.lower().endswith(".dng"):
@@ -944,7 +939,7 @@ class CombinedPanel(QWidget):
             )
 
     def dropdown_box_control(self):
-        from UILibrary.theme import get_theme
+        from resources.GenericUILibrary.theme import get_theme
 
         theme = get_theme()
         override_style = f"""
@@ -1085,21 +1080,12 @@ class CombinedPanel(QWidget):
 
     def _save_state_to_json(self, batch_id):
         """Simpan state checkbox dan combobox untuk batch_id ke dalam file JSON."""
-        json_path = os.path.join("database", "align", "batch_parameter.json")
+        json_path = get_json_path()
         state = self.get_current_state()
 
-        # Baca data lama jika ada
-        if os.path.exists(json_path):
-            with open(json_path, "r") as f:
-                all_batches = json.load(f)
-        else:
-            all_batches = {}
-
+        all_batches = load_json_state(json_path)
         all_batches[str(batch_id)] = state
-
-        os.makedirs(os.path.dirname(json_path), exist_ok=True)
-        with open(json_path, "w") as f:
-            json.dump(all_batches, f, indent=4)
+        save_json_state(json_path, all_batches)
 
     def _trigger_exclusive_handler(self, checkbox_key):
         """Dipanggil oleh klik label atau toggle checkbox untuk memicu logika eksklusif."""
@@ -1251,7 +1237,7 @@ class CombinedPanel(QWidget):
             return
 
         # --- Langkah 2: Baca Konfigurasi dari File JSON ---
-        json_path = os.path.join("database", "align", "batch_parameter.json")
+        json_path = get_json_path()
         config_from_json = {}
 
         if os.path.exists(json_path):
@@ -1259,7 +1245,7 @@ class CombinedPanel(QWidget):
             config_from_json = all_batches_in_json.get(str(self.batch_id), {})
             if not config_from_json:
                 print(
-                    f"[WARN] No configuration found in batch_parameter.json for batch_id: {self.batch_id}. Skipping."
+                    f"[WARN] No configuration found in ProjectParameters.json for batch_id: {self.batch_id}. Skipping."
                 )
                 return
 
@@ -1425,7 +1411,7 @@ class CombinedPanel(QWidget):
             SCROLL_AREA,
         )
         from PySide6.QtWidgets import QCheckBox, QComboBox, QScrollArea, QPushButton
-        from UILibrary.theme import get_theme, create_button_style, apply_style
+        from resources.GenericUILibrary.theme import get_theme, create_button_style, apply_style
 
         theme = get_theme()
 

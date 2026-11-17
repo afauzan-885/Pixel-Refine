@@ -454,11 +454,10 @@ def test_raw_provider_normalization_preserves_fractional_per_plane_levels():
         row, col = divmod(index, 2)
         target = expected[row::2, col::2]
         source = FakeRawFrame.samples[row::2, col::2].astype(np.float32)
-        target[:] = np.clip(
+        target[:] = np.maximum(
             (source - np.float32(black))
             * (np.float32(1.0) / np.float32(white - black)),
             np.float32(0.0),
-            np.float32(1.0),
         )
 
     assert actual.dtype == np.float32

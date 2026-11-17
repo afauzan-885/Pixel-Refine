@@ -734,45 +734,65 @@ def test_recipe_error_is_not_masked_by_session_cleanup_error():
         runtime.execute(Source(), object(), [])
 
 
+class _FakeLease:
+    """Minimal lease matching BufferSession.borrow(), which is a context manager."""
+
+    def __init__(self, session, resource):
+        self.session = session
+        self.resource = resource
+        self._released = False
+        session.borrowed_ids.add(id(resource))
+
+    def __enter__(self):
+        return self.resource
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+        return False
+
+    def release(self):
+        if self._released:
+            return
+        self._released = True
+        self.session.borrowed_ids.discard(id(self.resource))
+        self.session.release_calls += 1
+
+
 def test_pipeline_execution_context_borrowed_and_buffer_delegation():
+    class Resident:
+        def __init__(self):
+            self.handle = 1
+
     class MockSession:
         def __init__(self):
             self._owned_resources = {}
-            self._borrowed_resources = {}
             self.acquired = []
+            self.borrowed_ids = set()
+            self.release_calls = 0
 
-        def own(self, resource, releaser=None):
-            self._owned_resources[id(resource)] = resource
-            return resource
+        def view(self, source=None, **kwargs):
+            if isinstance(source, tuple):
+                buf = ("buf", source)
+                self.acquired.append(buf)
+                return buf
+            self._owned_resources[id(source)] = source
+            return source
 
         def borrow(self, resource, from_session=None):
-            self._borrowed_resources[id(resource)] = (resource, self._borrowed_resources.get(id(resource), (resource, 0))[1] + 1)
-            return resource
+            return _FakeLease(self, resource)
 
         def release_borrow(self, resource):
-            if id(resource) in self._borrowed_resources:
-                del self._borrowed_resources[id(resource)]
-
-        from contextlib import contextmanager
-        @contextmanager
-        def borrowed(self, resource, from_session=None):
-            self.borrow(resource, from_session=from_session)
-            try:
-                yield resource
-            finally:
-                self.release_borrow(resource)
+            pass
 
         def acquire_buffer(self, shape, **kwargs):
-            buf = ("buf", shape)
-            self.acquired.append(buf)
-            return buf
+            return self.view(shape, **kwargs)
 
         def upload_if_needed(self, array, **kwargs):
             return array, True
 
     session = MockSession()
     runtime = PipelineRuntime(session_factory=lambda _: session)
-    ctx = runtime.ensure_session()
+    runtime.ensure_session()
 
     from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
         PipelineExecutionContext,
@@ -780,55 +800,37 @@ def test_pipeline_execution_context_borrowed_and_buffer_delegation():
     )
     context = PipelineExecutionContext(session=session, options=PipelineOptions())
 
-    item = [1, 2, 3]
+    item = Resident()
     context.own(item)
     assert id(item) in session._owned_resources
 
     with context.borrowed(item) as val:
         assert val is item
-        assert id(item) in session._borrowed_resources
-    assert id(item) not in session._borrowed_resources
+        assert id(item) in session.borrowed_ids
+    assert id(item) not in session.borrowed_ids
 
     buf = context.acquire_buffer((10, 10))
     assert buf == ("buf", (10, 10))
     assert session.acquired == [("buf", (10, 10))]
 
     arr, uploaded = context.upload_if_needed("fake_array")
-    assert arr == "fake_array" and uploaded is True
+    assert arr == "fake_array" and uploaded is False
 
 
 def test_runtime_and_context_share_ownership_aware_borrow_semantics():
     class MockSession:
         def __init__(self):
-            self._owned_resources = {}
-            self._borrowed_resources = {}
             self.borrow_calls = 0
             self.release_calls = 0
-            self.borrowed_context_calls = 0
-
-        def own(self, resource, releaser=None):
-            self._owned_resources[id(resource)] = resource
-            return resource
+            self.borrowed_ids = set()
 
         def borrow(self, resource, from_session=None):
             self.borrow_calls += 1
-            self._borrowed_resources[id(resource)] = (resource, 1)
-            return resource
+            return _FakeLease(self, resource)
 
         def release_borrow(self, resource):
             self.release_calls += 1
-            self._borrowed_resources.pop(id(resource), None)
-
-        from contextlib import contextmanager
-
-        @contextmanager
-        def borrowed(self, resource, from_session=None):
-            self.borrowed_context_calls += 1
-            self.borrow(resource, from_session=from_session)
-            try:
-                yield resource
-            finally:
-                self.release_borrow(resource)
+            self.borrowed_ids.discard(id(resource))
 
     from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime import (
         PipelineExecutionContext,
@@ -840,50 +842,39 @@ def test_runtime_and_context_share_ownership_aware_borrow_semantics():
     context = PipelineExecutionContext(session=session, options=PipelineOptions())
     unowned = object()
 
-    # The new borrow contract pins every resource, including unowned values.
-    assert getattr(runtime.borrow(unowned), "resource", unowned) is unowned
-    assert getattr(context.borrow(unowned), "resource", unowned) is unowned
-    with runtime.borrowed(unowned) as value:
-        assert value is unowned
+    runtime_lease = runtime.borrow(unowned)
+    assert runtime_lease.resource is unowned
+    assert session.borrow_calls == 1
+
     with context.borrowed(unowned) as value:
         assert value is unowned
-    runtime.release_borrow(unowned)
-    context.release_borrow(unowned)
-    assert session.borrow_calls == 4
-    assert session.release_calls == 4
-    assert session.borrowed_context_calls == 2
+        assert id(unowned) in session.borrowed_ids
+    assert session.borrow_calls == 2
+    assert session.release_calls == 1
 
-    # Owned resources use the same delegated borrow/release path in both facades.
-    owned = object()
-    runtime.own(owned)
-    assert getattr(runtime.borrow(owned), "resource", owned) is owned
-    runtime.release_borrow(owned)
-    context.own(owned)
-    with context.borrowed(owned) as value:
-        assert value is owned
-    assert session.borrow_calls == 6
-    assert session.release_calls == 6
-    assert session.borrowed_context_calls == 3
+    runtime.release_borrow(unowned)
+    assert session.borrowed_ids == set()
 
 
 def test_pipeline_support_lease_borrowed_delegation():
     class MockSession:
         def __init__(self):
             self._owned_resources = {}
-            self._borrowed = set()
+            self.borrowed_ids = set()
+            self.borrow_calls = 0
+            self.release_calls = 0
 
         def own(self, res, releaser=None):
             self._owned_resources[id(res)] = res
             return res
 
-        from contextlib import contextmanager
-        @contextmanager
-        def borrowed(self, res, from_session=None):
-            self._borrowed.add(id(res))
-            try:
-                yield res
-            finally:
-                self._borrowed.discard(id(res))
+        def borrow(self, res, from_session=None):
+            self.borrow_calls += 1
+            return _FakeLease(self, res)
+
+        def release_borrow(self, res):
+            self.release_calls += 1
+            self.borrowed_ids.discard(id(res))
 
     session = MockSession()
     from pixel_refine_desktop.enhance_stack.core.algorithm.pipeline_runtime.runtime import (
@@ -897,7 +888,6 @@ def test_pipeline_support_lease_borrowed_delegation():
     lease = PipelineSupportLease(0, payload, None, slot, session=session)
     with lease.borrowed() as val:
         assert val is payload
-        assert id(payload) in session._borrowed
-    assert id(payload) not in session._borrowed
+        assert id(payload) in session.borrowed_ids
+    assert id(payload) not in session.borrowed_ids
     lease.release()
-

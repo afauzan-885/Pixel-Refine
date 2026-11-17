@@ -157,12 +157,29 @@ def _row_bytes(raw: Any, endian: str) -> bytes:
 
 def _pack_samples(raw: Any, bits: int, endian: str) -> bytes:
     np = _numpy()
-    if not 1 <= bits <= 16 or raw.dtype not in (np.uint8, np.uint16):
+    if not 1 <= bits <= 32:
+        raise ValueError("packed DNG samples require 1..32-bit integer data")
+    if bits <= 16 and raw.dtype not in (np.uint8, np.uint16):
         raise ValueError("packed DNG samples require 1..16-bit integer data")
+    if bits > 16 and raw.dtype not in (np.uint16, np.uint32):
+        raise ValueError("24/32-bit DNG samples require uint16 or uint32 input")
     if bits in (8, 16):
         if raw.size and int(np.max(raw)) >= (1 << bits):
             raise ValueError("DNG sample exceeds declared bit depth")
-        return _row_bytes(raw, endian)
+        dtype = np.uint8 if bits == 8 else np.uint16
+        return _row_bytes(np.ascontiguousarray(raw, dtype=dtype), endian)
+    if bits == 24:
+        if raw.size and int(np.max(raw)) >= (1 << 24):
+            raise ValueError("DNG sample exceeds declared 24-bit depth")
+        codes = np.ascontiguousarray(raw, dtype=np.uint32)
+        little = endian == "II"
+        view = codes.astype("<u4" if little else ">u4", copy=False).view(np.uint8)
+        view = np.ascontiguousarray(view).reshape(-1, 4)
+        return (view[:, :3] if little else view[:, 1:]).tobytes()
+    if bits == 32:
+        return np.ascontiguousarray(raw, dtype=np.uint32).astype(
+            "<u4" if endian == "II" else ">u4", copy=False
+        ).tobytes()
     row_bits = raw.shape[1] * bits
     row_size = (row_bits + 7) // 8
     output = bytearray()
@@ -393,403 +410,6 @@ def _lossless_jpeg_payload(samples: Any, precision: int, selection: int, huffman
     return b"\xff\xd8" + _jpeg_marker(0xC3, sof_payload) + dht + _jpeg_marker(0xDA, sos_payload) + bytes(stuffed) + b"\xff\xd9"
 
 
-class _LosslessJpegBitReader:
-    __slots__ = ("data", "offset")
-
-    def __init__(self, data: bytes):
-        self.data = memoryview(data).cast("B")
-        self.offset = 0
-
-    def read(self, count: int) -> int:
-        count = int(count)
-        if count < 0 or count > 16 or self.offset + count > len(self.data) * 8:
-            raise ValueError("truncated lossless JPEG entropy data")
-        value = 0
-        for _ in range(count):
-            byte_index, bit_index = divmod(self.offset, 8)
-            value = (value << 1) | ((int(self.data[byte_index]) >> (7 - bit_index)) & 1)
-            self.offset += 1
-        return value
-
-    @property
-    def remaining(self) -> int:
-        return len(self.data) * 8 - self.offset
-
-
-def _parse_lossless_jpeg_huffman(payload: bytes, tables: dict[int, dict[tuple[int, int], int]]) -> None:
-    cursor = 0
-    while cursor < len(payload):
-        if cursor + 17 > len(payload):
-            raise ValueError("truncated lossless JPEG DHT marker")
-        table_spec = payload[cursor]
-        cursor += 1
-        table_class, table_id = table_spec >> 4, table_spec & 15
-        if table_class != 0 or table_id > 3 or table_id in tables:
-            raise ValueError("unsupported or duplicate lossless JPEG Huffman table")
-        counts = tuple(int(value) for value in payload[cursor:cursor + 16])
-        cursor += 16
-        total = sum(counts)
-        if total <= 0 or total > 256 or cursor + total > len(payload):
-            raise ValueError("invalid lossless JPEG Huffman table size")
-        values = payload[cursor:cursor + total]
-        cursor += total
-        table: dict[tuple[int, int], int] = {}
-        code = 0
-        for length, count in enumerate(counts, 1):
-            for value in values[sum(counts[:length - 1]) : sum(counts[:length - 1]) + count]:
-                if code >= (1 << length):
-                    raise ValueError("overfull lossless JPEG Huffman table")
-                key = (length, code)
-                if key in table:
-                    raise ValueError("duplicate lossless JPEG Huffman code")
-                table[key] = int(value)
-                code += 1
-            code <<= 1
-        tables[table_id] = table
-    if cursor != len(payload):
-        raise ValueError("lossless JPEG DHT marker has trailing bytes")
-
-
-def _lossless_jpeg_huffman_decode(reader: _LosslessJpegBitReader, table: dict[tuple[int, int], int]) -> int:
-    code = 0
-    for length in range(1, 17):
-        code = (code << 1) | reader.read(1)
-        symbol = table.get((length, code))
-        if symbol is not None:
-            return int(symbol)
-    raise ValueError("invalid lossless JPEG Huffman code")
-
-
-def _lossless_jpeg_payload_decode(
-    payload: bytes,
-    expected_samples: int,
-    expected_precision: int | None = None,
-) -> Any:
-    """Decode the maintained one-component T.81 process-14 profile."""
-    np = _numpy()
-    data = bytes(payload)
-    if len(data) < 4 or data[:2] != b"\xff\xd8":
-        raise ValueError("lossless JPEG strip must start with SOI")
-    position = 2
-    frame = None
-    scan = None
-    tables: dict[int, dict[tuple[int, int], int]] = {}
-    restart_interval = 0
-    entropy_start = None
-    while position < len(data):
-        if data[position] != 0xFF:
-            raise ValueError("invalid lossless JPEG marker alignment")
-        while position < len(data) and data[position] == 0xFF:
-            position += 1
-        if position >= len(data):
-            raise ValueError("truncated lossless JPEG marker")
-        marker = data[position]
-        position += 1
-        if marker == 0x00:
-            raise ValueError("stuffed byte outside lossless JPEG entropy data")
-        if marker == 0xD9:
-            raise ValueError("lossless JPEG EOI appeared before SOS")
-        if marker in range(0xD0, 0xD8) or marker == 0x01:
-            raise ValueError("unexpected standalone marker in lossless JPEG header")
-        if position + 2 > len(data):
-            raise ValueError("truncated lossless JPEG marker length")
-        segment_length = struct.unpack_from(">H", data, position)[0]
-        if segment_length < 2 or position + segment_length > len(data):
-            raise ValueError("lossless JPEG marker length is out of bounds")
-        segment = data[position + 2 : position + segment_length]
-        position += segment_length
-        if marker == 0xC3:
-            if frame is not None or len(segment) < 6:
-                raise ValueError("invalid or duplicate lossless JPEG SOF3")
-            precision = int(segment[0])
-            height, width = struct.unpack_from(">HH", segment, 1)
-            components = int(segment[5])
-            if not 2 <= precision <= 16 or width <= 0 or height <= 0 or components != 1:
-                raise ValueError("only one-component SOF3 lossless JPEG is supported")
-            if len(segment) != 6 + components * 3:
-                raise ValueError("lossless JPEG SOF3 length is invalid")
-            component_id, sampling, table_id = segment[6:9]
-            if sampling != 0x11 or table_id != 0:
-                raise ValueError("subsampled lossless JPEG components are unsupported")
-            frame = (precision, int(width), int(height), int(component_id))
-        elif marker == 0xC4:
-            _parse_lossless_jpeg_huffman(segment, tables)
-        elif marker == 0xDD:
-            if len(segment) != 2:
-                raise ValueError("invalid lossless JPEG restart interval marker")
-            restart_interval = struct.unpack(">H", segment)[0]
-        elif marker == 0xDA:
-            if scan is not None or len(segment) != 6 or frame is None:
-                raise ValueError("invalid or duplicate lossless JPEG SOS")
-            components, component_id, table_spec, selection, spectral_end, point = segment
-            if components != 1 or component_id != frame[3] or table_spec & 0x0F != 0:
-                raise ValueError("lossless JPEG SOS component/table is unsupported")
-            if selection not in range(1, 8) or spectral_end != 0 or point != 0:
-                raise ValueError("lossless JPEG predictor or point transform is unsupported")
-            scan = (int(selection), int(table_spec >> 4))
-            entropy_start = position
-            break
-        elif marker in (0xC0, 0xC1, 0xC2, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
-            raise ValueError("lossy or arithmetic JPEG frame in a lossless DNG strip")
-
-    if frame is None or scan is None or entropy_start is None:
-        raise ValueError("lossless JPEG strip is missing SOF3 or SOS")
-    precision, width, height, _component_id = frame
-    if restart_interval:
-        raise ValueError("lossless JPEG restart markers are not yet supported")
-    if expected_samples <= 0 or width * height != int(expected_samples):
-        raise ValueError("lossless JPEG sample count does not match the TIFF strip")
-    if expected_precision is not None and precision != int(expected_precision):
-        raise ValueError("lossless JPEG precision does not match the TIFF bit depth")
-    if scan[1] not in tables:
-        raise ValueError("lossless JPEG SOS references a missing Huffman table")
-
-    entropy = bytearray()
-    position = entropy_start
-    while position < len(data):
-        value = data[position]
-        position += 1
-        if value != 0xFF:
-            entropy.append(value)
-            continue
-        if position >= len(data):
-            raise ValueError("truncated lossless JPEG entropy marker")
-        marker = data[position]
-        position += 1
-        while marker == 0xFF:
-            if position >= len(data):
-                raise ValueError("truncated lossless JPEG fill marker")
-            marker = data[position]
-            position += 1
-        if marker == 0x00:
-            entropy.append(0xFF)
-        elif marker == 0xD9:
-            if position != len(data):
-                raise ValueError("trailing bytes after lossless JPEG EOI")
-            break
-        elif marker in range(0xD0, 0xD8):
-            raise ValueError("lossless JPEG restart markers are not yet supported")
-        else:
-            raise ValueError("unexpected marker inside lossless JPEG entropy data")
-    else:
-        raise ValueError("lossless JPEG strip is missing EOI")
-
-    reader = _LosslessJpegBitReader(bytes(entropy))
-    output = np.empty(int(expected_samples), dtype=np.uint16)
-    selection = scan[0]
-    initial = 1 << (precision - 1)
-    mask = (1 << precision) - 1
-    for index in range(int(expected_samples)):
-        row, column = divmod(index, width)
-        if row == 0:
-            prediction = initial if column == 0 else int(output[index - 1])
-        elif column == 0:
-            prediction = int(output[index - width])
-        else:
-            left = int(output[index - 1])
-            upper = int(output[index - width])
-            diagonal = int(output[index - width - 1])
-            if selection == 1:
-                prediction = left
-            elif selection == 2:
-                prediction = upper
-            elif selection == 3:
-                prediction = diagonal
-            elif selection == 4:
-                prediction = left + upper - diagonal
-            elif selection == 5:
-                prediction = left + ((upper - diagonal) // 2)
-            elif selection == 6:
-                prediction = upper + ((left - diagonal) // 2)
-            else:
-                prediction = (left + upper) // 2
-        category = _lossless_jpeg_huffman_decode(reader, tables[scan[1]])
-        if category < 0 or category > 16:
-            raise ValueError("lossless JPEG difference category exceeds the JPEG limit")
-        if category == 0:
-            delta = 0
-        elif category == 16:
-            delta = -32768
-        else:
-            amplitude = reader.read(category)
-            delta = amplitude if amplitude >= (1 << (category - 1)) else amplitude - ((1 << category) - 1)
-        value = prediction + int(delta)
-        if not 0 <= value <= mask:
-            value &= mask
-        output[index] = value
-    if reader.remaining > 7:
-        raise ValueError("lossless JPEG entropy has excess data")
-    while reader.remaining:
-        if reader.read(1) != 1:
-            raise ValueError("lossless JPEG entropy padding is not all ones")
-    return output
-
-
-def _unpack_packed_row(raw: bytes, width: int, bits: int) -> Any:
-    """Vectorized unpack for the common packed Bayer widths.
-
-    DNG 10/12/14-bit sensors are frequent in camera files.  The old scalar
-    decoder was exact but performed one Python loop per sensor code, making a
-    tiled 12MP read prohibitively slow.  Decode complete byte groups with
-    NumPy and retain a tiny scalar tail for odd row widths.
-    """
-    np = _numpy()
-    if bits not in (10, 12, 14):
-        raise ValueError("vectorized packed-row decode supports 10, 12, or 14 bits")
-    samples_per_group = {10: 4, 12: 2, 14: 4}[bits]
-    bytes_per_group = {10: 5, 12: 3, 14: 7}[bits]
-    full_groups = int(width) // samples_per_group
-    full_samples = full_groups * samples_per_group
-    encoded = np.frombuffer(raw, dtype=np.uint8)
-    output = np.empty(int(width), dtype=np.uint16)
-    if full_groups:
-        grouped = encoded[: full_groups * bytes_per_group].reshape(
-            full_groups, bytes_per_group
-        ).astype(np.uint16, copy=False)
-        if bits == 10:
-            decoded = np.stack(
-                (
-                    (grouped[:, 0] << 2) | (grouped[:, 1] >> 6),
-                    ((grouped[:, 1] & 0x3F) << 4) | (grouped[:, 2] >> 4),
-                    ((grouped[:, 2] & 0x0F) << 6) | (grouped[:, 3] >> 2),
-                    ((grouped[:, 3] & 0x03) << 8) | grouped[:, 4],
-                ),
-                axis=1,
-            )
-        elif bits == 12:
-            decoded = np.stack(
-                (
-                    (grouped[:, 0] << 4) | (grouped[:, 1] >> 4),
-                    ((grouped[:, 1] & 0x0F) << 8) | grouped[:, 2],
-                ),
-                axis=1,
-            )
-        else:  # 14-bit, four samples in seven bytes
-            decoded = np.stack(
-                (
-                    (grouped[:, 0] << 6) | (grouped[:, 1] >> 2),
-                    ((grouped[:, 1] & 0x03) << 12)
-                    | (grouped[:, 2] << 4)
-                    | (grouped[:, 3] >> 4),
-                    ((grouped[:, 3] & 0x0F) << 10)
-                    | (grouped[:, 4] << 2)
-                    | (grouped[:, 5] >> 6),
-                    ((grouped[:, 5] & 0x3F) << 8) | grouped[:, 6],
-                ),
-                axis=1,
-            )
-        output[:full_samples] = decoded.reshape(-1)
-    remaining = int(width) - full_samples
-    if remaining:
-        position = full_groups * bytes_per_group
-        accumulator = 0
-        available = 0
-        for index in range(remaining):
-            while available < bits:
-                if position >= encoded.size:
-                    raise ValueError("packed DNG row is truncated")
-                accumulator = (accumulator << 8) | int(encoded[position])
-                position += 1
-                available += 8
-            available -= bits
-            output[full_samples + index] = (accumulator >> available) & ((1 << bits) - 1)
-            accumulator &= (1 << available) - 1 if available else 0
-    return output
-
-
-def _unpack_packed_row_region(
-    raw: bytes,
-    width: int,
-    bits: int,
-    x0: int,
-    x1: int,
-) -> Any:
-    """Decode only the packed groups intersecting ``[x0, x1)``."""
-    if bits not in (10, 12, 14) or (x0 == 0 and x1 == width):
-        return _unpack_packed_row(raw, width, bits)[x0:x1]
-    samples_per_group = {10: 4, 12: 2, 14: 4}[bits]
-    bytes_per_group = {10: 5, 12: 3, 14: 7}[bits]
-    group_start = x0 // samples_per_group
-    group_end = min(
-        (x1 + samples_per_group - 1) // samples_per_group,
-        (width + samples_per_group - 1) // samples_per_group,
-    )
-    group_width = min(width, group_end * samples_per_group) - group_start * samples_per_group
-    byte_start = group_start * bytes_per_group
-    byte_end = byte_start + (group_width * bits + 7) // 8
-    decoded = _unpack_packed_row(raw[byte_start:byte_end], group_width, bits)
-    local_start = x0 - group_start * samples_per_group
-    local_end = local_start + (x1 - x0)
-    return decoded[local_start:local_end]
-
-
-def _unpack_samples(raw: bytes, width: int, height: int, bits: int, endian: str = "II") -> Any:
-    np = _numpy()
-    expected = height * ((width * bits + 7) // 8)
-    if width <= 0 or height <= 0 or not 1 <= bits <= 16 or len(raw) != expected:
-        raise ValueError("DNG sample payload length or geometry is invalid")
-    if bits == 8:
-        return np.frombuffer(raw, dtype=np.uint8).reshape(height, width).copy()
-    if bits == 16:
-        dtype = ">u2" if endian == "MM" else "<u2"
-        return np.frombuffer(raw, dtype=dtype).reshape(height, width).copy()
-    samples_per_group = {10: 4, 12: 2, 14: 4}.get(bits)
-    if samples_per_group is not None and (width % samples_per_group) == 0:
-        encoded = np.frombuffer(raw, dtype=np.uint8)
-        output = np.empty((height, width), dtype=np.uint16)
-        flat = output.ravel()
-        if bits == 10:
-            b0 = encoded[0::5].astype(np.uint16)
-            b1 = encoded[1::5].astype(np.uint16)
-            b2 = encoded[2::5].astype(np.uint16)
-            b3 = encoded[3::5].astype(np.uint16)
-            b4 = encoded[4::5].astype(np.uint16)
-            flat[0::4] = (b0 << 2) | (b1 >> 6)
-            flat[1::4] = ((b1 & 0x3F) << 4) | (b2 >> 4)
-            flat[2::4] = ((b2 & 0x0F) << 6) | (b3 >> 2)
-            flat[3::4] = ((b3 & 0x03) << 8) | b4
-            return output
-        elif bits == 12:
-            b0 = encoded[0::3].astype(np.uint16)
-            b1 = encoded[1::3].astype(np.uint16)
-            b2 = encoded[2::3].astype(np.uint16)
-            flat[0::2] = (b0 << 4) | (b1 >> 4)
-            flat[1::2] = ((b1 & 0x0F) << 8) | b2
-            return output
-        elif bits == 14:
-            b0 = encoded[0::7].astype(np.uint16)
-            b1 = encoded[1::7].astype(np.uint16)
-            b2 = encoded[2::7].astype(np.uint16)
-            b3 = encoded[3::7].astype(np.uint16)
-            b4 = encoded[4::7].astype(np.uint16)
-            b5 = encoded[5::7].astype(np.uint16)
-            b6 = encoded[6::7].astype(np.uint16)
-            flat[0::4] = (b0 << 6) | (b1 >> 2)
-            flat[1::4] = ((b1 & 0x03) << 12) | (b2 << 4) | (b3 >> 4)
-            flat[2::4] = ((b3 & 0x0F) << 10) | (b4 << 2) | (b5 >> 6)
-            flat[3::4] = ((b5 & 0x3F) << 8) | b6
-            return output
-    row_size = (width * bits + 7) // 8
-    output = np.empty((height, width), dtype=np.uint16)
-    for y in range(height):
-        row = raw[y * row_size:(y + 1) * row_size]
-        if bits in (10, 12, 14):
-            output[y] = _unpack_packed_row(row, width, bits)
-            continue
-        accumulator = 0
-        available = 0
-        position = 0
-        for x in range(width):
-            while available < bits:
-                accumulator = (accumulator << 8) | row[position]
-                position += 1
-                available += 8
-            available -= bits
-            output[y, x] = (accumulator >> available) & ((1 << bits) - 1)
-            accumulator &= (1 << available) - 1 if available else 0
-    return output
-
-
 def _packbits_rows(raw_bytes: bytes, row_size: int, height: int) -> bytes:
     return b"".join(packbits_encode(raw_bytes[y * row_size:(y + 1) * row_size]) for y in range(height))
 
@@ -897,9 +517,9 @@ def _delta_samples(data: Any, inverse: bool = False, bit_depth: int | None = Non
     modulus = 1 << (bit_depth or (8 * data.dtype.itemsize))
     graph = "compression_dng_undelta_rows" if inverse else "compression_dng_delta_rows"
     try:
-        # Keep the container parser dependency-free.  Importing the AOT
+        # Keep the container writer dependency-free.  Importing the AOT
         # dispatcher here would initialize a GPU context merely by importing
-        # ``read_dng_aot``; predictor paths are the only callers that need it.
+        # the writer; predictor paths are the only callers that need it.
         from taichi_vision.taichi_algorithm.aot_api.research import _dispatch
 
         result = _dispatch(
@@ -932,123 +552,6 @@ def _delta_samples(data: Any, inverse: bool = False, bit_depth: int | None = Non
         return output
 
 
-@dataclass(frozen=True)
-class DNGFrame:
-    width: int
-    height: int
-    bits_per_sample: int
-    compression: int
-    tags: dict[int, object]
-    raw_bytes: bytes
-    endian: str = "II"
-
-    def raw_view(self) -> memoryview:
-        """Return a zero-copy, read-only view of the decoded packed CFA rows."""
-        return memoryview(self.raw_bytes)
-
-    def samples(self) -> Any:
-        """Materialize the complete sensor plane.
-
-        ``sample_region`` is preferred by block/fusion callers because it
-        avoids creating a second full-frame ndarray.  Keeping this method as
-        the eager compatibility API is intentional: existing DNG callers
-        expect a standalone native ``uint8``/``uint16`` array.
-        """
-        return _unpack_samples(
-            self.raw_bytes, self.width, self.height, self.bits_per_sample, self.endian
-        )
-
-    def sample_region(
-        self,
-        y0: int,
-        y1: int,
-        x0: int,
-        x1: int,
-    ) -> Any:
-        """Decode one sensor-domain region without demosaicing.
-
-        The parser stores decoded strip rows in ``raw_bytes``.  This method
-        decodes only the requested rows and columns, which lets RAW fusion
-        stream tiles without materializing another full ``uint16`` frame.
-        Packed 10/12/14-bit samples use the exact same row unpacker as the
-        eager path, so bit depth and CFA samples remain lossless.
-        """
-        np = _numpy()
-        y0, y1, x0, x1 = (int(y0), int(y1), int(x0), int(x1))
-        if not (0 <= y0 <= y1 <= self.height and 0 <= x0 <= x1 <= self.width):
-            raise ValueError("DNG sample region is outside the frame")
-        if y0 == y1 or x0 == x1:
-            dtype = np.uint8 if self.bits_per_sample <= 8 else np.uint16
-            return np.empty((y1 - y0, x1 - x0), dtype=dtype)
-
-        row_size = (self.width * self.bits_per_sample + 7) // 8
-        output_dtype = np.uint8 if self.bits_per_sample <= 8 else np.uint16
-        output = np.empty((y1 - y0, x1 - x0), dtype=output_dtype)
-        for output_row, source_row in enumerate(range(y0, y1)):
-            start = source_row * row_size
-            row_bytes = self.raw_bytes[start : start + row_size]
-            if len(row_bytes) != row_size:
-                raise ValueError("decoded DNG sample row is truncated")
-            if self.bits_per_sample == 8:
-                row = np.frombuffer(row_bytes, dtype=np.uint8)
-            elif self.bits_per_sample == 16:
-                dtype = ">u2" if self.endian == "MM" else "<u2"
-                row = np.frombuffer(row_bytes, dtype=dtype)
-            else:
-                # Decode one packed row only.  This avoids an HxW temporary
-                # while retaining the parser's proven bit-order semantics.
-                if self.bits_per_sample in (10, 12, 14):
-                    row = _unpack_packed_row_region(
-                        row_bytes,
-                        self.width,
-                        self.bits_per_sample,
-                        x0,
-                        x1,
-                    )
-                    output[output_row] = np.asarray(row, dtype=output_dtype)
-                    continue
-                row = _unpack_samples(
-                    row_bytes, self.width, 1, self.bits_per_sample, self.endian
-                )[0]
-            output[output_row] = np.asarray(row[x0:x1], dtype=output_dtype)
-        return output
-
-    def iter_regions(
-        self,
-        block_size: int | tuple[int, int] = 512,
-    ):
-        """Yield ``(y0, y1, x0, x1, samples)`` sensor tiles.
-
-        This is a small streaming primitive for pre-demosaic alignment and
-        fusion.  It deliberately yields native integer samples and never
-        applies white balance, normalization, or interpolation.
-        """
-        if isinstance(block_size, int):
-            block_h = block_w = int(block_size)
-        else:
-            block_h, block_w = (int(block_size[0]), int(block_size[1]))
-        if block_h <= 0 or block_w <= 0:
-            raise ValueError("block_size must be positive")
-        for y0 in range(0, self.height, block_h):
-            y1 = min(self.height, y0 + block_h)
-            for x0 in range(0, self.width, block_w):
-                x1 = min(self.width, x0 + block_w)
-                yield y0, y1, x0, x1, self.sample_region(y0, y1, x0, x1)
-
-    def to_raw_frame(self, *, source_id: str = "", source_version: str = ""):
-        """Adapt this container frame to the semantic pre-demosaic contract.
-
-        The import is lazy to keep the container parser independent from the
-        higher-level RAW pipeline and to avoid an import cycle during package
-        startup.
-        """
-        from .raw_frame import RawMosaicFrame
-
-        return RawMosaicFrame.from_dng(
-            self, source_id=source_id, source_version=source_version
-        )
-
-
 def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str = "packbits", predictor: str = "none", bits_per_sample: int | None = None) -> bytes:
     """Write a minimal interoperable mosaiced DNG without external codecs.
 
@@ -1061,8 +564,8 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
     """
     np = _numpy()
     data = np.asarray(raw)
-    if data.ndim != 2 or data.dtype not in (np.uint8, np.uint16):
-        raise ValueError("DNG raw input must be a 2D uint8 or uint16 array")
+    if data.ndim != 2 or data.dtype not in (np.uint8, np.uint16, np.uint32):
+        raise ValueError("DNG raw input must be a 2D uint8, uint16, or uint32 array")
     compression = str(compression).strip().lower().replace("-", "_")
     if compression in {"jpeg", "jpeg_lossless", "losslessjpeg"}:
         compression = "lossless_jpeg"
@@ -1078,8 +581,8 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
     orientation = int(metadata.get("orientation", 1))
     if orientation not in range(1, 9):
         raise ValueError("orientation must be a TIFF orientation value from 1 to 8")
-    if not 1 <= bits <= 16:
-        raise ValueError("bits_per_sample must be between 1 and 16")
+    if not 1 <= bits <= 32:
+        raise ValueError("bits_per_sample must be between 1 and 32")
     if compression == "lossless_jpeg" and not 8 <= bits <= 16:
         raise ValueError("DNG Lossless JPEG requires 8..16-bit integer samples")
     if compression == "lossless_jpeg":
@@ -1183,8 +686,8 @@ def _encode_dng_array_legacy(raw, metadata: dict | None = None, compression: str
         (296, 3, 1, 2),
         (33421, 3, 2, (2, 2)),
         (33422, 1, 4, bytes(cfa)),
-        (50706, 1, 4, bytes((1, 4, 0, 0))),
-        (50707, 1, 4, bytes((1, 4, 0, 0))),
+        (50706, 1, 4, bytes((1, 7, 0, 0))),
+        (50707, 1, 4, bytes((1, 7, 0, 0))),
         (50708, 2, len(str(metadata.get("camera_model", "Pixel Refine Native")).encode("ascii")) + 1, metadata.get("camera_model", "Pixel Refine Native")),
         (50714, 3, 1, black_level),
         (50717, 4, 1, white_level),
@@ -1301,8 +804,8 @@ def encode_dng_bytes(
     width, height, bits = int(width), int(height), int(bits_per_sample)
     if width <= 0 or height <= 0 or width > 0xFFFFFFFF or height > 0xFFFFFFFF:
         raise ValueError("DNG width and height must fit positive TIFF LONG values")
-    if not 1 <= bits <= 16:
-        raise ValueError("bits_per_sample must be between 1 and 16")
+    if not 1 <= bits <= 32:
+        raise ValueError("bits_per_sample must be between 1 and 32")
     compression = str(compression).strip().lower().replace("-", "_")
     if compression in {"jpeg", "jpeg_lossless", "losslessjpeg", "lossless_jpeg"}:
         raise ValueError(
@@ -1380,8 +883,8 @@ def encode_dng_bytes(
         (296, 3, 1, 2),
         (33421, 3, 2, (2, 2)),
         (33422, 1, 4, bytes(cfa)),
-        (50706, 1, 4, bytes((1, 4, 0, 0))),
-        (50707, 1, 4, bytes((1, 4, 0, 0))),
+        (50706, 1, 4, bytes((1, 7, 0, 0))),
+        (50707, 1, 4, bytes((1, 7, 0, 0))),
         (50708, 2, camera_model_count, camera_model),
         (50714, 3, 1, black_level),
         (50717, 4, 1, white_level),
@@ -1426,10 +929,39 @@ def encode_dng_bytes(
     return bytes(output)
 
 
+def _rust_dng_writer():
+    """Return the native writer functions when the Rust extension is present."""
+    try:
+        import taichi
+    except ImportError:
+        return None
+    native = getattr(taichi, "taichi_python", None)
+    if native is None:
+        return None
+    encode = getattr(native, "encode_dng", None)
+    write = getattr(native, "write_dng", None)
+    if encode is None or write is None:
+        return None
+    return encode, write
+
+
+def _rust_dng_input(raw, *, bits_per_sample: int | None):
+    np = _numpy()
+    array = np.asarray(raw)
+    if array.ndim != 2:
+        raise ValueError("DNG raw input must be a 2D array")
+    if array.dtype not in (np.uint8, np.uint16, np.uint32):
+        raise ValueError("DNG raw input must use uint8, uint16, or uint32")
+    if bits_per_sample is not None and not 1 <= int(bits_per_sample) <= 32:
+        raise ValueError("bits_per_sample must be between 1 and 32")
+    contiguous = np.ascontiguousarray(array)
+    return memoryview(contiguous).cast("B"), int(contiguous.shape[1]), int(contiguous.shape[0]), str(contiguous.dtype)
+
+
 def encode_dng_aot(
     raw,
     metadata: dict | None = None,
-    compression: str = "packbits",
+    compression: str = "lossless_jpeg",
     predictor: str = "none",
     bits_per_sample: int | None = None,
     *,
@@ -1459,14 +991,50 @@ def encode_dng_aot(
         )
     if width is not None or height is not None:
         raise ValueError("width and height are only valid for packed byte input")
+    native = _rust_dng_writer()
+    if native is not None:
+        encode, _write = native
+        buffer, resolved_width, resolved_height, dtype = _rust_dng_input(
+            raw, bits_per_sample=bits_per_sample
+        )
+        return bytes(
+            encode(
+                buffer,
+                resolved_width,
+                resolved_height,
+                dtype,
+                dict(metadata or {}),
+                str(compression),
+                str(predictor),
+                bits_per_sample,
+            )
+        )
     return _encode_dng_array_legacy(
         raw, metadata, compression, predictor, bits_per_sample
     )
 
 
-def save_dng_aot(raw, path: str | os.PathLike[str], metadata: dict | None = None, compression: str = "packbits", predictor: str = "none", bits_per_sample: int | None = None, *, width: int | None = None, height: int | None = None) -> None:
+def save_dng_aot(raw, path: str | os.PathLike[str], metadata: dict | None = None, compression: str = "lossless_jpeg", predictor: str = "none", bits_per_sample: int | None = None, *, width: int | None = None, height: int | None = None) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    native = _rust_dng_writer()
+    if native is not None and not isinstance(raw, (bytes, bytearray, memoryview)):
+        _encode, write = native
+        buffer, resolved_width, resolved_height, dtype = _rust_dng_input(
+            raw, bits_per_sample=bits_per_sample
+        )
+        write(
+            str(target),
+            buffer,
+            resolved_width,
+            resolved_height,
+            dtype,
+            dict(metadata or {}),
+            str(compression),
+            str(predictor),
+            bits_per_sample,
+        )
+        return
     temporary = target.with_name(target.name + ".tmp")
     temporary.write_bytes(
         encode_dng_aot(
@@ -1482,421 +1050,8 @@ def save_dng_aot(raw, path: str | os.PathLike[str], metadata: dict | None = None
     temporary.replace(target)
 
 
-def _read_value(data: bytes, offset: int, type_id: int, count: int, endian: str):
-    size = _TYPE_SIZE.get(type_id)
-    if size is None or count < 0 or offset < 0 or offset + size * count > len(data):
-        raise ValueError("invalid TIFF field bounds")
-    payload = data[offset:offset + size * count]
-    if type_id in (1, 7):
-        return payload
-    if type_id == 2:
-        return payload.rstrip(b"\x00").decode("ascii", errors="replace")
-    if type_id == 3:
-        values = struct.unpack(_fmt(endian, f"{count}H"), payload)
-    elif type_id == 4:
-        values = struct.unpack(_fmt(endian, f"{count}I"), payload)
-    elif type_id == 5:
-        raw = struct.unpack(_fmt(endian, f"{count * 2}I"), payload)
-        values = tuple((raw[i], raw[i + 1]) for i in range(0, len(raw), 2))
-    elif type_id == 6:
-        values = struct.unpack(_fmt(endian, f"{count}b"), payload)
-    elif type_id == 8:
-        values = struct.unpack(_fmt(endian, f"{count}h"), payload)
-    elif type_id == 9:
-        values = struct.unpack(_fmt(endian, f"{count}i"), payload)
-    elif type_id == 10:
-        raw = struct.unpack(_fmt(endian, f"{count * 2}i"), payload)
-        values = tuple((raw[i], raw[i + 1]) for i in range(0, len(raw), 2))
-    elif type_id == 11:
-        values = struct.unpack(_fmt(endian, f"{count}f"), payload)
-    elif type_id == 12:
-        values = struct.unpack(_fmt(endian, f"{count}d"), payload)
-    else:
-        raise ValueError(f"unsupported TIFF field type in reader: {type_id}")
-    return values[0] if count == 1 else values
-
-
-def _tag_scalar(tags: Mapping[int, object], tag: int, default=None):
-    """Return a scalar TIFF tag, rejecting ambiguous multi-value fields."""
-    if tag not in tags:
-        return default
-    value = tags[tag]
-    if isinstance(value, tuple):
-        if len(value) != 1:
-            return None
-        value = value[0]
-    if isinstance(value, list):
-        if len(value) != 1:
-            return None
-        value = value[0]
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-class DNGCapabilityError(ValueError):
-    """Raised when a DNG layout is outside the maintained safe profile."""
-
-    def __init__(self, message: str, report: "DNGCapabilityReport | None" = None):
-        super().__init__(message)
-        self.report = report
-
-
-@dataclass(frozen=True)
-class DNGCapabilityReport:
-    """Static capability result for a DNG/TIFF header.
-
-    The report is intentionally independent of decoding.  Applications can
-    inspect a camera file and select a supported path before allocating a
-    full RAW frame; unsupported lossless-JPEG and tiled layouts are reported
-    explicitly instead of being routed through a guessed decoder.
-    """
-
-    width: int | None
-    height: int | None
-    bits_per_sample: int | None
-    compression: int | None
-    predictor: int | None
-    uses_tiles: bool
-    uses_subifd: bool
-    has_strips: bool
-    supported: bool
-    profile: str
-    reasons: tuple[str, ...]
-    warnings: tuple[str, ...] = ()
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "width": self.width,
-            "height": self.height,
-            "bits_per_sample": self.bits_per_sample,
-            "compression": self.compression,
-            "predictor": self.predictor,
-            "uses_tiles": self.uses_tiles,
-            "uses_subifd": self.uses_subifd,
-            "has_strips": self.has_strips,
-            "supported": self.supported,
-            "profile": self.profile,
-            "reasons": list(self.reasons),
-            "warnings": list(self.warnings),
-        }
-
-
-def _read_tiff_tags_only(
-    source: bytes | bytearray | memoryview | str | os.PathLike[str],
-) -> tuple[str, dict[int, object]]:
-    """Read only TIFF header/IFD metadata for capability inspection."""
-    data = Path(source).read_bytes() if isinstance(source, (str, os.PathLike)) else bytes(source)
-    if len(data) < 8 or data[:2] not in (b"II", b"MM"):
-        raise ValueError("not a TIFF/DNG byte stream")
-    endian = data[:2].decode("ascii")
-    if struct.unpack(_fmt(endian, "H"), data[2:4])[0] != 42:
-        raise ValueError("unsupported TIFF magic")
-    ifd_offset = struct.unpack(_fmt(endian, "I"), data[4:8])[0]
-    if ifd_offset < 8 or ifd_offset & 1 or ifd_offset + 2 > len(data):
-        raise ValueError("IFD offset out of bounds")
-    count = struct.unpack(_fmt(endian, "H"), data[ifd_offset:ifd_offset + 2])[0]
-    ifd_end = ifd_offset + 2 + count * 12 + 4
-    if ifd_end > len(data):
-        raise ValueError("truncated IFD")
-    tags: dict[int, object] = {}
-    for index in range(count):
-        start = ifd_offset + 2 + index * 12
-        tag, type_id, value_count = struct.unpack(_fmt(endian, "HHI"), data[start:start + 8])
-        if tag in tags:
-            raise ValueError("duplicate TIFF tag")
-        value_field = data[start + 8:start + 12]
-        size = _TYPE_SIZE.get(type_id)
-        if size is None:
-            raise ValueError("unknown TIFF field type")
-        payload_size = size * value_count
-        value_offset = start + 8 if payload_size <= 4 else struct.unpack(_fmt(endian, "I"), value_field)[0]
-        tags[tag] = _read_value(data, value_offset, type_id, value_count, endian)
-    return endian, tags
-
-
-def dng_capability_report(
-    source: DNGFrame | Mapping[int, object] | bytes | bytearray | memoryview | str | os.PathLike[str],
-) -> DNGCapabilityReport:
-    """Return a fail-closed capability report without decoding pixel data."""
-    if isinstance(source, DNGFrame):
-        tags = dict(source.tags or {})
-        width, height = int(source.width), int(source.height)
-        bits = int(source.bits_per_sample)
-    elif isinstance(source, Mapping):
-        tags = dict(source)
-        width = _tag_scalar(tags, 256, None)
-        height = _tag_scalar(tags, 257, None)
-        bits = _tag_scalar(tags, 258, None)
-    else:
-        _endian, tags = _read_tiff_tags_only(source)
-        width = _tag_scalar(tags, 256, None)
-        height = _tag_scalar(tags, 257, None)
-        bits = _tag_scalar(tags, 258, None)
-    compression = _tag_scalar(tags, 259, 1)
-    predictor = _tag_scalar(tags, 317, 1)
-    photometric = _tag_scalar(tags, 262, None)
-    samples_per_pixel = _tag_scalar(tags, 277, 1)
-    uses_tiles = any(tag in tags for tag in _TILE_TAGS)
-    uses_subifd = 330 in tags
-    has_strips = 273 in tags and 279 in tags
-    reasons: list[str] = []
-    warnings: list[str] = []
-    if width is None or height is None or width <= 0 or height <= 0:
-        reasons.append("missing or invalid image geometry")
-    if bits is None or not 1 <= bits <= 16:
-        reasons.append("only 1..16 bits per sample are supported")
-    if compression is None:
-        reasons.append("Compression tag is not a scalar")
-    elif compression in _LOSSY_JPEG_COMPRESSION:
-        reasons.append(f"DNG compression {compression} is lossy JPEG and is not supported")
-    elif compression not in _SUPPORTED_COMPRESSION:
-        reasons.append(f"DNG compression {compression} is not supported")
-    if samples_per_pixel is None or samples_per_pixel != 1:
-        reasons.append("the maintained native DNG path requires SamplesPerPixel=1")
-    if uses_tiles:
-        reasons.append("tiled TIFF/DNG layout is not supported; use strip-based input")
-    if uses_subifd:
-        if _tag_scalar(tags, 262, 0) == 32803 and 33422 in tags:
-            warnings.append(
-                "SubIFDs are present; the maintained path uses the first IFD "
-                "because it is explicitly mosaiced RAW"
-            )
-        else:
-            reasons.append(
-                "SubIFDs are present and the first IFD is not explicitly mosaiced RAW"
-            )
-    if not has_strips:
-        reasons.append("StripOffsets/StripByteCounts are required")
-    if predictor is None:
-        reasons.append("Predictor tag is not a scalar")
-    elif predictor not in (1, 2):
-        reasons.append(f"TIFF predictor {predictor} is not supported")
-    if compression == 7:
-        if bits is not None and not 8 <= bits <= 16:
-            reasons.append("native DNG Lossless JPEG is maintained for 8..16 bits per sample")
-        if photometric in (1, 6) and bits == 8:
-            reasons.append(
-                "Compression=7 with 8-bit BlackIsZero/YCbCr is baseline JPEG; "
-                "the maintained path only decodes lossless CFA JPEG"
-            )
-        if 317 in tags and predictor != 1:
-            reasons.append("TIFF Predictor must be absent or 1 for JPEG-compressed DNG")
-        jpeg_proc = _tag_scalar(tags, 512, None)
-        if 512 in tags and jpeg_proc not in (14,):
-            reasons.append("JPEGProc must be 14 when present for lossless JPEG")
-        jpeg_predictor = _tag_scalar(tags, 517, None)
-        if 517 in tags and jpeg_predictor not in range(1, 8):
-            reasons.append("JPEGLosslessPredictors must be 1..7 when present")
-        point_transform = _tag_scalar(tags, 518, None)
-        if 518 in tags and point_transform != 0:
-            reasons.append("nonzero JPEGPointTransforms are not maintained")
-    if has_strips:
-        offsets = tags.get(273)
-        counts = tags.get(279)
-        offsets_len = len(offsets) if isinstance(offsets, tuple) else 1
-        counts_len = len(counts) if isinstance(counts, tuple) else 1
-        if offsets_len != counts_len:
-            reasons.append("StripOffsets/StripByteCounts length mismatch")
-    if compression in _LOSSLESS_JPEG_COMPRESSION:
-        profile = "lossless_jpeg_strip_profile"
-    elif compression in _LOSSY_JPEG_COMPRESSION:
-        profile = "lossy_jpeg_unsupported"
-    elif uses_tiles:
-        profile = "tiled_unsupported"
-    elif uses_subifd and reasons:
-        profile = "subifd_unsupported"
-    elif compression in _SUPPORTED_COMPRESSION and has_strips:
-        profile = "portable_strip_profile"
-    else:
-        profile = "unsupported"
-    return DNGCapabilityReport(
-        width=width,
-        height=height,
-        bits_per_sample=bits,
-        compression=compression,
-        predictor=predictor,
-        uses_tiles=uses_tiles,
-        uses_subifd=uses_subifd,
-        has_strips=has_strips,
-        supported=not reasons,
-        profile=profile,
-        reasons=tuple(reasons),
-        warnings=tuple(warnings),
-    )
-
-
-def read_dng_aot(source: bytes | bytearray | memoryview | str | os.PathLike[str]) -> DNGFrame:
-    data = Path(source).read_bytes() if isinstance(source, (str, os.PathLike)) else bytes(source)
-    if len(data) < 8 or data[:2] not in (b"II", b"MM"):
-        raise ValueError("not a TIFF/DNG byte stream")
-    endian = data[:2].decode("ascii")
-    if struct.unpack(_fmt(endian, "H"), data[2:4])[0] != 42:
-        raise ValueError("unsupported TIFF magic")
-    ifd_offset = struct.unpack(_fmt(endian, "I"), data[4:8])[0]
-    if ifd_offset < 8 or ifd_offset & 1 or ifd_offset + 2 > len(data):
-        raise ValueError("IFD offset out of bounds")
-    count = struct.unpack(_fmt(endian, "H"), data[ifd_offset:ifd_offset + 2])[0]
-    ifd_end = ifd_offset + 2 + count * 12 + 4
-    if ifd_end > len(data):
-        raise ValueError("truncated IFD")
-    tags: dict[int, object] = {}
-    for index in range(count):
-        start = ifd_offset + 2 + index * 12
-        tag, type_id, value_count = struct.unpack(_fmt(endian, "HHI"), data[start:start + 8])
-        if tag in tags:
-            raise ValueError("duplicate TIFF tag")
-        value_field = data[start + 8:start + 12]
-        size = _TYPE_SIZE.get(type_id)
-        if size is None:
-            raise ValueError("unknown TIFF field type")
-        payload_size = size * value_count
-        value_offset = start + 8 if payload_size <= 4 else struct.unpack(_fmt(endian, "I"), value_field)[0]
-        tags[tag] = _read_value(data, value_offset, type_id, value_count, endian)
-    capability = dng_capability_report(tags)
-    if not capability.supported:
-        raise DNGCapabilityError(
-            "DNG input is outside the maintained strip/native profile: "
-            + "; ".join(capability.reasons),
-            report=capability,
-        )
-    required = {256, 257, 258, 273, 279}
-    missing = required.difference(tags)
-    if missing:
-        raise ValueError(f"missing required TIFF tags: {sorted(missing)}")
-    width = _tag_scalar(tags, 256, None)
-    height = _tag_scalar(tags, 257, None)
-    bits = _tag_scalar(tags, 258, None)
-    if width is None or height is None or bits is None:
-        raise ValueError("required TIFF geometry tags must be scalar")
-    if width <= 0 or height <= 0 or not 1 <= bits <= 16:
-        raise ValueError("invalid DNG image geometry or bit depth")
-    compression = _tag_scalar(tags, 259, 1)
-    if compression is None:
-        raise ValueError("Compression tag must be scalar")
-    row_size = (width * bits + 7) // 8
-    offsets = tags[273] if isinstance(tags[273], tuple) else (tags[273],)
-    counts = tags[279] if isinstance(tags[279], tuple) else (tags[279],)
-    if not offsets or len(offsets) != len(counts):
-        raise ValueError("StripOffsets/StripByteCounts length mismatch")
-    rows_per_strip = _tag_scalar(tags, 278, height)
-    if rows_per_strip is None:
-        raise ValueError("RowsPerStrip must be scalar")
-    expected_strip_count = (height + rows_per_strip - 1) // rows_per_strip if rows_per_strip > 0 else 0
-    if rows_per_strip <= 0 or len(offsets) != expected_strip_count:
-        raise ValueError("invalid RowsPerStrip or strip count")
-    strip_ranges: list[tuple[int, int]] = []
-    raw_parts = []
-    for strip_index, (strip_offset, strip_count) in enumerate(zip(offsets, counts)):
-        strip_offset, strip_count = int(strip_offset), int(strip_count)
-        if strip_offset < 0 or strip_count <= 0 or strip_offset + strip_count > len(data):
-            raise ValueError("strip bounds out of range")
-        strip_range = (strip_offset, strip_offset + strip_count)
-        if any(strip_range[0] < other_end and other_start < strip_range[1] for other_start, other_end in strip_ranges):
-            raise ValueError("DNG strip payloads overlap")
-        strip_ranges.append(strip_range)
-        encoded = data[strip_offset:strip_offset + strip_count]
-        first_row = strip_index * rows_per_strip
-        if first_row >= height:
-            raise ValueError("strip index exceeds image height")
-        strip_rows = min(rows_per_strip, height - first_row)
-        expected_strip = strip_rows * row_size
-        if compression == 1:
-            if len(encoded) != expected_strip:
-                raise ValueError("uncompressed strip length mismatch")
-            raw_parts.append(encoded)
-        elif compression == 32773:
-            rows = bytearray()
-            cursor = 0
-            for _ in range(strip_rows):
-                row = bytearray()
-                while len(row) < row_size:
-                    if cursor >= len(encoded):
-                        raise ValueError("truncated PackBits strip")
-                    header = encoded[cursor]
-                    cursor += 1
-                    signed = header if header < 128 else header - 256
-                    if signed >= 0:
-                        size = signed + 1
-                        if cursor + size > len(encoded) or len(row) + size > row_size:
-                            raise ValueError("PackBits literal exceeds the strip row")
-                        row.extend(encoded[cursor:cursor + size])
-                        cursor += size
-                    elif signed != -128:
-                        size = 1 - signed
-                        if cursor >= len(encoded) or len(row) + size > row_size:
-                            raise ValueError("truncated PackBits repeat")
-                        row.extend(encoded[cursor:cursor + 1] * size)
-                        cursor += 1
-                if len(row) != row_size:
-                    raise ValueError("PackBits row size mismatch")
-                rows.extend(row)
-            if cursor != len(encoded):
-                raise ValueError("trailing PackBits bytes in strip")
-            raw_parts.append(bytes(rows))
-        elif compression == 7:
-            np = _numpy()
-            decoded = _lossless_jpeg_payload_decode(
-                encoded,
-                expected_samples=strip_rows * width,
-                expected_precision=bits,
-            )
-            decoded = decoded.reshape(strip_rows, width)
-            if decoded.size and int(np.max(decoded)) >= (1 << bits):
-                raise ValueError("lossless JPEG sample exceeds the TIFF bit depth")
-            if bits <= 8:
-                decoded = decoded.astype(np.uint8, copy=False)
-            raw_parts.append(_pack_samples(decoded, bits, endian))
-        elif compression == 8:
-            raw_parts.append(inflate_deflate(encoded, expected_strip))
-        else:
-            # Guarded by ``capability`` above; keep this branch fail-closed if
-            # a future code path changes the supported compression set.
-            raise DNGCapabilityError(f"unsupported DNG compression tag: {compression}", report=capability)
-    raw_bytes = b"".join(raw_parts)
-    if compression not in _SUPPORTED_COMPRESSION:
-        raise DNGCapabilityError(f"unsupported DNG compression tag: {compression}", report=capability)
-    expected = height * row_size
-    if len(raw_bytes) != expected:
-        raise ValueError("decoded DNG sample length mismatch")
-    predictor = _tag_scalar(tags, 317, 1)
-    if predictor is None:
-        raise ValueError("Predictor tag must be scalar")
-    if compression == 7 and predictor != 1:
-        raise DNGCapabilityError(
-            "TIFF Predictor is not applied to a JPEG-compressed DNG strip",
-            report=capability,
-        )
-    if predictor == 2:
-        raw_bytes = _horizontal_predict_packed(
-            raw_bytes, width, height, bits, inverse=True, endian=endian
-        )
-    elif predictor != 1:
-        raise DNGCapabilityError(f"unsupported TIFF predictor: {predictor}", report=capability)
-    return DNGFrame(width, height, bits, compression, tags, raw_bytes, endian)
-
-
-def decode_dng_bytes(source: bytes | bytearray | memoryview) -> DNGFrame:
-    """Decode a byte buffer to packed CFA rows without importing NumPy.
-
-    The returned :class:`DNGFrame` keeps bytes in ``raw_bytes`` and exposes a
-    zero-copy ``raw_view()``.  Calling the legacy ``samples()`` or
-    ``sample_region()`` compatibility methods imports NumPy lazily.
-    """
-    if not isinstance(source, (bytes, bytearray, memoryview)):
-        raise TypeError("source must be bytes, bytearray, or memoryview")
-    return read_dng_aot(source)
-
-
 __all__ = [
-    "DNGFrame",
-    "DNGCapabilityError",
-    "DNGCapabilityReport",
-    "dng_capability_report",
     "encode_dng_bytes",
-    "decode_dng_bytes",
     "encode_dng_aot",
-    "read_dng_aot",
     "save_dng_aot",
 ]

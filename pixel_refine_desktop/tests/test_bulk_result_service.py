@@ -46,7 +46,9 @@ def test_disabled_denoiser_never_reuses_its_result():
 def test_mixed_raw_rgb_and_hdr_dynamic_reference_disable_cache():
     stages = plan_stages(service.batch_selections(state_for()))
     assert service.expected_output_names(stages, ["ref.dng", "support.tif"], {}) is None
-    assert service.expected_output_names(stages, ["ref.nef", "support.nef"], {}) is None
+    assert service.expected_output_names(stages, ["ref.nef", "support.nef"], {}) == [
+        "ref_fusionet.dng"
+    ]
     stages = plan_stages({"hdr": "Weighted HDR"})
     assert service.expected_output_names(stages, ["ref.dng"], {}) is None
 
@@ -264,9 +266,12 @@ def test_both_layouts_share_exact_export_without_numbered_copies(tmp_path):
 
 def test_actual_panel_returns_declared_algorithm_output(bulk_job, monkeypatch):
     from pixel_refine_desktop.enhance_stack.components.bulk_page.widgets import bulk_combined_panel
+    from pixel_refine_desktop.enhance_stack.core.logic.batch_parameter_manager import (
+        get_json_path,
+    )
 
     data = bulk_job
-    config_path = Path("database/align/batch_parameter.json")
+    config_path = Path(get_json_path())
     config_path.parent.mkdir(parents=True)
     config_path.write_text(data.state.read_text(), encoding="utf-8")
     data.panel.database_manager = data.layout.database_manager

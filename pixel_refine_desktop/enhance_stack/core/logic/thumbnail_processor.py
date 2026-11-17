@@ -31,7 +31,6 @@ from PySide6.QtCore import (
 from collections import OrderedDict
 import threading
 import numpy as np
-import rawpy
 from PIL import Image, ImageOps
 import weakref
 

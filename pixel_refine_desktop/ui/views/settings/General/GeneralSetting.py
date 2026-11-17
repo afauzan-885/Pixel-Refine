@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from PySide6.QtWidgets import QWidget, QComboBox, QBoxLayout
 from PySide6.QtCore import Qt, QObject, QThread, Signal
 
-from UILibrary import (
+from resources.GenericUILibrary import (
     Container,
     Stack,
     FormRow,
@@ -14,7 +14,7 @@ from UILibrary import (
     SyncMixin,
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from UILibrary.modals import modal_confirm
+from resources.GenericUILibrary.modals import modal_confirm
 from .general_store import get_general_store
 from .helpers import restart_application
 from taichi.device_selection import (
@@ -642,7 +642,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         )
 
         self.store = get_general_store()
-        self.bind_store(self.store)
+        self.bind(self.store)
 
         # Track initial values for restart check
         self._initial_language = self.store.get("language", "English")
@@ -674,7 +674,7 @@ class GeneralSettingsPage(Container, SyncMixin):
             self.language_group.input.setToolTip(lang_tip)
 
         # We don't use auto_sync for language because we want to control the restart prompt
-        self.language_group.bind_store(self.store, "language")
+        self.language_group.bind(self.store, key="language")
         form.add_row(self.language_group)
 
         # Themes Selection temporarily disabled.
@@ -682,7 +682,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         # self.theme_group = FormGroup(label=theme_label, input_type="select")
         # if isinstance(self.theme_group.input, QComboBox):
         #     self.theme_group.input.addItems(["Light Theme", "Dark Theme"])
-        # self.theme_group.bind_store(self.store, "theme")
+        # self.theme_group.bind(self.store, key="theme")
         # form.add_row(self.theme_group)
 
         # Thumbnails
@@ -690,9 +690,48 @@ class GeneralSettingsPage(Container, SyncMixin):
         thumb_tip = getattr(language_config, "THUMBNAIL_DESCRIPTION", "")
         self.thumb_cb = Checkbox(thumb_label, auto_sync=True)
         self.thumb_cb.checkbox.setToolTip(thumb_tip)
-        self.thumb_cb.bind_store(self.store, "create_thumbnail")
+        self.thumb_cb.bind(self.store, key="create_thumbnail")
         self.thumb_cb.toggled.connect(self._on_thumbnail_toggled)
         form.add_row(self.thumb_cb)
+
+        preview_tone_label = getattr(
+            language_config,
+            "PREVIEW_TONE_MAPPING_LABEL",
+            "Preview RAW Tone Mapping",
+        )
+        preview_tone_tip = getattr(
+            language_config,
+            "PREVIEW_TONE_MAPPING_DESCRIPTION",
+            "Apply the display transform to RAW burst previews. Disabling it is "
+            "faster but makes fallback previews visibly darker.",
+        )
+        self.preview_tone_cb = Checkbox(preview_tone_label, auto_sync=True)
+        self.preview_tone_cb.checkbox.setToolTip(preview_tone_tip)
+        self.preview_tone_cb.bind(self.store, key="preview_tone_mapping")
+        form.add_row(self.preview_tone_cb)
+
+        preview_demosaic_label = getattr(
+            language_config,
+            "PREVIEW_DEMOSAIC_LABEL",
+            "Preview RAW Demosaic",
+        )
+        preview_demosaic_tip = getattr(
+            language_config,
+            "PREVIEW_DEMOSAIC_DESCRIPTION",
+            "dcb keeps colours correct. bilinear is experimental: the current "
+            "half-res graph loses the green channel and can look purple.",
+        )
+        self.preview_demosaic_group = FormGroup(
+            label=preview_demosaic_label, input_type="select", auto_sync=True
+        )
+        if isinstance(self.preview_demosaic_group.input, QComboBox):
+            self.preview_demosaic_group.input.addItem("dcb", "dcb")
+            self.preview_demosaic_group.input.addItem("bilinear", "bilinear")
+            self.preview_demosaic_group.input.setToolTip(preview_demosaic_tip)
+        self.preview_demosaic_group.bind(
+            self.store, key="preview_demosaic_method"
+        )
+        form.add_row(self.preview_demosaic_group)
 
         # Inactivity shutdown is deliberately opt-in.  The timer is owned by
         # main_desktop.py and observes these existing general settings.
@@ -706,7 +745,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         )
         self.auto_shutdown_cb = Checkbox(auto_shutdown_label, auto_sync=True)
         self.auto_shutdown_cb.checkbox.setToolTip(auto_shutdown_tip)
-        self.auto_shutdown_cb.bind_store(self.store, "auto_shutdown_enabled")
+        self.auto_shutdown_cb.bind(self.store, key="auto_shutdown_enabled")
         self.auto_shutdown_cb.toggled.connect(self._on_auto_shutdown_toggled)
         form.add_row(self.auto_shutdown_cb)
 
@@ -721,7 +760,7 @@ class GeneralSettingsPage(Container, SyncMixin):
             auto_sync=True,
         )
         self.auto_shutdown_minutes_group.input.setRange(1, 24 * 60)
-        self.auto_shutdown_minutes_group.bind_store(self.store, "auto_shutdown_minutes")
+        self.auto_shutdown_minutes_group.bind(self.store, key="auto_shutdown_minutes")
         form.add_row(self.auto_shutdown_minutes_group)
         self._update_auto_shutdown_timeout_state(self.auto_shutdown_cb.is_checked())
 
@@ -824,7 +863,7 @@ class GeneralSettingsPage(Container, SyncMixin):
 
     def update_theme(self):
         """Update checkbox styles and apply button variant styles dynamically on theme changes."""
-        from UILibrary.theme import (
+        from resources.GenericUILibrary.theme import (
             create_checkbox_style,
             create_button_style,
             apply_style,
@@ -1292,7 +1331,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.store.set("create_thumbnail", bool(checked))
         if hasattr(self.store, "save_to_file"):
             self.store.save_to_file()
-        from UILibrary import trigger_live_update
+        from resources.GenericUILibrary import trigger_live_update
 
         trigger_live_update()
 
@@ -1366,7 +1405,7 @@ class GeneralSettingsPage(Container, SyncMixin):
 
             broadcast_retranslate(main_win)
 
-        from UILibrary import Toast, trigger_live_update
+        from resources.GenericUILibrary import Toast, trigger_live_update
 
         trigger_live_update()
 
@@ -1413,7 +1452,7 @@ class GeneralSettingsPage(Container, SyncMixin):
             else status_record
         )
 
-        from UILibrary.theme import get_theme, create_select_style, apply_style
+        from resources.GenericUILibrary.theme import get_theme, create_select_style, apply_style
 
         theme = get_theme()
 
@@ -1621,7 +1660,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         self.test_btn.setText(language_config.BTN_TEST_BACKEND_HARDWARE)
         self.test_btn.setToolTip("")
 
-        from UILibrary import Toast
+        from resources.GenericUILibrary import Toast
 
         toast = Toast(
             language_config.MSG_BACKEND_TEST_CANCELLED,
@@ -1758,7 +1797,7 @@ class GeneralSettingsPage(Container, SyncMixin):
         dialog.exec()
 
         # Toast result
-        from UILibrary import Toast
+        from resources.GenericUILibrary import Toast
 
         toast = Toast(
             language_config.MSG_BACKEND_TEST_FINISHED,

@@ -45,6 +45,7 @@ def test_the_facade_and_algorithm_layer_share_one_runtime():
     assert aot_api.TaichiGPUBuffer is _ti_rt.TaichiGPUBuffer
     assert aot_api.AOTEngine is _ti_rt.AOTEngine
     assert aot_api.engine is _ti_rt.engine
+    assert aot_api._module_loader.engine is _ti_rt.get_engine()
 
 
 def test_cvtcolor_buffer_matches_host_path(arrays):

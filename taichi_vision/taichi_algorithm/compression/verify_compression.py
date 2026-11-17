@@ -440,10 +440,16 @@ def _container_regression_inputs(
     }
 
 
+def _read_dng_native(payload) -> np.ndarray:
+    import taichi
+
+    return np.asarray(taichi.read_dng(payload)["data"])
+
+
 def run_container_fuzz(height: int = 8, width: int = 10) -> dict:
     """Exercise deterministic truncation rejection for native container readers."""
     from .avif_aot import package_avif_aot, parse_avif_aot
-    from .dng_aot import encode_dng_aot, read_dng_aot
+    from .dng_aot import encode_dng_aot
     from .heif_aot import (
         package_heic_aot,
         package_heic_flat_aot,
@@ -475,7 +481,7 @@ def run_container_fuzz(height: int = 8, width: int = 10) -> dict:
         (
             "dng",
             encode_dng_aot(raw, compression="none", bits_per_sample=10),
-            read_dng_aot,
+            _read_dng_native,
         ),
         (
             "dng_lossless_jpeg",
@@ -488,7 +494,7 @@ def run_container_fuzz(height: int = 8, width: int = 10) -> dict:
                     "jpeg_predictor": 1,
                 },
             ),
-            read_dng_aot,
+            _read_dng_native,
         ),
         ("png", encode_png_aot(image), parse_png_aot),
         ("webp", encode_webp_lossless_aot(image), parse_webp_aot),
@@ -548,7 +554,7 @@ def run_verification(
     quality: int = 80,
     fuzz: bool = False,
 ) -> dict:
-    from .dng_aot import encode_dng_aot, read_dng_aot
+    from .dng_aot import encode_dng_aot
     from .avif_aot import package_avif_aot, parse_avif_aot
     from .heif_aot import (
         package_heic_aot,
@@ -1536,7 +1542,7 @@ def run_verification(
             ),
             repeats,
         )
-        decoded = read_dng_aot(encoded).samples()
+        decoded = _read_dng_native(encoded)
         report["cases"].append(
             {
                 "codec": "dng",
@@ -1565,7 +1571,7 @@ def run_verification(
         ),
         repeats,
     )
-    decoded = read_dng_aot(encoded).samples()
+    decoded = _read_dng_native(encoded)
     report["cases"].append(
         {
             "codec": "dng",
@@ -1583,7 +1589,7 @@ def run_verification(
     )
     for malformed in (b"", b"II\x2a\x00\x08\x00\x00\x00"):
         try:
-            read_dng_aot(malformed)
+            _read_dng_native(malformed)
         except Exception as exc:
             report["errors"].append(
                 {

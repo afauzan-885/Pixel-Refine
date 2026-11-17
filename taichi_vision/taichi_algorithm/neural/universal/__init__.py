@@ -9,12 +9,14 @@ Public API::
     session.close()
 
 The compiled pool lives alongside WeightNet artifacts at
-``pixel_refine_desktop/ui/data/aot_assets/neural/neural_<backend>.tcm`` and is
-rebuilt with ``python -m taichi_vision.taichi_algorithm.neural.universal.compile``.
+``pixel_refine_desktop/ui/data/aot_assets/neural/universal/<backend>/neural_<backend>.tcm``
+and is staged from the C++ AOT pipeline output (the Python venv exposes no AOT
+compile API); every staged artifact must pass the cgraph-manifest check against
+:data:`taichi_vision.taichi_algorithm.neural.universal.kernels.KERNEL_NAMES`.
 
-The archived universal runtime (``taichi_vision/taichi_algorithm/neural/onnx/``)
-exposed the names re-exported here. They are preserved so existing callers do
-not break:
+The archived universal runtime (``taichi_vision/taichi_algorithm/neural/onnx/``,
+now removed from the tree) exposed the names re-exported here. They are
+preserved so existing callers do not break:
 
 ``UniversalInferenceSession`` / ``UniversalSession``, ``find_universal_tcm``,
 ``prepare_static_model``, ``collapse_broadcast_shapes``,
@@ -24,6 +26,7 @@ not break:
 An exact-profile, opt-in static graph wrapper is available as
 ``StaticGraphSession``. It uses a model-specific AOT graph only when its
 model/target/shape manifest matches; other calls use ``UniversalSession``.
+Graph-level fusion planning is exposed through :func:`build_fusion_plan`.
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ from .errors import (
     UnsupportedONNXOperatorError,
     UnsupportedStepError,
 )
+from .fusions import FusedDispatch, FusionPlan, build_fusion_plan
 from .registry import OPS, OpSpec, require
 from .runtime import (
     BACKEND_SUBDIRS,
@@ -70,6 +74,10 @@ __all__ = [
     "OPS",
     "OpSpec",
     "require",
+    # fusion planning
+    "FusedDispatch",
+    "FusionPlan",
+    "build_fusion_plan",
     # errors
     "NeuralUniversalError",
     "UnsupportedONNXOperatorError",

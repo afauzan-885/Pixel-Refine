@@ -19,13 +19,6 @@ import numpy as np
 import tifffile
 from PIL import Image
 
-try:
-    import rawpy
-
-    RAWPY_AVAILABLE = True
-except ImportError:
-    RAWPY_AVAILABLE = False
-
 # Removed module-level language_config import to prevent circular dependencies
 
 # Taichi AOT for GPU operations
@@ -179,124 +172,6 @@ def get_all_image_paths_for_batch_process(db_path, batch_id):
         return []
 
 
-def _prepare_image_array_from_raw_backup(
-    original_path,
-    linear_mode=False,
-    generate_ref_proxy=False,
-    alignment_tonemapping_linear=False,
-):
-    """CPU Backup implementation using rawpy postprocessing.
-
-    NOTE — Hamilton-Adams GPU Tone Mapping Recipe (for future CPU parity use):
-    When alignment_tonemapping_linear=True is needed with GPU-matching output,
-    replace the block below with:
-
-        with rawpy.imread(original_path) as raw:
-            rgb_linear = raw.postprocess(
-                demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
-                use_camera_wb=True, no_auto_bright=True,
-                gamma=(1, 1), output_bps=16,
-                output_color=rawpy.ColorSpace.raw, user_flip=0,
-            )
-            img_f32 = rgb_linear.astype(np.float32) / 65535.0
-            cmatrix = raw.color_matrix[:, :3].astype(np.float32)
-            sRGB = np.matmul(img_f32, cmatrix.T)
-            # Sigmoid contrast roll-off (same as GPU AOT Hamilton)
-            sRGB = sRGB / np.sqrt(1.0 + sRGB * sRGB)
-            sRGB = np.clip(sRGB, 0.0, 1.0)
-            # Fast gamma approximation (same coefficients as GPU AOT Hamilton)
-            t = np.sqrt(sRGB)
-            gamma_rgb = t * (1.30547177 + t * (-0.78947190 + t * (0.79064221 - 0.30664208 * t)))
-            gamma_rgb = np.clip(gamma_rgb, 0.0, 1.0)
-            bgr = (gamma_rgb * 65535.0).astype(np.uint16)
-            # Swap R<->B channels for OpenCV BGR ordering
-            b = bgr[:, :, 0].copy(); bgr[:, :, 0] = bgr[:, :, 2]; bgr[:, :, 2] = b
-            bgr_f32 = bgr.astype(np.float32) / 65535.0
-            return cv2.cvtColor(bgr_f32, cv2.COLOR_BGR2GRAY)
-    """
-    try:
-        if not RAWPY_AVAILABLE:
-            return None
-        with rawpy.imread(original_path) as raw:
-            if alignment_tonemapping_linear:
-                # Standard rawpy sRGB for alignment grayscale (original rawpy path)
-                rgb = raw.postprocess(
-                    use_camera_wb=True,
-                    output_bps=16,
-                    output_color=rawpy.ColorSpace.sRGB,
-                    user_flip=0,
-                )
-                bgr = rgb
-                if rgb.flags["WRITEABLE"]:
-                    b_channel = bgr[:, :, 0].copy()
-                    bgr[:, :, 0] = bgr[:, :, 2]
-                    bgr[:, :, 2] = b_channel
-                bgr_f32 = bgr.astype(np.float32) / 65535.0
-                gray = cv2.cvtColor(bgr_f32, cv2.COLOR_BGR2GRAY)
-                return gray
-
-            if linear_mode:
-                # LINEAR DNG MODE (Gamma 1.0, 16-bit, No Auto Brightness)
-                rgb = raw.postprocess(
-                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
-                    use_camera_wb=True,
-                    no_auto_bright=True,  # Important for Linear
-                    gamma=(1, 1),  # Linear Gamma
-                    output_bps=16,
-                    output_color=rawpy.ColorSpace.sRGB,
-                    highlight_mode=rawpy.HighlightMode.Blend,
-                    user_flip=0,
-                )
-
-                gt_proxy = None
-                if generate_ref_proxy:
-                    gamma_setting = (2.222, 4.5)
-                    proxy_raw = raw.postprocess(
-                        demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
-                        use_camera_wb=True,
-                        no_auto_bright=True,
-                        gamma=gamma_setting,
-                        output_bps=16,
-                        output_color=rawpy.ColorSpace.sRGB,
-                        highlight_mode=rawpy.HighlightMode.Blend,
-                        user_flip=0,
-                    )
-                    # Convert to BGR
-                    if proxy_raw.flags["WRITEABLE"]:
-                        bgr_proxy = proxy_raw
-                        b_channel_p = bgr_proxy[:, :, 0].copy()
-                        bgr_proxy[:, :, 0] = bgr_proxy[:, :, 2]
-                        bgr_proxy[:, :, 2] = b_channel_p
-                        gt_proxy = bgr_proxy
-
-            else:
-                # STANDARD MODE (Gamma 2.222)
-                gamma_setting = (2.222, 4.5)
-                rgb = raw.postprocess(
-                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,
-                    use_camera_wb=True,
-                    gamma=gamma_setting,
-                    output_bps=16,
-                    output_color=rawpy.ColorSpace.sRGB,
-                    highlight_mode=rawpy.HighlightMode.Blend,
-                    user_flip=0,
-                )
-
-        if rgb.flags["WRITEABLE"]:
-            bgr = rgb
-            b_channel = bgr[:, :, 0].copy()
-            bgr[:, :, 0] = bgr[:, :, 2]
-            bgr[:, :, 2] = b_channel
-
-            if generate_ref_proxy and "gt_proxy" in locals() and gt_proxy is not None:
-                return (bgr, gt_proxy)
-
-            return bgr
-    except Exception as e:
-        print(f"Error membaca RAW file {original_path} via CPU backup: {e}")
-        return None
-
-
 def _prepare_image_array_from_raw(
     original_path,
     linear_mode=False,
@@ -305,32 +180,50 @@ def _prepare_image_array_from_raw(
 ):
     """GPU-Accelerated RAW Demosaicing using only Taichi for pixel processing.
 
-    rawpy is used only as a container reader for the Bayer plane and sensor
-    calibration values.  It never runs ``postprocess`` or performs demosaicing
-    in this path; the Bayer array is passed directly to ``ta_aot.demosaic``.
+    The native Rust reader supplies the Bayer plane and sensor calibration;
+    demosaicing runs in the Taichi AOT graph.
     """
     try:
-        if not RAWPY_AVAILABLE:
-            return None
-
         from taichi_vision import algorithm as ta_aot
         import config as app_config
 
-        # Read the Bayer plane/calibration only.  Calling demosaic(path) would
-        # make the API re-open rawpy internally and hide orientation handling.
-        with rawpy.imread(original_path) as raw:
-            bayer = raw.raw_image.astype(np.float32, copy=False)
-            wb = np.asarray(raw.camera_whitebalance, dtype=np.float32).copy()
-            if wb.size != 4:
-                wb = np.array([1.5, 1.0, 2.0, 1.0], dtype=np.float32)
-            if wb[3] <= 0.01:
-                wb[3] = wb[1]
-            wb /= max((wb[1] + wb[3]) / 2.0, 1e-6)
-            cmatrix = raw.color_matrix[:, :3].astype(np.float32)
-            black_level = float(raw.black_level_per_channel[0])
-            white_level = float(raw.white_level)
-            c00, c01 = int(raw.raw_colors[0, 0]), int(raw.raw_colors[0, 1])
-            c10, c11 = int(raw.raw_colors[1, 0]), int(raw.raw_colors[1, 1])
+        # Read the Bayer plane and calibration from the native Rust reader.
+        import taichi as _ti
+
+        native = _ti.imread(original_path, compute_hash=False)
+        if not isinstance(native, dict) or "data" not in native:
+            raise TypeError("Native RAW reader returned no CFA carrier")
+        bayer = np.asarray(native["data"])
+        neutral = np.asarray(
+            native.get("as_shot_neutral", [1.0, 1.0, 1.0]), dtype=np.float32
+        ).reshape(-1)
+        if neutral.size >= 3 and np.all(neutral[:3] > 0):
+            gains = 1.0 / neutral[:3]
+            gains /= max(float(gains[1]), 1e-6)
+            wb = np.array([gains[0], gains[1], gains[2], gains[1]], dtype=np.float32)
+        else:
+            wb = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+        matrix = np.asarray(native.get("color_matrix", []), dtype=np.float32)
+        cmatrix = (
+            matrix[:3, :3]
+            if matrix.ndim == 2 and matrix.shape[0] >= 3 and matrix.shape[1] >= 3
+            else np.eye(3, dtype=np.float32)
+        )
+        bits = int(native.get("bits_per_sample", 16) or 16)
+        black_level = float(
+            np.asarray(native.get("black_level", 0.0), dtype=np.float32).reshape(-1)[0]
+        )
+        white_level = float(
+            np.asarray(
+                native.get("white_level", (1 << bits) - 1), dtype=np.float32
+            ).reshape(-1)[0]
+        )
+        pattern = list(native.get("cfa_pattern") or [0, 1, 1, 2])[:4]
+        pattern = [
+            0 if int(value) == 0 else (1 if int(value) in (1, 3) else 2)
+            for value in pattern
+        ]
+        c00, c01, c10, c11 = pattern
 
         demosaic_kwargs = dict(
             wb_r=float(wb[0]),
@@ -400,13 +293,9 @@ def _prepare_image_array_from_raw(
         return bgr
 
     except Exception as e:
-        print(
-            f"GPU AOT Demosaicing failed for {original_path}: {e}. Falling back to CPU backup."
-        )
-        # Robust fallback to CPU backup to guarantee no application crashes
-        return _prepare_image_array_from_raw_backup(
-            original_path, linear_mode, generate_ref_proxy, alignment_tonemapping_linear
-        )
+        raise RuntimeError(
+            f"Native RAW demosaic failed for {original_path}: {e}"
+        ) from e
 
 
 def load_images_from_paths(
@@ -776,13 +665,17 @@ def _reference_orientation(path):
     if not path or not os.path.exists(path):
         return 1
     raw_extensions = {".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".rw2", ".pef", ".srw"}
-    # PIL/TIFF can expose a normalized DNG Orientation that differs from
-    # LibRaw's sensor flip.  For RAW inputs LibRaw is authoritative.
-    if RAWPY_AVAILABLE and os.path.splitext(path)[1].lower() in raw_extensions:
+    # PIL/TIFF can expose a normalized DNG Orientation that differs from the
+    # sensor flip.  Use the native DNG metadata first for RAW inputs.
+    if os.path.splitext(path)[1].lower() in raw_extensions:
         try:
-            with rawpy.imread(path) as raw:
-                flip = int(getattr(raw.sizes, "flip", 0))
-                return flip if flip in range(1, 9) else 1
+            import taichi
+
+            metadata = taichi.imread(path, mode="metadata")
+            if isinstance(metadata, dict):
+                orientation = int(metadata.get("orientation", 1) or 1)
+                if orientation in range(1, 9):
+                    return orientation
         except Exception:
             pass
     try:
@@ -790,13 +683,6 @@ def _reference_orientation(path):
             return int(ref.getexif().get(274, 1) or 1)
     except Exception:
         pass
-    if RAWPY_AVAILABLE:
-        try:
-            with rawpy.imread(path) as raw:
-                flip = int(getattr(raw.sizes, "flip", 0))
-                return flip if flip in range(1, 9) else 1
-        except Exception:
-            pass
     return 1
 
 
@@ -1206,7 +1092,7 @@ def calculate_scale_from_gt_proxy(linear_img, gt_proxy, ref_dtype=np.uint16):
 
     Args:
         linear_img: Gambar Linear (Main Image), BGR.
-        gt_proxy: Gambar Ground Truth dari rawpy (sRGB), BGR.
+        gt_proxy: Gambar Ground Truth native (sRGB), BGR.
         ref_dtype: Tipe data referensi (uint16/uint8).
 
     Returns:

@@ -561,18 +561,24 @@
               ],
               "returns": null
             },
-            "on_store_changed": {
+            "on_sync": {
               "parameters": [
                 {
-                  "name": "key",
+                  "name": "payload",
                   "kind": "positional_or_keyword",
                   "default": null,
                   "annotation": null
                 },
                 {
-                  "name": "value",
-                  "kind": "positional_or_keyword",
-                  "default": null,
+                  "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "origin",
+                  "kind": "keyword_only",
+                  "default": "None",
                   "annotation": null
                 }
               ],
@@ -706,18 +712,24 @@
               ],
               "returns": null
             },
-            "on_store_changed": {
+            "on_sync": {
               "parameters": [
                 {
-                  "name": "key",
+                  "name": "payload",
                   "kind": "positional_or_keyword",
                   "default": null,
                   "annotation": null
                 },
                 {
-                  "name": "value",
-                  "kind": "positional_or_keyword",
-                  "default": null,
+                  "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "origin",
+                  "kind": "keyword_only",
+                  "default": "None",
                   "annotation": null
                 }
               ],
@@ -842,18 +854,24 @@
               ],
               "returns": null
             },
-            "on_store_changed": {
+            "on_sync": {
               "parameters": [
                 {
-                  "name": "key",
+                  "name": "payload",
                   "kind": "positional_or_keyword",
                   "default": null,
                   "annotation": null
                 },
                 {
-                  "name": "value",
-                  "kind": "positional_or_keyword",
-                  "default": null,
+                  "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "origin",
+                  "kind": "keyword_only",
+                  "default": "None",
                   "annotation": null
                 }
               ],
@@ -1869,23 +1887,6 @@
             "returns": null
           },
           "methods": {
-            "on_store_changed": {
-              "parameters": [
-                {
-                  "name": "key",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                },
-                {
-                  "name": "value",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                }
-              ],
-              "returns": null
-            },
             "sync_items": {
               "parameters": [
                 {
@@ -1976,6 +1977,29 @@
                   "name": "event",
                   "kind": "positional_or_keyword",
                   "default": null,
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "on_sync": {
+              "parameters": [
+                {
+                  "name": "payload",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "origin",
+                  "kind": "keyword_only",
+                  "default": "None",
                   "annotation": null
                 }
               ],
@@ -3312,23 +3336,6 @@
               ],
               "returns": null
             },
-            "on_store_changed": {
-              "parameters": [
-                {
-                  "name": "key",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                },
-                {
-                  "name": "value",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                }
-              ],
-              "returns": null
-            },
             "sync_items": {
               "parameters": [
                 {
@@ -3385,6 +3392,29 @@
             },
             "refresh_responsive_layout": {
               "parameters": [],
+              "returns": null
+            },
+            "on_sync": {
+              "parameters": [
+                {
+                  "name": "payload",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "origin",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
               "returns": null
             }
           },
@@ -4761,18 +4791,24 @@
               ],
               "returns": null
             },
-            "on_store_changed": {
+            "on_sync": {
               "parameters": [
                 {
-                  "name": "key",
+                  "name": "payload",
                   "kind": "positional_or_keyword",
                   "default": null,
                   "annotation": null
                 },
                 {
-                  "name": "value",
-                  "kind": "positional_or_keyword",
-                  "default": null,
+                  "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "origin",
+                  "kind": "keyword_only",
+                  "default": "None",
                   "annotation": null
                 }
               ],
@@ -4976,23 +5012,6 @@
               ],
               "returns": null
             },
-            "on_store_changed": {
-              "parameters": [
-                {
-                  "name": "key",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                },
-                {
-                  "name": "value",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                }
-              ],
-              "returns": null
-            },
             "update_progress": {
               "parameters": [
                 {
@@ -5012,6 +5031,29 @@
             },
             "clear": {
               "parameters": [],
+              "returns": null
+            },
+            "on_sync": {
+              "parameters": [
+                {
+                  "name": "payload",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "origin",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
               "returns": null
             }
           },
@@ -5492,7 +5534,7 @@
         "RealtimeMixin": {
           "init": null,
           "methods": {
-            "bind_store": {
+            "bind": {
               "parameters": [
                 {
                   "name": "store",
@@ -5502,66 +5544,111 @@
                 },
                 {
                   "name": "key",
-                  "kind": "positional_or_keyword",
-                  "default": "None",
-                  "annotation": null
-                }
-              ],
-              "returns": null
-            },
-            "on_store_changed": {
-              "parameters": [
-                {
-                  "name": "key",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                },
-                {
-                  "name": "value",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                }
-              ],
-              "returns": null
-            },
-            "get_data": {
-              "parameters": [
-                {
-                  "name": "key",
-                  "kind": "positional_or_keyword",
-                  "default": "None",
-                  "annotation": null
-                }
-              ],
-              "returns": null
-            },
-            "set_data": {
-              "parameters": [
-                {
-                  "name": "value",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                },
-                {
-                  "name": "key",
-                  "kind": "positional_or_keyword",
+                  "kind": "keyword_only",
                   "default": "None",
                   "annotation": null
                 },
                 {
-                  "name": "notify",
-                  "kind": "positional_or_keyword",
+                  "name": "scope",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "bindings",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "fallback",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "apply",
+                  "kind": "keyword_only",
+                  "default": "True",
+                  "annotation": null
+                },
+                {
+                  "name": "follow",
+                  "kind": "keyword_only",
                   "default": "True",
                   "annotation": null
                 }
               ],
               "returns": null
             },
-            "signal_blocker": {
-              "parameters": [],
+            "sync": {
+              "parameters": [
+                {
+                  "name": "scope",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "keys",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "values",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "notify",
+                  "kind": "keyword_only",
+                  "default": "True",
+                  "annotation": null
+                },
+                {
+                  "name": "persist",
+                  "kind": "keyword_only",
+                  "default": "False",
+                  "annotation": null
+                },
+                {
+                  "name": "peek",
+                  "kind": "keyword_only",
+                  "default": "False",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "on_sync": {
+              "parameters": [
+                {
+                  "name": "payload",
+                  "kind": "positional_or_keyword",
+                  "default": null,
+                  "annotation": null
+                },
+                {
+                  "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "origin",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                }
+              ],
               "returns": null
             }
           },
@@ -5571,7 +5658,7 @@
         "SyncMixin": {
           "init": null,
           "methods": {
-            "bind_store": {
+            "bind": {
               "parameters": [
                 {
                   "name": "store",
@@ -5581,65 +5668,108 @@
                 },
                 {
                   "name": "key",
-                  "kind": "positional_or_keyword",
+                  "kind": "keyword_only",
                   "default": "None",
                   "annotation": null
-                }
-              ],
-              "returns": null
-            },
-            "set_scope": {
-              "parameters": [
+                },
                 {
-                  "name": "prefix",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                }
-              ],
-              "returns": null
-            },
-            "add_binding": {
-              "parameters": [
-                {
-                  "name": "key",
-                  "kind": "positional_or_keyword",
-                  "default": null,
+                  "name": "scope",
+                  "kind": "keyword_only",
+                  "default": "None",
                   "annotation": null
                 },
                 {
-                  "name": "widget",
-                  "kind": "positional_or_keyword",
-                  "default": null,
-                  "annotation": null
-                },
-                {
-                  "name": "property_name",
-                  "kind": "positional_or_keyword",
-                  "default": "'value'",
+                  "name": "bindings",
+                  "kind": "keyword_only",
+                  "default": "None",
                   "annotation": null
                 },
                 {
                   "name": "fallback",
-                  "kind": "positional_or_keyword",
+                  "kind": "keyword_only",
                   "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "apply",
+                  "kind": "keyword_only",
+                  "default": "True",
+                  "annotation": null
+                },
+                {
+                  "name": "follow",
+                  "kind": "keyword_only",
+                  "default": "True",
                   "annotation": null
                 }
               ],
               "returns": null
             },
-            "on_store_changed": {
+            "sync": {
               "parameters": [
                 {
+                  "name": "scope",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
                   "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "keys",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "values",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "notify",
+                  "kind": "keyword_only",
+                  "default": "True",
+                  "annotation": null
+                },
+                {
+                  "name": "persist",
+                  "kind": "keyword_only",
+                  "default": "False",
+                  "annotation": null
+                },
+                {
+                  "name": "peek",
+                  "kind": "keyword_only",
+                  "default": "False",
+                  "annotation": null
+                }
+              ],
+              "returns": null
+            },
+            "on_sync": {
+              "parameters": [
+                {
+                  "name": "payload",
                   "kind": "positional_or_keyword",
                   "default": null,
                   "annotation": null
                 },
                 {
-                  "name": "value",
-                  "kind": "positional_or_keyword",
-                  "default": null,
+                  "name": "key",
+                  "kind": "keyword_only",
+                  "default": "None",
+                  "annotation": null
+                },
+                {
+                  "name": "origin",
+                  "kind": "keyword_only",
+                  "default": "None",
                   "annotation": null
                 }
               ],

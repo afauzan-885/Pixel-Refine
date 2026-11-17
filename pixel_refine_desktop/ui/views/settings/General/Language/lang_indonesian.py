@@ -663,6 +663,14 @@ THUMBNAIL_LABEL = "Thumbnail"
 THUMBNAIL_DESCRIPTION = """Menampilkan pratinjau gambar saat proses batch (Eksperimental).
 - Catatan: Dapat menyebabkan sedikit lag saat menambahkan batch baru."""
 
+PREVIEW_TONE_MAPPING_LABEL = "Tone Mapping Preview RAW"
+PREVIEW_TONE_MAPPING_DESCRIPTION = """Menerapkan transformasi tampilan pada preview burst RAW.
+- Nonaktif: Preview fallback lebih cepat, tetapi terlihat lebih gelap."""
+PREVIEW_DEMOSAIC_LABEL = "Demosaic Preview RAW"
+PREVIEW_DEMOSAIC_DESCRIPTION = """Algoritma saat RAW tidak punya preview bawaan yang layak.
+- dcb: Warna benar (disarankan).
+- bilinear: Eksperimental; graph half-res dapat kehilangan kanal hijau."""
+
 NOISE_MAD_OFFSET_LABEL = "MAD Noise Factor"
 NOISE_MAD_OFFSET_DESCRIPTION = """Toleransi deteksi MAD terhadap gambar dengan noise tinggi.
 - Lebih Tinggi: Lebih toleran noise, risiko bayangan gerakan (ghosting) meningkat."""

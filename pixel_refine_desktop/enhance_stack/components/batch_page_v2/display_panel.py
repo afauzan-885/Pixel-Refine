@@ -13,6 +13,7 @@ Adapted from: pixel_refine_desktop/ui/views/panorama/display_area/display_panel.
 """
 
 from PySide6.QtWidgets import (
+    QApplication,
     QGraphicsOpacityEffect,
     QMessageBox,
     QWidget,
@@ -40,16 +41,17 @@ from PySide6.QtCore import (
 from typing import Any
 from PySide6.QtGui import QPixmap, QColor, QImage
 import os
+import time
 
 # Generic UI Library
-from UILibrary import (
+from resources.GenericUILibrary import (
     Button,
     IconButton,
     Container,
     OverlayContainer,
     OverlayPosition,
 )
-from UILibrary.grids import GridContainer
+from resources.GenericUILibrary.grids import GridContainer
 from resources.animations.animation_manager import (
     StackedWidgetAnimator,
 )
@@ -58,7 +60,9 @@ from pixel_refine_desktop.ui.components.common.sidebar import Sidebar
 # Logic
 from pixel_refine_desktop.enhance_stack.core.logic.display_logic import DisplayLogic
 from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    set_thumbnail_generation_suspended,
     thumbnail_creation_enabled,
+    thumbnail_generation_suspended,
 )
 from pixel_refine_desktop.enhance_stack.core.logic import display_manager
 from pixel_refine_desktop.enhance_stack.core.logic.process_manager import (
@@ -110,7 +114,16 @@ from config import SUPPORTED_FORMATS
 
 # Import the new widget
 from .multiple_batch_delete_widget import MultipleBatchDeleteWidget
-from UILibrary import live_update
+from .preview_playback import (
+    AdaptivePacer,
+    PreviewWindowConfig,
+    indices_to_drop,
+    initial_buffer_ready,
+    needs_refill,
+    normalise,
+    prefetch_plan,
+)
+from resources.GenericUILibrary import live_update
 import numpy as np
 
 
@@ -142,6 +155,7 @@ class BackgroundBatchPreloader(QThread):
         """Pre-load thumbnails ke GlobalThumbnailCache secara diam-diam di background."""
         from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
             thumbnail_creation_enabled,
+            thumbnail_generation_suspended,
         )
 
         if not thumbnail_creation_enabled():
@@ -161,6 +175,9 @@ class BackgroundBatchPreloader(QThread):
 
         for path in self.image_paths:
             if self._is_cancelled or not thumbnail_creation_enabled():
+                break
+
+            if thumbnail_generation_suspended():
                 break
 
             # Skip jika sudah ada di L0 cache
@@ -204,8 +221,9 @@ class BackgroundBatchPreloader(QThread):
 class BurstPreloadWorker(QThread):
     """
     Background thread to preload burst preview images into QImage at LowestPriority.
-    Pre-decodes images in parallel using 4 concurrent workers continuously
-    so playback can cycle through self.playback_cache at 15-30 FPS with zero lag.
+    Uses up to 4 workers for standard/embedded-JPEG frames and 2 for RAW
+    demosaic fallback, so playback can cycle through self.playback_cache at
+    5 FPS with zero lag.
     """
 
     frame_cached = Signal(str, QImage, str)  # (path, q_image, batch_id)
@@ -218,13 +236,30 @@ class BurstPreloadWorker(QThread):
     # so only genuinely extreme frames are ever touched.
     MAX_PREVIEW_SIDE = 6144
     MAX_PREVIEW_PIXELS = 24_000_000
+    # Rolling-window playback only needs a display-sized frame. 1280 keeps the
+    # embedded RAW preview draft at 1/2 scale (2016 px) instead of a full JPEG
+    # decode, and bounds 10+ cached frames to a few MB each.
+    PREVIEW_MAX_SIDE = 1280
+    MIN_EMBEDDED_PREVIEW_SIDE = 640
 
-    def __init__(self, image_paths, parent=None, max_workers=4, batch_id=None):
+    def __init__(
+        self,
+        image_paths,
+        parent=None,
+        max_workers=4,
+        batch_id=None,
+        tone_map=True,
+        demosaic_method="dcb",
+    ):
         super().__init__(parent)
         self.image_paths = list(image_paths)
-        # RAW decode can hold a full-resolution sensor buffer before producing
-        # the display-sized QImage. Keep this fan-out small to bound peak RAM.
-        self.max_workers = max(1, min(max_workers, 2))
+        self.tone_map = bool(tone_map)
+        self.demosaic_method = str(demosaic_method or "dcb")
+        # Embedded RAW previews and standard images decode in parallel. The
+        # demosaic fallback is still serialized by the global taichi lock, so a
+        # larger fan-out only queues those calls; four stays bounded and fast
+        # for the common case.
+        self.max_workers = max(1, min(max_workers, 4))
         self.batch_id = str(batch_id) if batch_id is not None else ""
         self._is_aborted = False
         self._executor = None
@@ -271,6 +306,96 @@ class BurstPreloadWorker(QThread):
         )
         return capped
 
+    def _cap_preview_frame(self, img_array):
+        """Downsample to the preview long edge with a cheap stride subsample."""
+        import numpy as np
+
+        try:
+            height, width = img_array.shape[:2]
+        except Exception:
+            return img_array
+        longest = max(height, width)
+        if longest <= self.PREVIEW_MAX_SIDE:
+            return img_array
+        stride = max(1, int(np.ceil(longest / self.PREVIEW_MAX_SIDE)))
+        return np.ascontiguousarray(img_array[::stride, ::stride])
+
+    def _apply_preview_orientation(self, image, orientation):
+        """Rotate the embedded preview; its JPEG carries no EXIF orientation."""
+        from PIL import Image
+
+        try:
+            value = int(orientation or 1)
+        except (TypeError, ValueError):
+            value = 1
+        method = {
+            2: Image.Transpose.FLIP_LEFT_RIGHT,
+            3: Image.Transpose.ROTATE_180,
+            4: Image.Transpose.FLIP_TOP_BOTTOM,
+            5: Image.Transpose.TRANSPOSE,
+            6: Image.Transpose.ROTATE_270,
+            7: Image.Transpose.TRANSVERSE,
+            8: Image.Transpose.ROTATE_90,
+        }.get(value)
+        return image.transpose(method) if method is not None else image
+
+    def _decode_embedded_raw_preview(self, path):
+        """Decode the camera preview carried by a RAW file, if it is usable.
+
+        Some DNG writers store an uncompressed RGB bitmap (often only
+        256x192) instead of a JPEG.  Those are too small for a full-screen
+        preview, so they are rejected and the caller falls back to a
+        half-resolution demosaic.
+        """
+        import io
+
+        import numpy as np
+        import taichi
+        from PIL import Image, ImageOps
+
+        payload = taichi.imread(path, mode="preview")
+        if not isinstance(payload, dict):
+            return None
+        preview = payload.get("preview")
+        if not preview:
+            return None
+
+        data = bytes(preview)
+        orientation = payload.get("orientation")
+        is_jpeg = data[:2] == b"\xff\xd8"
+        is_png = data[:8] == b"\x89PNG\r\n\x1a\n"
+        if is_jpeg or is_png:
+            with Image.open(io.BytesIO(data)) as image:
+                image.draft(
+                    "RGB", (self.PREVIEW_MAX_SIDE, self.PREVIEW_MAX_SIDE)
+                )
+                image = ImageOps.exif_transpose(image)
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+                image = self._apply_preview_orientation(image, orientation)
+                image.thumbnail(
+                    (self.PREVIEW_MAX_SIDE, self.PREVIEW_MAX_SIDE),
+                    Image.Resampling.BILINEAR,
+                )
+                return np.array(image)
+
+        width = int(payload.get("width") or 0)
+        height = int(payload.get("height") or 0)
+        if width <= 0 or height <= 0 or len(data) < width * height * 3:
+            return None
+        if max(width, height) < self.MIN_EMBEDDED_PREVIEW_SIDE:
+            return None
+
+        bitmap = np.frombuffer(data, dtype=np.uint8, count=width * height * 3)
+        bitmap = np.ascontiguousarray(bitmap.reshape(height, width, 3))
+        image = Image.fromarray(bitmap)
+        image = self._apply_preview_orientation(image, orientation)
+        image.thumbnail(
+            (self.PREVIEW_MAX_SIDE, self.PREVIEW_MAX_SIDE),
+            Image.Resampling.BILINEAR,
+        )
+        return np.array(image)
+
     def _decode_frame(self, path: str):
         from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
             load_raw_as_8bit_rgb_half_res,
@@ -288,24 +413,48 @@ class BurstPreloadWorker(QThread):
             img_array = None
 
             if ext in SUPPORTED_FORMATS.get("raw", []):
-                # Half-res demosaic cuts memory footprint by 75% and decodes 3-4x faster
-                img_array = load_raw_as_8bit_rgb_half_res(path)
+                try:
+                    img_array = self._decode_embedded_raw_preview(path)
+                except Exception as preview_error:
+                    if not self._is_aborted:
+                        print(
+                            f"[BurstPreloadWorker] Embedded preview unavailable for {path}: "
+                            f"{preview_error}"
+                        )
+                    img_array = None
+                if img_array is None:
+                    # Slow fallback: half-res demosaic, serialized by the global
+                    # taichi lock. dcb keeps the green channel correct; the
+                    # bilinear half-res graph loses it (purple cast).
+                    img_array = load_raw_as_8bit_rgb_half_res(
+                        path,
+                        method=self.demosaic_method,
+                        preview_max_side=self.PREVIEW_MAX_SIDE,
+                        tone_map=self.tone_map,
+                    )
             elif ext in (
                 SUPPORTED_FORMATS.get("jpg", [])
                 + SUPPORTED_FORMATS.get("png", [])
                 + SUPPORTED_FORMATS.get("tiff", [])
             ):
                 with Image.open(path) as img:
+                    img.draft(
+                        "RGB", (self.PREVIEW_MAX_SIDE, self.PREVIEW_MAX_SIDE)
+                    )
                     img = ImageOps.exif_transpose(img)
                     if img.mode != "RGB":
                         img = img.convert("RGB")
-                    # Pre-downscale in PIL C-space if larger than preview bounds (2560x1440)
-                    if img.width > 2560 or img.height > 1440:
-                        img.thumbnail((2560, 1440), Image.Resampling.BILINEAR)
+                    # Pre-downscale in PIL C-space to the preview long edge.
+                    if img.width > self.PREVIEW_MAX_SIDE or img.height > self.PREVIEW_MAX_SIDE:
+                        img.thumbnail(
+                            (self.PREVIEW_MAX_SIDE, self.PREVIEW_MAX_SIDE),
+                            Image.Resampling.BILINEAR,
+                        )
                     img_array = np.array(img)
 
             if img_array is not None and not self._is_aborted:
                 img_array = self._cap_extreme_frame(img_array)
+                img_array = self._cap_preview_frame(img_array)
                 if img_array.dtype != np.uint8:
                     import taichi.aot_engine as taichi_aot
                     img_array = taichi_aot.cast(img_array, np.uint8)
@@ -531,8 +680,24 @@ class DisplayPanel(QWidget):
         # Shared byte budget plus a stricter active-burst frame limit keep
         # long sequences from retaining every decoded frame in RAM.
         self._playback_cache_max_bytes: int = 160 * 1024 * 1024
-        self._playback_cache_max_frames: int = 16
+        self._playback_cache_max_frames: int = 15
         self._playback_cache_bytes: dict[str, int] = {}
+        # Rolling burst-preview window: current + ahead + behind frames only.
+        self._preview_window = PreviewWindowConfig()
+        self._preview_pacer = AdaptivePacer(self._preview_window)
+        self._preview_playhead: int = 0
+        self._preview_pending: set = set()
+        self._preview_pending_target = None
+        self._preview_target_retries: int = 0
+        self._preview_start_when_ready: bool = False
+        self._preview_ready: bool = False
+        self._preview_arrow_last_ms: float = 0.0
+        self.is_playing: bool = False
+        self.playback_timer = QTimer(self)
+        self.playback_timer.timeout.connect(self._show_next_frame)
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._shutdown_preview)
         self._preview_pixmap_item = None
         self._needs_playback_fit: bool = False
         self._layout_refresh_pending: bool = False
@@ -549,6 +714,9 @@ class DisplayPanel(QWidget):
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._setup_ui()
+        # Arrow keys must step preview frames even when the graphics view owns
+        # focus; it consumes arrows for scrolling by default.
+        self.zoomable_preview.installEventFilter(self)
         self._setup_sidebar()  # New Sidebar Integration
         self._setup_param_overlay()
 
@@ -968,7 +1136,7 @@ class DisplayPanel(QWidget):
         self.save_btn_ref.clicked.connect(self._on_save_clicked)
 
         self.start_btn_ref = Button("▶ Start", variant="primary")
-        from UILibrary.theme import get_theme, create_button_style, apply_style
+        from resources.GenericUILibrary.theme import get_theme, create_button_style, apply_style
 
         theme = get_theme()
         apply_style(self.start_btn_ref, create_button_style(self.start_btn_ref.variant, theme).with_overrides(padding="5px", font_size="10pt"))
@@ -1050,6 +1218,8 @@ class DisplayPanel(QWidget):
         self._settings_activity_timer.setInterval(200)
         self._settings_activity_timer.timeout.connect(self._sync_settings_enabled)
         self._settings_activity_timer.start()
+        self._thumbnail_suspension_held = False
+        self._thumbnails_suspended_by_compute = False
         self._sync_settings_enabled()
 
     def _setup_settings_overlay(self):
@@ -1214,13 +1384,43 @@ class DisplayPanel(QWidget):
 
     def _sync_settings_enabled(self):
         """Mirror backend activity in the Settings sidebar control."""
+        processing = self._thumbnail_suspension_held or self._is_processing_active()
+        self._sync_thumbnail_suspension(processing)
         buttons = getattr(getattr(self, "sidebar", None), "side_buttons", ())
         if len(buttons) < 2:
             return
-        enabled = not self._is_processing_active()
+        enabled = not processing
         buttons[1].setEnabled(enabled)
         if not enabled and self.settings_overlay.isVisible():
             self.settings_overlay.hide()
+
+    def _sync_thumbnail_suspension(self, processing):
+        """Defer thumbnail creation while compute owns the backend."""
+        if processing == self._thumbnails_suspended_by_compute:
+            return
+        self._thumbnails_suspended_by_compute = bool(processing)
+
+        if processing:
+            self.lazy_load_timer.stop()
+            # A preloader decodes in its own thread and would keep competing
+            # with the computation, so it is ended rather than paused.
+            for preloader in list(self._bg_preloaders.values()):
+                try:
+                    preloader.cancel()
+                except Exception:
+                    pass
+            self._bg_preloaders.clear()
+            set_thumbnail_generation_suspended(True, reason="compute")
+            return
+
+        set_thumbnail_generation_suspended(False, reason="compute")
+        if not thumbnail_generation_suspended() and self.all_cards:
+            self.lazy_load_timer.start()
+
+    def set_thumbnail_suspension(self, processing):
+        """Hold thumbnails for the whole Start..finish window of one process."""
+        self._thumbnail_suspension_held = bool(processing)
+        self._sync_thumbnail_suspension(self._thumbnail_suspension_held)
 
     def toggle_sidebar(self):
         """Toggle floating sidebar visibility directly without fade animation."""
@@ -1456,6 +1656,7 @@ class DisplayPanel(QWidget):
         # Hide old batch toast
         self.toast.hide()
         self.logic.set_batch(batch_id, images)
+        self._reset_preview_state()
 
         # Set exact count tracked from backend data
         # START ZOMBIE LOGIC: If we have pending deletions, we need to add them to the grid
@@ -1594,6 +1795,7 @@ class DisplayPanel(QWidget):
         """
         display_manager.cancel_pending_comparison(self)
         self.current_batch_id = None
+        self._reset_preview_state()
 
         # Hide any active toast when batch is unselected
         self.toast.hide()
@@ -1827,6 +2029,9 @@ class DisplayPanel(QWidget):
         if not thumbnail_creation_enabled(self.logic.thumbnail_policy):
             return
 
+        if thumbnail_generation_suspended():
+            return
+
         self.logic.load_thumbnail_async(
             image_path, lambda img, p: self._on_thumbnail_ready(img, p, card_widget)
         )
@@ -1926,6 +2131,8 @@ class DisplayPanel(QWidget):
             Qt.Key.Key_Up,
             Qt.Key.Key_Down,
         ):
+            if self.display_stack.currentIndex() == 1 and self._handle_preview_arrow(event):
+                return
             shift_held = modifiers == Qt.KeyboardModifier.ShiftModifier
             self._navigate_selection(key, shift_held)
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -2220,12 +2427,37 @@ class DisplayPanel(QWidget):
         return None
 
     def eventFilter(self, watched, event):
+        zoomable = getattr(self, "zoomable_preview", None)
+        if zoomable is not None and watched is zoomable and event.type() == QEvent.Type.KeyPress:
+            stack = getattr(self, "display_stack", None)
+            if stack is not None and stack.currentIndex() == 1 and self._handle_preview_arrow(event):
+                return True
         if watched is self.toggle_btn:
             if event.type() == QEvent.Type.Enter:
                 self._hamburger_hover_timer.start()
             elif event.type() == QEvent.Type.Leave:
                 self._hamburger_hover_timer.stop()
         return super().eventFilter(watched, event)
+
+    def _handle_preview_arrow(self, event):
+        """Step preview frames with the arrow keys, throttled for key repeat."""
+        key = event.key()
+        if key not in (
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+        ):
+            return False
+        now = time.monotonic()
+        if now - self._preview_arrow_last_ms < 0.04:
+            return True
+        self._preview_arrow_last_ms = now
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Up):
+            self._show_prev_frame()
+        else:
+            self._show_next_frame()
+        return True
 
     def _show_hamburger_menu(self):
         if self.toggle_btn.underMouse():
@@ -2359,7 +2591,7 @@ class DisplayPanel(QWidget):
     # =========================================================================
 
     def _get_bulk_mode_btn_stylesheet(self, is_bulk, font_size):
-        from UILibrary.theme import get_theme
+        from resources.GenericUILibrary.theme import get_theme
 
         theme = get_theme()
         if is_bulk:
@@ -2636,13 +2868,193 @@ class DisplayPanel(QWidget):
         _evict_playback_budget(self, keep_bid=bid)
 
     def _on_image_pre_cached(self, path, q_image, batch_id=""):
-        """Callback when an image is successfully pre-loaded and decoded in the background."""
+        """Callback when a background burst frame finished decoding."""
         pixmap = QPixmap.fromImage(q_image)
         self._store_playback_frame(batch_id, path, pixmap)
+        index = self._preview_index_of(path)
+        if index is not None:
+            self._preview_pending.discard(index)
+        self._preview_prune()
+        if index is not None and self._preview_pending_target is not None:
+            if index == normalise(self._preview_pending_target, len(self._preview_paths())):
+                self._preview_pending_target = None
+                self._preview_target_retries = 0
+                self._preview_playhead = index
+                self.current_preview_path = path
+                self._update_preview_pixmap(pixmap)
         if getattr(self, "current_preview_path", None) == path:
             self._update_preview_pixmap(pixmap)
-            if getattr(self, "is_playing", False):
+            if getattr(self, "is_playing", False) and self._preview_ready:
                 self.playback_timer.start()
+        self._preview_advance_buffer_state()
+
+    # --- rolling preview window -------------------------------------------
+    def _preview_paths(self):
+        return [
+            image.path
+            for image in (self.logic.current_images or [])
+            if getattr(image, "path", None)
+        ]
+
+    def _preview_index_of(self, path):
+        if not path:
+            return None
+        target = os.path.normpath(path)
+        for index, candidate in enumerate(self._preview_paths()):
+            if os.path.normpath(candidate) == target:
+                return index
+        return None
+
+    def _preview_cached_indices(self):
+        frames = self.playback_cache
+        return {
+            index
+            for index, path in enumerate(self._preview_paths())
+            if path in frames
+        }
+
+    def _preview_prune(self):
+        """Drop cached frames outside the rolling window (index-based)."""
+        paths = self._preview_paths()
+        if not paths:
+            return
+        frames = self.playback_cache
+        cached = {index for index, path in enumerate(paths) if path in frames}
+        drop = indices_to_drop(
+            self._preview_playhead, len(paths), cached, self._preview_window
+        )
+        if not drop:
+            return
+        bid = (
+            str(self.current_batch_id)
+            if self.current_batch_id is not None
+            else "__transient__"
+        )
+        tally = _playback_tally(self)
+        for index in drop:
+            pixmap = frames.pop(paths[index], None)
+            if pixmap is not None:
+                tally[bid] = max(0, tally.get(bid, 0) - _pixmap_bytes(pixmap))
+
+    def _preview_abort_worker(self):
+        worker = getattr(self, "_burst_preloader", None)
+        if worker is not None:
+            self._burst_preloader = None
+            if worker.isRunning():
+                worker.abort()
+                self._retained_workers.add(worker)
+                worker.finished.connect(
+                    lambda w=worker: self._retained_workers.discard(w)
+                )
+        self._preview_pending.clear()
+
+    def _preview_advance_buffer_state(self):
+        paths = self._preview_paths()
+        if not paths:
+            return
+        cached = self._preview_cached_indices()
+        if self._preview_start_when_ready and initial_buffer_ready(
+            cached, len(paths), self._preview_window
+        ):
+            self._start_preview_playback()
+            return
+        if getattr(self, "is_playing", False) and needs_refill(
+            self._preview_playhead, len(paths), cached, self._preview_window
+        ):
+            self._trigger_preview_preload(
+                paths[normalise(self._preview_playhead, len(paths))]
+            )
+
+    def _start_preview_playback(self, force=False):
+        paths = self._preview_paths()
+        cached = self._preview_cached_indices()
+        if not force and not initial_buffer_ready(
+            cached, len(paths), self._preview_window
+        ):
+            return
+        if not hasattr(self, "playback_timer") or self.playback_timer is None:
+            self.playback_timer = QTimer(self)
+            self.playback_timer.timeout.connect(self._show_next_frame)
+        self._preview_start_when_ready = False
+        self._preview_ready = True
+        self._preview_pacer.reset()
+        self._set_preview_thumbnail_suspension(True)
+        self.playback_timer.setInterval(self._preview_window.interval_ms)
+        path = getattr(self, "current_preview_path", None)
+        if path in self.playback_cache:
+            self._update_preview_pixmap(self.playback_cache[path])
+        self.is_playing = True
+        self.playback_timer.start()
+        self._reset_burst_preload_indicator()
+        self.play_btn.setText("⏸")
+
+    def _set_preview_thumbnail_suspension(self, suspended, restart=True):
+        """Pause grid thumbnails while the preview owns the decoder."""
+        released = set_thumbnail_generation_suspended(
+            suspended, reason="preview"
+        )
+        timer = getattr(self, "lazy_load_timer", None)
+        if suspended:
+            if timer is not None:
+                timer.stop()
+            for preloader in list(getattr(self, "_bg_preloaders", {}).values()):
+                try:
+                    preloader.cancel()
+                except Exception:
+                    pass
+            getattr(self, "_bg_preloaders", {}).clear()
+            return
+        if not released or thumbnail_generation_suspended():
+            return
+        if timer is not None and getattr(self, "all_cards", None):
+            timer.start()
+        if restart and self.current_batch_id is not None:
+            self._start_background_preload(self.current_batch_id)
+
+    def _shutdown_preview(self):
+        """Stop preview playback and release pixmaps before app teardown."""
+        timer = getattr(self, "playback_timer", None)
+        if timer is not None:
+            timer.stop()
+        self.is_playing = False
+        self._set_preview_thumbnail_suspension(False, restart=False)
+
+        worker = getattr(self, "_burst_preloader", None)
+        self._preview_abort_worker()
+        if worker is not None:
+            if worker.isRunning():
+                worker.wait(2000)
+            worker.blockSignals(True)
+
+        for frames in getattr(self, "_batch_playback_cache", {}).values():
+            frames.clear()
+        self._batch_playback_cache.clear()
+        getattr(self, "_playback_cache_bytes", {}).clear()
+        scene = getattr(self, "preview_scene", None)
+        if scene is not None:
+            try:
+                scene.clear()
+            except RuntimeError:
+                pass
+        self._preview_pixmap_item = None
+
+    def _reset_preview_state(self):
+        """Reset rolling-window bookkeeping for a batch switch/clear."""
+        self._preview_abort_worker()
+        self._set_preview_thumbnail_suspension(False, restart=False)
+        self._preview_playhead = 0
+        self._preview_pending_target = None
+        self._preview_target_retries = 0
+        self._preview_start_when_ready = False
+        self._preview_ready = False
+        self._preview_pacer.reset()
+        timer = getattr(self, "playback_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        if getattr(self, "is_playing", False):
+            self.is_playing = False
+            if hasattr(self, "play_btn"):
+                self.play_btn.setText("▶")
 
     def _start_background_preload(self, batch_id):
         """
@@ -2725,78 +3137,138 @@ class DisplayPanel(QWidget):
             pass
 
     def _toggle_playback(self):
-        """Toggle play/pause state for preview burst sequence."""
+        """Toggle rolling-window playback over the active burst."""
         if not hasattr(self, "playback_timer") or self.playback_timer is None:
             self.playback_timer = QTimer(self)
-            self.playback_timer.setInterval(100)  # ~10 FPS (100ms interval)
             self.playback_timer.timeout.connect(self._show_next_frame)
-            self.is_playing = False
 
         if self.is_playing:
             self.playback_timer.stop()
             self.play_btn.setText("▶")
             self.is_playing = False
+            self._preview_start_when_ready = False
+            self._set_preview_thumbnail_suspension(False)
+            self.update_controls_visibility_and_states()
+            return
+
+        paths = self._preview_paths()
+        if not paths:
+            return
+        self._set_preview_thumbnail_suspension(True)
+        index = self._preview_index_of(getattr(self, "current_preview_path", None))
+        if index is not None:
+            self._preview_playhead = index
+        if getattr(self.zoomable_preview, "_zoom_level", 0) == 0:
+            self._needs_playback_fit = True
+
+        cached = self._preview_cached_indices()
+        self._preview_pacer.reset()
+        self._preview_ready = initial_buffer_ready(
+            cached, len(paths), self._preview_window
+        )
+        if self._preview_ready:
+            self._start_preview_playback()
         else:
-            # Ensure the playback frame fills the view if user has not manually zoomed in
-            if getattr(self.zoomable_preview, "_zoom_level", 0) == 0:
-                self._needs_playback_fit = True
-
-            # If current frame is cached, switch to it immediately so it fits instantly
-            if (
-                hasattr(self, "current_preview_path")
-                and self.current_preview_path
-                and self.current_preview_path in self.playback_cache
-            ):
-                self._update_preview_pixmap(
-                    self.playback_cache[self.current_preview_path]
-                )
-
-            # Trigger burst preload to warm up remaining frames
-            self._trigger_preview_preload(self.current_preview_path)
-            self.playback_timer.start()
-            self.play_btn.setText("⏸")
-            self.is_playing = True
+            self._preview_start_when_ready = True
+            self._trigger_preview_preload(paths[self._preview_playhead])
+            target = min(self._preview_window.initial_buffer, len(paths))
+            percent = int((len(cached) / target) * 100) if target else 0
+            self.play_btn.setEnabled(True)
+            self.play_btn.setText(f"{percent}%")
         self.update_controls_visibility_and_states()
 
-    def _get_current_image_index(self):
-        """Get the index of the currently shown preview image in the batch list."""
-        if (
-            not self.logic.current_images
-            or not hasattr(self, "current_preview_path")
-            or not self.current_preview_path
-        ):
-            return 0
-
-        for i, img in enumerate(self.logic.current_images):
-            if os.path.normpath(img.path) == os.path.normpath(
-                self.current_preview_path
-            ):
-                return i
-        return 0
-
     def _show_next_frame(self):
-        """Show the next frame in the burst sequence."""
-        if not self.logic.current_images or not getattr(self, "is_playing", False):
+        """Advance one frame (timer tick) or step manually when paused."""
+        paths = self._preview_paths()
+        if not paths:
             return
-        current_idx = self._get_current_image_index()
-        next_idx = (current_idx + 1) % len(self.logic.current_images)
-        next_path = self.logic.current_images[next_idx].path
-        self._display_fast_preview(next_path)
+        count = len(paths)
+        next_index = normalise(self._preview_playhead + 1, count)
+        cached = self._preview_cached_indices()
+        ready = next_index in cached
+
+        if getattr(self, "is_playing", False):
+            action = self._preview_pacer.tick(ready)
+            if action == "advance":
+                self._preview_playhead = next_index
+                self.current_preview_path = paths[next_index]
+                self._update_preview_pixmap(self.playback_cache[paths[next_index]])
+            elif action == "skip":
+                # Real-time mode: keep moving even when this frame is late.
+                self._preview_playhead = next_index
+                for step in range(1, self._preview_window.ahead + 1):
+                    candidate = normalise(self._preview_playhead + step, count)
+                    if candidate in cached:
+                        self._preview_playhead = candidate
+                        self.current_preview_path = paths[candidate]
+                        self._update_preview_pixmap(
+                            self.playback_cache[paths[candidate]]
+                        )
+                        break
+            self._preview_prune()
+            if needs_refill(
+                self._preview_playhead,
+                count,
+                self._preview_cached_indices(),
+                self._preview_window,
+            ):
+                self._trigger_preview_preload(paths[self._preview_playhead])
+            return
+
+        self._preview_pacer.reset()
+        if ready:
+            self._preview_playhead = next_index
+            self.current_preview_path = paths[next_index]
+            self._update_preview_pixmap(self.playback_cache[paths[next_index]])
+            self._preview_prune()
+            if needs_refill(
+                self._preview_playhead,
+                count,
+                self._preview_cached_indices(),
+                self._preview_window,
+            ):
+                self._trigger_preview_preload(paths[self._preview_playhead])
+        else:
+            self._preview_pending_target = next_index
+            self._preview_target_retries = 0
+            self._trigger_preview_preload(paths[next_index])
 
     def _show_prev_frame(self):
-        """Show the previous frame in the burst sequence."""
-        if not self.logic.current_images:
+        """Step one frame backwards, waiting for the decoder when needed."""
+        paths = self._preview_paths()
+        if not paths:
             return
-        current_idx = self._get_current_image_index()
-        prev_idx = (current_idx - 1) % len(self.logic.current_images)
-        prev_path = self.logic.current_images[prev_idx].path
-        self._display_fast_preview(prev_path)
+        count = len(paths)
+        prev_index = normalise(self._preview_playhead - 1, count)
+        cached = self._preview_cached_indices()
+        self._preview_pacer.reset()
+
+        if prev_index in cached:
+            self._preview_playhead = prev_index
+            self.current_preview_path = paths[prev_index]
+            self._update_preview_pixmap(self.playback_cache[paths[prev_index]])
+            self._preview_prune()
+            if needs_refill(
+                self._preview_playhead,
+                count,
+                self._preview_cached_indices(),
+                self._preview_window,
+            ):
+                self._trigger_preview_preload(paths[self._preview_playhead])
+        else:
+            self._preview_pending_target = prev_index
+            self._preview_target_retries = 0
+            self._trigger_preview_preload(paths[prev_index])
 
     @Slot(int, int)
     def _on_burst_preload_progress(self, loaded, total):
         """Show preload percentage in the playback button slot."""
         active_worker = self.sender()
         if active_worker is not None and active_worker is not self._burst_preloader:
+            return
+        # Once playback is running from a warm window, a refill percentage must
+        # not replace the play/pause control on every wave.
+        if getattr(self, "_preview_ready", False) and getattr(self, "is_playing", False):
             return
         if total <= 0:
             self._reset_burst_preload_indicator()
@@ -2843,11 +3315,42 @@ class DisplayPanel(QWidget):
         if worker is not self._burst_preloader:
             return
         self._burst_preloader = None
-        self._reset_burst_preload_indicator()
-        if getattr(self, "is_playing", False):
+        self._preview_pending.clear()
+        paths = self._preview_paths()
+        cached = self._preview_cached_indices()
+
+        if self._preview_start_when_ready:
+            if initial_buffer_ready(cached, len(paths), self._preview_window):
+                self._start_preview_playback()
+                return
+            # Decode failures must not leave the play button waiting forever.
+            minimum = min(self._preview_window.refill_threshold, len(paths))
+            if cached and len(cached) >= minimum:
+                self._start_preview_playback(force=True)
+                return
+            self._preview_start_when_ready = False
+
+        if getattr(self, "is_playing", False) and paths and needs_refill(
+            self._preview_playhead, len(paths), cached, self._preview_window
+        ):
             QTimer.singleShot(
                 0, lambda: self._trigger_preview_preload(self.current_preview_path)
             )
+            return
+        if self._preview_pending_target is not None and paths:
+            target_path = paths[
+                normalise(self._preview_pending_target, len(paths))
+            ]
+            if target_path not in self.playback_cache:
+                if self._preview_target_retries < 1:
+                    self._preview_target_retries += 1
+                    QTimer.singleShot(
+                        0, lambda: self._trigger_preview_preload(target_path)
+                    )
+                    return
+                self._preview_pending_target = None
+                self._preview_target_retries = 0
+        self._reset_burst_preload_indicator()
 
     def _schedule_controls_bar_resize(self):
         """Recalculate the overlay after the play control changes width."""
@@ -2871,43 +3374,96 @@ class DisplayPanel(QWidget):
             self.controls_overlay.raise_()
 
     def _trigger_preview_preload(self, center_path=None):
-        """Preloads burst sequence images into self.playback_cache in background."""
-        if not self.logic.current_images:
+        """Fill the rolling window around the playhead in the background."""
+        paths = self._preview_paths()
+        if not paths:
+            return
+        if thumbnail_generation_suspended(exclude_reason="preview"):
             return
 
-        # If a preloader is already actively working, let it continue without interruption
+        if center_path:
+            index = self._preview_index_of(center_path)
+            if index is not None:
+                self._preview_playhead = index
+
+        cached = self._preview_cached_indices()
+        target_index = normalise(self._preview_playhead, len(paths))
         if (
-            getattr(self, "_burst_preloader", None) is not None
-            and self._burst_preloader.isRunning()
+            self._preview_pending_target is not None
+            and target_index not in cached
+            and target_index not in self._preview_pending
         ):
+            # A manual step/seek supersedes a wave aimed at an older frame.
+            self._preview_abort_worker()
+            cached = self._preview_cached_indices()
+        if self._preview_start_when_ready and initial_buffer_ready(
+            cached, len(paths), self._preview_window
+        ):
+            self._start_preview_playback()
             return
 
-        paths = [img.path for img in self.logic.current_images if hasattr(img, "path")]
-        paths_to_load = [p for p in paths if p not in self.playback_cache]
-        if not paths_to_load:
+        worker = getattr(self, "_burst_preloader", None)
+        if worker is not None and worker.isRunning():
+            return
+
+        plan = prefetch_plan(
+            self._preview_playhead,
+            len(paths),
+            cached,
+            self._preview_pending,
+            self._preview_window,
+        )
+        target = normalise(self._preview_playhead, len(paths))
+        if (
+            target not in cached
+            and target not in self._preview_pending
+            and target not in plan
+        ):
+            # A far seek must decode the target itself, not only what follows it.
+            plan.insert(0, target)
+        if not plan:
+            self._preview_pending.clear()
             self._reset_burst_preload_indicator()
             return
 
-        # Decode a small forward window, wrapping around the burst. Refill it
-        # after each wave so bursts of any length stream without full preloading.
-        if center_path in paths:
-            center_idx = paths.index(center_path)
-        else:
-            center_idx = -1
-        paths_to_load.sort(
-            key=lambda path: (paths.index(path) - center_idx - 1) % len(paths)
-        )
-        paths_to_load = paths_to_load[:12]
+        chunk = plan[: self._preview_window.ahead]
+        self._preview_pending = set(chunk)
+        # RAW fallback decodes serialize on taichi_lock; two workers overlap the
+        # tone/cast while avoiding the contention seen with four. Standard
+        # images and embedded JPEG previews still benefit from four.
+        import os
 
+        from config import SUPPORTED_FORMATS
+
+        raw_exts = set(SUPPORTED_FORMATS.get("raw", []))
+        sample_ext = os.path.splitext(paths[chunk[0]])[1].lower()
+        workers = 2 if sample_ext in raw_exts else 4
+        try:
+            from pixel_refine_desktop.ui.views.settings.General.general_store import (
+                get_general_store,
+            )
+
+            preview_settings = get_general_store()
+            tone_map = bool(preview_settings.get("preview_tone_mapping", True))
+            demosaic_method = str(
+                preview_settings.get("preview_demosaic_method", "dcb")
+            )
+        except Exception:
+            tone_map = True
+            demosaic_method = "dcb"
         worker = BurstPreloadWorker(
-            paths_to_load, parent=self, batch_id=self.current_batch_id
+            [paths[index] for index in chunk],
+            parent=self,
+            max_workers=workers,
+            batch_id=self.current_batch_id,
+            tone_map=tone_map,
+            demosaic_method=demosaic_method,
         )
         self._burst_preloader = worker
         worker.frame_cached.connect(self._on_image_pre_cached)
         worker.preload_progress.connect(self._on_burst_preload_progress)
         worker.preload_finished.connect(self._on_burst_preload_finished)
-        self._on_burst_preload_progress(0, len(paths_to_load))
-
+        self._on_burst_preload_progress(0, len(chunk))
         worker.start(QThread.Priority.LowestPriority)
 
     def _update_preview_pixmap(self, pixmap: QPixmap):
@@ -2962,29 +3518,6 @@ class DisplayPanel(QWidget):
                 self.preview_scene.itemsBoundingRect(),
                 Qt.AspectRatioMode.KeepAspectRatio,
             )
-
-    def _display_fast_preview(self, image_path):
-        """High-efficiency loader specifically for burst previews using preloaded cache or Hamilton Adams half-res demosaicing."""
-        if not self.logic.prepare_preview(image_path):
-            return
-
-        self.current_preview_path = image_path
-
-        # Check if we have preloaded cache for zero-flicker instant rendering
-        if image_path in self.playback_cache:
-            pixmap = self.playback_cache[image_path]
-            self._update_preview_pixmap(pixmap)
-            self._trigger_preview_preload(image_path)
-        else:
-            # Share the bounded background decoder. Never wait for an image
-            # loader on the GUI thread when playback outruns decoding.
-            if getattr(self, "is_playing", False) and self.playback_timer.isActive():
-                self.playback_timer.stop()
-            self._trigger_preview_preload(image_path)
-
-        if self.display_stack.currentIndex() != 1:
-            self.show_preview(show_dropdown=False)
-            self._enter_preview_mode()
 
     def set_start_button_mode(self, active: bool):
         self.is_start_button_mode = active

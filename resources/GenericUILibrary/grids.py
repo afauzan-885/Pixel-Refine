@@ -220,8 +220,11 @@ class GridContainer(QScrollArea, RealtimeMixin):
 
     # --- Realtime System ---
 
-    def on_store_changed(self, key, value):
+    def on_sync(self, payload, *, key=None, origin=None):
         """Handle real-time updates from DataStore."""
+        if not payload:
+            return
+        value = payload.get(getattr(self, "_store_key", None))
         if isinstance(value, list):
             # Expecting list of dicts like [{"id": "1", "label": "Image 1"}, ...]
             self.sync_items(value)

@@ -175,7 +175,7 @@ class FormGroup(QWidget, RealtimeMixin):
 
     Usage:
         form = FormGroup(label="Username", input_type="text")
-        form.bind_store(store, "username")
+        form.bind(store, key="username")
     """
 
     value_changed = Signal(object)  # Emits the current value
@@ -270,8 +270,11 @@ class FormGroup(QWidget, RealtimeMixin):
 
     # --- RealtimeMixin Implementation ---
 
-    def on_store_changed(self, key, value):
-        """Update UI value from Store."""
+    def on_sync(self, payload, *, key=None, origin=None):
+        """Update UI value from the bound store key."""
+        if not payload:
+            return
+        value = payload.get(getattr(self, "_store_key", None))
         if value is not None:
             # Block internal signal to prevent loop if auto_sync is on
             self.blockSignals(True)
@@ -280,8 +283,8 @@ class FormGroup(QWidget, RealtimeMixin):
 
     def _handle_internal_value_change(self, value):
         """Handle value change from UI side."""
-        if self.auto_sync:
-            self.set_data(value)
+        if self.auto_sync and getattr(self, "_store_key", None):
+            self.sync(values={self._store_key: value})
 
     def to_qml(self, indent=0):
         tab = "    " * indent
@@ -429,7 +432,7 @@ class Checkbox(QWidget, RealtimeMixin):
 
     Usage:
         cb = Checkbox("Option 1")
-        cb.bind_store(store, "option_1_enabled")
+        cb.bind(store, key="option_1_enabled")
     """
 
     toggled = Signal(bool)
@@ -457,7 +460,10 @@ class Checkbox(QWidget, RealtimeMixin):
         self.checkbox.setChecked(checked)
 
     # --- RealtimeMixin ---
-    def on_store_changed(self, key, value):
+    def on_sync(self, payload, *, key=None, origin=None):
+        if not payload:
+            return
+        value = payload.get(getattr(self, "_store_key", None))
         if isinstance(value, bool):
             self.checkbox.blockSignals(True)
             self.checkbox.setChecked(value)
@@ -465,8 +471,8 @@ class Checkbox(QWidget, RealtimeMixin):
 
     def _on_internal_toggle(self, checked):
         self.toggled.emit(checked)
-        if self.auto_sync:
-            self.set_data(checked)
+        if self.auto_sync and getattr(self, "_store_key", None):
+            self.sync(values={self._store_key: checked})
 
     def to_qml(self, indent=0):
         tab = "    " * indent
@@ -526,7 +532,7 @@ class RadioGroup(QWidget, RealtimeMixin):
 
     Usage:
         group = RadioGroup(options=["A", "B"])
-        group.bind_store(store, "selected_mode")
+        group.bind(store, key="selected_mode")
     """
 
     selection_changed = Signal(int, str)  # index, text
@@ -586,7 +592,10 @@ class RadioGroup(QWidget, RealtimeMixin):
             self.radios[index].setChecked(True)
 
     # --- RealtimeMixin ---
-    def on_store_changed(self, key, value):
+    def on_sync(self, payload, *, key=None, origin=None):
+        if not payload:
+            return
+        value = payload.get(getattr(self, "_store_key", None))
         if isinstance(value, int):
             self._block_radios(True)
             self.set_selected(value)
@@ -605,10 +614,10 @@ class RadioGroup(QWidget, RealtimeMixin):
             r.blockSignals(block)
 
     def _on_internal_selection_change(self, index, text):
-        if self.auto_sync:
+        if self.auto_sync and getattr(self, "_store_key", None):
             # We can sync either index or text. Preferring index for robustness,
             # but usually it matches what's in the store.
-            self.set_data(index)
+            self.sync(values={self._store_key: index})
 
     def to_qml(self, indent=0):
         tab = "    " * indent

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QFrame, QLineEdit, QListWidget, QScrollBar,
 )
 
-import UILibrary as ui
+import resources.GenericUILibrary as ui
 
 TEST_DIR = Path(__file__).parent
 TRACES = json.loads((TEST_DIR / "behavior_traces.json").read_text(encoding="utf-8"))
@@ -44,7 +44,7 @@ def test_canonical_package_and_root_api():
 
 
 def test_neutral_style_values_and_pyside_adapter(qapp):
-    from UILibrary.theme import (
+    from resources.GenericUILibrary.theme import (
         Theme, DarkTheme, apply_style, create_button_style, create_card_style,
         create_input_style, create_select_style, create_list_style,
         create_scrollbar_style, create_checkbox_style,

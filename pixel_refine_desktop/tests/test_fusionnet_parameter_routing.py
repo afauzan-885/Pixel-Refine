@@ -6,7 +6,16 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.FusionNet impor
 )
 
 
-def test_fusionnet_panel_values_override_generic_similarity_aliases():
+def test_fusionnet_panel_values_override_generic_similarity_aliases(monkeypatch):
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising import (
+        fusionnet_parameter_settings,
+    )
+
+    monkeypatch.setattr(
+        fusionnet_parameter_settings,
+        "load_fusionnet_config_for_batch",
+        lambda _batch_id: {"fusionnet_weightnet_variant": "v3"},
+    )
     ctx = SimpleNamespace(
         batch_id=None,
         params={
@@ -23,10 +32,20 @@ def test_fusionnet_panel_values_override_generic_similarity_aliases():
     resolved = FusionNetDenoisingAlgorithm()._resolve_config(ctx)
 
     assert resolved["work_scale"] == 0.25
-    assert resolved["tile_size"] == 256
+    # WeightNet bundle ships 1024x1024 only; the block is locked.
+    assert resolved["tile_size"] == 1024
 
 
-def test_batch_fusionnet_payload_is_authoritative():
+def test_batch_fusionnet_payload_is_authoritative(monkeypatch):
+    from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising import (
+        fusionnet_parameter_settings,
+    )
+
+    monkeypatch.setattr(
+        fusionnet_parameter_settings,
+        "load_fusionnet_config_for_batch",
+        lambda _batch_id: {"fusionnet_weightnet_variant": "v3"},
+    )
     ctx = SimpleNamespace(
         batch_id=None,
         params={
@@ -43,10 +62,11 @@ def test_batch_fusionnet_payload_is_authoritative():
     resolved = FusionNetDenoisingAlgorithm()._resolve_config(ctx)
 
     assert resolved["work_scale"] == 0.33
-    assert resolved["tile_size"] == 512
+    # WeightNet bundle ships 1024x1024 only; the block is locked.
+    assert resolved["tile_size"] == 1024
 
 
-def test_fusionnet_default_ghost_penalty_maximum_is_one(monkeypatch):
+def test_fusionnet_ghost_sensitivity_resolves(monkeypatch):
     from pixel_refine_desktop.enhance_stack.components.batch_page_v2.parameter_denoising import (
         fusionnet_parameter_settings,
     )
@@ -54,10 +74,7 @@ def test_fusionnet_default_ghost_penalty_maximum_is_one(monkeypatch):
     monkeypatch.setattr(
         fusionnet_parameter_settings,
         "load_fusionnet_config_for_batch",
-        lambda _batch_id: {
-            "ghost_penalty": 1.0,
-            "ghost_penalty_min": 0.65,
-        },
+        lambda _batch_id: {"fusionnet_ghost_sensitivity": 0.7},
     )
     ctx = SimpleNamespace(
         batch_id=None,
@@ -67,8 +84,7 @@ def test_fusionnet_default_ghost_penalty_maximum_is_one(monkeypatch):
 
     resolved = FusionNetDenoisingAlgorithm()._resolve_config(ctx)
 
-    assert resolved["ghost_penalty"] == 1.0
-    assert resolved["ghost_penalty_min"] == 0.65
+    assert resolved["ghost_sensitivity"] == 0.7
 
 
 def test_pixel_resolution_percent_is_total_pixel_fraction(monkeypatch):

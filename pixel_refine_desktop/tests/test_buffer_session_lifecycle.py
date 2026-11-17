@@ -1,4 +1,4 @@
-"""Focused ownership tests for resident factory/provider lifecycle routing."""
+"""Routing tests for resident factory/provider lifecycle through the session."""
 
 from types import SimpleNamespace
 
@@ -13,6 +13,8 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.pipeline_proces
 
 
 class _RecordingSession:
+    """Records the session API the pipeline actually calls."""
+
     def __init__(self):
         self.calls = []
 
@@ -20,17 +22,22 @@ class _RecordingSession:
         self.calls.append(("managed_api", api))
         return ("managed", api)
 
-    def track_result(self, result):
-        self.calls.append(("track_result", result))
+    def _track(self, result):
+        self.calls.append(("_track", result))
         return result
 
-    def own(self, resource, releaser=None):
-        self.calls.append(("own", resource, releaser))
+    def view(self, shape, **kwargs):
+        buffer = SimpleNamespace(shape=shape, kwargs=kwargs)
+        self.calls.append(("view", buffer))
+        return buffer
+
+    def borrow(self, resource, *, from_session=None):
+        self.calls.append(("borrow", resource))
         return resource
 
-    def detach(self, resource):
-        self.calls.append(("detach", resource))
-        return ("detached", resource)
+    def release(self, resource=None, *, to=None, retain=False, keep=()):
+        self.calls.append(("release", resource, retain))
+        return 1
 
     def release_tree(self, resource):
         self.calls.append(("release_tree", resource))
@@ -49,7 +56,7 @@ class _RecordingRuntime:
         return self.session
 
     def own(self, resource, releaser=None):
-        return self.session.own(resource, releaser=releaser)
+        return self.session.borrow(resource)
 
 
 def test_factory_helpers_route_ownership_through_runtime_session(monkeypatch):
@@ -64,19 +71,22 @@ def test_factory_helpers_route_ownership_through_runtime_session(monkeypatch):
 
     assert factory._managed_api(api) == ("managed", api)
     assert factory._track_gpu_result(result) is result
-    assert factory._own_component(component, releaser="release") is component
-    assert factory._export_result(exported) == ("detached", exported)
+    assert factory._own_component(component) is component
+    assert factory._export_result(exported) is exported
 
     assert [call[0] for call in session.calls] == [
         "managed_api",
-        "track_result",
-        "own",
-        "own",
-        "detach",
+        "_track",
+        "borrow",
+        "borrow",
+        "release",
     ]
+    export_release = session.calls[-1]
+    assert export_release[1] is exported
+    assert export_release[2] is True
 
 
-def test_factory_cleanup_uses_release_tree_and_preserves_shared_item(monkeypatch):
+def test_factory_cleanup_releases_work_item_without_protected_carrier(monkeypatch):
     session = _RecordingSession()
     runtime = _RecordingRuntime(session)
     monkeypatch.setattr(factory, "current_pipeline_runtime", lambda: runtime)
@@ -85,21 +95,15 @@ def test_factory_cleanup_uses_release_tree_and_preserves_shared_item(monkeypatch
     factory._destroy_work_item((first, shared))
     factory._destroy_work_item_except((first, shared, repeated, repeated), shared)
 
-    releases = [call[1] for call in session.calls if call[0] == "release_tree"]
-    assert releases[0] == (first, shared)
-    assert releases[1] == (first, repeated)
+    released = [call[1] for call in session.calls if call[0] == "release"]
+    assert released[0] == (first, shared)
+    assert released[1] == (first, repeated)
 
 
 def test_raw_provider_releases_cfa_workspace_via_active_runtime(monkeypatch):
     from pixel_refine_desktop.enhance_stack.core.algorithm import pipeline_runtime
 
-    class Session(_RecordingSession):
-        def acquire_buffer(self, shape, **kwargs):
-            buffer = SimpleNamespace(shape=shape, kwargs=kwargs)
-            self.calls.append(("acquire_buffer", buffer))
-            return buffer
-
-    session = Session()
+    session = _RecordingSession()
     runtime = _RecordingRuntime(session)
     monkeypatch.setattr(pipeline_runtime, "current_pipeline_runtime", lambda: runtime)
 
@@ -113,11 +117,11 @@ def test_raw_provider_releases_cfa_workspace_via_active_runtime(monkeypatch):
     buffers = tuple(provider._cfa_planes_gpu)
 
     assert len(buffers) == 4
-    assert all(call[0] == "acquire_buffer" for call in session.calls)
+    assert all(call[0] == "view" for call in session.calls)
     assert not hasattr(provider, "_cfa_buffer_session")
 
     provider.close()
 
-    released = [call[1] for call in session.calls if call[0] == "release_tree"]
+    released = [call[1] for call in session.calls if call[0] == "release"]
     assert released == list(buffers)
     assert provider._cfa_planes_gpu is None

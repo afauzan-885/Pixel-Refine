@@ -60,6 +60,36 @@ class SpatialSplatAOT:
         # explicit same-backend batch recovery path without probing every tile.
         self._resident_offset_available = None
 
+    def _buffer_session(self):
+        """Return the active resident BufferSession for this process, if any."""
+        try:
+            from ...pipeline_runtime import current_pipeline_runtime
+
+            runtime = current_pipeline_runtime()
+            return runtime.buffer_session if runtime is not None else None
+        except Exception:
+            return None
+
+    def _scratch(self, session, shape, *, tag, host=False):
+        if session is None:
+            return self.engine.allocate(
+                shape, dtype=np.float32, host_accessible=host
+            )
+        return session.view(shape, dtype=np.float32, tag=tag, host=host)
+
+    def _upload(self, session, data, *, tag, is_vector=False, vector_dim=None):
+        if session is None:
+            return self.engine.upload(
+                data, is_vector=is_vector, vector_dim=vector_dim
+            )
+        return session.upload_if_needed(
+            data,
+            is_vector=is_vector,
+            vector_dim=vector_dim,
+            tag=tag,
+            refresh=True,
+        )[0]
+
     def run(
         self,
         frames: np.ndarray,
@@ -84,6 +114,7 @@ class SpatialSplatAOT:
             raise ValueError("scale must be >= 1")
 
         buffers = []
+        session = self._buffer_session() if self.backend != "vulkan" else None
         previous_memory_override = getattr(self.engine, "_force_host_accessible", None)
         if self.backend == "vulkan":
             # The current Vulkan bridge maps graph ndarray arguments during
@@ -92,32 +123,40 @@ class SpatialSplatAOT:
             # before the graph executes on drivers without a host-visible heap.
             self.engine.set_force_host_accessible(True)
         try:
-            confidence_buf = self.engine.upload(confidence)
+            confidence_buf = self._upload(
+                session, confidence, tag="splat_sr.confidence"
+            )
             # The public flow contract is [dx, dy].  The gray AOT graph
             # receives separate y/x planes, so split them in the graph's
             # order rather than forwarding the vector channels verbatim.
-            flow_y_buf = self.engine.upload(flow[..., 1])
-            flow_x_buf = self.engine.upload(flow[..., 0])
-            result = np.empty((h * int(scale), w * int(scale), channels), np.float32)
-            coverage = np.empty((h * int(scale), w * int(scale)), np.float32)
-            buffers = [confidence_buf, flow_y_buf, flow_x_buf]
+            flow_y_buf = self._upload(
+                session, flow[..., 1], tag="splat_sr.flow_y"
+            )
+            flow_x_buf = self._upload(
+                session, flow[..., 0], tag="splat_sr.flow_x"
+            )
+            hr_shape = (h * int(scale), w * int(scale))
+            result = np.empty(hr_shape + (channels,), np.float32)
+            coverage = np.empty(hr_shape, np.float32)
+            buffers = [confidence_buf, flow_y_buf, flow_x_buf] if session is None else []
             for channel in range(channels):
-                frame_buf = self.engine.upload(frames[..., channel])
+                frame_buf = self._upload(
+                    session,
+                    frames[..., channel],
+                    tag=f"splat_sr.frame.{channel}",
+                )
                 # Vulkan graph outputs are read back immediately.  Request
                 # host-visible allocations explicitly; a device-local output
                 # can be written by the graph but cannot be mapped by the
                 # bridge's direct readback path on this driver.
-                result_buf = self.engine.allocate(
-                    (h * int(scale), w * int(scale)),
-                    dtype=np.float32,
-                    host_accessible=True,
+                result_buf = self._scratch(
+                    session, hr_shape, tag="splat_sr.result", host=True
                 )
-                coverage_buf = self.engine.allocate(
-                    (h * int(scale), w * int(scale)),
-                    dtype=np.float32,
-                    host_accessible=True,
+                coverage_buf = self._scratch(
+                    session, hr_shape, tag="splat_sr.coverage", host=True
                 )
-                buffers.extend((frame_buf, result_buf, coverage_buf))
+                if session is None:
+                    buffers.extend((frame_buf, result_buf, coverage_buf))
                 self.module.run(
                     "robust_splat_gray",
                     frames=frame_buf, confidence=confidence_buf,
@@ -265,11 +304,15 @@ class SpatialSplatAOT:
                     f"accumulator denominator shape {denominator.shape} != "
                     f"expected {(hr_h, hr_w)}"
                 )
+        session = self._buffer_session() if self.backend != "vulkan" else None
+        use_session_tiles = session is not None
         previous_memory_override = getattr(self.engine, "_force_host_accessible", None)
         input_buffers = []
         pending_tiles = []
 
         def destroy_tile_buffers(tile_buffers):
+            if use_session_tiles:
+                return
             for buffer in tile_buffers:
                 try:
                     buffer.destroy()
@@ -279,14 +322,30 @@ class SpatialSplatAOT:
         if self.backend == "vulkan":
             self.engine.set_force_host_accessible(True)
         try:
-            confidence_buf = self.engine.upload(confidence)
-            flow_y_buf = self.engine.upload(flow[..., 1])
-            flow_x_buf = self.engine.upload(flow[..., 0])
-            input_buffers = [confidence_buf, flow_y_buf, flow_x_buf]
+            confidence_buf = self._upload(
+                session, confidence, tag="splat_sr.confidence"
+            )
+            flow_y_buf = self._upload(
+                session, flow[..., 1], tag="splat_sr.flow_y"
+            )
+            flow_x_buf = self._upload(
+                session, flow[..., 0], tag="splat_sr.flow_x"
+            )
+            input_buffers = (
+                [] if session is not None
+                else [confidence_buf, flow_y_buf, flow_x_buf]
+            )
             frame_buffers = []
             for channel in range(channels):
-                frame_buffers.append(self.engine.upload(frames[..., channel]))
-            input_buffers.extend(frame_buffers)
+                frame_buffers.append(
+                    self._upload(
+                        session,
+                        frames[..., channel],
+                        tag=f"splat_sr.frame.{channel}",
+                    )
+                )
+            if session is None:
+                input_buffers.extend(frame_buffers)
 
             resident_tile_batch = 2
             try:
@@ -350,19 +409,35 @@ class SpatialSplatAOT:
                     tile_shape = (y1 - y0, x1 - x0)
                     tile_buffers = []
                     try:
-                        coverage_buf = self.engine.allocate(
-                            tile_shape,
-                            dtype=np.float32,
-                            host_accessible=(self.backend == "vulkan"),
-                        )
-                        tile_buffers.append(coverage_buf)
-                        result_buffers = []
-                        for channel, frame_buf in enumerate(frame_buffers):
-                            result_buf = self.engine.allocate(
+                        if use_session_tiles:
+                            coverage_buf = session.acquire_ring_buffer(
+                                "splat_sr.tile_coverage",
+                                tile_shape,
+                                depth=resident_tile_batch,
+                                dtype=np.float32,
+                            )
+                        else:
+                            coverage_buf = self.engine.allocate(
                                 tile_shape,
                                 dtype=np.float32,
                                 host_accessible=(self.backend == "vulkan"),
                             )
+                        tile_buffers.append(coverage_buf)
+                        result_buffers = []
+                        for channel, frame_buf in enumerate(frame_buffers):
+                            if use_session_tiles:
+                                result_buf = session.acquire_ring_buffer(
+                                    "splat_sr.tile_result",
+                                    tile_shape,
+                                    depth=resident_tile_batch,
+                                    dtype=np.float32,
+                                )
+                            else:
+                                result_buf = self.engine.allocate(
+                                    tile_shape,
+                                    dtype=np.float32,
+                                    host_accessible=(self.backend == "vulkan"),
+                                )
                             tile_buffers.append(result_buf)
                             result_buffers.append(result_buf)
                             self.module.run(
@@ -409,11 +484,12 @@ class SpatialSplatAOT:
             # If dispatch/readback failed, do not leak queued tile buffers.
             for pending in pending_tiles:
                 destroy_tile_buffers(pending[-1])
-            for buffer in input_buffers:
-                try:
-                    buffer.destroy()
-                except Exception:
-                    pass
+            if session is None:
+                for buffer in input_buffers:
+                    try:
+                        buffer.destroy()
+                    except Exception:
+                        pass
             if self.backend == "vulkan":
                 self.engine.set_force_host_accessible(previous_memory_override)
 

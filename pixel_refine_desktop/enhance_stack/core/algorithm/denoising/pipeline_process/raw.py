@@ -28,6 +28,7 @@ from ...pipeline_runtime import (
 from .analysis import ANALYSIS_AUTO_ENHANCE_MODE
 from .contracts import ResidentGeometry, scale_homography
 from .facade import api as _facade
+from .aligners import factory as _aligner_factory
 from .telemetry import PipelineTelemetry
 
 __all__ = ["_run_shared_raw_provider_pipeline"]
@@ -256,12 +257,11 @@ def _run_shared_raw_provider_pipeline(
             normalized_engine == "fusionet" and weightnet_channels == 1
         ):
             weightnet_gray_gpu = buffer_session.view(
-                engine.allocate(
-                    geometry.weight_shape,
-                    dtype=np.float32,
-                    host_accessible=False,
-                )
+                geometry.weight_shape,
+                dtype=np.float32,
+                tag="raw.weightnet_gray",
             )
+            _aligner_factory._mark_session_cached(weightnet_gray_gpu)
         if normalized_engine == "fusionet" and getattr(session, "runtime", None) != "taichi_aot":
             weightnet_support_workspace = _facade()._WeightNetReadbackWorkspace(
                 geometry.weight_shape, channels=weightnet_channels
@@ -424,16 +424,23 @@ def _run_shared_raw_provider_pipeline(
                 spatial_cols = _compute_tile_starts(
                     geometry.weight_shape[1], tile, overlap=overlap_value
                 )
-                spatial_rows_gpu = buffer_session.view(
-                    _ti_rt.upload(np.asarray(spatial_rows, dtype=np.int32))
-                )
-                spatial_cols_gpu = buffer_session.view(
-                    _ti_rt.upload(np.asarray(spatial_cols, dtype=np.int32))
-                )
+                spatial_rows_gpu = buffer_session.upload_if_needed(
+                    np.asarray(spatial_rows, dtype=np.int32),
+                    tag="raw.spatial_rows",
+                )[0]
+                spatial_cols_gpu = buffer_session.upload_if_needed(
+                    np.asarray(spatial_cols, dtype=np.int32),
+                    tag="raw.spatial_cols",
+                )[0]
                 spatial_weight_work_gpu = buffer_session.view(
-                    engine.allocate(
-                        geometry.weight_shape, dtype=np.float32, host_accessible=False
-                    )
+                    geometry.weight_shape,
+                    dtype=np.float32,
+                    tag="raw.spatial_weight_work",
+                )
+                _aligner_factory._mark_session_cached(
+                    spatial_rows_gpu,
+                    spatial_cols_gpu,
+                    spatial_weight_work_gpu,
                 )
                 spatial_scratch = _facade()._own_component(SpatialScratchCache(), releaser=lambda cache: cache.clear())
                 spatial_state = (tile, overlap_value, motion, noise_offset, noise_sigma)
@@ -546,7 +553,19 @@ def _run_shared_raw_provider_pipeline(
                         full_shape=geometry.full_shape,
                         flow_shape=geometry.align_shape,
                     )
-                    flow_gpu = engine.upload(flow_host, is_vector=True)
+                    if buffer_session is None:
+                        flow_gpu = engine.upload(flow_host, is_vector=True)
+                    else:
+                        flow_gpu = buffer_session.acquire_ring_buffer(
+                            "raw.candidate_flow",
+                            flow_host.shape,
+                            depth=2,
+                            dtype=np.float32,
+                            is_vector=True,
+                            vector_dim=2,
+                        )
+                        engine.write_into(flow_gpu, flow_host, synchronize=False)
+                        _aligner_factory._mark_session_cached(flow_gpu)
                     weight_gpu = _facade()._upload_weightnet_confidence(
                         engine,
                         confidence,
@@ -584,8 +603,11 @@ def _run_shared_raw_provider_pipeline(
                 target_scratch_h = geometry.full_shape[0] // 2 if use_half_res else geometry.full_shape[0]
                 target_scratch_w = geometry.full_shape[1] // 2 if use_half_res else geometry.full_shape[1]
                 _demosaic_scratch = buffer_session.view(
-                    engine.allocate((target_scratch_h, target_scratch_w, 3), dtype=np.float32, host_accessible=False)
+                    (target_scratch_h, target_scratch_w, 3),
+                    dtype=np.float32,
+                    tag="raw.demosaic_scratch",
                 )
+                _aligner_factory._mark_session_cached(_demosaic_scratch)
             except Exception:
                 _demosaic_scratch = None
 
@@ -596,8 +618,11 @@ def _run_shared_raw_provider_pipeline(
                     _work_scratch = _demosaic_scratch
                 else:
                     _work_scratch = buffer_session.view(
-                        engine.allocate((align_h, align_w, 3), dtype=np.float32, host_accessible=False)
+                        (align_h, align_w, 3),
+                        dtype=np.float32,
+                        tag="raw.work_scratch",
                     )
+                    _aligner_factory._mark_session_cached(_work_scratch)
             except Exception:
                 _work_scratch = None
 
@@ -965,9 +990,29 @@ def _run_shared_raw_provider_pipeline(
                                                 flow_shape=geometry.align_shape,
                                                 base_transform=transform,
                                             )
-                                            transform_gpu = engine.upload(
-                                                rank_flow_host, is_vector=True
-                                            )
+                                            if buffer_session is None:
+                                                transform_gpu = engine.upload(
+                                                    rank_flow_host, is_vector=True
+                                                )
+                                            else:
+                                                transform_gpu = (
+                                                    buffer_session.acquire_ring_buffer(
+                                                        "raw.candidate_transform",
+                                                        rank_flow_host.shape,
+                                                        depth=2,
+                                                        dtype=np.float32,
+                                                        is_vector=True,
+                                                        vector_dim=2,
+                                                    )
+                                                )
+                                                engine.write_into(
+                                                    transform_gpu,
+                                                    rank_flow_host,
+                                                    synchronize=False,
+                                                )
+                                                _aligner_factory._mark_session_cached(
+                                                    transform_gpu
+                                                )
                                         telemetry.record("candidate_transform", transform_started)
                                     weight_gpu = _facade()._upload_weightnet_confidence(
                                         engine,
@@ -1144,7 +1189,23 @@ def _run_shared_raw_provider_pipeline(
                                 )
                             )
                         )
-                        weight_gpu = engine.upload(weight_upload, is_vector=False)
+                        if buffer_session is None:
+                            weight_gpu = engine.upload(
+                                weight_upload, is_vector=False
+                            )
+                        else:
+                            weight_gpu = buffer_session.acquire_ring_buffer(
+                                "raw.frame_weight",
+                                weight_upload.shape,
+                                depth=2,
+                                dtype=np.float32,
+                                is_vector=False,
+                                vector_dim=1,
+                            )
+                            engine.write_into(
+                                weight_gpu, weight_upload, synchronize=False
+                            )
+                            _aligner_factory._mark_session_cached(weight_gpu)
                         del weight_upload
                         if aligned_analysis_weight is not None:
                             if support_analysis is aligned_analysis_weight:

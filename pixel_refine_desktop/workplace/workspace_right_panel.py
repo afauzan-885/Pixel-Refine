@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, Qt, QTimer
 
-from UILibrary import (
+from resources.GenericUILibrary import (
     ListGroup,
     Button,
 )

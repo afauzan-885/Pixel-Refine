@@ -637,6 +637,14 @@ THUMBNAIL_LABEL = "Thumbnail"
 THUMBNAIL_DESCRIPTION = """Shows image previews during batch processing (Experimental).
 - Note: May cause slight lag or flickering when loading new batches."""
 
+PREVIEW_TONE_MAPPING_LABEL = "Preview RAW Tone Mapping"
+PREVIEW_TONE_MAPPING_DESCRIPTION = """Apply the display transform to RAW burst previews.
+- Off: Faster fallback previews, but visibly darker."""
+PREVIEW_DEMOSAIC_LABEL = "Preview RAW Demosaic"
+PREVIEW_DEMOSAIC_DESCRIPTION = """Algorithm used when a RAW has no usable embedded preview.
+- dcb: Correct colours (recommended).
+- bilinear: Experimental; the half-res graph can lose the green channel."""
+
 NOISE_MAD_OFFSET_LABEL = "MAD Noise Factor"
 NOISE_MAD_OFFSET_DESCRIPTION = """MAD threshold for noisy images.
 - Higher: More tolerant to noise, but increases ghosting risk in moving areas."""

@@ -142,35 +142,8 @@ def encode_dng_bytes(*args, **kwargs):
     return _impl(*args, **kwargs)
 
 
-def decode_dng_bytes(*args, **kwargs):
-    from taichi_vision.taichi_algorithm.compression.dng_aot import decode_dng_bytes as _impl
-    return _impl(*args, **kwargs)
-
-
-def read_dng_aot(*args, **kwargs):
-    from taichi_vision.taichi_algorithm.compression.dng_aot import read_dng_aot as _impl
-    return _impl(*args, **kwargs)
-
-
-def dng_capability_report(*args, **kwargs):
-    from taichi_vision.taichi_algorithm.compression.dng_aot import dng_capability_report as _impl
-    return _impl(*args, **kwargs)
-
-
 def save_dng_aot(*args, **kwargs):
     from taichi_vision.taichi_algorithm.compression.dng_aot import save_dng_aot as _impl
-    return _impl(*args, **kwargs)
-
-
-def raw_frame_from_dng(*args, **kwargs):
-    """Create a semantic pre-demosaic RAW frame from a parsed DNG frame."""
-    from taichi_vision.taichi_algorithm.compression.raw_frame import raw_frame_from_dng as _impl
-    return _impl(*args, **kwargs)
-
-
-def fuse_dng_frames_blockwise(*args, **kwargs):
-    """Fuse parsed DNG frames directly without a demosaic intermediate."""
-    from taichi_vision.taichi_algorithm.compression.raw_pipeline import fuse_dng_frames_blockwise as _impl
     return _impl(*args, **kwargs)
 
 
@@ -187,12 +160,6 @@ def fuse_raw_frames_blockwise(*args, **kwargs):
 
 def raw_alignment_guide(*args, **kwargs):
     from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_alignment_guide as _impl
-    return _impl(*args, **kwargs)
-
-
-def raw_alignment_guide_dng(*args, **kwargs):
-    """Build a streamed pre-demosaic guide directly from a DNG frame."""
-    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_alignment_guide_dng as _impl
     return _impl(*args, **kwargs)
 
 
@@ -236,21 +203,9 @@ def raw_optical_flow(*args, **kwargs):
     return _impl(*args, **kwargs)
 
 
-def raw_optical_flow_dng(*args, **kwargs):
-    """Run optical flow on streamed pre-demosaic DNG guides."""
-    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_optical_flow_dng as _impl
-    return _impl(*args, **kwargs)
-
-
 def raw_flow_tile_contract(*args, **kwargs):
     """Declare an explicit, phase-safe RAW green-guide tile contract."""
     from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_flow_tile_contract as _impl
-    return _impl(*args, **kwargs)
-
-
-def raw_flow_tile_parity_report(*args, **kwargs):
-    """Run a read-only full-vs-tiled RAW-flow candidate diagnostic."""
-    from taichi_vision.taichi_algorithm.compression.raw_pipeline import raw_flow_tile_parity_report as _impl
     return _impl(*args, **kwargs)
 
 
@@ -701,19 +656,11 @@ __all__ = [
     "decode_lossless_jpeg",
     "encode_dng_aot",
     "encode_dng_bytes",
-    "decode_dng_bytes",
-    "read_dng_aot",
-    "dng_capability_report",
-    "DNGCapabilityError",
-    "DNGCapabilityReport",
     "save_dng_aot",
     "RawMosaicFrame",
-    "raw_frame_from_dng",
-    "fuse_dng_frames_blockwise",
     "raw_mosaic_frame",
     "fuse_raw_frames_blockwise",
     "raw_alignment_guide",
-    "raw_alignment_guide_dng",
     "raw_alignment_guide_native",
     "raw_normalize_headroom_native",
     "raw_weight_map",
@@ -722,10 +669,8 @@ __all__ = [
     "fuse_raw_accumulate_native",
     "phase_safe_integer_warp",
     "raw_optical_flow",
-    "raw_optical_flow_dng",
     "RawFlowTileContract",
     "raw_flow_tile_contract",
-    "raw_flow_tile_parity_report",
     "package_heic_aot",
     "package_heic_image_aot",
     "build_heif_payload",

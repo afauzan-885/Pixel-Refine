@@ -50,78 +50,53 @@ def demosaic(
     flip = 0
     bayer = raw_input
 
-    # 1. Handle file path or rawpy object input
-    is_rawpy_obj = hasattr(raw_input, "raw_image")
-    is_filepath = isinstance(raw_input, (str, bytes, os.PathLike)) and os.path.exists(str(raw_input))
+    # 1. Native RAW container input.  rawpy is not part of the production path.
+    if hasattr(raw_input, "raw_image"):
+        raise TypeError(
+            "demosaic no longer accepts rawpy objects; pass a native RAW path or bytes"
+        )
 
-    if is_rawpy_obj or is_filepath:
-        try:
-            import rawpy
-            if is_rawpy_obj:
-                raw = raw_input
-                close_raw = False
-            else:
-                raw = rawpy.imread(str(raw_input))
-                close_raw = True
+    is_filepath = isinstance(raw_input, (str, bytes, os.PathLike))
+    if is_filepath:
+        import taichi as _ti
 
-            try:
-                flip = getattr(raw.sizes, "flip", 0)
-                algo = rawpy.DemosaicAlgorithm.PPG if str(method).lower() in ("hamilton", "ha") else (
-                    rawpy.DemosaicAlgorithm.BILINEAR if str(method).lower() == "bilinear" else rawpy.DemosaicAlgorithm.AHD
-                )
-                rgb = raw.postprocess(
-                    demosaic_algorithm=algo,
-                    half_size=bool(half_res),
-                    output_bps=16,
-                    no_auto_bright=True,
-                    use_camera_wb=True,
-                )
-                rgb_f32 = (rgb.astype(np.float32) / 65535.0)
-
-                if hasattr(ti, "engine"):
-                    try:
-                        ti.engine.active_cmatrix = raw.color_matrix[:, :3].astype(np.float32)
-                        wb = raw.camera_whitebalance
-                        ti.engine.active_wb_r = float(wb[0])
-                        ti.engine.active_wb_g1 = float(wb[1])
-                        ti.engine.active_wb_b = float(wb[2])
-                        ti.engine.active_wb_g2 = float(wb[3] if len(wb) > 3 else wb[1])
-                        ti.engine.active_black_level = float(raw.black_level_per_channel[0])
-                        ti.engine.active_white_level = float(raw.white_level)
-                    except Exception:
-                        pass
-            finally:
-                if close_raw:
-                    raw.close()
-
-            if output_bgr_u16:
-                bgr = cv2.cvtColor(rgb_f32, cv2.COLOR_RGB2BGR)
-                res = np.clip(bgr * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
-            else:
-                res = rgb_f32
-
-            if dst is not None:
-                if hasattr(dst, "from_numpy"):
-                    dst.from_numpy(res)
-                    return dst
-                np.copyto(dst, res)
-                return dst
-
-            if _resident_output and hasattr(ti, "engine"):
-                return ti.engine.upload(res)
-            return res
-        except Exception:
-            if is_filepath and hasattr(ti, "read_dng"):
-                try:
-                    dng_info = ti.read_dng(str(raw_input))
-                    bayer = dng_info.get("data", dng_info.get("raw_data"))
-                    black_level = float(dng_info.get("black_level", black_level))
-                    white_level = float(dng_info.get("white_level", white_level))
-                    pat = dng_info.get("cfa_pattern", [0, 1, 1, 2])
-                    if len(pat) == 4:
-                        c00, c01, c10, c11 = pat[0], pat[1], pat[2], pat[3]
-                except Exception:
-                    pass
+        native = _ti.imread(raw_input, compute_hash=False)
+        if not isinstance(native, dict) or "data" not in native:
+            raise TypeError(
+                "demosaic expects a RAW container; standard images are not CFA input"
+            )
+        bayer = np.asarray(native["data"])
+        bits = int(native.get("bits_per_sample", 16) or 16)
+        black_level = float(
+            np.asarray(native.get("black_level", 0.0), dtype=np.float32).reshape(-1)[0]
+        )
+        white_level = float(
+            np.asarray(
+                native.get("white_level", (1 << bits) - 1), dtype=np.float32
+            ).reshape(-1)[0]
+        )
+        neutral = np.asarray(
+            native.get("as_shot_neutral", [1.0, 1.0, 1.0]), dtype=np.float32
+        ).reshape(-1)
+        if neutral.size >= 3 and np.all(neutral[:3] > 0):
+            gains = 1.0 / neutral[:3]
+            gains /= max(float(gains[1]), 1e-6)
+            wb_r, wb_g1, wb_b = (float(value) for value in gains)
+        else:
+            wb_r = wb_g1 = wb_b = 1.0
+        wb_g2 = wb_g1
+        matrix = np.asarray(native.get("color_matrix", []), dtype=np.float32)
+        if matrix.ndim == 2 and matrix.shape[0] >= 3 and matrix.shape[1] >= 3:
+            cmatrix = matrix[:3, :3]
+        else:
+            cmatrix = np.eye(3, dtype=np.float32)
+        pattern = list(native.get("cfa_pattern") or [0, 1, 1, 2])[:4]
+        pattern = [
+            0 if int(value) == 0 else (1 if int(value) in (1, 3) else 2)
+            for value in pattern
+        ]
+        c00, c01, c10, c11 = pattern
+        flip = 0
 
     # 2. Handle 2D Bayer array (NumPy or TaichiGPUBuffer)
     if hasattr(bayer, "to_numpy"):

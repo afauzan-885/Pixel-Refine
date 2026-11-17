@@ -56,13 +56,18 @@ def run_strict_verification():
         img_ref = np.random.rand(1024, 1024, 3).astype(np.float32) * 255.0
         img_ref = img_ref.astype(np.uint8)
     else:
-        import rawpy
         print(f"Loading and demosaicing: {img_path}")
-        with rawpy.imread(img_path) as raw:
-            rgb = raw.postprocess(use_camera_wb=True, half_size=True)
-            img_ref = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            h_ref, w_ref = img_ref.shape[:2]
-            img_ref = img_ref[(h_ref//2 - 512):(h_ref//2 + 512), (w_ref//2 - 512):(w_ref//2 + 512)].copy()
+        rgb = np.asarray(
+            taichi_aot.demosaic(img_path, method="hamilton", half_res=True)
+        )
+        if rgb.dtype == np.uint16:
+            rgb = (rgb.astype(np.float32) / 257.0).astype(np.uint8)
+        elif rgb.dtype != np.uint8:
+            scale = 255.0 if float(np.max(rgb)) <= 1.5 else 1.0
+            rgb = np.clip(rgb.astype(np.float32) * scale, 0, 255).astype(np.uint8)
+        img_ref = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        h_ref, w_ref = img_ref.shape[:2]
+        img_ref = img_ref[(h_ref//2 - 512):(h_ref//2 + 512), (w_ref//2 - 512):(w_ref//2 + 512)].copy()
     
     h, w = img_ref.shape[:2]
     

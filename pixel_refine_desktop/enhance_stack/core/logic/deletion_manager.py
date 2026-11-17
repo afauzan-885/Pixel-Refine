@@ -248,7 +248,7 @@ class DeletionManager(QObject):
         if not selected_ids or not self.panel.current_batch_id:
             return
 
-        from UILibrary import modal_confirm
+        from resources.GenericUILibrary import modal_confirm
         from pixel_refine_desktop.ui.views.settings.General.Language import language_config
         confirmed = modal_confirm.question(
             self.panel,

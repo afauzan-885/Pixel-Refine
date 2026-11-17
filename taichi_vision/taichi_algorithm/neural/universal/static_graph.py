@@ -168,11 +168,11 @@ def capture_universal_session(
             logical_shapes.update({item["name"]: item["shape"] for item in allocations.values()})
             if enable_pointwise_ssa:
                 from .pointwise_ssa import rewrite_events as rewrite_pointwise
-                from .kernels import ALL_KERNELS
+                from .kernels import ALL_KERNELS, kernel_name
                 events, pointwise_regions = rewrite_pointwise(
                     events, session.plan, logical_shapes, {**uploads, **allocations},
                     {id(session.buffers[name]) for name in session.plan.output_names if name in session.buffers},
-                    {kernel.__name__: kernel for kernel in ALL_KERNELS},
+                    {kernel_name(kernel): kernel for kernel in ALL_KERNELS},
                 )
             if enable_binary_chains:
                 events, binary_regions = rewrite_events(events, session.plan, logical_shapes, set(session.plan.output_names))
@@ -276,9 +276,9 @@ def capture_universal_session(
         scalar_arg_by_value: Dict[Tuple[str, Any], str] = {}
         scalar_values: Dict[str, Any] = {}
         dispatch_specs = []
-        from .kernels import ALL_KERNELS
+        from .kernels import ALL_KERNELS, kernel_name
 
-        kernels = {kernel.__name__: kernel for kernel in ALL_KERNELS}
+        kernels = {kernel_name(kernel): kernel for kernel in ALL_KERNELS}
         import taichi as ti
 
         for event in events:
@@ -385,8 +385,10 @@ def compile_static_graph_from_capture(
         raise ValueError("existing Taichi runtime fast_math does not match compile policy")
     builder = ti.graph.GraphBuilder()
     specialization_keys = []
+    from .kernels import kernel_name
+
     for kernel, args in capture["dispatch_specs"]:
-        kernel = (kernel_overrides or {}).get(kernel.__name__, kernel)
+        kernel = (kernel_overrides or {}).get(kernel_name(kernel), kernel)
         if specialize_scalars:
             from .scalar_specialization import specialize_kernel
             kernel, args, key = specialize_kernel(

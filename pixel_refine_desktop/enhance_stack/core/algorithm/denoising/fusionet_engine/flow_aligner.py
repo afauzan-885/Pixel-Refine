@@ -32,10 +32,9 @@ _MODULE_CACHE = {}
 
 def load_compute_flow_module(engine=None):
     """Loads and caches the compute_flow AOT module on the active Taichi engine."""
-    from taichi_vision import algorithm as taichi_aot
-    import taichi.aot_engine as _ti_rt
+    from taichi_vision.taichi_algorithm import aot_api
 
-    return _ti_rt.load_tcm("compute_flow")
+    return aot_api.load_tcm("compute_flow")
 
 
 class AOTOpticalFlowAligner:

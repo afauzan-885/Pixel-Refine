@@ -12,6 +12,7 @@ from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_processor import (
 )
 from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
     ThumbnailPolicy,
+    thumbnail_generation_suspended,
 )
 
 # Image display helper
@@ -72,6 +73,9 @@ class DisplayLogic:
             callback: Callable(QImage, str) - Called ketika thumbnail ready
         """
         if not self.thumbnail_policy.is_enabled():
+            return
+
+        if thumbnail_generation_suspended():
             return
 
         self.thumbnail_processor.process_image(image_path, callback)
@@ -265,6 +269,9 @@ class DisplayLogic:
             List of (path, card) tuples to load
         """
         if not self.thumbnail_policy.is_enabled():
+            return []
+
+        if thumbnail_generation_suspended():
             return []
 
         if not all_cards or grid_container.isHidden():

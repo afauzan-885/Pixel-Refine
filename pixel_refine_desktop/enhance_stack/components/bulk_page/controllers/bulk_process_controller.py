@@ -35,20 +35,21 @@ from resources.styles.stylesheet import (
 )
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 from pixel_refine_desktop.enhance_stack.core.logic.batch_parameter_manager import (
+    get_batch_algorithm_summary,
+    get_json_path,
     load_json_state,
+    save_json_state,
 )
-from UILibrary import (
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    set_thumbnail_generation_suspended,
+)
+from resources.GenericUILibrary import (
     ModalDialog,
     ProgressBar,
     Button,
     NumericStepper,
 )
-from UILibrary.forms import apply_numeric_spinbox_style
-
-
-def save_json_state(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=4)
+from resources.GenericUILibrary.forms import apply_numeric_spinbox_style
 
 
 def _parse_bulk_progress(*args, **kwargs):
@@ -77,7 +78,7 @@ def _parse_bulk_progress(*args, **kwargs):
 class MassAlgorithmEditDialog(ModalDialog):
     algorithms_updated = Signal()
 
-    def __init__(self, panels, parent=None):
+    def __init__(self, panels, parent=None, store=None):
         super().__init__(
             message="",
             parent=parent,
@@ -89,6 +90,7 @@ class MassAlgorithmEditDialog(ModalDialog):
             height=300,
         )
         self.panels = panels
+        self.store = store
         self.seq_to_batch_id = {
             getattr(p, "sequential_batch_number", i + 1): getattr(
                 p, "batch_id", getattr(p, "id", i + 1)
@@ -96,10 +98,10 @@ class MassAlgorithmEditDialog(ModalDialog):
             for i, p in enumerate(self.panels)
         }
         self.algorithms = {
-            category: [language_config.UI_NO_CHANGE, *get_names(category, context="bulk_edit")]
+            category: [language_config.UI_NO_CHANGE, *get_names(category, context="batch")]
             for category in ("alignment", "super_resolution", "denoising")
         }
-        self.json_path = os.path.join("database", "align", "batch_parameter.json")
+        self.json_path = get_json_path()
         self.initUI()
         self.setStyleSheet(stylesheet_global_page())
 
@@ -195,39 +197,44 @@ class MassAlgorithmEditDialog(ModalDialog):
             )
             return
 
-        all_params = load_json_state(self.json_path)
+        store = self.store
+        all_params = store.get(None) if store is not None else load_json_state(self.json_path)
+        updates = {}
 
         for seq, batch_id in self.seq_to_batch_id.items():
-            if start_seq <= seq <= end_seq:
-                batch_params = all_params.get(str(batch_id), {})
+            if not (start_seq <= seq <= end_seq):
+                continue
+            batch_params = dict(all_params.get(str(batch_id), {}) or {})
 
-                if self.align_checkbox.isChecked():
-                    align_val = self.align_combo.currentText()
-                    if align_val != language_config.UI_NO_CHANGE:
-                        batch_params["checkbox_align_images"] = (
-                            align_val != "No Alignment"
-                        )
-                        batch_params["alignment_algo"] = align_val
+            if self.align_checkbox.isChecked():
+                value = self.align_combo.currentText()
+                if value != language_config.UI_NO_CHANGE:
+                    batch_params[config.KEY_ALIGNMENT_ALGO] = value
+                    batch_params[config.KEY_CHECKBOX_ALIGN] = value != "No Alignment"
 
-                if self.sr_checkbox.isChecked():
-                    sr_val = self.sr_combo.currentText()
-                    if sr_val != language_config.UI_NO_CHANGE:
-                        batch_params["checkbox_super_resolution"] = (
-                            sr_val != "No Super Resolution"
-                        )
-                        batch_params["super_resolution_algo"] = sr_val
+            if self.sr_checkbox.isChecked():
+                value = self.sr_combo.currentText()
+                if value != language_config.UI_NO_CHANGE:
+                    batch_params[config.KEY_SUPER_RESOLUTION_ALGO] = value
+                    batch_params[config.KEY_CHECKBOX_SUPER_RES] = value != "No Super Resolution"
 
-                if self.denoise_checkbox.isChecked():
-                    denoise_val = self.denoise_combo.currentText()
-                    if denoise_val != language_config.UI_NO_CHANGE:
-                        batch_params["checkbox_denoising"] = (
-                            denoise_val != "No Denoising"
-                        )
-                        batch_params["denoising_algo"] = denoise_val
+            if self.denoise_checkbox.isChecked():
+                value = self.denoise_combo.currentText()
+                if value != language_config.UI_NO_CHANGE:
+                    batch_params[config.KEY_DENOISING_ALGO] = value
+                    batch_params[config.KEY_CHECKBOX_DENOISING] = value != "No Denoising"
 
-                all_params[str(batch_id)] = batch_params
+            updates[str(batch_id)] = batch_params
 
-        save_json_state(self.json_path, all_params)
+        if store is not None:
+            # Writing through the live store refreshes Bulk Mode and Batch Mode.
+            # Persist synchronously because the executor reads the JSON at start.
+            store.update_bulk(updates, save=False)
+            store.save_to_file()
+        else:
+            all_params.update(updates)
+            save_json_state(self.json_path, all_params)
+
         QMessageBox.information(
             self,
             language_config.BATCH_SUCCESS_HEADER,
@@ -760,7 +767,11 @@ class BatchProcessDialog(ModalDialog):
             self.cancel_processing()
 
     def open_mass_edit_dialog(self):
-        dialog = MassAlgorithmEditDialog(self.panels, self)
+        dialog = MassAlgorithmEditDialog(
+            self.panels,
+            self,
+            store=getattr(self.batch_page_layout, "store", None),
+        )
         dialog.algorithms_updated.connect(self.on_algorithms_updated)
         dialog.exec()
 
@@ -784,29 +795,7 @@ class BatchProcessDialog(ModalDialog):
                     label.setStyleSheet(f"background-color: {color_name};")
 
     def _get_algorithm_summary(self, batch_id):
-        json_path = os.path.join("database", "align", "batch_parameter.json")
-        all_params = load_json_state(json_path)
-        batch_params = all_params.get(str(batch_id), {})
-        active_algos = []
-
-        if batch_params.get("checkbox_align_images", False):
-            algo = batch_params.get("alignment_algo", "None")
-            if algo not in ["None", "No Alignment"]:
-                active_algos.append(algo)
-        if batch_params.get("checkbox_super_resolution", False):
-            algo = batch_params.get("super_resolution_algo", "None")
-            if algo not in ["None", "No Super Resolution"]:
-                active_algos.append(algo)
-        if batch_params.get("checkbox_denoising", False):
-            algo = batch_params.get("denoising_algo", "None")
-            if algo not in ["None", "No Denoising"]:
-                active_algos.append(algo)
-
-        return (
-            ", ".join(active_algos)
-            if active_algos
-            else language_config.UI_ALGORITHM_NOT_SET
-        )
+        return get_batch_algorithm_summary(batch_id)
 
     def populate_table(self):
         self.table_widget.setRowCount(len(self.panels))
@@ -1017,6 +1006,7 @@ class BatchProcessDialog(ModalDialog):
             self._set_row_color(row, Qt.transparent)
 
         self._is_processing = True
+        set_thumbnail_generation_suspended(True)
         self.processed_count = 0
         self._eta = BatchEtaEstimator(len(self.panels_to_process_with_rows))
         self._eta_timer.start()
@@ -1042,7 +1032,7 @@ class BatchProcessDialog(ModalDialog):
 
     def cancel_processing(self):
         if hasattr(self, "processing_thread") and self.processing_thread.isRunning():
-            from UILibrary import modal_confirm
+            from resources.GenericUILibrary import modal_confirm
 
             reply = modal_confirm.question(
                 self,
@@ -1118,6 +1108,7 @@ class BatchProcessDialog(ModalDialog):
     def reset_dialog_state(self):
         self._is_processing = False
         self._eta_timer.stop()
+        set_thumbnail_generation_suspended(False)
 
         self._apply_start_button_style()
         self.action_button.setEnabled(True)
@@ -1223,9 +1214,7 @@ class ProcessingThread(QThread):
         return names, directories
 
     def _batch_selections(self, panel, batch_id):
-        state_path = getattr(self.batch_page_layout, "json_path", None) or os.path.join(
-            "database", "align", "batch_parameter.json"
-        )
+        state_path = getattr(self.batch_page_layout, "json_path", None) or get_json_path()
         state = load_json_state(state_path).get(str(batch_id), {}) if os.path.isfile(state_path) else {}
         return batch_selections(state, getattr(panel, "selected_algorithms", {}))
 

@@ -38,11 +38,12 @@ def test_mixed_raw_and_rgb_burst_fails_closed(tmp_path, monkeypatch):
         _prepare_context(monkeypatch, paths, {})
 
 
-def test_non_dng_raw_fails_without_rgb_demosaic_fallback(tmp_path, monkeypatch):
+def test_non_dng_raw_routes_to_native_raw_pipeline(tmp_path, monkeypatch):
     paths = [str(tmp_path / "a.NEF"), str(tmp_path / "b.nef")]
 
-    with pytest.raises(ValueError, match="provider currently supports DNG only"):
-        _prepare_context(monkeypatch, paths, {})
+    ctx = _prepare_context(monkeypatch, paths, {})
+    assert ctx.source_descriptor.kind == "raw"
+    assert ctx.is_raw_pipeline is True
 
 
 def test_standard_rgb_formats_use_rgb_pipeline_even_with_legacy_raw_setting(

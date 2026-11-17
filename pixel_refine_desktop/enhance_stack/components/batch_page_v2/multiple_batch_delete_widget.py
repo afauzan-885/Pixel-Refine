@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 from PySide6.QtCore import Signal, Qt
-from UILibrary import Button, ModalDialog
+from resources.GenericUILibrary import Button, ModalDialog
 
 
 class MultipleBatchDeleteWidget(QWidget):

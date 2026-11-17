@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QFont, QDoubleValidator
 from PySide6.QtCore import Qt, QLocale
 
-from UILibrary import FormGroup, live_update
+from resources.GenericUILibrary import FormGroup, live_update
 from resources.styles.stylesheet import SLIDER_STYLE, APPLY_BUTTON, SCROLL_AREA
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
 

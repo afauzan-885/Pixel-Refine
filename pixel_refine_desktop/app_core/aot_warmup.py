@@ -189,11 +189,9 @@ class AOTSilentWarmupWorker(QThread):
                     from taichi import get_engine
 
                     taichi_engine = get_engine()
-                from taichi import (
-                    AOTModuleLoader,
-                )
+                from taichi_vision.taichi_algorithm.aot_api import _warmup_modules
 
-                batch_stats = AOTModuleLoader(taichi_engine).warmup(self._modules)
+                batch_stats = _warmup_modules(self._modules)
                 stats["loaded_modules"] = batch_stats["loaded_modules"]
                 for mod_name, exc in batch_stats.get("deferred_modules", ()):
                     _warmup_log(

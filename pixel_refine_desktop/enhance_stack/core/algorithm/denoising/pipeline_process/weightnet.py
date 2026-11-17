@@ -356,9 +356,33 @@ def _upload_weightnet_confidence(engine, confidence_chw, *, confidence_scale=1.0
         confidence = np.ascontiguousarray(confidence * np.float32(confidence_scale))
     if confidence.shape[0] == 1:
         host = np.ascontiguousarray(confidence[0], dtype=np.float32)
-        return engine.upload(host, is_vector=False)
-    host = np.ascontiguousarray(np.transpose(confidence, (1, 2, 0)), dtype=np.float32)
-    return engine.upload(host, is_vector=True)
+        is_vector = False
+        vector_dim = 1
+    else:
+        host = np.ascontiguousarray(
+            np.transpose(confidence, (1, 2, 0)), dtype=np.float32
+        )
+        is_vector = True
+        vector_dim = 3
+
+    from ...pipeline_runtime import current_pipeline_runtime
+    from .aligners import factory as _aligner_factory
+
+    runtime = current_pipeline_runtime()
+    buffer_session = runtime.buffer_session if runtime is not None else None
+    if buffer_session is None:
+        return engine.upload(host, is_vector=is_vector)
+    buffer = buffer_session.acquire_ring_buffer(
+        "weightnet.confidence",
+        host.shape,
+        depth=2,
+        dtype=np.float32,
+        is_vector=is_vector,
+        vector_dim=vector_dim,
+    )
+    engine.write_into(buffer, host, synchronize=False)
+    _aligner_factory._mark_session_cached(buffer)
+    return buffer
 
 
 def _iter_deep_support_candidate_maps(session, reference_chw, support_chw, offsets, **options):

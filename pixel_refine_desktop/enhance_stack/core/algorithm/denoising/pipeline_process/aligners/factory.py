@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from functools import wraps
 from typing import Optional, Tuple
+import weakref
 
 from taichi.aot_engine import TaichiGPUBuffer
 
 from ....pipeline_runtime import current_pipeline_runtime
 from ..facade import api as _facade
+
+# Session ring/tagged members are reused across frames/tiles. They must not be
+# physically destroyed by per-frame cleanup; the session owns their lifetime.
+_SESSION_CACHED: "weakref.WeakSet" = weakref.WeakSet()
 
 __all__ = [
     "create_resident_aligner",
@@ -20,7 +25,29 @@ __all__ = [
     "_export_result",
     "_destroy_work_item",
     "_destroy_work_item_except",
+    "_mark_session_cached",
 ]
+
+
+def _mark_session_cached(*items):
+    """Mark session-owned ring/tag buffers as reusable (never per-frame freed)."""
+    for item in items:
+        if item is None:
+            continue
+        if isinstance(item, (tuple, list)):
+            _mark_session_cached(*item)
+            continue
+        try:
+            _SESSION_CACHED.add(item)
+        except TypeError:
+            pass
+
+
+def _is_session_cached(item):
+    try:
+        return item in _SESSION_CACHED
+    except TypeError:
+        return False
 
 
 def _component_factory(factory):
@@ -137,27 +164,64 @@ def _export_result(result):
     return result
 
 
+def _destroy_if_unowned(item):
+    """Destroy a buffer the session never adopted (direct engine allocation)."""
+    if item is None:
+        return
+    if isinstance(item, (tuple, list)):
+        for element in item:
+            _destroy_if_unowned(element)
+        return
+    if getattr(item, "handle", None) is None and hasattr(item, "handle"):
+        return
+    destroy = getattr(item, "destroy", None)
+    if callable(destroy):
+        try:
+            destroy()
+        except Exception:
+            pass
+
+
+def _without_cached(value):
+    """Drop session ring/tag members from a compound work item."""
+    if value is None or _is_session_cached(value):
+        return None
+    if isinstance(value, (tuple, list)):
+        retained = tuple(
+            child for child in (_without_cached(element) for element in value)
+            if child is not None
+        )
+        return retained or None
+    return value
+
+
 def _destroy_work_item(item):
     """Release work buffers through the active session when one exists."""
     if item is None:
         return
+    if isinstance(item, (tuple, list)):
+        item = _without_cached(item)
+        if item is None:
+            return
+    elif _is_session_cached(item):
+        return
     runtime = current_pipeline_runtime()
     session = runtime.buffer_session if runtime is not None else None
     if session is not None:
-        session.release(item)
-        return
-    if isinstance(item, tuple):
-        for el in item:
-            if el is not None and hasattr(el, "destroy"):
-                try:
-                    el.destroy()
-                except Exception:
-                    pass
-    elif hasattr(item, "destroy"):
+        owned_before = getattr(session, "owned_count", None)
         try:
-            item.destroy()
-        except Exception:
-            pass
+            session.release(item)
+        except RuntimeError:
+            # Borrowed resources are ended by release_borrow(), never here.
+            return
+        if (
+            owned_before is not None
+            and getattr(session, "owned_count", owned_before) == owned_before
+            and getattr(session, "borrowed_count", 0) == 0
+        ):
+            _destroy_if_unowned(item)
+        return
+    _destroy_if_unowned(item)
 
 
 def _destroy_work_item_except(item, protected):
@@ -168,7 +232,12 @@ def _destroy_work_item_except(item, protected):
     seen = set()
 
     def without_protected(value):
-        if value is None or value is protected or id(value) in seen:
+        if (
+            value is None
+            or value is protected
+            or id(value) in seen
+            or _is_session_cached(value)
+        ):
             return None
         if isinstance(value, (tuple, list)):
             seen.add(id(value))

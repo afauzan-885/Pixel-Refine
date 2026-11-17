@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 
-from UILibrary import (
+from resources.GenericUILibrary import (
     Button,
     ProgressBar as ModernProgressBar,
 )
@@ -153,7 +153,7 @@ class WorkspaceParameterPanel(QWidget):
         self.process_btn = Button("▶ Start", variant="primary")
         self.process_btn.setFixedWidth(180)
 
-        from UILibrary.theme import get_theme, create_button_style, apply_style
+        from resources.GenericUILibrary.theme import get_theme, create_button_style, apply_style
         theme = get_theme()
         apply_style(self.process_btn, create_button_style(self.process_btn.variant, theme).with_overrides(padding="6px 12px", font_size="10pt"))
 
@@ -358,7 +358,7 @@ class WorkspaceParameterPanel(QWidget):
 
     def _update_all_buttons(self, enabled=None, text=None, variant=None):
         """Sync semua process button instances."""
-        from UILibrary.theme import get_theme, create_button_style, apply_style
+        from resources.GenericUILibrary.theme import get_theme, create_button_style, apply_style
         theme = get_theme()
         for btn in self._all_process_buttons:
             try:

@@ -45,17 +45,9 @@ def load_rgb_linear_image(path: str | Path, is_raw: bool = False) -> np.ndarray:
             )
             img_np = np.asarray(demosaiced, dtype=np.float32)
         except Exception as exc:
-            import rawpy
-
-            with rawpy.imread(str(path)) as raw:
-                rgb = raw.postprocess(
-                    gamma=(1, 1),
-                    no_auto_bright=True,
-                    output_bps=16,
-                    use_camera_wb=True,
-                    highlight_mode=rawpy.HighlightMode.Blend,
-                )
-            img_np = rgb.astype(np.float32) / 65535.0
+            raise RuntimeError(
+                f"Native RAW demosaic failed for {path}: {exc}"
+            ) from exc
         if img_np.ndim != 3 or img_np.shape[2] != 3:
             raise ValueError(
                 f"Raw decoding failed for {path}, got shape {img_np.shape}"
@@ -109,26 +101,15 @@ def load_rgb_linear_image_bytes(
 
     if is_raw or path.suffix.lower() in RAW_EXTENSIONS:
         try:
-            import rawpy
-
-            with rawpy.imread(BytesIO(encoded_bytes)) as raw:
-                demosaiced = taichi_aot.demosaic(
-                    raw,
-                    method="hamilton",
-                )
+            demosaiced = taichi_aot.demosaic(
+                encoded_bytes,
+                method="hamilton",
+            )
             img_np = np.asarray(demosaiced, dtype=np.float32)
-        except Exception:
-            import rawpy
-
-            with rawpy.imread(BytesIO(encoded_bytes)) as raw:
-                rgb = raw.postprocess(
-                    gamma=(1, 1),
-                    no_auto_bright=True,
-                    output_bps=16,
-                    use_camera_wb=True,
-                    highlight_mode=rawpy.HighlightMode.Blend,
-                )
-            img_np = rgb.astype(np.float32) / 65535.0
+        except Exception as exc:
+            raise RuntimeError(
+                f"Native RAW demosaic failed for {path} bytes: {exc}"
+            ) from exc
         if img_np.ndim != 3 or img_np.shape[2] != 3:
             raise ValueError(
                 f"Raw decoding failed for {path}, got shape {img_np.shape}"

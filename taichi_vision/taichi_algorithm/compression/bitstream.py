@@ -345,6 +345,9 @@ def packbits_encode(row: bytes) -> bytes:
                 break
             index = probe
         count = index - literal_start
+        if count > 128:
+            index = literal_start + 128
+            count = 128
         out.append(count - 1)
         out.extend(row[literal_start:index])
     return bytes(out)

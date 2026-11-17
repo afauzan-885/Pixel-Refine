@@ -52,7 +52,7 @@ class ProgressBar(QWidget, RealtimeMixin):
 
     Usage:
         progress = ProgressBar(style="animated", variant="primary")
-        progress.bind_store(store, "main_progress")
+        progress.bind(store, key="main_progress")
     """
 
     value_changed = Signal(int)
@@ -262,8 +262,11 @@ class ProgressBar(QWidget, RealtimeMixin):
 
     # --- RealtimeMixin Implementation ---
 
-    def on_store_changed(self, key, value):
+    def on_sync(self, payload, *, key=None, origin=None):
         """Update progress from DataStore."""
+        if not payload:
+            return
+        value = payload.get(getattr(self, "_store_key", None))
         if isinstance(value, (int, float)):
             self.set_value(int(value))
 
@@ -579,7 +582,7 @@ class ProgressGroup(QWidget, RealtimeMixin):
     Usage:
         group = ProgressGroup()
         group.add_progress("Task 1", label="task1")
-        group.bind_store(store) # Will react to any change in store
+        group.bind(store)  # Reacts to any keyed change in the store
     """
 
     def __init__(self, parent=None):
@@ -632,19 +635,17 @@ class ProgressGroup(QWidget, RealtimeMixin):
 
     # --- RealtimeMixin Implementation ---
 
-    def on_store_changed(self, key, value):
-        """
-        Handle multi-key updates.
-        If value is a dict, try updating multiple bars.
-        Otherwise, try to find a bar matching the key.
-        """
-        if isinstance(value, dict):
-            for k, v in value.items():
-                if k in self.key_to_bar:
-                    self.key_to_bar[k].set_value(v)
-        elif key in self.key_to_bar:
-            if isinstance(value, (int, float)):
-                self.key_to_bar[key].set_value(int(value))
+    def on_sync(self, payload, *, key=None, origin=None):
+        """Update any progress bar whose mapping key is present in the payload."""
+        if payload is None:
+            # Global invalidation (e.g. file reload): re-read only our keys.
+            payload = self.sync(peek=True, keys=list(self.key_to_bar))
+        if not isinstance(payload, dict):
+            return
+        for name, value in payload.items():
+            bar = self.key_to_bar.get(name)
+            if bar is not None and isinstance(value, (int, float)):
+                bar.set_value(int(value))
 
     def update_progress(self, index, value):
         """Update progress bar value by index"""

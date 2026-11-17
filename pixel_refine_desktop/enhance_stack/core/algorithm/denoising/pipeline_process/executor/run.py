@@ -45,6 +45,57 @@ from ..telemetry import PipelineTelemetry
 
 __all__ = ["run_gpu_resident_pipeline"]
 
+
+def _session_scratch(
+    buffer_session,
+    shape,
+    *,
+    tag=None,
+    ring=None,
+    depth=2,
+    dtype=np.float32,
+    is_vector=False,
+    vector_dim=None,
+):
+    """Acquire reusable GPU scratch through BufferSession when one is active.
+
+    Ring buffers are for per-frame/per-tile data: slots rotate so an
+    in-flight worker keeps its own slot. Tagged scratch is for one buffer per
+    run. The ``None`` fallback keeps standalone/test callers working.
+    """
+    if buffer_session is None:
+        return get_engine().allocate(
+            shape,
+            dtype=dtype,
+            is_vector=is_vector,
+            vector_dim=vector_dim,
+            host_accessible=False,
+        )
+    if ring is not None:
+        return buffer_session.acquire_ring_buffer(
+            ring,
+            shape,
+            depth=depth,
+            dtype=dtype,
+            is_vector=is_vector,
+            vector_dim=vector_dim,
+        )
+    return buffer_session.view(
+        shape,
+        dtype=dtype,
+        is_vector=is_vector,
+        vector_dim=vector_dim,
+        tag=tag,
+    )
+
+
+def _mark_session_cached(*items):
+    """Keep session ring/tag members out of per-frame physical release."""
+    from ..aligners import factory as _aligner_factory
+
+    _aligner_factory._mark_session_cached(*items)
+
+
 @runtime_entrypoint
 def run_gpu_resident_pipeline(
     image_paths: Sequence[str | Path],
@@ -166,14 +217,9 @@ def run_gpu_resident_pipeline(
     is_raw = source_mode == "raw"
 
     if source_mode == "raw":
-        if any(Path(path).suffix.lower() != ".dng" for path in image_paths):
-            raise ValueError(
-                "RAW pipeline currently supports DNG input only; "
-                "this RAW format cannot be processed without a compatible RAW provider"
-            )
-        # The provider supplies only the CFA carrier operations.  The shared
-        # executor below owns the same frame loop, analysis, alignment, weight
-        # generation, telemetry, and cleanup as the RGB path.
+        # The native provider decodes every RAW family supported by taichi.imread.
+        # Non-Bayer formats (RAF/X3F) fail at the reader boundary with an explicit
+        # capability error instead of silently switching to an RGB pipeline.
         if session is None and str(weight_engine).strip().lower() == "fusionet":
             from ...fusionet_engine.weightnet_inference import (
                 DEFAULT_WEIGHTNET_ONNX,
@@ -457,9 +503,12 @@ def run_gpu_resident_pipeline(
     if weight_engine == "spatial_fusion" or (
         weight_engine == "fusionet" and weightnet_channels == 1
     ):
-        weightnet_gray_gpu = engine.allocate(
-            (work_h, work_w), dtype=np.float32, host_accessible=False
+        weightnet_gray_gpu = _session_scratch(
+            buffer_session,
+            (work_h, work_w),
+            tag="denoise.weightnet_gray",
         )
+        _mark_session_cached(weightnet_gray_gpu)
     if weight_engine == "fusionet" and getattr(session, "runtime", None) != "taichi_aot":
         weightnet_support_workspace = _facade()._WeightNetReadbackWorkspace(
             (work_h, work_w), channels=weightnet_channels
@@ -540,12 +589,19 @@ def run_gpu_resident_pipeline(
         spatial_cols_gpu = _ti_rt.upload(
             np.asarray(spatial_col_starts, dtype=np.int32)
         )
-        spatial_weight_post_a_gpu = engine.allocate(
-            (work_h, work_w), dtype=np.float32, host_accessible=False
+        spatial_weight_post_a_gpu = _session_scratch(
+            buffer_session,
+            (work_h, work_w),
+            ring="denoise.spatial_weight_post",
+            depth=2,
         )
-        spatial_weight_post_b_gpu = engine.allocate(
-            (work_h, work_w), dtype=np.float32, host_accessible=False
+        spatial_weight_post_b_gpu = _session_scratch(
+            buffer_session,
+            (work_h, work_w),
+            ring="denoise.spatial_weight_post",
+            depth=2,
         )
+        _mark_session_cached(spatial_weight_post_a_gpu, spatial_weight_post_b_gpu)
         spatial_weight_slots = queue.Queue(maxsize=2)
         spatial_weight_slots.put_nowait(spatial_weight_post_a_gpu)
         spatial_weight_slots.put_nowait(spatial_weight_post_b_gpu)
@@ -646,11 +702,11 @@ def run_gpu_resident_pipeline(
         # Uniform weights are invariant across support frames. Keep one
         # resident work-resolution buffer instead of allocating and uploading
         # a full host array for every frame.
-        average_weight_gpu = engine.upload(
+        average_weight_gpu = buffer_session.upload_if_needed(
             np.ones((work_h, work_w), dtype=np.float32),
-            is_vector=False,
-            vector_dim=1,
-        )
+            tag="denoise.average_weight",
+        )[0]
+        _mark_session_cached(average_weight_gpu)
     rgb_provider.bind_accumulator(sum_img_gpu, weight_sum_gpu)
     engine_arch = str(getattr(engine, "arch", "")).lower()
     is_cpu_backend = engine_arch == "cpu"
@@ -659,6 +715,9 @@ def run_gpu_resident_pipeline(
     # The RAM Queue controls the host loader queue. The separate in-processing
     # limiter below spans admission through final blend for this support frame.
     q_depth = runtime.prefetch_depth
+    # Carrier slots must outlive every concurrently admitted support frame so a
+    # rotating slot never clobbers a frame still in an async stage.
+    supp_linear_slots = max(2, q_depth + max(1, runtime.in_processing_depth))
     in_processing_lock = threading.Lock()
     in_processing_active: dict[int, Any] = {}
     in_processing_peak = 0
@@ -710,7 +769,20 @@ def run_gpu_resident_pipeline(
             full_shape=geometry.full_shape,
             flow_shape=geometry.align_shape,
         )
-        flow_gpu = engine.upload(flow_host, is_vector=True)
+        if buffer_session is None:
+            flow_gpu = engine.upload(flow_host, is_vector=True)
+        else:
+            flow_gpu = _session_scratch(
+                buffer_session,
+                flow_host.shape,
+                ring="denoise.carrier_flow",
+                depth=2,
+                dtype=np.float32,
+                is_vector=True,
+                vector_dim=2,
+            )
+            engine.write_into(flow_gpu, flow_host, synchronize=False)
+            _mark_session_cached(flow_gpu)
         try:
             started = time.perf_counter()
             result = taichi_aot.remap_with_flow(
@@ -722,7 +794,8 @@ def run_gpu_resident_pipeline(
             telemetry.record("carrier_rank_remap", started)
             return result
         finally:
-            _facade()._destroy_work_item(flow_gpu)
+            if buffer_session is None:
+                _facade()._destroy_work_item(flow_gpu)
 
     patch_offsets = None
     if weight_engine == "fusionet" and denoising_mode == "deep_analysis":
@@ -921,8 +994,21 @@ def run_gpu_resident_pipeline(
                     # Upload exactly the support currently entering the GPU stages.
                     if isinstance(supp_linear_input, TaichiGPUBuffer):
                         supp_linear_gpu = supp_linear_input
-                    else:
+                    elif buffer_session is None:
                         supp_linear_gpu = engine.upload(supp_linear_input)
+                        del supp_linear_input
+                    else:
+                        supp_linear_gpu = _session_scratch(
+                            buffer_session,
+                            supp_linear_input.shape,
+                            ring="denoise.supp_linear",
+                            depth=supp_linear_slots,
+                            dtype=supp_linear_input.dtype,
+                        )
+                        engine.write_into(
+                            supp_linear_gpu, supp_linear_input, synchronize=False
+                        )
+                        _mark_session_cached(supp_linear_gpu)
                         del supp_linear_input
 
                     if (
@@ -1485,7 +1571,17 @@ def run_gpu_resident_pipeline(
                     _facade()._destroy_work_item(supp_linear_np)
                     break
 
-                supp_linear_gpu = engine.upload(supp_linear_np)
+                supp_linear_gpu = _session_scratch(
+                    buffer_session,
+                    supp_linear_np.shape,
+                    ring="denoise.supp_linear",
+                    depth=supp_linear_slots,
+                    dtype=supp_linear_np.dtype,
+                )
+                engine.write_into(
+                    supp_linear_gpu, supp_linear_np, synchronize=False
+                )
+                _mark_session_cached(supp_linear_gpu)
                 del supp_linear_np
 
                 # OpenGL/GLES owns one native context thread.  Keep any
@@ -1789,7 +1885,19 @@ def run_gpu_resident_pipeline(
                 if isinstance(weight_work_item, _ti_rt.TaichiGPUBuffer):
                     weight_work_gpu = weight_work_item
                 else:
-                    weight_work_gpu = engine.upload(weight_work_item)
+                    weight_work_gpu = _session_scratch(
+                        buffer_session,
+                        weight_work_item.shape,
+                        ring="denoise.weight_work",
+                        depth=2,
+                        dtype=np.float32,
+                        is_vector=weight_work_item.ndim == 3,
+                        vector_dim=3 if weight_work_item.ndim == 3 else 1,
+                    )
+                    engine.write_into(
+                        weight_work_gpu, weight_work_item, synchronize=False
+                    )
+                    _mark_session_cached(weight_work_gpu)
                     del weight_work_item
 
                 rgb_provider.accumulate(
@@ -1984,7 +2092,19 @@ def run_gpu_resident_pipeline(
                     if isinstance(weight_work_item, _ti_rt.TaichiGPUBuffer):
                         weight_work_gpu = weight_work_item
                     else:
-                        weight_work_gpu = engine.upload(weight_work_item)
+                        weight_work_gpu = _session_scratch(
+                            buffer_session,
+                            weight_work_item.shape,
+                            ring="denoise.weight_work",
+                            depth=2,
+                            dtype=np.float32,
+                            is_vector=weight_work_item.ndim == 3,
+                            vector_dim=3 if weight_work_item.ndim == 3 else 1,
+                        )
+                        engine.write_into(
+                            weight_work_gpu, weight_work_item, synchronize=False
+                        )
+                        _mark_session_cached(weight_work_gpu)
                         del weight_work_item
 
                     rgb_provider.accumulate(

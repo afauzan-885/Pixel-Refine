@@ -7,8 +7,8 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPen
 from PySide6.QtWidgets import QListView, QStyledItemDelegate, QToolTip, QWidget
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import get_names
 from pixel_refine_desktop.ui.views.settings.General.Language import language_config
-from UILibrary import ScrollContainer
-from UILibrary.theme import create_button_style, get_theme
+from resources.GenericUILibrary import ScrollContainer
+from resources.GenericUILibrary.theme import create_button_style, get_theme
 
 _ROW_ICON_PATHS = (
     "resources/assets/icons/add-image_black.png",

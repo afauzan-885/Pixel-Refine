@@ -52,7 +52,7 @@ from PySide6.QtCore import (
 from typing import Optional, Any
 from PySide6.QtGui import QPixmap, QColor, QAction, QImage
 
-from UILibrary import (
+from resources.GenericUILibrary import (
     Button,
     IconButton,
     Container,
@@ -60,7 +60,7 @@ from UILibrary import (
     OverlayPosition,
     ImageCompareItem,
 )
-from UILibrary.grids import GridContainer
+from resources.GenericUILibrary.grids import GridContainer
 from resources.animations.slide import slide
 from resources.animations.animation_manager import (
     SlideDirection,
@@ -608,7 +608,7 @@ class WorkspaceDisplayPanel(QWidget):
 
     def _get_bulk_mode_btn_stylesheet(self, is_bulk, font_size):
         """Generate stylesheet untuk bulk mode button."""
-        from UILibrary.theme import get_theme
+        from resources.GenericUILibrary.theme import get_theme
 
         theme = get_theme()
         if is_bulk:

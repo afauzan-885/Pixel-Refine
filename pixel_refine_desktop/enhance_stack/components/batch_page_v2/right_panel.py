@@ -23,14 +23,14 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import normalize_
 
 
 # Generic UI Library
-from UILibrary import (
+from resources.GenericUILibrary import (
     ListGroup,
     Button,
     FormGroup,
     FeatureCard,
     FeatureCardGroup,
 )
-from UILibrary.mixins import SyncMixin
+from resources.GenericUILibrary.mixins import SyncMixin
 
 from pixel_refine_desktop.enhance_stack.components.batch_page_v2.batch_process_dialog import (
     BatchProcessDialog,
@@ -55,7 +55,7 @@ from resources.animations.animation_manager import (
 )
 
 
-from UILibrary import live_update
+from resources.GenericUILibrary import live_update
 
 
 class _BatchQueueItemDelegate(QStyledItemDelegate):
@@ -232,11 +232,12 @@ class RightPanel(QWidget, SyncMixin):
             self._update_process_all_btn_visibility
         )
 
-        # Real-time state binding
-        if store:
-            self.bind_store(store)
-
+        # Declarative bindings are collected while the UI is built, then attached
+        # once so ``bind()`` applies the selected batch's values immediately.
+        self._binding_specs = {}
         self._setup_ui()
+        if store:
+            self.bind(store, bindings=self._binding_specs)
         # Defer the synchronous batch-list load to the next event-loop
         # tick so the panel constructor returns to the Qt event loop
         # immediately. The list_group renders a placeholder until the
@@ -257,39 +258,20 @@ class RightPanel(QWidget, SyncMixin):
 
         self._update_process_all_btn_visibility()
 
-    def on_store_changed(self, key, value):
-        """React to store changes (SyncMixin handles bindings)."""
-        if self._is_syncing:
+    def on_sync(self, payload, *, key=None, origin=None):
+        """Refresh derived state after the mixin applied the bindings."""
+        if origin == "self" or not self.current_batch_id:
             return
-
-        # 1. Let SyncMixin handle declarative bindings (dropdowns)
-        super().on_store_changed(key, value)
-
-        # 2. Additional logic for batch-wide state changes
-        if self.current_batch_id:
-            str_id = str(self.current_batch_id)
-            if key is None or key == str_id:
-                # Refresh entire UI state from store
-                self._on_settings_changed(save_to_store=False)
+        self._on_settings_changed(save_to_store=False)
 
     def _load_batch_settings(self, batch_id):
         """
         Load settings for specific batch from store.
-        Uses SyncMixin scope to automate updates.
+        ``sync(scope=...)`` applies every binding for the new batch eagerly.
         """
         self.current_batch_id = batch_id
-
-        # Set scope for all bindings to this batch
-        self.set_scope(str(batch_id))
-
-        # Trigger immediate refresh for all bindings in this scope
-        # (SyncMixin.on_store_changed(None, ...) handles this)
-        self._is_syncing = True
-        try:
-            self.on_store_changed(None, self.get_data())
-            self._normalize_alignment_form_value()
-        finally:
-            self._is_syncing = False
+        self.sync(scope=str(batch_id))
+        self._normalize_alignment_form_value()
 
         # Emit signal for adaptive UI (AlgorithmPanel) once cleanly
         self._on_settings_changed(save_to_store=False)
@@ -301,8 +283,8 @@ class RightPanel(QWidget, SyncMixin):
             self.align_form.set_value(normalized)
 
     def _save_batch_settings(self):
-        """Save current UI values to store under the current batch scope."""
-        if not self.current_batch_id or not self._store:
+        """Persist current UI values through the scoped binding API."""
+        if not self.current_batch_id or not getattr(self, "_store", None):
             return
 
         settings = {
@@ -317,10 +299,9 @@ class RightPanel(QWidget, SyncMixin):
             config.KEY_CHECKBOX_HDR: self.hdr_card.is_checked,
         }
 
-        # Use logic module to update store
-        batch_parameter_manager.update_batch_settings(
-            self._store, self.current_batch_id, settings
-        )
+        # One call writes the relative keys under the active batch scope and
+        # persists synchronously; the executor reads the JSON at start.
+        self.sync(values=settings, persist=True)
 
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -425,7 +406,7 @@ class RightPanel(QWidget, SyncMixin):
             self.align_form.set_value(align_names[0])
         self.align_form.value_changed.connect(self._on_settings_changed)
         # self.scroll_content_layout.addWidget(self.align_form)
-        self.add_binding("alignment_algo", self.align_form, fallback="No Alignment")
+        self._binding_specs["alignment_algo"] = (self.align_form, "value", "No Alignment")
 
         # Super Resolution Feature Card
         sr_names = self.logic.get_algorithm_names("super_resolution")
@@ -438,8 +419,8 @@ class RightPanel(QWidget, SyncMixin):
             self,
         )
         self.sr_card.value_changed.connect(self._on_settings_changed)
-        self.add_binding(
-            "super_resolution_algo", self.sr_card, fallback="No Super Resolution"
+        self._binding_specs["super_resolution_algo"] = (
+            self.sr_card, "value", "No Super Resolution",
         )
 
         # HDR Feature Card
@@ -453,7 +434,7 @@ class RightPanel(QWidget, SyncMixin):
             self,
         )
         self.hdr_card.value_changed.connect(self._on_settings_changed)
-        self.add_binding("hdr_algo", self.hdr_card, fallback="No HDR")
+        self._binding_specs["hdr_algo"] = (self.hdr_card, "value", "No HDR")
 
         # Multi-frame denoising card
         denoise_names = self.logic.get_algorithm_names("denoising")
@@ -466,7 +447,9 @@ class RightPanel(QWidget, SyncMixin):
             self,
         )
         self.denoise_card.value_changed.connect(self._on_settings_changed)
-        self.add_binding("denoising_algo", self.denoise_card, fallback="No Denoising")
+        self._binding_specs["denoising_algo"] = (
+            self.denoise_card, "value", "No Denoising",
+        )
 
         self.card_group = FeatureCardGroup(columns=2, spacing=4)
         for card in (self.sr_card, self.hdr_card, self.denoise_card):
@@ -565,7 +548,7 @@ class RightPanel(QWidget, SyncMixin):
             self.process_all_btn.setFixedHeight(btn_h)
             
             font_size = 8.0 + f * 3.0  # scale from 8pt to 11pt
-            from UILibrary.theme import get_theme, create_button_style, apply_style
+            from resources.GenericUILibrary.theme import get_theme, create_button_style, apply_style
             theme = get_theme()
             apply_style(self.process_all_btn, create_button_style("primary", theme).with_overrides(padding="2px 4px", font_size=f"{font_size:.1f}pt"))
 
@@ -689,6 +672,10 @@ class RightPanel(QWidget, SyncMixin):
             self._is_syncing = was_syncing
 
         store = getattr(self, "_store", None)
+        if store is None:
+            # Panels that were built without a store (tests/headless hosts) have
+            # nothing to persist; the in-memory settings are already current.
+            return
         save_to_file = getattr(store, "save_to_file", None)
         if callable(save_to_file):
             save_to_file()
@@ -940,7 +927,7 @@ class RightPanel(QWidget, SyncMixin):
             show_confirm = True
 
         if show_confirm:
-            from UILibrary.modals import modal_confirm
+            from resources.GenericUILibrary.modals import modal_confirm
             from PySide6.QtWidgets import QDialog
             dialog = modal_confirm(
                 message="Apakah Anda yakin ingin membuat batch baru?",
@@ -994,7 +981,7 @@ class RightPanel(QWidget, SyncMixin):
         if not batch_ids:
             return
 
-        from UILibrary import modal_confirm
+        from resources.GenericUILibrary import modal_confirm
         confirmed = modal_confirm.question(
             self,
             language_config.CONFIRM_BATCH_ALL_DELETE_BUTTON.format(len(batch_ids))
@@ -1397,7 +1384,7 @@ class RightPanel(QWidget, SyncMixin):
             if card is not None and hasattr(card, "update_theme"):
                 card.update_theme()
         # 3. Update buttons
-        from UILibrary.theme import get_theme, create_button_style, apply_style
+        from resources.GenericUILibrary.theme import get_theme, create_button_style, apply_style
         theme = get_theme()
         for btn in [self.new_btn, self.del_btn, self.process_all_btn]:
             if btn:

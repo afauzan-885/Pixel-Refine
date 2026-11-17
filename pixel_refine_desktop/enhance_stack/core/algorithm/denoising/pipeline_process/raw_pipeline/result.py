@@ -41,12 +41,12 @@ class RawPipelineResult:
         if not np.isfinite(normalized).all():
             raise ValueError("RAW Native result contains non-finite sensor values")
         bits = int(frame.bits_per_sample if bits_per_sample is None else bits_per_sample)
-        if not 1 <= bits <= 16:
-            raise ValueError("DNG output bit depth must be between 1 and 16")
+        if not 1 <= bits <= 32:
+            raise ValueError("DNG output bit depth must be between 1 and 32")
         maximum = (1 << bits) - 1
-        dtype = np.uint8 if bits <= 8 else np.uint16
+        dtype = np.uint8 if bits <= 8 else (np.uint16 if bits <= 16 else np.uint32)
         values = normalized / np.float32(frame.exposure_scale)
-        return np.clip(np.rint(values * np.float32(maximum)), 0, maximum).astype(dtype)
+        return np.clip(np.rint(values * np.float64(maximum)), 0, maximum).astype(dtype)
 
     def save_dng(self, path: str | Path) -> str:
         """Write a self-contained derived DNG.
@@ -58,7 +58,10 @@ class RawPipelineResult:
         from taichi_vision.taichi_algorithm.compression import save_dng_aot
 
         frame = self.reference_frame
-        bits = 16
+        source_bits = int(
+            frame.metadata.get("source_bits_per_sample", frame.bits_per_sample)
+        )
+        bits = source_bits if 8 <= source_bits <= 32 else 16
         mosaic = _apply_baked_orientation(
             self.quantized_mosaic(bits_per_sample=bits), int(frame.orientation)
         )

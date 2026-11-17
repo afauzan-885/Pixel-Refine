@@ -6,9 +6,12 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QPixmap, QImage
 from PIL import Image, ImageOps
-import rawpy
 
 from config import SUPPORTED_FORMATS
+from pixel_refine_desktop.enhance_stack.core.algorithm.shared_utils import (
+    apply_orientation as _apply_orientation,
+    read_orientation as _read_orientation,
+)
 
 taichi_lock = threading.Lock()
 
@@ -122,7 +125,7 @@ def _process_image_part(img_part_data):
 def load_raw_as_8bit_rgb(
     image_path: str, presentation: str = None, **kwargs
 ) -> np.ndarray:
-    """Loads a RAW/DNG image and returns it as an 8-bit RGB numpy array using Hamilton Demosaic with rawpy fallback."""
+    """Loads a RAW/DNG image and returns it as an 8-bit RGB numpy array using native Hamilton demosaic."""
     filename = os.path.basename(image_path)
     try:
         from taichi_vision import algorithm as taichi_aot
@@ -135,77 +138,81 @@ def load_raw_as_8bit_rgb(
             u8_res = _ti_rt.cast(rgb_f32, np.uint8)
             del rgb_f32
             _cleanup_taichi_memory()
+            orientation = _read_orientation(image_path)
+            if orientation != 1:
+                u8_res = _apply_orientation(u8_res, orientation)
             return u8_res
         else:
             raise RuntimeError("Hamilton demosaic returned None")
     except Exception as e_ta:
-        print(
-            f"[Fallback] Taichi Hamilton demosaic failed ({e_ta}), falling back to rawpy."
-        )
-        try:
-            with rawpy.imread(image_path) as raw:
-                gamma_setting = (2.222, 4.5)
-                img_array = raw.postprocess(
-                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # type: ignore
-                    four_color_rgb=True,
-                    use_camera_wb=True,
-                    gamma=gamma_setting,
-                    output_bps=8,
-                    output_color=rawpy.ColorSpace.sRGB,  # type: ignore
-                    highlight_mode=rawpy.HighlightMode.Blend,  # type: ignore
-                )
-                if img_array is None:
-                    raise RuntimeError(f"Rawpy postprocessing failed for {filename}")
-                return img_array
-        except rawpy.LibRawError as e:
-            raise RuntimeError(f"Rawpy Error for {filename}: {e}")  # type: ignore
-    except Exception as e:
-        raise RuntimeError(f"Unexpected DNG error for {filename}: {e}")
+        _cleanup_taichi_memory()
+        raise RuntimeError(
+            f"Native Hamilton demosaic failed for {filename}: {e_ta}"
+        ) from e_ta
 
 
 def load_raw_as_8bit_rgb_half_res(
-    image_path: str, presentation: str = None, **kwargs
+    image_path: str,
+    presentation: str = None,
+    method: str = "dcb",
+    preview_max_side: int = None,
+    tone_map: bool = True,
+    **kwargs,
 ) -> np.ndarray:
-    """Loads a RAW/DNG image and returns it as an 8-bit half-resolution RGB numpy array using Hamilton Demosaic with rawpy fallback."""
+    """Loads a RAW/DNG image as an 8-bit half-resolution RGB numpy array.
+
+    dcb is the default because the bilinear/hamilton half-res graphs drop the
+    green channel and produce a purple cast; dcb keeps colours correct and is
+    also faster once warmed up.
+
+    ``preview_max_side`` runs the preview pipeline: the float result is
+    downsampled before tone mapping and converted with NumPy, which keeps
+    5 FPS playback viable without changing the image. ``tone_map=False`` skips
+    the display transform (faster, but visibly darker).
+    """
     filename = os.path.basename(image_path)
     try:
         from taichi_vision import algorithm as taichi_aot
         import taichi.aot_engine as _ti_rt
 
         with taichi_lock:
-            rgb_f32 = taichi_aot.demosaic(image_path, method="bilinear", half_res=True)
+            rgb_f32 = taichi_aot.demosaic(
+                image_path, method=method, half_res=True
+            )
         if rgb_f32 is not None:
-            rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
-            u8_res = _ti_rt.cast(rgb_f32, np.uint8)
+            if preview_max_side:
+                source = (
+                    rgb_f32.to_numpy()
+                    if hasattr(rgb_f32, "to_numpy")
+                    else np.asarray(rgb_f32)
+                )
+                height, width = source.shape[:2]
+                longest = max(height, width)
+                if longest > preview_max_side:
+                    stride = max(1, int(np.ceil(longest / preview_max_side)))
+                    source = np.ascontiguousarray(source[::stride, ::stride])
+                rgb_f32 = source
+            if tone_map:
+                rgb_f32 = taichi_aot.naturalTonemapping(rgb_f32)
+            if preview_max_side:
+                u8_res = np.clip(
+                    np.asarray(rgb_f32) * 255.0 + 0.5, 0, 255
+                ).astype(np.uint8)
+            else:
+                u8_res = _ti_rt.cast(rgb_f32, np.uint8)
             del rgb_f32
             _cleanup_taichi_memory()
+            orientation = _read_orientation(image_path)
+            if orientation != 1:
+                u8_res = _apply_orientation(u8_res, orientation)
             return u8_res
         else:
-            raise RuntimeError("Hamilton demosaic half res returned None")
+            raise RuntimeError("Half-res demosaic returned None")
     except Exception as e_ta:
-        print(
-            f"[Fallback] Taichi Hamilton half res demosaic failed ({e_ta}), falling back to rawpy half-res."
-        )
         _cleanup_taichi_memory()
-        try:
-            with rawpy.imread(image_path) as raw:
-                gamma_setting = (2.222, 4.5)
-                img_array = raw.postprocess(
-                    demosaic_algorithm=rawpy.DemosaicAlgorithm.DCB,  # type: ignore
-                    half_size=True,  # Extracted at half size for speed!
-                    use_camera_wb=True,
-                    gamma=gamma_setting,
-                    output_bps=8,
-                    output_color=rawpy.ColorSpace.sRGB,  # type: ignore
-                    highlight_mode=rawpy.HighlightMode.Blend,  # type: ignore
-                )
-                if img_array is None:
-                    raise RuntimeError(f"Rawpy postprocessing failed for {filename}")
-                return img_array
-        except rawpy.LibRawError as e:
-            raise RuntimeError(f"Rawpy Error for {filename}: {e}")  # type: ignore
-        except Exception as e:
-            raise RuntimeError(f"Unexpected DNG error for {filename}: {e}")
+        raise RuntimeError(
+            f"Native half-res demosaic ({method}) failed for {filename}: {e_ta}"
+        ) from e_ta
 
 
 class RawImageProcessingThread(BaseMultiThreading):

@@ -7,15 +7,18 @@ import tempfile
 import weakref
 from collections import OrderedDict
 
-import rawpy
-from PIL import Image, ImageOps
+import numpy as np
+from PIL import Image, ImageOps, UnidentifiedImageError
 from PySide6.QtGui import QImage
 from PySide6.QtCore import (
     QObject, QRunnable, QThreadPool, QTimer, QThread, Signal, Slot,
     QMutex, QWaitCondition, QSemaphore, Qt,
 )
 from config import CACHE_DIR, SUPPORTED_FORMATS
-from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import thumbnail_creation_enabled
+from pixel_refine_desktop.enhance_stack.core.logic.thumbnail_policy import (
+    thumbnail_creation_enabled,
+    thumbnail_generation_suspended,
+)
 
 semaphore = QSemaphore(2)
 _retired_loaders = set()
@@ -28,11 +31,58 @@ def _cache_path(image_path):
     return os.path.join(CACHE_DIR, hashlib.sha1(identity.encode("utf-8")).hexdigest() + ".jpg")
 
 
-def _small_preview(image):
+def _small_preview(image, apply_exif=True):
     # JPEG draft avoids decoding the full image before downsizing.
     image.draft("RGB", THUMBNAIL_SIZE)
     image.thumbnail(THUMBNAIL_SIZE, Image.Resampling.BILINEAR, reducing_gap=3.0)
-    return ImageOps.exif_transpose(image).convert("RGB")
+    if apply_exif:
+        image = ImageOps.exif_transpose(image)
+    return image.convert("RGB")
+
+
+def _apply_tiff_orientation(image, orientation):
+    operations = {
+        2: Image.Transpose.FLIP_LEFT_RIGHT,
+        3: Image.Transpose.ROTATE_180,
+        4: Image.Transpose.FLIP_TOP_BOTTOM,
+        5: Image.Transpose.TRANSPOSE,
+        6: Image.Transpose.ROTATE_270,
+        7: Image.Transpose.TRANSVERSE,
+        8: Image.Transpose.ROTATE_90,
+    }
+    operation = operations.get(int(orientation or 1))
+    return image.transpose(operation) if operation is not None else image
+
+
+def _decode_embedded_preview(preview_bytes, payload):
+    """Open an embedded preview when its bytes are an image container or raw RGB."""
+    if not preview_bytes:
+        return None
+    signatures = (
+        b"\xff\xd8",  # JPEG
+        b"\x89PNG\r\n\x1a\n",  # PNG
+        b"II*\x00",  # TIFF little-endian
+        b"MM\x00*",  # TIFF big-endian
+    )
+    if preview_bytes.startswith(signatures):
+        try:
+            return Image.open(io.BytesIO(preview_bytes))
+        except (UnidentifiedImageError, OSError, ValueError):
+            return None
+    if not isinstance(payload, dict):
+        return None
+    width = int(payload.get("width") or 0)
+    height = int(payload.get("height") or 0)
+    if width <= 0 or height <= 0 or int(payload.get("compression") or 0) != 1:
+        return None
+    photometric = int(payload.get("photometric") or 0)
+    if len(preview_bytes) != width * height * 3:
+        return None
+    if photometric == 2:
+        return Image.frombytes("RGB", (width, height), preview_bytes)
+    if photometric == 6:
+        return Image.frombytes("YCbCr", (width, height), preview_bytes)
+    return None
 
 
 def load_bulk_thumbnail(image_path):
@@ -47,23 +97,33 @@ def load_bulk_thumbnail(image_path):
                 return cached.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
     if os.path.splitext(image_path)[1].lower() in SUPPORTED_FORMATS["raw"]:
-        # open_file + extract_thumb reads the embedded preview without unpacking CFA.
-        with rawpy.RawPy() as raw:
-            raw.open_file(image_path)
-            try:
-                thumb = raw.extract_thumb()
-                if thumb.format == rawpy.ThumbFormat.JPEG:
-                    with Image.open(io.BytesIO(thumb.data)) as image:
-                        preview = _small_preview(image)
-                else:
-                    preview = _small_preview(Image.fromarray(thumb.data))
-            except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
-                raw.unpack()
-                image = Image.fromarray(raw.postprocess(
-                    output_bps=8, use_camera_wb=True, half_size=True,
-                    demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
-                ))
-                preview = _small_preview(image)
+        import taichi
+
+        try:
+            payload = taichi.imread(image_path, mode="preview")
+            preview_bytes = payload.get("preview") if isinstance(payload, dict) else None
+            orientation = int(payload.get("orientation", 1) or 1) if isinstance(payload, dict) else 1
+            preview = None
+            embedded = _decode_embedded_preview(preview_bytes, payload)
+            if embedded is not None:
+                try:
+                    with embedded as image:
+                        preview = _apply_tiff_orientation(
+                            _small_preview(image, apply_exif=False), orientation
+                        )
+                except (OSError, ValueError):
+                    preview = None
+            if preview is None:
+                from pixel_refine_desktop.enhance_stack.core.logic.multi_threading import (
+                    load_raw_as_8bit_rgb_half_res,
+                )
+
+                array = load_raw_as_8bit_rgb_half_res(image_path)
+                preview = _small_preview(Image.fromarray(np.asarray(array)))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Native RAW thumbnail failed for {image_path}: {exc}"
+            ) from exc
     else:
         with Image.open(image_path) as image:
             preview = _small_preview(image)
@@ -156,8 +216,15 @@ class ThumbnailScheduler(QObject):
             listeners.clear()
         self._pump_timer.stop()
 
+    def resume(self):
+        """Restart queued thumbnail work after compute released the backend."""
+        self._pump_timer.start(0)
+
     @Slot()
     def _pump(self):
+        if thumbnail_generation_suspended():
+            # Keep every request queued; resume() re-arms the pump later.
+            return
         while self.pending and len(self.active) < self.max_workers:
             path, listeners = self.pending.popitem(last=False)
             self.active[path] = listeners
@@ -211,7 +278,7 @@ class ThumbnailLoader(QThread):
             if self.isInterruptionRequested() or not thumbnail_creation_enabled():
                 return
             self.mutex.lock()
-            while self.paused and not self.isInterruptionRequested():
+            while (self.paused or thumbnail_generation_suspended()) and not self.isInterruptionRequested():
                 self.cond.wait(self.mutex, 100)
             self.mutex.unlock()
             if not self.isInterruptionRequested():

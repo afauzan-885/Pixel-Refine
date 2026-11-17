@@ -1,5 +1,5 @@
 import os
-from UILibrary import get_store, DataStore
+from resources.GenericUILibrary import get_store, DataStore
 from config import GENERAL_SETTINGS_FILE
 
 DEFAULTS = {
@@ -8,6 +8,10 @@ DEFAULTS = {
     "gpu_acceleration": False,
     "multi_core_cpu": True,
     "create_thumbnail": False,
+    # RAW burst preview fallback: tone mapping is optional; bilinear is much
+    # faster in theory but currently drops the green channel in the AOT graph.
+    "preview_tone_mapping": True,
+    "preview_demosaic_method": "dcb",
     "auto_shutdown_enabled": False,
     "auto_shutdown_minutes": 60,
     "device_backend": "CPU (Universal)",

@@ -8,8 +8,7 @@ import inspect
 import json
 from pathlib import Path
 
-import UILibrary
-
+import resources.GenericUILibrary as UILibrary
 GOLDEN = json.loads(
     (Path(__file__).parent / "golden_signatures.json").read_text(encoding="utf-8")
 )
@@ -72,7 +71,7 @@ def _matches(actual, expected):
 def test_pyside_public_signatures_match_shared_contract():
     gaps = []
     for module_name, module_spec in GOLDEN["modules"].items():
-        module = importlib.import_module(f"UILibrary.{module_name}")
+        module = importlib.import_module(f"resources.GenericUILibrary.{module_name}")
         for class_name, spec in module_spec["classes"].items():
             target = getattr(module, ALIASED.get(class_name, class_name), None)
             if target is None:

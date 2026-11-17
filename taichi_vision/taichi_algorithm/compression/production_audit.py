@@ -150,21 +150,15 @@ def _codec_matrix() -> dict[str, dict[str, Any]]:
     dng_source = _repository_root() / "test_algorithm" / "IMG_test.dng"
     try:
         from . import dng_aot as dng_module
-        from .dng_aot import dng_capability_report
 
-        if dng_source.exists():
-            value = dng_capability_report(dng_source)
-            dng = (
-                dataclasses.asdict(value)
-                if dataclasses.is_dataclass(value)
-                else dict(value)
-            )
-        else:
-            dng = {"available": False, "error": "IMG_test.dng not found"}
-        dng["bytes_api"] = bool(
-            hasattr(dng_module, "encode_dng_bytes")
-            and hasattr(dng_module, "decode_dng_bytes")
-        )
+        dng = {
+            "available": bool(dng_source.exists()),
+            "reader": "taichi.read_dng",
+            "writer": "dng_aot.save_dng_aot",
+            "bytes_api": hasattr(dng_module, "encode_dng_bytes"),
+        }
+        if not dng_source.exists():
+            dng["error"] = "IMG_test.dng not found"
     except Exception as exc:  # pragma: no cover - diagnostic guard
         dng = {"available": False, "error": f"{type(exc).__name__}: {exc}"}
     return {

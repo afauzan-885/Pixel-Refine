@@ -34,7 +34,7 @@ class ApplicationManager:
 
         # Auto-apply GenericUILibrary stylesheet
         try:
-            from UILibrary import (
+            from resources.GenericUILibrary import (
                 apply_stylesheet,
             )
 

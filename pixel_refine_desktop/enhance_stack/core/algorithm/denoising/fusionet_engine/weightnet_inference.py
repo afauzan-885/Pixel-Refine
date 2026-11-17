@@ -28,6 +28,10 @@ from pixel_refine_desktop.enhance_stack.core.algorithm.denoising.fusionet_engine
 DEFAULT_WEIGHTNET_ONNX = Path(
     "database/Learning_Model/weightNet/weightnet_master.bundle"
 )
+DEFAULT_WEIGHTNET_V31_BUNDLE = Path(
+    "database/Learning_Model/weightnet_v3.1/weightnet_v3.1.bundle"
+)
+V31_PATCH_SIZE = 1024
 def _validate_weightnet_input_channels(session, expected_channels: int):
     try:
         shape = session.get_inputs()[0].shape
@@ -45,7 +49,54 @@ def load_weightnet_onnx(
     patch_size: int = 512,
     input_channels: int | None = 1,
     max_safety: float = 0.30,
+    variant: str | None = None,
 ):
+    resolved_variant = str(
+        variant or os.environ.get("PIXEL_REFINE_WEIGHTNET_VARIANT") or "v3"
+    ).strip().lower()
+    if resolved_variant in ("v3.1", "v31", "3.1"):
+        from .weightnet_onnx_session import (
+            OrtWeightNetSession,
+            DEFAULT_V31_BUNDLE,
+            V31_PATCH_SIZE,
+        )
+
+        provider = os.environ.get("PIXEL_REFINE_WEIGHTNET_EP", "auto")
+        session = OrtWeightNetSession.from_bundle(
+            DEFAULT_V31_BUNDLE, patch_size=V31_PATCH_SIZE, provider=provider
+        )
+        session.max_safety = float(max_safety)
+        print(
+            f"[WeightNet AOT] variant=v3.1 onnx provider={session.provider} "
+            f"vendor={getattr(session, 'vendor', '?')} "
+            f"device_id={getattr(session, 'dml_device_id', None)} "
+            f"patch={session.patch_size} member={getattr(session, 'member_name', '?')} "
+            f"host_patch_readback=0"
+        )
+        return session
+
+    # WeightNet V3 now runs from the ONNX bundle via ONNX Runtime (TCM ignored).
+    # Set PIXEL_REFINE_WEIGHTNET_TCM=1 to fall back to the resident TCM path.
+    tcm_requested = str(
+        os.environ.get("PIXEL_REFINE_WEIGHTNET_TCM", "")
+    ).strip().lower() in ("1", "true", "on", "yes")
+    if not tcm_requested:
+        from .weightnet_onnx_session import OrtWeightNetSession, DEFAULT_V3_BUNDLE
+
+        provider = os.environ.get("PIXEL_REFINE_WEIGHTNET_EP", "auto")
+        session = OrtWeightNetSession.from_bundle(
+            DEFAULT_V3_BUNDLE, patch_size=patch_size, provider=provider
+        )
+        session.max_safety = float(max_safety)
+        print(
+            f"[WeightNet ONNX] variant=v3 provider={session.provider} "
+            f"vendor={getattr(session, 'vendor', '?')} "
+            f"device_id={getattr(session, 'dml_device_id', None)} "
+            f"patch={session.patch_size} member={getattr(session, 'member_name', '?')} "
+            f"host_patch_readback=0"
+        )
+        return session
+
     source = Path(model_path)
     # Direct TCM file path loading
     if source.is_file() and source.suffix.lower() == ".tcm":
@@ -65,7 +116,7 @@ def load_weightnet_onnx(
             resident_weightnet_load_kwargs,
             selected_weightnet_model_bytes,
         )
-        from taichi_vision.taichi_algorithm.neural import neural
+        import taichi_vision.neural as neural
 
         backend = _ti_rt.get_backend_name()
         search_dirs = [
@@ -79,11 +130,7 @@ def load_weightnet_onnx(
         if custom_artifact and Path(custom_artifact).is_file():
             artifact = Path(custom_artifact)
         else:
-            tcm_candidate = neural.DEFAULT_AOT_NEURAL_DIR / f"weightnet_{patch_size}_{backend}.tcm"
-            if tcm_candidate.is_file():
-                artifact = tcm_candidate
-            else:
-                artifact = neural.find_prebaked_tcm(f"weightnet_{patch_size}", backend)
+            artifact = neural.find_prebaked_artifact(f"weightnet_{patch_size}", backend)
 
         if artifact is not None and Path(artifact).is_file():
             session = ResidentWeightNet(
@@ -106,12 +153,16 @@ def load_weightnet_onnx(
             with zipfile.ZipFile(bundle) as archive:
                 if member in archive.namelist():
                     model_bytes = archive.read(member)
-                    artifact = neural.resolve_or_compile_tcm(
-                        model_bytes,
-                        backend=backend,
-                        model_name=f"weightnet_{patch_size}",
-                        patch_tools=True,
+                    # taichi_vision is load-only: the artifact must already exist.
+                    artifact = neural.find_prebaked_artifact(
+                        f"weightnet_{patch_size}", backend
                     )
+                    if artifact is None:
+                        raise FileNotFoundError(
+                            "WeightNet TCM artifact is not pre-baked for "
+                            f"backend={backend} patch={patch_size}; the Taichi "
+                            "runtime is load-only and cannot compile it at runtime."
+                        )
                     session = ResidentWeightNet(
                         artifact, **resident_weightnet_load_kwargs(model_bytes)
                     )
@@ -150,6 +201,17 @@ def infer_single_support_weight_map(
     Output: weight_map_work [3, work_h, work_w] by default, or the native
     scalar map [1, work_h, work_w] when ``return_scalar`` is requested.
     """
+    if getattr(session, "runtime", None) in ("onnx", "onnx_dml", "onnx_cpu"):
+        return session.infer(
+            ref_work,
+            supp_work,
+            overlap=overlap,
+            ghost_penalty=ghost_penalty,
+            ghost_cutoff=ghost_cutoff,
+            stop_event=stop_event,
+            max_safety=max_safety,
+            return_scalar=return_scalar,
+        )
     if getattr(session, "runtime", None) == "taichi_aot":
         ms_val = max_safety if max_safety is not None else getattr(session, "max_safety", 0.30)
         return session.infer(ref_work, supp_work, overlap=overlap, ghost_penalty=ghost_penalty,

@@ -1,7 +1,7 @@
 import pytest
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
-from UILibrary.modals import AlertModal
+from resources.GenericUILibrary.modals import AlertModal
 
 
 @pytest.fixture(scope="session")

@@ -706,7 +706,7 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 # Shared backend-neutral style contract (overrides the legacy QSS builders).
-# Keep this schema and values in sync with UILibrary/theme.py.
+# Keep this schema and values in sync with the stylesheet tokens in resources/styles.
 # ---------------------------------------------------------------------------
 from .style_spec import StyleSpec
 

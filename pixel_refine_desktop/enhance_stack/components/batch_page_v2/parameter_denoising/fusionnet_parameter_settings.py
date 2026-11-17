@@ -13,13 +13,16 @@ from config import ALGORITHM_PARAMETER_SETTINGS_FILE, CONFIG_DIR
 
 FUSIONNET_DEFAULTS = {
     "fusionnet_denoising_mode": "standard",
-    "fusionnet_tile_size": 512,
+    "fusionnet_tile_size": 1024,
+    "fusionnet_weightnet_variant": "v3",
+    "fusionnet_motion_sensitivity": 1.0,
+    "fusionnet_ghost_sensitivity": 0.3,
     "fusionnet_work_pixel_fraction": 0.50,
     "fusionnet_max_neighbor_candidates": 4,
     "fusionnet_patch_search_radius": 5,
-    "fusionnet_max_safety": 1.30,
-    "fusionnet_ghost_penalty": 3.50,
 }
+
+FUSIONNET_WEIGHTNET_VARIANTS = ("v3", "v3.1")
 
 FUSIONNET_DENOISING_MODES = ("standard", "deep_analysis")
 
@@ -48,14 +51,34 @@ def _normalize_fusionnet_config(config):
         if requested_mode in FUSIONNET_DENOISING_MODES
         else FUSIONNET_DEFAULTS["fusionnet_denoising_mode"]
     )
+    requested_variant = str(
+        source.get(
+            "fusionnet_weightnet_variant",
+            normalized["fusionnet_weightnet_variant"],
+        )
+    ).strip().lower()
+    normalized["fusionnet_weightnet_variant"] = (
+        requested_variant
+        if requested_variant in FUSIONNET_WEIGHTNET_VARIANTS
+        else FUSIONNET_DEFAULTS["fusionnet_weightnet_variant"]
+    )
+    if "fusionnet_motion_sensitivity" in source or "motion_sensitivity" in source:
+        try:
+            raw_motion = source.get(
+                "fusionnet_motion_sensitivity", source.get("motion_sensitivity")
+            )
+            normalized["fusionnet_motion_sensitivity"] = max(
+                1.0, min(3.0, float(raw_motion))
+            )
+        except (TypeError, ValueError):
+            normalized["fusionnet_motion_sensitivity"] = FUSIONNET_DEFAULTS[
+                "fusionnet_motion_sensitivity"
+            ]
     for name in ("fusionnet_tile_size", "tile_size", "ai_tile_size"):
         if name in source and source[name] is not None:
             normalized["fusionnet_tile_size"] = source[name]
             break
-    try:
-        normalized["fusionnet_tile_size"] = int(float(normalized["fusionnet_tile_size"]))
-    except (TypeError, ValueError):
-        normalized["fusionnet_tile_size"] = FUSIONNET_DEFAULTS["fusionnet_tile_size"]
+    normalized["fusionnet_tile_size"] = 1024  # locked: bundle ships 1024 only
     for key, lower, upper in (
         ("fusionnet_max_neighbor_candidates", 1, 16),
         ("fusionnet_patch_search_radius", 1, 16),
@@ -95,19 +118,18 @@ def _normalize_fusionnet_config(config):
         normalized["fusionnet_work_pixel_fraction"] = FUSIONNET_DEFAULTS[
             "fusionnet_work_pixel_fraction"
         ]
-    if "fusionnet_max_safety" in source or "max_safety" in source:
+    if "fusionnet_ghost_sensitivity" in source or "ghost_sensitivity" in source:
         try:
-            raw_safety = source.get("fusionnet_max_safety", source.get("max_safety"))
-            normalized["fusionnet_max_safety"] = max(0.01, min(2.0, float(raw_safety)))
+            raw_ghost = source.get(
+                "fusionnet_ghost_sensitivity", source.get("ghost_sensitivity")
+            )
+            normalized["fusionnet_ghost_sensitivity"] = max(
+                0.0, min(5.0, float(raw_ghost))
+            )
         except (TypeError, ValueError):
-            normalized["fusionnet_max_safety"] = FUSIONNET_DEFAULTS["fusionnet_max_safety"]
-
-    if "fusionnet_ghost_penalty" in source or "ghost_penalty" in source:
-        try:
-            raw_penalty = source.get("fusionnet_ghost_penalty", source.get("ghost_penalty"))
-            normalized["fusionnet_ghost_penalty"] = max(0.1, min(5.0, float(raw_penalty)))
-        except (TypeError, ValueError):
-            normalized["fusionnet_ghost_penalty"] = FUSIONNET_DEFAULTS["fusionnet_ghost_penalty"]
+            normalized["fusionnet_ghost_sensitivity"] = FUSIONNET_DEFAULTS[
+                "fusionnet_ghost_sensitivity"
+            ]
 
     return normalized
 
@@ -127,6 +149,37 @@ PARAMETER_SCHEMA = [
         "tooltip": (
             "Standard runs the existing temporal FusionNet pipeline. Deep Analysis "
             "selects similar local patches and uses WeightNet confidence for fusion."
+        ),
+    },
+    {
+        "key": "fusionnet_weightnet_variant",
+        "label": "WeightNet Model",
+        "type": "dropdown",
+        "default": "v3",
+        "options": ["v3", "v3.1"],
+        "option_labels": {
+            "v3": "V3 (TCM)",
+            "v3.1": "V3.1 (ONNX 1024)",
+        },
+        "value_type": "str",
+        "tooltip": (
+            "V3 runs the resident TCM WeightNet. V3.1 runs the ONNX Runtime model on "
+            "a fixed 1024x1024 block (alternative, approximation)."
+        ),
+    },
+    {
+        "key": "fusionnet_motion_sensitivity",
+        "label": "Motion Sensitivity",
+        "type": "slider",
+        "default": 1.0,
+        "min": 100,
+        "max": 300,
+        "scale": 0.01,
+        "value_type": "float",
+        "visible_if": {"fusionnet_weightnet_variant": "v3.1"},
+        "tooltip": (
+            "V3.1 per-iteration motion damping. 1.0 = baseline; effect starts above "
+            "1.1 (range 1.00-3.00). Higher suppresses fusion on coherent motion."
         ),
     },
     {
@@ -152,15 +205,6 @@ PARAMETER_SCHEMA = [
         "tooltip": "Patch search radius in WeightNet analysis-grid pixels; larger values inspect farther neighbors.",
     },
     {
-        "key": "fusionnet_tile_size",
-        "label": "Model Block",
-        "type": "dropdown",
-        "default": 512,
-        "options": [256, 512, 1024],
-        "value_type": "int",
-        "tooltip": "WeightNet model block size.",
-    },
-    {
         "key": "fusionnet_work_pixel_fraction",
         "label": "Pixel Resolution",
         "type": "dropdown",
@@ -180,26 +224,19 @@ PARAMETER_SCHEMA = [
         ),
     },
     {
-        "key": "fusionnet_max_safety",
-        "label": "Max Safety",
+        "key": "fusionnet_ghost_sensitivity",
+        "label": "Motion Sensitivity",
         "type": "slider",
-        "default": 1.30,
-        "min": 1,
-        "max": 200,
-        "scale": 0.01,
-        "value_type": "float",
-        "tooltip": "Maximum additive WeightNet safety-head bias (0.01 to 2.00, default 1.30).",
-    },
-    {
-        "key": "fusionnet_ghost_penalty",
-        "label": "Ghost Penalty",
-        "type": "slider",
-        "default": 3.50,
-        "min": 10,
+        "default": 0.30,
+        "min": 0,
         "max": 500,
         "scale": 0.01,
         "value_type": "float",
-        "tooltip": "Noise-adaptive ghost penalty multiplier (0.1 to 5.0, default 3.50).",
+        "visible_if": {"fusionnet_weightnet_variant": "v3"},
+        "tooltip": (
+            "V3 coherence-gated motion scaling (ghost_sensitivity input). "
+            "0 = off; higher suppresses fusion on coherent motion."
+        ),
     },
 ]
 
@@ -258,8 +295,9 @@ def load_fusionnet_config_for_batch(batch_id=None):
                 for key in (
                     "fusionnet_max_neighbor_candidates",
                     "fusionnet_patch_search_radius",
-                    "fusionnet_max_safety",
-                    "fusionnet_ghost_penalty",
+                    "fusionnet_weightnet_variant",
+                    "fusionnet_motion_sensitivity",
+                    "fusionnet_ghost_sensitivity",
                 ):
                     if key in nested:
                         config[key] = normalized_nested[key]
@@ -290,8 +328,9 @@ def load_fusionnet_config_for_batch(batch_id=None):
                 for key in (
                     "fusionnet_max_neighbor_candidates",
                     "fusionnet_patch_search_radius",
-                    "fusionnet_max_safety",
-                    "fusionnet_ghost_penalty",
+                    "fusionnet_weightnet_variant",
+                    "fusionnet_motion_sensitivity",
+                    "fusionnet_ghost_sensitivity",
                 ):
                     if key in batch:
                         config[key] = normalized_batch[key]
@@ -332,6 +371,8 @@ def save_fusionnet_config(config_to_save):
         {
             "fusionnet_denoising_mode": normalized["fusionnet_denoising_mode"],
             "fusionnet_tile_size": normalized["fusionnet_tile_size"],
+            "fusionnet_weightnet_variant": normalized["fusionnet_weightnet_variant"],
+            "fusionnet_motion_sensitivity": normalized["fusionnet_motion_sensitivity"],
             "fusionnet_max_neighbor_candidates": normalized[
                 "fusionnet_max_neighbor_candidates"
             ],
@@ -341,8 +382,7 @@ def save_fusionnet_config(config_to_save):
             "fusionnet_work_pixel_fraction": normalized[
                 "fusionnet_work_pixel_fraction"
             ],
-            "fusionnet_max_safety": normalized["fusionnet_max_safety"],
-            "fusionnet_ghost_penalty": normalized["fusionnet_ghost_penalty"],
+            "fusionnet_ghost_sensitivity": normalized["fusionnet_ghost_sensitivity"],
             # Keep equivalent linear scale for older app versions.
             "fusionnet_work_resolution": linear_scale,
         }

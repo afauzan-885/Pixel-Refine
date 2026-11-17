@@ -13,7 +13,7 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QGraphicsPixmapItem
 
 # Generic UI Library
-from UILibrary import ImageCompareItem
+from resources.GenericUILibrary import ImageCompareItem
 
 # Image loading helper for RAW support
 from pixel_refine_desktop.enhance_stack.core.logic.image_display_helper import (

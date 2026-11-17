@@ -27,7 +27,7 @@ class ListGroup(QWidget, RealtimeMixin):
         list_group.selection_changed.connect(my_handler)
 
         # Real-time binding
-        list_group.bind_store(my_store, "project_list")
+        list_group.bind(my_store, key="project_list")
     """
 
     # Signals
@@ -124,8 +124,11 @@ class ListGroup(QWidget, RealtimeMixin):
 
     # --- RealtimeMixin Implementation ---
 
-    def on_store_changed(self, key, value):
+    def on_sync(self, payload, *, key=None, origin=None):
         """Handle real-time updates from DataStore."""
+        if not payload:
+            return
+        value = payload.get(getattr(self, "_store_key", None))
         if isinstance(value, list):
             # Expecting list of dicts like [{"text": "Item 1", "value": 1}, ...]
             # or list of strings ["Item 1", "Item 2"]

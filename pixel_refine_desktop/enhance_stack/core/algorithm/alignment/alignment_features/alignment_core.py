@@ -10,7 +10,7 @@ import time
 import traceback
 import cv2
 import numpy as np
-import onnxruntime as ort
+import taichi_vision.neural as ort
 
 # Taichi AOT for GPU Farneback
 try:
@@ -34,6 +34,34 @@ def get_taichi_worker():
     if not hasattr(worker, "submit_and_wait"):
         worker.submit_and_wait = worker.submit
     return worker
+
+
+def _align_buffer_session():
+    """Return the active resident BufferSession, or None outside a pipeline."""
+    try:
+        from ...pipeline_runtime import current_pipeline_runtime
+
+        runtime = current_pipeline_runtime()
+        return runtime.buffer_session if runtime is not None else None
+    except Exception:
+        return None
+
+
+def _align_scratch(shape, *, tag, is_vector=False, dtype=np.float32):
+    """Resident scratch for per-burst invariant work buffers."""
+    session = _align_buffer_session()
+    if session is None:
+        return _ti_rt.get_engine().allocate(
+            shape, dtype=dtype, is_vector=is_vector
+        )
+    return session.view(shape, dtype=dtype, is_vector=is_vector, tag=tag)
+
+
+def _align_upload(data, *, tag):
+    session = _align_buffer_session()
+    if session is None:
+        return _ti_rt.upload(data)
+    return session.upload_if_needed(data, tag=tag, refresh=True)[0]
 
 
 ALIGN_LIB = None
@@ -146,6 +174,13 @@ class ONNXSessionManager:
             # print(f"Model RAFT berhasil dimuat menggunakan: {session.get_providers()[0]}")
 
             return session
+
+        except ort.CapabilityMissingError as e:
+            # Tidak ada strategi Taichi yang menutup graf RAFT (mis. dynamic INT64
+            # belum aktif). Laporkan sekali, tanpa traceback, lalu kembalikan None
+            # seperti kontrak pemanggil yang sudah ada.
+            print(f"[RAFT] model tidak dapat dijalankan pada runtime Taichi: {e}")
+            return None
 
         except Exception as e:
             # print(f"Error fatal saat memuat model ONNX: {e}")
@@ -555,7 +590,7 @@ _FLOW_NET_PATCH_SIZE = 256
 
 
 def _flow_net_session():
-    import onnxruntime as ort
+    import taichi_vision.neural as ort
 
     cache_key = "nanoflow_256_gpu_dml_strict"
     cached = _FLOW_NET_SESSION_CACHE.get(cache_key)
@@ -1054,10 +1089,10 @@ def perform_alignment_gpu(
             for i in range(256):
                 val = (i / 255.0) ** gamma * contrast + brightness
                 lut_np[i] = np.clip(val, 0.0, 1.0)
-            lut_gpu = engine.upload(lut_np)
+            lut_gpu = _align_upload(lut_np, tag="align.lut")
 
             h_w, w_w = work_res_h, work_res_w
-            blur_work_gpu = engine.allocate((h_w, w_w), dtype=np.float32)
+            blur_work_gpu = _align_scratch((h_w, w_w), tag="align.blur_work")
 
             # 2. Setup Reference Pyramid pada GPU (ALLOCATE ONCE)
             ref_pyramid = taichi_bridge.prepare_reference_for_alignment(
@@ -1182,20 +1217,26 @@ def perform_alignment_gpu(
                     )
 
             # Iterative Warping Grayscale Scratch Buffers
-            comp_l1_warped = engine.allocate(
-                (h_w // 2, w_w // 2), dtype=np.float32, is_vector=False
+            comp_l1_warped = _align_scratch(
+                (h_w // 2, w_w // 2), tag="align.comp_l1_warped"
             )
-            comp_l0_warped = engine.allocate(
-                (h_w, w_w), dtype=np.float32, is_vector=False
+            comp_l0_warped = _align_scratch(
+                (h_w, w_w), tag="align.comp_l0_warped"
             )
 
             full_h_ref, full_w_ref = images[0].shape[:2]
-            smooth_flow_buf = engine.allocate((h_w, w_w, 2), dtype=np.float32)
+            smooth_flow_buf = _align_scratch(
+                (h_w, w_w, 2), tag="align.smooth_flow"
+            )
 
             use_flow_remap = kwargs.get("use_flow_remap", True)
             if not use_flow_remap:
-                map_x_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
-                map_y_gpu = engine.allocate((full_h_ref, full_w_ref), dtype=np.float32)
+                map_x_gpu = _align_scratch(
+                    (full_h_ref, full_w_ref), tag="align.map_x"
+                )
+                map_y_gpu = _align_scratch(
+                    (full_h_ref, full_w_ref), tag="align.map_y"
+                )
             else:
                 map_x_gpu = None
                 map_y_gpu = None

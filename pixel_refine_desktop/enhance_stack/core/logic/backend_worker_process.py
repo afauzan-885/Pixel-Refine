@@ -246,7 +246,36 @@ class WorkerRunner:
     def _initialize_engine():
         """Load the configured runtime and fail startup if it cannot initialize."""
         import taichi.aot_engine as ta_aot
-        ta_aot.get_engine()
+
+        arch = os.environ.get("AOT_ARCH") or None
+        raw_device = os.environ.get("AOT_DEVICE", "0")
+        try:
+            device_id = int(raw_device)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid AOT_DEVICE={raw_device!r}") from None
+        live_engine = ta_aot.get_engine(arch=arch, device_id=device_id)
+        singleton = getattr(ta_aot, "engine", None)
+        target = getattr(singleton, "_target", None)
+        if singleton is not None and target is not live_engine:
+            singleton._target = live_engine
+        if getattr(live_engine, "arch", None) != arch or int(
+            getattr(live_engine, "device_id", -1)
+        ) != device_id:
+            raise RuntimeError(
+                "Taichi AOT engine selection mismatch: "
+                f"requested {arch}:{device_id}, got "
+                f"{getattr(live_engine, 'arch', None)}:{getattr(live_engine, 'device_id', None)}"
+            )
+        try:
+            from taichi_vision.taichi_algorithm import aot_api
+
+            aot_api._module_loader.engine = live_engine
+            aot_api._module_loader.clear()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to bind Taichi Vision AOT loader to {arch}:{device_id}: {exc}"
+            ) from exc
+        return live_engine
 
     @staticmethod
     def _initialize_algorithms():

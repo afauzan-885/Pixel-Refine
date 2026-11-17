@@ -386,14 +386,6 @@ class MFDenoiserAlgorithm:
             raise ValueError("A denoising burst cannot mix RAW and RGB input frames")
 
         is_raw_input = bool(raw_flags and all(raw_flags))
-        if is_raw_input and any(extension != ".dng" for extension in source_extensions):
-            unsupported = next(
-                extension for extension in source_extensions if extension != ".dng"
-            )
-            raise ValueError(
-                f"RAW pipeline detected {unsupported} input, but the active RAW "
-                "provider currently supports DNG only"
-            )
 
         source_kind = "raw" if is_raw_input else "rgb"
         ctx.source_descriptor = PipelineSourceDescriptor(
@@ -770,7 +762,7 @@ def running_mf_denoiser(
             clear_raw=clear_raw,
         )
 
-    from UILibrary import ProgressModal
+    from resources.GenericUILibrary import ProgressModal
 
     dialog = ProgressModal(
         title="MFDenoiser Processing",

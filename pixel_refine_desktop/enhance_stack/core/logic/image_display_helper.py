@@ -8,7 +8,6 @@ dengan support untuk berbagai format dan ukuran gambar.
 
 import os
 import numpy as np
-import rawpy
 from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsPixmapItem
 from PySide6.QtCore import QThread, Signal, Qt

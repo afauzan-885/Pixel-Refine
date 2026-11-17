@@ -554,6 +554,78 @@ def nu_conv2d_3x3_s1p1(
 
 
 @ti.kernel
+def nu_conv2d_4x4_s1(
+    x: ti.types.ndarray(ti.f32, 1),
+    w: ti.types.ndarray(ti.f32, 1),
+    b: ti.types.ndarray(ti.f32, 1),
+    y: ti.types.ndarray(ti.f32, 1),
+    n_batch: ti.i32,
+    ci: ti.i32,
+    co: ti.i32,
+    h: ti.i32,
+    w_in: ti.i32,
+    oh: ti.i32,
+    ow: ti.i32,
+    has_bias: ti.i32,
+    act: ti.i32,
+):
+    """Group-1 kernel 4x4, stride 1, pad 0, dilation 1.
+
+    One thread per output element with the 16 taps unrolled at compile time, the
+    same shape as ``nu_conv2d_3x3_s1p1``. The generic ``nu_conv2d`` recomputes
+    bounds and re-enters two nested loops per output, which measures ~7x slower
+    per pixel on the WeightNet producer convolution.
+    """
+    plane = h * w_in
+    for idx in range(n_batch * co * oh * ow):
+        xx = idx % ow
+        t = idx // ow
+        yy = t % oh
+        t2 = t // oh
+        oc = t2 % co
+        n = t2 // co
+        acc = 0.0
+        w_base = oc * ci * 16
+        x_base = n * ci * plane
+        # Interior fast path: no row/column bounds needed when the 4x4 window
+        # fits entirely inside the padded-free input.
+        if yy < oh and xx < ow:
+            for ic in range(ci):
+                xb = x_base + ic * plane + yy * w_in + xx
+                wb = w_base + ic * 16
+                acc += (
+                    x[xb] * w[wb]
+                    + x[xb + 1] * w[wb + 1]
+                    + x[xb + 2] * w[wb + 2]
+                    + x[xb + 3] * w[wb + 3]
+                )
+                xb += w_in
+                acc += (
+                    x[xb] * w[wb + 4]
+                    + x[xb + 1] * w[wb + 5]
+                    + x[xb + 2] * w[wb + 6]
+                    + x[xb + 3] * w[wb + 7]
+                )
+                xb += w_in
+                acc += (
+                    x[xb] * w[wb + 8]
+                    + x[xb + 1] * w[wb + 9]
+                    + x[xb + 2] * w[wb + 10]
+                    + x[xb + 3] * w[wb + 11]
+                )
+                xb += w_in
+                acc += (
+                    x[xb] * w[wb + 12]
+                    + x[xb + 1] * w[wb + 13]
+                    + x[xb + 2] * w[wb + 14]
+                    + x[xb + 3] * w[wb + 15]
+                )
+        if has_bias != 0:
+            acc += b[oc]
+        y[idx] = nu_activate(acc, act)
+
+
+@ti.kernel
 def nu_conv2d_1x1(
     x: ti.types.ndarray(ti.f32, 1),
     w: ti.types.ndarray(ti.f32, 1),
@@ -752,4 +824,14 @@ ALL_CONV_KERNELS = [
     nu_conv2d_1x1,
     nu_conv2d_depthwise_3x3_s1p1,
     nu_conv_transpose2d,
+]
+
+#: Kernels implemented here but not yet present in any staged pool artifact.
+#: Registering them would make ``KERNEL_NAMES`` stricter than the artifact and
+#: fail the runtime closed for every model (the manifest guard compares the two
+#: sets). They are listed separately until the pool is recompiled (blocker B1b);
+#: ``_lower_conv`` already guards its dispatch on the artifact manifest, so the
+#: generic kernel stays the fallback until then.
+PENDING_POOL_KERNELS = [
+    nu_conv2d_4x4_s1,
 ]

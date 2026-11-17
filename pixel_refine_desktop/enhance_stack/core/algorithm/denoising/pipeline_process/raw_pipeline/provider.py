@@ -104,17 +104,15 @@ def _normalize_phase_planes_into(frame, destinations) -> tuple[np.ndarray, ...]:
             )
         black = np.float32(black_levels[index if len(black_levels) == 4 else 0])
         white = np.float32(white_levels[index if len(white_levels) == 4 else 0])
-        inverse_range = np.float32(1.0) / np.maximum(
-            np.float32(1.0), np.float32(white - black)
-        )
+        range_value = np.float32(white - black)
+        if not np.isfinite(range_value) or range_value <= 0:
+            raise ValueError(
+                f"invalid RAW black/white range: black={black}, white={white}"
+            )
+        inverse_range = np.float32(1.0) / range_value
         np.subtract(source, black, out=destination, dtype=np.float32)
         np.multiply(destination, inverse_range, out=destination)
-        np.clip(
-            destination,
-            np.float32(0.0),
-            np.float32(1.0),
-            out=destination,
-        )
+        np.maximum(destination, np.float32(0.0), out=destination)
     return tuple(destinations)
 
 def _normalized_for_rgb_parity(frame) -> np.ndarray:
@@ -142,13 +140,16 @@ def _normalized_for_rgb_parity(frame) -> np.ndarray:
         col = (plane_x - phase_x) & 1
         black = np.float32(black_levels[index if len(black_levels) == 4 else 0])
         white = np.float32(white_levels[index if len(white_levels) == 4 else 0])
-        inverse_range = np.float32(1.0) / np.maximum(
-            np.float32(1.0), np.float32(white - black)
-        )
+        range_value = np.float32(white - black)
+        if not np.isfinite(range_value) or range_value <= 0:
+            raise ValueError(
+                f"invalid RAW black/white range: black={black}, white={white}"
+            )
+        inverse_range = np.float32(1.0) / range_value
         destination = normalized[row::2, col::2]
         np.subtract(samples[row::2, col::2], black, out=destination, dtype=np.float32)
         np.multiply(destination, inverse_range, out=destination)
-        np.clip(destination, np.float32(0.0), np.float32(1.0), out=destination)
+        np.maximum(destination, np.float32(0.0), out=destination)
     return np.ascontiguousarray(normalized, dtype=np.float32)
 
 def _plane_homography(matrix: np.ndarray, frame, index: int) -> np.ndarray:
@@ -448,13 +449,23 @@ class RawPipelineProvider:
         self._finalized = False
 
     def _read_frame(self, index: int):
-        from taichi_vision.taichi_algorithm.compression import RawMosaicFrame, read_dng_aot
+        import os
+
+        import numpy as np
+        import taichi
+        from taichi_vision.taichi_algorithm.compression import RawMosaicFrame
 
         path = self.image_paths[int(index)]
-        return RawMosaicFrame.from_dng(
-            read_dng_aot(path),
+        frame = RawMosaicFrame.from_raw_image(
+            taichi.imread(path, compute_hash=False),
             source_id=path,
         )
+        precision = self.options.get("raw_precision") or os.environ.get(
+            "PIXEL_REFINE_RAW_PRECISION", "uint16"
+        )
+        if frame.samples.dtype not in (np.dtype(np.uint8), np.dtype(np.uint16)):
+            frame = frame.as_processing_frame(precision)
+        return frame
 
     def load_support_dng_bytes_host(self, index: int) -> bytes:
         """Read an unchanged support DNG container for the bounded host queue."""
@@ -471,10 +482,21 @@ class RawPipelineProvider:
     ) -> ProviderFrame:
         """Decode a prefetched DNG after it has left the host queue."""
 
-        from taichi_vision.taichi_algorithm.compression import RawMosaicFrame, read_dng_aot
+        import os
+
+        import numpy as np
+        import taichi
+        from taichi_vision.taichi_algorithm.compression import RawMosaicFrame
 
         path = self.image_paths[int(index)]
-        frame = RawMosaicFrame.from_dng(read_dng_aot(dng_bytes), source_id=path)
+        frame = RawMosaicFrame.from_raw_image(
+            taichi.imread(dng_bytes, compute_hash=False), source_id=path
+        )
+        precision = self.options.get("raw_precision") or os.environ.get(
+            "PIXEL_REFINE_RAW_PRECISION", "uint16"
+        )
+        if frame.samples.dtype not in (np.dtype(np.uint8), np.dtype(np.uint16)):
+            frame = frame.as_processing_frame(precision)
         return self._support_provider_frame(index, frame)
 
     def _support_provider_frame(self, index: int, frame) -> ProviderFrame:

@@ -74,11 +74,6 @@ class _BufferSessionFacade:
             lease = active.pop(id(resource), None)
         if lease is not None and hasattr(lease, "release"):
             lease.release()
-            return
-        session = self._buffer_session()
-        if session is not None and hasattr(session, "borrow") and resource is not None:
-            with session.borrow(resource):
-                pass
 
     def own(self, resource: Any, releaser: Any = None) -> Any:
         """Return a resident resource through the three-API session surface."""

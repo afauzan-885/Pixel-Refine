@@ -5,7 +5,40 @@ use this policy instead of reading ``app_setting.json`` or starting a
 ``ThumbnailLoader`` based on local assumptions.
 """
 
+import threading
+
 from PySide6.QtCore import QObject, Signal
+
+_suspension_lock = threading.Lock()
+_suspension_reasons = set()
+
+
+def set_thumbnail_generation_suspended(suspended, reason="default"):
+    """Hold new thumbnail work while a reason owns the backend.
+
+    Reasons are independent: releasing ``preview`` must not resume thumbnails
+    while ``compute`` is still running. Returns True only when this call
+    releases the last active reason, so the UI can restart lazy loading once.
+    """
+
+    key = str(reason)
+    with _suspension_lock:
+        was_suspended = bool(_suspension_reasons)
+        if suspended:
+            _suspension_reasons.add(key)
+        else:
+            _suspension_reasons.discard(key)
+        now_suspended = bool(_suspension_reasons)
+        return was_suspended and not now_suspended
+
+
+def thumbnail_generation_suspended(exclude_reason=None):
+    """Whether thumbnail creation must wait for any active owner."""
+
+    with _suspension_lock:
+        if exclude_reason is None:
+            return bool(_suspension_reasons)
+        return bool(_suspension_reasons - {str(exclude_reason)})
 
 
 class ThumbnailPolicy(QObject):

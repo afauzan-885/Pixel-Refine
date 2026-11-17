@@ -160,11 +160,16 @@ def get_selected_gpu_vendor(store=None) -> str:
 def resolve_onnx_runtime_and_providers(
     runtime: str = "auto", store=None
 ) -> Tuple[str, List[Any]]:
-    """Resolve ONNX execution providers prioritized by the active GPU Acceleration backend."""
+    """Resolve execution providers prioritized by the active GPU Acceleration backend.
+
+    Providers come from the public Taichi neural facade; the returned names are
+    onnxruntime-compatible aliases that ``taichi_vision.neural.InferenceSession``
+    accepts, so callers keep their existing shape.
+    """
     try:
-        import onnxruntime as ort
+        import taichi_vision.neural as ort
     except ImportError as exc:
-        raise RuntimeError("ONNX inference requires onnxruntime package.") from exc
+        raise RuntimeError("ONNX inference requires the taichi_vision.neural facade.") from exc
 
     if store is None:
         try:

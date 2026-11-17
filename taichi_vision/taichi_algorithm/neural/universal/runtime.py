@@ -26,8 +26,14 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from . import shapeinfer
+from . import native_i64, shapeinfer
 from .errors import UnsupportedONNXOperatorError, UnsupportedStepError
+from .fusions import (
+    BINARY_CODES as _BINARY_CODES,
+    UNARY_CODES as _UNARY_CODES,
+    build_fusion_plan,
+    run_fused_dispatch,
+)
 from .plan import GraphNode, Plan
 from .dtypes import F32, I32, I64, NUMPY_DTYPE, broadcast_strides, normalize_axis, pad_to, product
 
@@ -65,13 +71,6 @@ class _Ctx:
         self.host: Dict[str, np.ndarray] = {}
         self.dummy = session.dummy
         self.conv_activation_fusions: Dict[int, Tuple[int, str, int]] = {}
-        self.mul_clip_fusions: Dict[int, Tuple[int, str, float, float]] = {}
-        self.binary_unary_fusions: Dict[int, Tuple[int, str, int, int, float, float]] = {}
-        self.add_sqrt_clip_fusions: Dict[int, Tuple[int, int, str, float, float]] = {}
-        self.sub_clip_sqrt_fusions: Dict[int, Tuple[int, int, str, float, float]] = {}
-        self.sub_square_fusions: Dict[int, Tuple[int, str]] = {}
-        self.unary_binary_fusions: Dict[int, Tuple[int, str, str, int, int, int, float, float]] = {}
-        self.sub_sub_div_fusions: Dict[int, Tuple[int, int, str, str, str, str, str]] = {}
         self.fused_nodes: set = set()
 
     def value(self, name: str) -> np.ndarray:
@@ -156,8 +155,8 @@ class _Ctx:
             [self.session.plan.dtypes.get(n, F32) for n in node.inputs],
         )
 
-    def alloc(self, name: str, shape: Shape, dtype: str = F32):
-        return self.session.alloc_slot(name, shape, dtype, self)
+    def alloc(self, name: str, shape: Shape, dtype: str = F32, *, borrowed: bool = False):
+        return self.session.alloc_slot(name, shape, dtype, self, borrowed=borrowed)
 
     def alloc_temp(self, prefix: str, shape: Shape, dtype: str):
         """Allocate a scratch value under a name disjoint from every ONNX value."""
@@ -431,25 +430,6 @@ def _host_eval(node: GraphNode, ctx: _Ctx) -> np.ndarray:
 # device lowerings
 # --------------------------------------------------------------------------
 
-_UNARY_CODES = {
-    "Relu": 1, "Sigmoid": 2, "Tanh": 3, "Gelu": 4, "Abs": 7, "Sqrt": 6,
-    "Neg": 8, "Erf": 9, "Softplus": 10, "Floor": 11, "Exp": 12, "Log": 13,
-    "Sin": 14, "Cos": 15, "Ceil": 18, "Sign": 19, "Reciprocal": 17,
-}
-
-_BINARY_CODES = {
-    "Add": 0, "Sub": 1, "Mul": 2, "Div": 3, "Pow": 4, "Max": 5, "Min": 6,
-    "Less": 7, "Greater": 8, "Equal": 9, "Mod": 10, "And": 11,
-}
-
-_UNARY_BINARY_CODES = {
-    # Keep this whitelist limited to operators without attributes in this pass.
-    # Sigmoid, Relu, and Erf are excluded until their NaN edge behavior is
-    # explicitly reconciled with the ORT oracle for this fused context.
-    "Tanh": 3, "Softplus": 10, "Log": 13,
-}
-_UNARY_BINARY_OP_CODES = {"Add": 0, "Sub": 1, "Mul": 2}
-
 _REDUCE_KERNELS = {
     "ReduceMean": "nu_reduce_mean", "ReduceSum": "nu_reduce_sum",
     "ReduceMax": "nu_reduce_max", "ReduceMin": "nu_reduce_min",
@@ -509,6 +489,8 @@ def _lower_binary(node: GraphNode, ctx: _Ctx) -> None:
     b = ctx.device(b_name)
     n = product(so)
     if ctx.session.plan.dtypes.get(a_name) == I64 or ctx.session.plan.dtypes.get(b_name) == I64:
+        if native_i64.binary(ctx, node, op, a, b, out, sa, sb, so, n):
+            return
         if (not ctx.session.int64_candidate
                 or op not in ("Add", "Sub", "Mul", "Div", "Mod", "Less", "Greater", "Equal")
                 or max(len(sa), len(sb), len(so)) > 8):
@@ -676,6 +658,98 @@ def _conv_common(node: GraphNode, ctx: _Ctx):
     return x, w, bias, si, sw, so, out, has_bias, int(attrs.get("group", 1)), pads, strides, dilations, act
 
 
+def _rust_conv_available() -> bool:
+    """Whether the conv path can actually run against runtime buffers.
+
+    The Rust kernels take raw device pointers. ``taichi_python`` exposes them,
+    but the bridge buffer type does not, so this stays ``False`` until a device
+    pointer is reachable — advertising it earlier would produce a crash rather
+    than an acceleration.
+    """
+    try:
+        from taichi import taichi_python  # noqa: F401
+    except ImportError:
+        return False
+    if not hasattr(taichi_python, "conv2d_f32"):
+        return False
+    try:
+        from taichi.aot_engine import TaichiGPUBuffer
+    except ImportError:
+        return False
+    return hasattr(TaichiGPUBuffer, "data_ptr")
+
+
+def _handle_of(buffer) -> Optional[int]:
+    """Device address of an engine buffer, or ``None`` when not addressable."""
+    data_ptr = getattr(buffer, "data_ptr", None)
+    if data_ptr is None:
+        return None
+    try:
+        address = int(data_ptr() if callable(data_ptr) else data_ptr)
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    return address or None
+
+
+def _try_rust_conv(ctx: _Ctx, x, w, bias, out, si, sw, so, has_bias: bool,
+                   group: int, pads, strides, dilations, act: int) -> bool:
+    """Run the convolution through the Rust im2col+GEMM path when admitted.
+
+    Admitted profile: f32, 4D NCHW, `group == 1`, `dilation == 1`. Everything
+    else returns False so the existing Taichi dispatch handles it unchanged.
+    The workspace is owned by the session, so no allocation happens in Rust.
+    """
+    session = ctx.session
+    if not getattr(session, "use_rust_conv", False):
+        return False
+    if group != 1 or dilations != [1, 1]:
+        return False
+    if len(si) != 4 or len(so) != 4:
+        return False
+    if getattr(session, "_rust_conv_ready", None) is None:
+        session._rust_conv_ready = _rust_conv_available()
+    if not session._rust_conv_ready:
+        return False
+
+    n, ci, h, w_in = (int(v) for v in si)
+    co, oh, ow = int(so[1]), int(so[2]), int(so[3])
+    kh, kw = int(sw[2]), int(sw[3])
+    elements = ci * kh * kw * oh * ow
+    if elements <= 0:
+        return False
+
+    workspace = session.acquire_slot("__rust_conv_workspace", (elements,), F32)
+    pointers = {
+        "x": _handle_of(x),
+        "w": _handle_of(w),
+        "y": _handle_of(out),
+        "workspace": _handle_of(workspace),
+    }
+    if any(value is None for value in pointers.values()):
+        return False  # not a native buffer; leave it to the Taichi path
+    bias_ptr = _handle_of(bias) if has_bias else 0
+    if has_bias and bias_ptr is None:
+        return False
+
+    try:
+        from taichi import taichi_python
+
+        taichi_python.conv2d_f32(
+            pointers["x"], pointers["w"], bias_ptr or 0, pointers["y"],
+            n, ci, co, h, w_in, oh, ow, kh, kw,
+            int(strides[0]), int(strides[1]), int(pads[0]), int(pads[1]),
+            1 if has_bias else 0, int(act),
+            pointers["workspace"], elements * 4,
+        )
+    except Exception:
+        # Never mask a real run: fall back to the Taichi kernel and remember not
+        # to try again for this session.
+        session._rust_conv_ready = False
+        return False
+    session._rust_conv_used = True
+    return True
+
+
 def _lower_conv(node: GraphNode, ctx: _Ctx) -> None:
     (x, w, bias, si, sw, so, out, has_bias, group, pads,
      strides, dilations, act) = _conv_common(node, ctx)
@@ -685,6 +759,9 @@ def _lower_conv(node: GraphNode, ctx: _Ctx) -> None:
         _activation_index, output_name, fused_act = fusion
         act = fused_act
     out = ctx.alloc(output_name, so, F32)
+    if _try_rust_conv(ctx, x, w, bias, out, si, sw, so, has_bias, group,
+                      pads, strides, dilations, act):
+        return
     if (sw[2:] == (3, 3) and group == si[1] == so[1] and strides == [1, 1]
             and dilations == [1, 1] and pads == [1, 1, 1, 1]):
         ctx.module.run("nu_conv2d_depthwise_3x3_s1p1", x=x, w=w, b=bias, y=out,
@@ -709,6 +786,19 @@ def _lower_conv(node: GraphNode, ctx: _Ctx) -> None:
             "nu_conv2d_4x4_s2", x=x, w=w, b=bias, y=out,
             n_batch=si[0], ci=si[1], co=so[1], h=si[2], w_in=si[3],
             oh=so[2], ow=so[3], group=group,
+            has_bias=1 if has_bias else 0, act=act,
+        )
+        return
+    if (sw[2:] == (4, 4) and group == 1 and strides == [1, 1]
+            and dilations == [1, 1] and pads == [0, 0, 0, 0]
+            and so[2] == si[2] - 3 and so[3] == si[3] - 3
+            and "nu_conv2d_4x4_s1" in ctx.session.pool_graph_names):
+        # Unrolled 4x4, stride 1, pad 0. Guarded by the artifact manifest, so the
+        # generic kernel stays the fallback until the pool is rebuilt (blocker B1b).
+        ctx.module.run(
+            "nu_conv2d_4x4_s1", x=x, w=w, b=bias, y=out,
+            n_batch=si[0], ci=si[1], co=so[1], h=si[2], w_in=si[3],
+            oh=so[2], ow=so[3],
             has_bias=1 if has_bias else 0, act=act,
         )
         return
@@ -899,16 +989,23 @@ def _lower_gather(node: GraphNode, ctx: _Ctx) -> None:
     data_dtype = ctx.session.plan.dtypes[data_name]
     index_dtype = ctx.session.plan.dtypes[index_name]
     dynamic_i64_indices = index_dtype == I64 and index_name in ctx.buffers
+    native_path = (data_dtype == I64 or index_dtype == I64) and native_i64.available()
     if node.op == "Gather" and data_dtype == I64:
         indices = None  # Promoted/checked below, before any narrowing.
     elif node.op == "GatherElements" and index_dtype == I64:
-        if data_dtype not in (F32, I64) or not ctx.session.int64_candidate:
+        if native_path:
+            indices = ctx.device(index_name)
+        elif data_dtype not in (F32, I64) or not ctx.session.int64_candidate:
             raise UnsupportedStepError("INT64 GatherElements requires supported data dtype and CPU candidate graph")
-        indices = ctx.device(index_name)
+        else:
+            indices = ctx.device(index_name)
     elif node.op == "Gather" and dynamic_i64_indices:
-        if not ctx.session.int64_candidate or data_dtype not in (F32, I64):
+        if native_path:
+            indices = ctx.device(index_name)
+        elif not ctx.session.int64_candidate or data_dtype not in (F32, I64):
             raise UnsupportedStepError("dynamic INT64 Gather indices require CPU candidate graph")
-        indices = ctx.device(index_name)
+        else:
+            indices = ctx.device(index_name)
     else:
         indices = ctx.device_i32(index_name)
     sd, si = ctx.shape_of(node.inputs[0]), ctx.shape_of(node.inputs[1])
@@ -918,6 +1015,13 @@ def _lower_gather(node: GraphNode, ctx: _Ctx) -> None:
     outer = product(sd[:axis]) if axis else 1
     inner = product(sd[axis + 1:]) if axis + 1 < len(sd) else 1
     if node.op == "Gather":
+        if data_dtype == I64 or (dynamic_i64_indices and index_dtype == I64):
+            # `data` may be a compile-time constant with no device buffer yet;
+            # the native path uploads it on demand. The index operand must itself
+            # be i64 — a narrowed i32 buffer is a different layout.
+            if native_i64.gather(ctx, node, data if data_name in ctx.buffers else None,
+                                 indices, out, sd, si, so, axis):
+                return
         if data_dtype == I64:
             if (not ctx.session.int64_candidate
                     or "nu_gather_i64_indices_i64_candidate" not in ctx.session.pool_graph_names):
@@ -978,6 +1082,10 @@ def _lower_concat(node: GraphNode, ctx: _Ctx) -> None:
     out = ctx.alloc(node.output, so, ctx.session.plan.dtypes[node.output])
     is_i64 = ctx.session.plan.dtypes[node.output] == I64
     if is_i64 and not ctx.session.int64_candidate:
+        shapes = [ctx.shape_of(name) for name in node.inputs]
+        parts = [ctx.device(name) for name in node.inputs]
+        if native_i64.concat(ctx, node, parts, out, shapes, so, axis):
+            return
         raise UnsupportedStepError("INT64 Concat requires the isolated CPU candidate pool")
     outer = product(so[:axis]) if axis else 1
     inner = product(so[axis + 1:]) if axis + 1 < len(so) else 1
@@ -1000,8 +1108,6 @@ def _lower_split(node: GraphNode, ctx: _Ctx) -> None:
     x = ctx.device(node.inputs[0])
     si = ctx.shape_of(node.inputs[0])
     is_i64 = ctx.session.plan.dtypes[node.inputs[0]] == I64
-    if is_i64 and not ctx.session.int64_candidate:
-        raise UnsupportedStepError("INT64 Split requires the isolated CPU candidate pool")
     axis = normalize_axis(int(node.attrs.get("axis", 0)), len(si))
     split = node.attrs.get("split")
     if split is None and ctx.const_arg(node, 1) is not None:
@@ -1013,6 +1119,17 @@ def _lower_split(node: GraphNode, ctx: _Ctx) -> None:
         sizes = [int(v) for v in split]
     outer = product(si[:axis]) if axis else 1
     inner = product(si[axis + 1:]) if axis + 1 < len(si) else 1
+    if is_i64 and not ctx.session.int64_candidate and native_i64.available():
+        offset = 0
+        for name, size in zip(node.outputs, sizes):
+            out_shape = tuple(size if i == axis else d for i, d in enumerate(si))
+            out = ctx.alloc(name, out_shape, ctx.session.plan.dtypes[name])
+            if not native_i64.split(ctx, node, x, out, si, out_shape, axis, offset):
+                raise UnsupportedStepError("INT64 Split requires the isolated CPU candidate pool")
+            offset += size
+        return
+    if is_i64 and not ctx.session.int64_candidate:
+        raise UnsupportedStepError("INT64 Split requires the isolated CPU candidate pool")
     offset = 0
     for name, size in zip(node.outputs, sizes):
         out_shape = tuple(size if i == axis else d for i, d in enumerate(si))
@@ -1027,9 +1144,6 @@ def _lower_slice(node: GraphNode, ctx: _Ctx) -> None:
     x = ctx.device(node.inputs[0])
     si = ctx.shape_of(node.inputs[0])
     is_i64 = ctx.session.plan.dtypes[node.inputs[0]] == I64
-    if is_i64 and not ctx.session.int64_candidate:
-        raise UnsupportedStepError("INT64 Slice requires the isolated CPU candidate pool")
-    so = ctx.infer_out(node, [si])
     starts = [int(v) for v in np.asarray(ctx.const_arg(node, 1)).ravel()]
     ends = [int(v) for v in np.asarray(ctx.const_arg(node, 2)).ravel()]
     axes = (
@@ -1042,6 +1156,17 @@ def _lower_slice(node: GraphNode, ctx: _Ctx) -> None:
         if ctx.const_arg(node, 4) is not None
         else [1] * len(starts)
     )
+    if is_i64 and not ctx.session.int64_candidate:
+        if len(axes) == 1:
+            so_native = ctx.infer_out(node, [si])
+            output = ctx.alloc(node.output, so_native, ctx.session.plan.dtypes[node.output])
+            if native_i64.slice_axis(
+                ctx, node, x, output, si, so_native,
+                normalize_axis(axes[0], len(si)), starts[0], steps[0],
+            ):
+                return
+        raise UnsupportedStepError("INT64 Slice requires the isolated CPU candidate pool")
+    so = ctx.infer_out(node, [si])
     current = x
     current_shape = si
     for position, (start, end, raw_axis, step) in enumerate(zip(starts, ends, axes, steps)):
@@ -1111,6 +1236,8 @@ def _lower_transpose(node: GraphNode, ctx: _Ctx) -> None:
     kwargs.update({f"s{i}": v for i, v in enumerate(pad_to(mapped, 8, 0))})
     if ctx.session.plan.dtypes[node.inputs[0]] == I64:
         if not ctx.session.int64_candidate:
+            if native_i64.transpose(ctx, node, x, out, si, so, perm):
+                return
             raise UnsupportedStepError("INT64 Transpose requires the isolated CPU candidate pool")
         ctx.module.run("nu_transpose_general_i64_candidate", **kwargs)
     else:
@@ -1127,6 +1254,8 @@ def _lower_expand(node: GraphNode, ctx: _Ctx) -> None:
     kwargs.update({f"s{i}": v for i, v in enumerate(pad_to(broadcast_strides(si, so), 8, 0))})
     if ctx.session.plan.dtypes[node.inputs[0]] == I64:
         if not ctx.session.int64_candidate:
+            if si != so and native_i64.expand(ctx, node, x, out, si, so):
+                return
             raise UnsupportedStepError("INT64 Expand requires the isolated CPU candidate pool")
         ctx.module.run("nu_transpose_general_i64_candidate", **kwargs)
     else:
@@ -1257,6 +1386,14 @@ def _lower_topk(node: GraphNode, ctx: _Ctx) -> None:
     if index_dtype == I64:
         if (not ctx.session.int64_candidate
                 or "nu_topk_axis_i64_indices_candidate" not in ctx.session.pool_graph_names):
+            if axis == len(si) - 1:
+                indices = ctx.alloc(node.outputs[1], output_shape, I64)
+                data_dtype = ctx.session.plan.dtypes[node.inputs[0]]
+                if native_i64.topk_last(
+                    ctx, node, x, values, indices,
+                    product(si[:-1]), si[-1], k, data_dtype,
+                ):
+                    return
             raise UnsupportedStepError("ONNX TopK INT64 indices require the isolated CPU candidate graph")
         indices = ctx.alloc(node.outputs[1], output_shape, I64)
         outer = product(si[:axis]) if axis else 1
@@ -1294,6 +1431,13 @@ def _lower_nonzero(node: GraphNode, ctx: _Ctx) -> None:
                 and "nu_nonzero_scatter_serial_i32_i64_candidate" in ctx.session.pool_graph_names):
             serial_nonzero_graph = "nu_nonzero_scatter_serial_i32_i64_candidate"
     serial_nonzero = serial_nonzero_graph is not None
+    if not serial_nonzero and native_i64.available():
+        # Native path: same (rank, capacity) layout the reader expects, so
+        # `record_nonzero`/reshape at readback stays identical.
+        out_native = ctx.alloc(node.output, (rank, total), I64)
+        if native_i64.nonzero(ctx, node, x, out_native, counter, si):
+            ctx.session.record_nonzero(node.output, counter, rank)
+            return
     out = ctx.alloc(node.output, (rank, total), I64 if serial_nonzero else I32)
     kwargs = {"x": x, "out": out, "counter": counter, "total": total,
               "capacity": total, "rank": rank}
@@ -1332,6 +1476,8 @@ def _lower_fill(node: GraphNode, ctx: _Ctx) -> None:
     value = 0.0
     if node.attrs.get("value") is not None:
         value = float(np.asarray(node.attrs["value"]).ravel()[0])
+    if native_i64.fill_i64(ctx, node, out, shape, value, dtype):
+        return
     kernel = {"f32": "nu_fill_f32", "i32": "nu_fill_i32", "i64": "nu_fill_i64"}[dtype]
     ctx.module.run(kernel, y=out, n=product(shape), value=value)
 
@@ -1363,6 +1509,16 @@ def _lower_cast(node: GraphNode, ctx: _Ctx) -> None:
     dst = ctx.session.plan.dtypes[node.output]
     out = ctx.alloc(node.output, si, dst)
     n = product(si)
+    if src == dst and src == I64:
+        # Same-dtype i64 "cast" is a copy; the pool copy graph needs the
+        # candidate artifact, so use the native path when it is available.
+        if native_i64.cast_i64(ctx, node, x, out, si, src, dst):
+            return
+    if src != dst and (src == I64 or dst == I64):
+        # The pool's i64 copy/cast graphs need the candidate artifact; the native
+        # conversion covers every admitted direction without it.
+        if native_i64.cast_i64(ctx, node, x, out, si, src, dst):
+            return
     if src == dst:
         kernel = {"f32": "nu_copy_f32", "i32": "nu_copy_i32", "i64": "nu_copy_i64"}[src]
         ctx.module.run(kernel, x=x, y=out, n=n)
@@ -1404,456 +1560,6 @@ LOWER: Dict[str, Any] = {
     "MultiHeadAttention": _lower_attention, "ConstantOfShape": _lower_fill,
     "Range": _lower_range, "Cast": _lower_cast,
 }
-
-
-def _build_conv_activation_fusions(plan: Plan, requested_outputs: set) -> Tuple[Dict[int, Tuple[int, str, int]], set]:
-    """Fuse a Conv with its sole pointwise activation consumer when safe.
-
-    Unsupported activations, requested intermediate outputs, multi-consumer
-    Conv values, and all other graph shapes retain the ordinary ONNX steps.
-    """
-    consumers: Dict[str, List[GraphNode]] = {}
-    for node in plan.nodes:
-        for name in node.inputs:
-            if name:
-                consumers.setdefault(name, []).append(node)
-
-    activation_codes = {"Relu": 1, "Sigmoid": 2, "Tanh": 3, "Softplus": 6}
-    fusions: Dict[int, Tuple[int, str, int]] = {}
-    skipped: set = set()
-    for node in plan.nodes:
-        if node.op != "Conv" or node.output in requested_outputs:
-            continue
-        uses = consumers.get(node.output, ())
-        if len(uses) != 1:
-            continue
-        activation = uses[0]
-        if len(activation.inputs) != 1 or activation.inputs[0] != node.output:
-            continue
-        if activation.op == "Gelu":
-            approximate = str(activation.attrs.get("approximate", "none")).lower()
-            code = 4 if approximate == "tanh" else 5
-        else:
-            code = activation_codes.get(activation.op, 0)
-        if code == 0 or plan.dtypes.get(activation.output) != F32:
-            continue
-        fusions[node.index] = (activation.index, activation.output, code)
-        skipped.add(activation.index)
-    return fusions, skipped
-
-
-def _build_mul_clip_fusions(
-    plan: Plan, requested_outputs: set
-) -> Dict[int, Tuple[int, str, float, float]]:
-    """Find safe ONNX Mul->Clip candidates; shape checks remain runtime-dynamic."""
-    consumers: Dict[str, List[GraphNode]] = {}
-    for node in plan.nodes:
-        for name in node.inputs:
-            if name:
-                consumers.setdefault(name, []).append(node)
-
-    fusions: Dict[int, Tuple[int, str, float, float]] = {}
-    minimum = -3.4028234663852886e38
-    maximum = 3.4028234663852886e38
-    for node in plan.nodes:
-        if node.op != "Mul" or node.output in requested_outputs:
-            continue
-        if plan.dtypes.get(node.output) != F32:
-            continue
-        uses = consumers.get(node.output, ())
-        if len(uses) != 1 or uses[0].op != "Clip":
-            continue
-        clip = uses[0]
-        if clip.output in plan.host_int_values or plan.dtypes.get(clip.output) != F32:
-            continue
-        low, high = minimum, maximum
-        valid = True
-        for position, bound_name, fallback in (
-            (1, "min", minimum), (2, "max", maximum)
-        ):
-            if position >= len(clip.inputs) or not clip.inputs[position]:
-                value = clip.attrs.get(bound_name, fallback)
-            else:
-                constant = plan.constants.get(clip.inputs[position])
-                if constant is None or np.asarray(constant).size == 0:
-                    valid = False
-                    break
-                value = float(np.asarray(constant).ravel()[0])
-            if position == 1:
-                low = float(value)
-            else:
-                high = float(value)
-        if valid:
-            fusions[node.index] = (clip.index, clip.output, low, high)
-    return fusions
-
-
-def _binary_unary_parameters(node: GraphNode, plan: Plan) -> Optional[Tuple[int, float, float]]:
-    code = _UNARY_CODES.get(node.op)
-    low = 0.0
-    high = 0.0
-    if node.op == "Clip":
-        code = 21
-        low = float(node.attrs.get("min", -3.4028234663852886e38))
-        high = float(node.attrs.get("max", 3.4028234663852886e38))
-        for position, bound_name in ((1, "min"), (2, "max")):
-            if position >= len(node.inputs) or not node.inputs[position]:
-                continue
-            value = plan.constants.get(node.inputs[position])
-            if value is None or np.asarray(value).size == 0:
-                return None
-            bound = float(np.asarray(value).ravel()[0])
-            if position == 1:
-                low = bound
-            else:
-                high = bound
-    elif node.op == "LeakyRelu":
-        low = float(node.attrs.get("alpha", 0.01))
-    if code is None:
-        return None
-    return code, low, high
-
-
-def _build_binary_unary_fusions(
-    plan: Plan, requested_outputs: set
-) -> Dict[int, Tuple[int, str, int, int, float, float]]:
-    consumers: Dict[str, List[GraphNode]] = {}
-    for node in plan.nodes:
-        for name in node.inputs:
-            if name:
-                consumers.setdefault(name, []).append(node)
-
-    fusions: Dict[int, Tuple[int, str, int, int, float, float]] = {}
-    for node in plan.nodes:
-        binary_code = _BINARY_CODES.get(node.op)
-        if binary_code is None or node.output in requested_outputs:
-            continue
-        if plan.dtypes.get(node.output) != F32:
-            continue
-        uses = consumers.get(node.output, ())
-        if len(uses) != 1:
-            continue
-        unary = uses[0]
-        if len(unary.inputs) != 1 or unary.inputs[0] != node.output:
-            continue
-        if plan.dtypes.get(unary.output) != F32:
-            continue
-        parameters = _binary_unary_parameters(unary, plan)
-        if parameters is None:
-            continue
-        unary_code, low, high = parameters
-        fusions[node.index] = (
-            unary.index, unary.output, binary_code, unary_code, low, high
-        )
-    return fusions
-
-
-def _build_unary_binary_fusions(
-    plan: Plan, requested_outputs: set
-) -> Dict[int, Tuple[int, str, str, int, int, int, float, float]]:
-    """Find standard-domain FP32 unary->binary edges with unique private inputs.
-
-    A binary node with two eligible unary-produced inputs is deliberately left
-    unfused; this pass composes exactly one unary producer and one binary node.
-    Runtime shape/broadcast checks can still decline a candidate and use the
-    regular per-node lowerings.
-    """
-    consumers: Dict[str, List[GraphNode]] = {}
-    for node in plan.nodes:
-        for name in node.inputs:
-            if name:
-                consumers.setdefault(name, []).append(node)
-
-    candidates: Dict[int, List[Tuple[GraphNode, str, int, int]]] = {}
-    for unary in plan.nodes:
-        unary_code = _UNARY_BINARY_CODES.get(unary.op)
-        if unary.domain != "ai.onnx" or unary_code is None:
-            continue
-        if unary.attrs or len(unary.inputs) != 1 or len(unary.outputs) != 1:
-            continue
-        intermediate = unary.output
-        if intermediate in requested_outputs or plan.dtypes.get(intermediate) != F32:
-            continue
-        if plan.dtypes.get(unary.inputs[0]) != F32:
-            continue
-        uses = consumers.get(intermediate, ())
-        if len(uses) != 1:
-            continue
-        binary = uses[0]
-        binary_code = _UNARY_BINARY_OP_CODES.get(binary.op)
-        if binary.domain != "ai.onnx" or binary_code is None:
-            continue
-        if binary.attrs or len(binary.inputs) != 2 or len(binary.outputs) != 1:
-            continue
-        if binary.inputs.count(intermediate) != 1:
-            continue
-        if plan.dtypes.get(binary.output) != F32:
-            continue
-        unary_position = binary.inputs.index(intermediate)
-        unary_is_left = 1 if unary_position == 0 else 0
-        other_input = binary.inputs[1 - unary_position]
-        if plan.dtypes.get(other_input) != F32:
-            continue
-        candidates.setdefault(binary.index, []).append(
-            (unary, other_input, unary_code, binary_code)
-        )
-
-    fusions: Dict[int, Tuple[int, str, str, int, int, int, float, float]] = {}
-    for binary_index, matches in candidates.items():
-        if len(matches) != 1:
-            continue
-        unary, other_input, unary_code, binary_code = matches[0]
-        binary = plan.nodes[binary_index]
-        unary_is_left = 1 if binary.inputs[0] == unary.output else 0
-        fusions[unary.index] = (
-            binary.index, binary.output, other_input,
-            unary_code, binary_code, unary_is_left, 0.0, 0.0,
-        )
-    return fusions
-
-
-def _build_sub_sub_div_fusions(
-    plan: Plan, requested_outputs: set
-) -> Dict[int, Tuple[int, int, str, str, str, str, str]]:
-    """Find private standard-domain FP32 ``Sub -> Sub -> Div`` chains.
-
-    Runtime shape checks require exact equal shapes for all four operands and
-    each intermediate/output. Any fanout, requested intermediate, attributes,
-    mixed dtype, duplicate external operand, or shape/broadcast mismatch leaves
-    the ordinary per-node lowerings in place.
-    """
-    consumers: Dict[str, List[GraphNode]] = {}
-    for node in plan.nodes:
-        for name in node.inputs:
-            if name:
-                consumers.setdefault(name, []).append(node)
-
-    graph_names = set(plan.dtypes) | set(plan.constants)
-    graph_names.update(plan.input_names)
-    graph_names.update(plan.output_names)
-    for graph_node in plan.nodes:
-        graph_names.update(name for name in graph_node.inputs if name)
-        graph_names.update(name for name in graph_node.outputs if name)
-
-    fusions: Dict[int, Tuple[int, int, str, str, str, str, str]] = {}
-    for first in plan.nodes:
-        if first.domain != "ai.onnx" or first.op != "Sub":
-            continue
-        if first.attrs or len(first.inputs) != 2 or len(first.outputs) != 1:
-            continue
-        first_mid = first.output
-        if first_mid in requested_outputs or plan.dtypes.get(first_mid) != F32:
-            continue
-        if any(plan.dtypes.get(name) != F32 for name in first.inputs):
-            continue
-        first_uses = consumers.get(first_mid, ())
-        if len(first_uses) != 1:
-            continue
-        second = first_uses[0]
-        if second.index != first.index + 1:
-            continue
-        if (second.domain != "ai.onnx" or second.op != "Sub" or second.attrs
-                or len(second.inputs) != 2 or second.inputs.count(first_mid) != 1
-                or len(second.outputs) != 1):
-            continue
-        second_mid = second.output
-        if second_mid in requested_outputs or plan.dtypes.get(second_mid) != F32:
-            continue
-        other_second = second.inputs[1 - second.inputs.index(first_mid)]
-        if plan.dtypes.get(other_second) != F32:
-            continue
-        second_uses = consumers.get(second_mid, ())
-        if len(second_uses) != 1:
-            continue
-        last = second_uses[0]
-        if last.index != second.index + 1:
-            continue
-        if (last.domain != "ai.onnx" or last.op != "Div" or last.attrs
-                or len(last.inputs) != 2 or last.inputs.count(second_mid) != 1
-                or len(last.outputs) != 1):
-            continue
-        other_last = last.inputs[1 - last.inputs.index(second_mid)]
-        if plan.dtypes.get(other_last) != F32 or plan.dtypes.get(last.output) != F32:
-            continue
-        external = [first.inputs[0], first.inputs[1], other_second, other_last]
-        if len(set(external)) != 4:
-            continue
-        scratch_names = {
-            f"__nu_fused_sub_sub_div_{first.index}_first",
-            f"__nu_fused_sub_sub_div_{first.index}_second",
-        }
-        if scratch_names & graph_names:
-            continue
-        fusions[first.index] = (
-            second.index, last.index, last.output, *external,
-        )
-    return fusions
-
-
-def _build_sub_square_fusions(plan: Plan, requested_outputs: set) -> Dict[int, Tuple[int, str]]:
-    """Find safe ``Sub -> Pow(exponent=2)`` patterns for the generic square kernel.
-
-    The candidate only applies to float32 tensors, an exact scalar constant
-    exponent of 2, and a subtraction result with one consumer. If the
-    intermediate is requested or runtime shapes are not identical, execution
-    uses the ordinary ONNX lowerings instead.
-    """
-    consumers: Dict[str, List[GraphNode]] = {}
-    for node in plan.nodes:
-        for name in node.inputs:
-            if name:
-                consumers.setdefault(name, []).append(node)
-
-    fusions: Dict[int, Tuple[int, str]] = {}
-    for node in plan.nodes:
-        if node.op != "Sub" or node.output in requested_outputs:
-            continue
-        if plan.dtypes.get(node.output) != F32:
-            continue
-        if any(plan.dtypes.get(name) != F32 for name in node.inputs):
-            continue
-        uses = consumers.get(node.output, ())
-        if len(uses) != 1:
-            continue
-        power = uses[0]
-        if power.op != "Pow" or len(power.inputs) != 2 or power.inputs[0] != node.output:
-            continue
-        if plan.dtypes.get(power.output) != F32:
-            continue
-        if plan.dtypes.get(power.inputs[1]) != F32:
-            continue
-        exponent = plan.constants.get(power.inputs[1])
-        if exponent is None:
-            continue
-        exponent = np.asarray(exponent)
-        if exponent.size != 1 or not np.isfinite(exponent).all():
-            continue
-        if float(exponent.reshape(-1)[0]) != 2.0:
-            continue
-        fusions[node.index] = (power.index, power.output)
-    return fusions
-
-
-def _clip_bounds_are_scalar_constants(node: GraphNode, plan: Plan) -> bool:
-    if node.op != "Clip":
-        return True
-    for position in (1, 2):
-        if position >= len(node.inputs) or not node.inputs[position]:
-            continue
-        name = node.inputs[position]
-        value = plan.constants.get(name)
-        if value is None or plan.dtypes.get(name) != F32:
-            return False
-        array = np.asarray(value)
-        if array.size != 1 or not np.isfinite(array).all():
-            return False
-    return True
-
-
-def _build_add_sqrt_clip_fusions(
-    plan: Plan, requested_outputs: set
-) -> Dict[int, Tuple[int, int, str, float, float]]:
-    """Match standard-domain Add -> Sqrt -> Clip with scalar FP32 bounds."""
-    consumers: Dict[str, List[GraphNode]] = {}
-    for node in plan.nodes:
-        for name in node.inputs:
-            if name:
-                consumers.setdefault(name, []).append(node)
-
-    fusions: Dict[int, Tuple[int, int, str, float, float]] = {}
-    for binary in plan.nodes:
-        if binary.domain != "ai.onnx" or binary.op != "Add":
-            continue
-        if binary.output in requested_outputs:
-            continue
-        if plan.dtypes.get(binary.output) != F32 or any(
-            plan.dtypes.get(name) != F32 for name in binary.inputs
-        ):
-            continue
-        first_uses = consumers.get(binary.output, ())
-        if len(first_uses) != 1:
-            continue
-        first = first_uses[0]
-        if (first.op != "Sqrt" or len(first.inputs) != 1
-                or first.inputs[0] != binary.output
-                or first.domain != "ai.onnx"
-                or first.output in requested_outputs
-                or plan.dtypes.get(first.output) != F32
-                or not _clip_bounds_are_scalar_constants(first, plan)):
-            continue
-        first_params = _binary_unary_parameters(first, plan)
-        if first_params is None:
-            continue
-        second_uses = consumers.get(first.output, ())
-        if len(second_uses) != 1:
-            continue
-        second = second_uses[0]
-        if (second.op != "Clip" or not 1 <= len(second.inputs) <= 3
-                or second.inputs[0] != first.output
-                or second.domain != "ai.onnx"
-                or plan.dtypes.get(second.output) != F32
-                or not _clip_bounds_are_scalar_constants(second, plan)):
-            continue
-        second_params = _binary_unary_parameters(second, plan)
-        if second_params is None:
-            continue
-        if first_params[0] != 6 or second_params[0] != 21:
-            continue
-        _first_code, _first_lo, _first_hi = first_params
-        _second_code, clip_lo, clip_hi = second_params
-        fusions[binary.index] = (
-            first.index, second.index, second.output, clip_lo, clip_hi,
-        )
-    return fusions
-
-
-def _build_sub_clip_sqrt_fusions(
-    plan: Plan, requested_outputs: set
-) -> Dict[int, Tuple[int, int, str, float, float]]:
-    """Match standard-domain Sub -> Clip -> Sqrt with scalar FP32 bounds."""
-    consumers: Dict[str, List[GraphNode]] = {}
-    for node in plan.nodes:
-        for name in node.inputs:
-            if name:
-                consumers.setdefault(name, []).append(node)
-
-    fusions: Dict[int, Tuple[int, int, str, float, float]] = {}
-    for binary in plan.nodes:
-        if binary.domain != "ai.onnx" or binary.op != "Sub":
-            continue
-        if binary.output in requested_outputs:
-            continue
-        if plan.dtypes.get(binary.output) != F32 or any(
-            plan.dtypes.get(name) != F32 for name in binary.inputs
-        ):
-            continue
-        first_uses = consumers.get(binary.output, ())
-        if len(first_uses) != 1:
-            continue
-        clip = first_uses[0]
-        if (clip.op != "Clip" or not 1 <= len(clip.inputs) <= 3
-                or clip.inputs[0] != binary.output or clip.domain != "ai.onnx"
-                or clip.output in requested_outputs
-                or plan.dtypes.get(clip.output) != F32
-                or not _clip_bounds_are_scalar_constants(clip, plan)):
-            continue
-        clip_params = _binary_unary_parameters(clip, plan)
-        if clip_params is None or clip_params[0] != 21:
-            continue
-        second_uses = consumers.get(clip.output, ())
-        if len(second_uses) != 1:
-            continue
-        sqrt = second_uses[0]
-        if (sqrt.op != "Sqrt" or len(sqrt.inputs) != 1
-                or sqrt.inputs[0] != clip.output or sqrt.domain != "ai.onnx"
-                or plan.dtypes.get(sqrt.output) != F32):
-            continue
-        sqrt_params = _binary_unary_parameters(sqrt, plan)
-        if sqrt_params is None or sqrt_params[0] != 6:
-            continue
-        _clip_code, clip_lo, clip_hi = clip_params
-        fusions[binary.index] = (clip.index, sqrt.index, sqrt.output, clip_lo, clip_hi)
-    return fusions
 
 
 def _check_backend_dtype_support(plan: Plan, backend: str) -> None:
@@ -1933,6 +1639,9 @@ class UniversalInferenceSession:
         weights_source: Optional[Union[str, Path, bytes, dict]] = None,
         input_shapes: Optional[Dict[str, Sequence[int]]] = None,
         pool_dir: Optional[Union[str, Path]] = None,
+        ring_slots: int = 2,
+        use_buffer_session: bool = True,
+        use_rust_conv: bool = True,
     ):
         from taichi.aot_engine import (
             AOTEngine,
@@ -1949,6 +1658,12 @@ class UniversalInferenceSession:
         self.model_name = model_name
         self.weights_source = weights_source
         self.input_shapes = dict(input_shapes) if input_shapes else None
+        self.ring_slots = max(1, int(ring_slots))
+        self.use_buffer_session = bool(use_buffer_session)
+        #: Route admitted Conv shapes through the Rust im2col+GEMM path.
+        self.use_rust_conv = bool(use_rust_conv)
+        self._rust_conv_ready: Optional[bool] = None
+        self._rust_conv_used = False
 
         current = str(global_engine.arch).lower()
         if current != self.backend:
@@ -1979,7 +1694,8 @@ class UniversalInferenceSession:
             raise FileNotFoundError(
                 f"universal pool TCM for backend '{self.backend}' not found under "
                 f"{base or os.environ.get('PIXEL_REFINE_NEURAL_POOL_DIR') or DEFAULT_POOL_DIR}; "
-                "run python -m taichi_vision.taichi_algorithm.neural.universal.compile"
+                "stage the C++ pipeline artifact as universal/<backend>/neural_<backend>.tcm "
+                "and verify its cgraph manifest against kernels.KERNEL_NAMES"
             )
         self.pool_path = pool_path
         self.pool_graph_names = _read_pool_graph_names(pool_path)
@@ -2037,8 +1753,75 @@ class UniversalInferenceSession:
         self._nz: Dict[str, Tuple[Any, int]] = {}
         #: Buffers currently owned by the session, keyed by tensor name.
         self.buffers: Dict[str, Any] = {}
+        #: Tagged scratch/ring ownership for this session. Steady-state runs
+        #: already reuse cached slots, so the session adds cross-signature reuse,
+        #: ring slots for borrowed outputs, and one auditable owner for cleanup.
+        self.buffer_session = self._open_buffer_session()
+        #: Names whose buffers must survive a run (inputs, borrowed outputs).
+        self._kept_buffers: set = set()
 
     # ------------------------------------------------------------- helpers
+
+    def _open_buffer_session(self):
+        """Create the tagged scratch/ring owner for this session.
+
+        ``BufferSession`` is the venv's native ownership facade. It is optional:
+        when the installed ``taichi`` build does not expose it, the session keeps
+        its previous engine-only allocation path and reports that fact.
+        """
+        if not self.use_buffer_session:
+            self.buffer_session_available = False
+            return None
+        try:
+            from taichi.buffer_session import BufferSession
+        except ImportError:
+            self.buffer_session_available = False
+            return None
+        session = BufferSession(
+            engine=self.engine, sync_on_exit=False,
+            tag=f"neural_universal_{self.backend}", ring_slots=self.ring_slots,
+        )
+        self.buffer_session_available = True
+        return session
+
+    def acquire_slot(self, name: str, shape: Shape, dtype: str):
+        """Allocate a slot owned by the buffer session.
+
+        Allocation deliberately goes through ``engine.allocate`` — the same call
+        the runtime used before — and the session then *adopts* the buffer. That
+        keeps memory placement and host accessibility byte-identical to the
+        measured baseline while giving the session one owner for lifecycle.
+        """
+        np_dtype = NUMPY_DTYPE[dtype]
+        flat_shape = (max(1, product(shape)),)
+        buffer = self.engine.allocate(flat_shape, dtype=np_dtype, is_vector=False)
+        if self.buffer_session is not None:
+            try:
+                self.buffer_session.own(buffer)
+            except Exception:
+                pass
+        return buffer
+
+    def acquire_output_slot(self, name: str, shape: Shape, dtype: str):
+        """Allocate an output that may outlive the call (borrowed output)."""
+        np_dtype = NUMPY_DTYPE[dtype]
+        flat_shape = (max(1, product(shape)),)
+        if self.buffer_session is not None:
+            return self.buffer_session.view(
+                flat_shape, dtype=np_dtype, tag=f"output::{name}"
+            )
+        return self.engine.allocate(flat_shape, dtype=np_dtype, is_vector=False)
+
+    def download(self, name: str, buffer):
+        """Host readback into the session's host scratch slot."""
+        if self.buffer_session is not None:
+            host = self.buffer_session.acquire_host(
+                buffer.shape, dtype=buffer.dtype, tag=f"host::{name}"
+            )
+            native_read = getattr(buffer, "to_numpy", None)
+            if native_read is not None:
+                return native_read(out=host)
+        return buffer.to_numpy()
 
     def upload(self, name: str, array: np.ndarray):
         contiguous = np.ascontiguousarray(array)
@@ -2047,19 +1830,29 @@ class UniversalInferenceSession:
         if buf is not None and getattr(buf, "handle", None) is not None:
             self.engine.write_into(buf, contiguous, synchronize=False)
             return buf
-        buf = self.engine.upload(contiguous, is_vector=False)
+        if self.buffer_session is not None:
+            # Identity-cached upload: identical host data is not re-uploaded,
+            # and mutating the same array updates the resident copy in place.
+            buf, _cached = self.buffer_session.upload_if_needed(
+                contiguous, tag=f"upload::{name}"
+            )
+        else:
+            buf = self.engine.upload(contiguous, is_vector=False)
         self._run_buffer_cache[key] = buf
         self._live.append(buf)
+        self._kept_buffers.add(name)
         return buf
 
-    def alloc_slot(self, name: str, shape: Shape, dtype: str, ctx: _Ctx):
-        elements = max(1, product(shape))
-        flat_shape = (elements,)
+    def alloc_slot(self, name: str, shape: Shape, dtype: str, ctx: _Ctx, *, borrowed: bool = False):
         np_dtype = NUMPY_DTYPE[dtype]
-        key = (name, flat_shape, np.dtype(np_dtype).str)
+        key = (name, (max(1, product(shape)),), np.dtype(np_dtype).str)
         buf = self._run_buffer_cache.get(key)
         if buf is None or getattr(buf, "handle", None) is None:
-            buf = self.engine.allocate(flat_shape, dtype=np_dtype, is_vector=False)
+            if borrowed:
+                buf = self.acquire_output_slot(name, shape, dtype)
+                self._kept_buffers.add(name)
+            else:
+                buf = self.acquire_slot(name, shape, dtype)
             self._run_buffer_cache[key] = buf
             self._live.append(buf)
         ctx.buffers[name] = buf
@@ -2079,6 +1872,16 @@ class UniversalInferenceSession:
         self.buffers = {}
         self._run_buffer_cache.clear()
         self._run_signature = None
+        self._kept_buffers = set()
+        session = getattr(self, "buffer_session", None)
+        if session is not None:
+            # The buffer session owns every slot it handed out; releasing them
+            # through it keeps one owner and avoids double-free on destroy().
+            try:
+                session.release_all_except()
+                return
+            except Exception:
+                pass
         for buffer in previous:
             try:
                 buffer.destroy()
@@ -2119,22 +1922,7 @@ class UniversalInferenceSession:
                 )
 
         requested = list(output_names) if output_names else list(plan.output_names)
-        conv_fusions, fused_activation_nodes = _build_conv_activation_fusions(
-            plan, set(requested)
-        )
-        mul_clip_fusions = _build_mul_clip_fusions(plan, set(requested))
-        binary_unary_fusions = _build_binary_unary_fusions(plan, set(requested))
-        add_sqrt_clip_fusions = _build_add_sqrt_clip_fusions(plan, set(requested))
-        sub_clip_sqrt_fusions = _build_sub_clip_sqrt_fusions(plan, set(requested))
-        sub_square_fusions = _build_sub_square_fusions(plan, set(requested))
-        sub_sub_div_fusions = (
-            _build_sub_sub_div_fusions(plan, set(requested))
-            if "nu_fused_sub_sub_div" in self.pool_graph_names else {}
-        )
-        unary_binary_fusions = (
-            _build_unary_binary_fusions(plan, set(requested))
-            if "nu_fused_unary_binary" in self.pool_graph_names else {}
-        )
+        fusion_plan = build_fusion_plan(plan, set(requested), self.pool_graph_names)
 
         input_arrays: Dict[str, np.ndarray] = {}
         for name in plan.input_names:
@@ -2168,14 +1956,8 @@ class UniversalInferenceSession:
             self._run_signature = signature
 
         ctx = _Ctx(self)
-        ctx.conv_activation_fusions = conv_fusions
-        ctx.mul_clip_fusions = mul_clip_fusions
-        ctx.binary_unary_fusions = binary_unary_fusions
-        ctx.add_sqrt_clip_fusions = add_sqrt_clip_fusions
-        ctx.sub_clip_sqrt_fusions = sub_clip_sqrt_fusions
-        ctx.sub_square_fusions = sub_square_fusions
-        ctx.sub_sub_div_fusions = sub_sub_div_fusions
-        ctx.unary_binary_fusions = unary_binary_fusions
+        ctx.conv_activation_fusions = fusion_plan.conv_activation
+        ctx.fused_nodes = set(fusion_plan.conv_activation_skipped)
         self._nz.clear()
         for name, array in input_arrays.items():
             ctx.buffers[name] = self.upload(name, array.reshape(-1))
@@ -2186,7 +1968,7 @@ class UniversalInferenceSession:
                 break
             if step_callback is not None:
                 step_callback(step_index, node)
-            if node.index in fused_activation_nodes or node.index in ctx.fused_nodes:
+            if node.index in ctx.fused_nodes:
                 continue
             if node.op == "Constant":
                 continue
@@ -2220,225 +2002,14 @@ class UniversalInferenceSession:
                 ctx.buffers[node.output] = ctx.device(source)
                 ctx.shapes[node.output] = _alias_target(node, ctx, ctx.shape_of(source))
                 continue
-            triple = ctx.sub_sub_div_fusions.get(node.index)
-            if triple is not None:
-                second_index, last_index, fused_output, a_name, b_name, c_name, d_name = triple
-                names = (a_name, b_name, c_name, d_name)
-                shapes = tuple(ctx.shape_of(name) for name in names)
-                output_shape = None
-                if shapes and all(shape == shapes[0] for shape in shapes):
-                    first_node = node
-                    second_node = plan.nodes[second_index]
-                    last_node = plan.nodes[last_index]
-                    try:
-                        first_shape = ctx.infer_out(first_node, [shapes[0], shapes[1]])
-                        second_shape = ctx.infer_out(
-                            second_node, [first_shape, shapes[2]]
-                        )
-                        final_shape = ctx.infer_out(last_node, [second_shape, shapes[3]])
-                        if first_shape == second_shape == final_shape == shapes[0]:
-                            output_shape = final_shape
-                    except (UnsupportedONNXOperatorError, ValueError, TypeError):
-                        output_shape = None
-                if output_shape is not None:
-                    output = ctx.alloc(fused_output, output_shape, F32)
-                    first_tmp = ctx.alloc(
-                        f"__nu_fused_sub_sub_div_{node.index}_first", output_shape, F32
-                    )
-                    second_tmp = ctx.alloc(
-                        f"__nu_fused_sub_sub_div_{node.index}_second", output_shape, F32
-                    )
-                    ctx.module.run(
-                        "nu_fused_sub_sub_div",
-                        a=ctx.device(a_name), b=ctx.device(b_name),
-                        c=ctx.device(c_name), d=ctx.device(d_name), y=output,
-                        first_tmp=first_tmp, second_tmp=second_tmp,
-                        n=product(output_shape),
-                    )
-                    ctx.fused_nodes.update((second_index, last_index))
-                    continue
-            fusion = ctx.unary_binary_fusions.get(node.index)
-            if fusion is not None:
-                (
-                    binary_index, fused_output, other_input,
-                    unary_code, binary_code, unary_is_left, low, high,
-                ) = fusion
-                unary_shape = ctx.shape_of(node.inputs[0])
-                binary = plan.nodes[binary_index]
-                if unary_is_left:
-                    left_shape = unary_shape
-                    right_shape = ctx.shape_of(other_input)
-                else:
-                    left_shape = ctx.shape_of(other_input)
-                    right_shape = unary_shape
-                output_shape = None
-                if max(len(left_shape), len(right_shape)) <= 8:
-                    try:
-                        output_shape = ctx.infer_out(binary, [left_shape, right_shape])
-                        unary_strides = broadcast_strides(unary_shape, output_shape)
-                        other_strides = broadcast_strides(
-                            ctx.shape_of(other_input), output_shape
-                        )
-                    except (UnsupportedONNXOperatorError, ValueError, TypeError):
-                        output_shape = None
-                if output_shape is not None:
-                    output = ctx.alloc(fused_output, output_shape, F32)
-                    kwargs = {
-                        f"o{i}": value
-                        for i, value in enumerate(pad_to(output_shape, 8))
-                    }
-                    kwargs.update({
-                        f"x{i}": value
-                        for i, value in enumerate(pad_to(unary_strides, 8, 0))
-                    })
-                    kwargs.update({
-                        f"b{i}": value
-                        for i, value in enumerate(pad_to(other_strides, 8, 0))
-                    })
-                    ctx.module.run(
-                        "nu_fused_unary_binary",
-                        x=ctx.device(node.inputs[0]), other=ctx.device(other_input),
-                        y=output, n=product(output_shape), unary_code=unary_code,
-                        binary_code=binary_code, unary_is_left=unary_is_left,
-                        lo=low, hi=high, **kwargs,
-                    )
-                    ctx.fused_nodes.add(binary_index)
-                    continue
-            fusion = ctx.add_sqrt_clip_fusions.get(node.index)
-            if fusion is not None:
-                first_index, second_index, fused_output, clip_lo, clip_hi = fusion
-                left_shape = ctx.shape_of(node.inputs[0])
-                right_shape = ctx.shape_of(node.inputs[1])
-                output_shape = ctx.infer_out(node, [left_shape, right_shape])
-                if (max(len(left_shape), len(right_shape)) <= 8
-                        and ctx.session.plan.dtypes[node.inputs[0]] == F32
-                        and ctx.session.plan.dtypes[node.inputs[1]] == F32):
-                    output = ctx.alloc(fused_output, output_shape, F32)
-                    kwargs = {
-                        f"o{i}": value
-                        for i, value in enumerate(pad_to(output_shape, 8))
-                    }
-                    kwargs.update({
-                        f"a{i}": value
-                        for i, value in enumerate(
-                            pad_to(broadcast_strides(left_shape, output_shape), 8, 0)
-                        )
-                    })
-                    kwargs.update({
-                        f"b{i}": value
-                        for i, value in enumerate(
-                            pad_to(broadcast_strides(right_shape, output_shape), 8, 0)
-                        )
-                    })
-                    ctx.module.run(
-                        "nu_add_sqrt_clip_broadcast",
-                        a=ctx.device(node.inputs[0]), b=ctx.device(node.inputs[1]),
-                        y=output, n=product(output_shape), clip_lo=clip_lo,
-                        clip_hi=clip_hi, **kwargs,
-                    )
-                    ctx.fused_nodes.add(first_index)
-                    ctx.fused_nodes.add(second_index)
-                    continue
-            fusion = ctx.sub_clip_sqrt_fusions.get(node.index)
-            if fusion is not None:
-                clip_index, sqrt_index, fused_output, clip_lo, clip_hi = fusion
-                left_shape = ctx.shape_of(node.inputs[0])
-                right_shape = ctx.shape_of(node.inputs[1])
-                output_shape = ctx.infer_out(node, [left_shape, right_shape])
-                if (max(len(left_shape), len(right_shape)) <= 8
-                        and ctx.session.plan.dtypes[node.inputs[0]] == F32
-                        and ctx.session.plan.dtypes[node.inputs[1]] == F32):
-                    output = ctx.alloc(fused_output, output_shape, F32)
-                    kwargs = {
-                        f"o{i}": value
-                        for i, value in enumerate(pad_to(output_shape, 8))
-                    }
-                    kwargs.update({
-                        f"a{i}": value
-                        for i, value in enumerate(
-                            pad_to(broadcast_strides(left_shape, output_shape), 8, 0)
-                        )
-                    })
-                    kwargs.update({
-                        f"b{i}": value
-                        for i, value in enumerate(
-                            pad_to(broadcast_strides(right_shape, output_shape), 8, 0)
-                        )
-                    })
-                    ctx.module.run(
-                        "nu_sub_clip_sqrt_broadcast",
-                        a=ctx.device(node.inputs[0]), b=ctx.device(node.inputs[1]),
-                        y=output, n=product(output_shape), clip_lo=clip_lo,
-                        clip_hi=clip_hi, **kwargs,
-                    )
-                    ctx.fused_nodes.add(clip_index)
-                    ctx.fused_nodes.add(sqrt_index)
-                    continue
-            fusion = ctx.sub_square_fusions.get(node.index)
-            if fusion is not None:
-                power_index, fused_output = fusion
-                left_shape = ctx.shape_of(node.inputs[0])
-                right_shape = ctx.shape_of(node.inputs[1])
-                output_shape = ctx.infer_out(node, [left_shape, right_shape])
-                if left_shape == right_shape == output_shape:
-                    output = ctx.alloc(fused_output, output_shape, F32)
-                    ctx.module.run(
-                        "nu_sub_square", a=ctx.device(node.inputs[0]),
-                        b=ctx.device(node.inputs[1]), y=output,
-                        n=product(output_shape),
-                    )
-                    ctx.fused_nodes.add(power_index)
-                    continue
-            fusion = ctx.mul_clip_fusions.get(node.index)
-            if fusion is not None:
-                clip_index, fused_output, low, high = fusion
-                left_shape = ctx.shape_of(node.inputs[0])
-                right_shape = ctx.shape_of(node.inputs[1])
-                output_shape = ctx.infer_out(node, [left_shape, right_shape])
-                if left_shape == right_shape == output_shape:
-                    fused = ctx.alloc(fused_output, output_shape, F32)
-                    ctx.module.run(
-                        "nu_mul_clip", a=ctx.device(node.inputs[0]),
-                        b=ctx.device(node.inputs[1]), y=fused,
-                        n=product(output_shape), lo=low, hi=high,
-                    )
-                    ctx.fused_nodes.add(clip_index)
-                    continue
-            fusion = ctx.binary_unary_fusions.get(node.index)
-            if fusion is not None:
-                unary_index, fused_output, binary_code, unary_code, low, high = fusion
-                left_shape = ctx.shape_of(node.inputs[0])
-                right_shape = ctx.shape_of(node.inputs[1])
-                output_shape = ctx.infer_out(node, [left_shape, right_shape])
-                if (max(len(left_shape), len(right_shape)) <= 8
-                        and ctx.session.plan.dtypes[node.inputs[0]] == F32
-                        and ctx.session.plan.dtypes[node.inputs[1]] == F32):
-                    output = ctx.alloc(fused_output, output_shape, F32)
-                    kwargs = {
-                        f"o{i}": value
-                        for i, value in enumerate(pad_to(output_shape, 8))
-                    }
-                    kwargs.update({
-                        f"a{i}": value
-                        for i, value in enumerate(
-                            pad_to(broadcast_strides(left_shape, output_shape), 8, 0)
-                        )
-                    })
-                    kwargs.update({
-                        f"b{i}": value
-                        for i, value in enumerate(
-                            pad_to(broadcast_strides(right_shape, output_shape), 8, 0)
-                        )
-                    })
-                    ctx.module.run(
-                        "nu_binary_unary_broadcast",
-                        a=ctx.device(node.inputs[0]), b=ctx.device(node.inputs[1]),
-                        y=output, n=product(output_shape),
-                        binary_code=binary_code, unary_code=unary_code,
-                        lo=low, hi=high, **kwargs,
-                    )
-                    ctx.fused_nodes.add(unary_index)
-                    continue
+            dispatched = False
+            for dispatch in fusion_plan.dispatches.get(node.index, ()):
+                if run_fused_dispatch(dispatch, ctx):
+                    ctx.fused_nodes.update(dispatch.fused_nodes)
+                    dispatched = True
+                    break
+            if dispatched:
+                continue
             lowering = LOWER.get(node.op)
             if lowering is None:
                 raise UnsupportedStepError(
@@ -2506,6 +2077,13 @@ class UniversalInferenceSession:
             self.dummy.destroy()
         except Exception:
             pass
+        session = getattr(self, "buffer_session", None)
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+            self.buffer_session = None
 
     def __enter__(self):
         return self

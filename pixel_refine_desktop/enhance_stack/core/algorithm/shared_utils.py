@@ -28,6 +28,19 @@ RAW_EXTENSIONS = frozenset(
 
 def read_orientation(path) -> int:
     """Return the EXIF orientation tag (0x0112) of one image, defaulting to 1."""
+    suffix = str(path).lower().rsplit(".", 1)[-1]
+    if f".{suffix}" in RAW_EXTENSIONS:
+        try:
+            import taichi
+
+            mode = "preview" if suffix == "dng" else "metadata"
+            payload = taichi.imread(path, mode=mode)
+            if isinstance(payload, dict):
+                orientation = int(payload.get("orientation", 1) or 1)
+                if 1 <= orientation <= 8:
+                    return orientation
+        except Exception:
+            pass
     from PIL import Image
 
     try:

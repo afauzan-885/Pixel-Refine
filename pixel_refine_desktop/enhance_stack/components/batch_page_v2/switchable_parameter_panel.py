@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QEvent
-from UILibrary import live_update
+from resources.GenericUILibrary import live_update
 
 from pixel_refine_desktop.enhance_stack.core.algorithm.catalog import (
     get_names, get_parameter_provider, get_spec, normalize_name,

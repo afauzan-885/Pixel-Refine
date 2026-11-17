@@ -9,7 +9,7 @@ Auto-Styling:
     when any component is imported, ensuring consistent styling without manual setup.
 
 Usage:
-    from GenericUILibrary import Button, Card, Container, ListGroup
+    from resources.GenericUILibrary import Button, Card, Container, ListGroup
 
     # Stylesheet is automatically applied!
     btn = Button("Click Me", variant="primary")
@@ -22,6 +22,9 @@ Usage:
 
 __version__ = "0.6.0"
 __author__ = "Akmal Fauzan"
+
+# Canonical backend marker (previously set by the removed UILibrary alias).
+BACKEND = "pyside6"
 
 # Auto-apply stylesheet system
 from PySide6.QtWidgets import QApplication

@@ -182,10 +182,14 @@ def test_general_start_accepts_an_external_card_command(panels):
 def test_restored_hdr_settings_keep_start_enabled(panels, monkeypatch):
     left, _ = panels
     executor = left.algorithm_panel
-    monkeypatch.setattr(executor, "get_data", lambda *args: {
-        config.KEY_HDR_ALGO: "SPDE-MR HDR Fusion", config.KEY_CHECKBOX_HDR: True,
-    })
-    executor.on_store_changed(None, None)
+    executor.on_sync(
+        {
+            config.KEY_HDR_ALGO: "SPDE-MR HDR Fusion",
+            config.KEY_CHECKBOX_HDR: True,
+        },
+        key=None,
+        origin="store",
+    )
     assert executor.get_settings()[config.KEY_HDR] == "SPDE-MR HDR Fusion"
     assert executor.get_settings()[config.KEY_CHECKBOX_HDR] is True
     assert left.display_panel.start_btn_ref.isVisible()
